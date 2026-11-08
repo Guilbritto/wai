@@ -306,6 +306,11 @@ impl Workspace {
                 };
                 if let Some(ix) = pane {
                     this.panes[ix] = shown;
+                    // Only the focused pane takes the caret: elsewhere it would pull focus away
+                    // from the pane the user is in.
+                    if ix == this.focused_pane {
+                        this.focus_pane(ix, window, cx);
+                    }
                 }
                 cx.notify();
             })

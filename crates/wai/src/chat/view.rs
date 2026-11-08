@@ -90,7 +90,7 @@ impl ChatSession {
             input.set_submit_on_enter(true, cx);
             input
         });
-        input.update(cx, |input, cx| input.focus(window, cx));
+        // The workspace focuses it (`focus`) when its pane is the focused one.
         let subscriptions =
             vec![
                 cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
@@ -399,10 +399,15 @@ impl ChatSession {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
+    use wai_agent::StopReason;
 
     use super::ChatSession;
+    use crate::agents::RegistryEvent;
     use crate::chat::model::{ChatItem, NoticeKind, TurnState};
     use crate::workspace::Workspace;
     use crate::workspace::tests::{
@@ -564,6 +569,87 @@ mod tests {
         // Clicked again, it shows the open session instead of loading a second copy.
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
         assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 1);
+    }
+
+    fn typed(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> String {
+        session.read_with(cx, |s, cx| s.input.read(cx).value().to_string())
+    }
+
+    /// A session that lands after ⌘N must not pull the caret out of the pane the user is in.
+    #[gpui_kit::test]
+    fn landing_session_keeps_focus_on_focused_pane(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(1));
+        let rows = load_history(&workspace, 1, cx);
+
+        // Pane 0 prepares a session; meanwhile a history row opens to the side and takes focus.
+        cx.simulate_keystrokes("secondary-n");
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], true, window, cx)));
+        let side = workspace.read_with(cx, |w, _| w.panes[1].session().cloned().unwrap());
+
+        wait_until(cx, "the new session", |cx| {
+            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
+        });
+        let landed = workspace.read_with(cx, |w, _| w.panes[0].session().cloned().unwrap());
+        cx.simulate_input("typed");
+
+        assert_eq!(workspace.read_with(cx, |w, _| w.focused_pane), 1);
+        assert_eq!(typed(&side, cx), "typed");
+        assert_eq!(typed(&landed, cx), "");
+    }
+
+    /// R12: ⌘W on a session waiting for a permission closes it and its pane, and the agent's
+    /// turn ends instead of waiting for an answer nobody can give.
+    #[gpui_kit::test]
+    fn close_drops_session_and_pane_and_ends_its_turn(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let cwd = std::env::temp_dir();
+        let flags = format!(
+            "--ask-permission --sessions 1 --sessions-cwd '{}'",
+            cwd.display()
+        );
+        let (workspace, cx) = open(cx, fake_settings(&flags));
+        let rows = load_history(&workspace, 1, cx);
+        let first = start_session(&workspace, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], true, window, cx)));
+        let side = workspace.read_with(cx, |w, _| w.panes[1].session().cloned().unwrap());
+        wait_until(cx, "the replay", |cx| state(&side, cx) == TurnState::Idle);
+
+        let registry = workspace.read_with(cx, |w, _| w.registry.clone());
+        let ended = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|_, cx| {
+            let ended = ended.clone();
+            cx.subscribe(&registry, move |_, event, _| {
+                if let RegistryEvent::TurnEnded {
+                    session, reason, ..
+                } = event
+                {
+                    ended.borrow_mut().push((session.clone(), reason.clone()));
+                }
+            })
+            .detach();
+        });
+
+        send("edit", cx); // into the focused side pane
+        wait_until(cx, "the permission card", |cx| {
+            state(&side, cx) == TurnState::NeedsYou
+        });
+        cx.simulate_keystrokes("secondary-w");
+
+        workspace.read_with(cx, |w, _| {
+            assert!(
+                w.sessions == [first.clone()],
+                "only the first session stays open"
+            );
+            assert_eq!(w.panes.len(), 1);
+            assert_eq!(w.focused_pane, 0);
+            assert!(w.panes[0].session() == Some(&first));
+        });
+        wait_until(cx, "the closed session's turn to end", |_| {
+            ended
+                .borrow()
+                .contains(&("session-0".into(), StopReason::Cancelled))
+        });
     }
 
     #[gpui_kit::test]
