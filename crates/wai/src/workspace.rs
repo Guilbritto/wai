@@ -563,6 +563,7 @@ impl Render for Workspace {
             let focused = split && ix == self.focused_pane;
             resizable_panel().child(
                 v_flex()
+                    .debug_selector(move || format!("pane-{ix}"))
                     .size_full()
                     .when(split, |el| {
                         el.border_t_2().border_color(if focused {
@@ -571,11 +572,13 @@ impl Render for Workspace {
                             transparent_black()
                         })
                     })
-                    // Clicking into a pane focuses it, whatever the click lands on.
-                    .capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                    // Clicking into a pane focuses it, caret included, whatever the click lands
+                    // on. Deferred past the click: the workspace root takes the focus otherwise.
+                    .capture_any_mouse_down(cx.listener(move |this, _, window, cx| {
                         if this.focused_pane != ix {
-                            this.focused_pane = ix;
-                            cx.notify();
+                            cx.defer_in(window, move |this, window, cx| {
+                                this.focus_pane(ix, window, cx)
+                            });
                         }
                     }))
                     .child(match pane {

@@ -422,7 +422,7 @@ mod tests {
     use std::rc::Rc;
 
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{Entity, TestAppContext, VisualTestContext};
+    use gpui_kit::{Entity, Modifiers, TestAppContext, VisualTestContext};
     use wai_agent::StopReason;
 
     use super::ChatSession;
@@ -616,6 +616,30 @@ mod tests {
         assert_eq!(workspace.read_with(cx, |w, _| w.focused_pane), 1);
         assert_eq!(typed(&side, cx), "typed");
         assert_eq!(typed(&landed, cx), "");
+    }
+
+    /// Clicking into a pane moves the caret there, so typing and ⌘W/⌘N act on the same pane.
+    #[gpui_kit::test]
+    fn click_moves_focus_to_pane(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(2));
+        for row in load_history(&workspace, 2, cx) {
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&row, true, window, cx)));
+        }
+        let pane = |ix: usize, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, _| w.panes[ix].session().cloned().unwrap())
+        };
+        let (left, right) = (pane(0, cx), pane(1, cx));
+        assert_eq!(workspace.read_with(cx, |w, _| w.focused_pane), 1);
+
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("pane-0").expect("pane 0 drawn");
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        cx.simulate_input("typed");
+
+        assert_eq!(workspace.read_with(cx, |w, _| w.focused_pane), 0);
+        assert_eq!(typed(&left, cx), "typed");
+        assert_eq!(typed(&right, cx), "");
     }
 
     /// R12: ⌘W on a session waiting for a permission closes it and its pane, and the agent's
