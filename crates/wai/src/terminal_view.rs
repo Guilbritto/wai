@@ -12,7 +12,8 @@ const EXITED: &str = "[process exited] Click to restart.";
 /// It redraws only when the shell writes (`Wakeup`) or the panel changes size.
 pub struct TerminalView {
     shell: Option<String>,
-    cwd: PathBuf,
+    /// Where the next shell starts: the project folder.
+    pub cwd: PathBuf,
     /// `None` until the first `activate` and after the shell exits.
     model: Option<TerminalModel>,
     pub snapshot: GridSnapshot,
@@ -242,16 +243,10 @@ mod tests {
     use super::EXITED;
     use crate::workspace::tests::{open, wait_until};
 
-    fn sh() -> Settings {
-        let mut settings = Settings::default();
-        settings.terminal.shell = Some("/bin/sh".into());
-        settings
-    }
-
     #[gpui_kit::test]
     fn terminal_view_shows_shell_output(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the shell is a real process
-        let (workspace, cx) = open(cx, sh());
+        let (workspace, cx) = open(cx, Settings::default());
 
         cx.simulate_keystrokes("ctrl-`");
         cx.simulate_input("printf wai-%s ok");
@@ -268,12 +263,18 @@ mod tests {
         });
     }
 
+    /// A shell that exits starts again on the next show, in the project open by then.
     #[gpui_kit::test]
-    fn exited_shell_restarts_on_toggle(cx: &mut TestAppContext) {
+    fn exited_shell_restarts_in_current_project(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the shell is a real process
-        let (workspace, cx) = open(cx, sh());
+        let (workspace, cx) = open(cx, Settings::default());
         cx.simulate_keystrokes("ctrl-`");
         let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        let project = std::env::temp_dir().join(format!("wai-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&project).unwrap();
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.set_project(project.clone(), window, cx))
+        });
 
         cx.simulate_input("exit");
         cx.simulate_keystrokes("enter");
@@ -286,5 +287,11 @@ mod tests {
         terminal.read_with(cx, |t, _| {
             assert!(t.model.is_some() && t.notice.is_none(), "a new shell runs");
         });
+        cx.simulate_input("touch wai-cwd");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "a file in the new project", |_| {
+            project.join("wai-cwd").exists()
+        });
+        std::fs::remove_dir_all(&project).ok();
     }
 }

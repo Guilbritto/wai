@@ -23,10 +23,12 @@ use crate::agents::AgentRegistry;
 // ponytail: a fixed rate; lower it for smoother text at the cost of CPU.
 const STREAM_FLUSH: Duration = Duration::from_millis(100);
 
+#[derive(Debug)]
 pub enum ChatEvent {
-    /// Carries the state before the change.
-    StateChanged(TurnState),
+    StateChanged,
     TitleChanged,
+    /// A prompt's turn ended, with why. Loading a session replays it without one.
+    TurnEnded(StopReason),
 }
 
 /// A message's markdown and how many bytes of it the view already handed over.
@@ -209,6 +211,7 @@ impl ChatSession {
             }
         });
         self.sync_rows(None, cx);
+        cx.emit(ChatEvent::TurnEnded(reason.clone()));
         cx.notify();
     }
 
@@ -228,7 +231,7 @@ impl ChatSession {
         let (state, title) = (self.model.state.clone(), self.model.title.clone());
         let result = f(&mut self.model);
         if self.model.state != state {
-            cx.emit(ChatEvent::StateChanged(state));
+            cx.emit(ChatEvent::StateChanged);
         }
         if self.model.title != title {
             cx.emit(ChatEvent::TitleChanged);
@@ -410,6 +413,7 @@ mod tests {
     use super::ChatSession;
     use crate::agents::RegistryEvent;
     use crate::chat::model::{ChatItem, NoticeKind, TurnState};
+    use crate::notify;
     use crate::workspace::Workspace;
     use crate::workspace::tests::{
         fake_settings, history_settings, load_history, open, wait_until,
@@ -681,5 +685,69 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// Puts the window in the background, as when the user switched to another app.
+    fn deactivate(cx: &mut VisualTestContext) {
+        cx.deactivate_window();
+        assert!(!cx.update(|window, _| window.is_window_active()));
+    }
+
+    /// R13: a turn that finishes (`EndTurn`) in the background says so.
+    #[gpui_kit::test]
+    fn finished_turn_notifies_in_background(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        deactivate(cx);
+
+        send("hi", cx);
+        wait_until(cx, "the reply", |cx| {
+            state(&session, cx) == TurnState::Idle && last_agent_text(&session, cx).is_some()
+        });
+        let sent = notify::sent();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(sent[0].0.ends_with(" is done"), "{sent:?}");
+        assert_eq!(sent[0].1, "Hello from fake agent");
+    }
+
+    /// R13: a cancelled turn is not "done".
+    #[gpui_kit::test]
+    fn cancelled_turn_does_not_notify(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let reply: Vec<String> = (0..200).map(|i| format!("w{i}")).collect();
+        let flags = format!("--reply '{}' --chunk-delay-ms 20", reply.join(" "));
+        let (workspace, cx) = open(cx, fake_settings(&flags));
+        let session = start_session(&workspace, cx);
+        deactivate(cx);
+
+        send("go", cx);
+        wait_until(cx, "the first chunk", |cx| {
+            last_agent_text(&session, cx).is_some()
+        });
+        cx.simulate_keystrokes("escape");
+        wait_until(cx, "the cancel", |cx| {
+            state(&session, cx) == TurnState::Idle
+        });
+        assert_eq!(notify::sent(), []);
+    }
+
+    /// R13: loading a session (a history row now, a restore at launch in 1.9) replays it; that
+    /// is not a finished turn.
+    #[gpui_kit::test]
+    fn loaded_session_does_not_notify(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(1));
+        let rows = load_history(&workspace, 1, cx);
+        deactivate(cx);
+
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
+        let session = workspace.read_with(cx, |w, _| w.panes[0].session().cloned().unwrap());
+        wait_until(cx, "the replay", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.state == TurnState::Idle && s.model.items.len() == 2
+            })
+        });
+        assert_eq!(notify::sent(), []);
     }
 }

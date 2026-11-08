@@ -9,7 +9,7 @@ use wai_settings::Settings;
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, ToggleTerminal};
-use crate::chat::{ChatEvent, ChatSession};
+use crate::chat::ChatSession;
 use crate::notify::{self, should_notify};
 use crate::sidebar::canonical;
 use crate::terminal_view::TerminalView;
@@ -185,12 +185,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         cx.subscribe_in(&session, window, |_, session, event, window, cx| {
-            if let ChatEvent::StateChanged(prev) = event {
-                let model = &session.read(cx).model;
-                if let Some(kind) = should_notify(prev, &model.state, window.is_window_active()) {
-                    let (title, body) = notify::message(kind, model);
-                    notify::notify(&title, &body);
-                }
+            let model = &session.read(cx).model;
+            if let Some(kind) = should_notify(event, &model.state, window.is_window_active()) {
+                let (title, body) = notify::message(kind, model);
+                notify::notify(&title, &body);
             }
             cx.notify();
         })
@@ -382,6 +380,10 @@ impl Workspace {
     pub fn set_project(&mut self, project: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         window.set_window_title(&title(&project));
         self.project = canonical(&project);
+        // The next shell starts there; a running one stays where it is.
+        if let Some(terminal) = &self.terminal {
+            terminal.update(cx, |t, _| t.cwd = self.project.clone());
+        }
         cx.notify();
     }
 
@@ -554,8 +556,11 @@ pub(crate) mod tests {
 
     pub(crate) fn open(
         cx: &mut TestAppContext,
-        settings: Settings,
+        mut settings: Settings,
     ) -> (Entity<Workspace>, &mut VisualTestContext) {
+        // The terminal never loads the developer's shell or its rc files.
+        let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
+        settings.terminal.shell = Some(shell.into());
         cx.update(|cx| app::init(&settings, cx));
         let project = std::env::temp_dir();
         cx.add_window_view(|window, cx| Workspace::new(project, settings, window, cx))

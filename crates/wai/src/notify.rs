@@ -1,4 +1,6 @@
-use crate::chat::{ChatItem, ChatModel, TurnState};
+use wai_agent::StopReason;
+
+use crate::chat::{ChatEvent, ChatItem, ChatModel, TurnState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotifyKind {
@@ -6,17 +8,18 @@ pub enum NotifyKind {
     Done,
 }
 
-/// When a session's state change deserves an OS notification: only while the window is in the
-/// background, when the session starts waiting for the user or a turn finishes.
+/// Whether a session event deserves an OS notification: only while the window is in the
+/// background, when the session starts waiting for the user (`NeedsYou`) or a turn finishes
+/// (`EndTurn`). A cancelled or cut-off turn and the replay of a loaded session do not count.
 pub fn should_notify(
-    prev: &TurnState,
-    next: &TurnState,
+    event: &ChatEvent,
+    state: &TurnState,
     window_active: bool,
 ) -> Option<NotifyKind> {
-    match (prev, next) {
+    match event {
         _ if window_active => None,
-        (_, TurnState::NeedsYou) => Some(NotifyKind::NeedsYou),
-        (TurnState::Working, TurnState::Idle) => Some(NotifyKind::Done),
+        ChatEvent::StateChanged if *state == TurnState::NeedsYou => Some(NotifyKind::NeedsYou),
+        ChatEvent::TurnEnded(StopReason::EndTurn) => Some(NotifyKind::Done),
         _ => None,
     }
 }
@@ -46,14 +49,29 @@ pub fn message(kind: NotifyKind, model: &ChatModel) -> (String, String) {
     }
 }
 
-/// Shows a native notification off the UI thread (on macOS, delivery waits up to 2 s for
-/// confirmation). A failure is logged, never shown.
+// Tests never pop OS notifications: they record them per test thread.
+#[cfg(test)]
+thread_local! {
+    static SENT: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The notifications this test thread asked for, as `(title, body)`.
+#[cfg(test)]
+pub fn sent() -> Vec<(String, String)> {
+    SENT.with_borrow(Clone::clone)
+}
+
+/// Shows a native notification. A failure is logged, never shown.
 pub fn notify(title: &str, body: &str) {
-    // Tests never pop OS notifications.
-    if cfg!(test) {
-        return;
-    }
-    let (title, body) = (title.to_owned(), body.to_owned());
+    #[cfg(test)]
+    SENT.with_borrow_mut(|sent| sent.push((title.into(), body.into())));
+    #[cfg(not(test))]
+    show(title.to_owned(), body.to_owned());
+}
+
+/// Off the UI thread: on macOS, delivery waits up to 2 s for confirmation.
+#[cfg(not(test))]
+fn show(title: String, body: String) {
     std::thread::spawn(move || {
         // Unset, the first notification looks an app id up through AppleScript, which blocks.
         // ponytail: an unbundled binary borrows Terminal's identity; the app bundle (Phase 4)
@@ -79,30 +97,39 @@ pub fn notify(title: &str, body: &str) {
 
 #[cfg(test)]
 mod tests {
-    use wai_agent::PermissionRequest;
+    use wai_agent::{PermissionRequest, StopReason};
 
     use super::{NotifyKind, message, should_notify};
-    use crate::chat::{ChatItem, ChatModel, TurnState};
+    use crate::chat::{ChatEvent, ChatItem, ChatModel, TurnState};
 
     #[test]
     fn notification_policy() {
+        use ChatEvent::{StateChanged, TurnEnded};
         use TurnState::*;
-        let error = || Error("boom".into());
+        let (end_turn, cancelled) = (StopReason::EndTurn, StopReason::Cancelled);
         let table = [
-            (Working, NeedsYou, false, Some(NotifyKind::NeedsYou)),
-            (Working, Idle, false, Some(NotifyKind::Done)),
-            (Working, NeedsYou, true, None),
-            (Working, Idle, true, None),
-            (Idle, Working, false, None),
-            (NeedsYou, Working, false, None),
-            (Working, error(), false, None),
-            (error(), Idle, false, None),
+            (StateChanged, NeedsYou, false, Some(NotifyKind::NeedsYou)),
+            (
+                TurnEnded(end_turn.clone()),
+                Idle,
+                false,
+                Some(NotifyKind::Done),
+            ),
+            (StateChanged, NeedsYou, true, None),
+            (TurnEnded(end_turn), Idle, true, None),
+            // A cancel, and the end of a loaded session's replay, also go Working -> Idle.
+            (StateChanged, Idle, false, None),
+            (TurnEnded(cancelled), Idle, false, None),
+            (TurnEnded(StopReason::MaxTokens), Idle, false, None),
+            (StateChanged, Working, false, None),
+            (StateChanged, Error("boom".into()), false, None),
+            (ChatEvent::TitleChanged, NeedsYou, false, None),
         ];
-        for (prev, next, active, want) in table {
+        for (event, state, active, want) in table {
             assert_eq!(
-                should_notify(&prev, &next, active),
+                should_notify(&event, &state, active),
                 want,
-                "{prev:?} -> {next:?}, window active: {active}"
+                "{event:?} in {state:?}, window active: {active}"
             );
         }
     }
