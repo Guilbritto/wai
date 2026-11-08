@@ -228,6 +228,7 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 /// with the terminal panel shown and `echo wai` run in it.
 /// `WAI_SHOT=docs/screens/fase-1-sidebar.png WAI_SHOT_PROMPT=… WAI_SHOT_SIDE=1` with a fake
 /// agent run with `--sessions 8 --ask-permission --reply-file …`.
+/// `WAI_SHOT_AGENTS=1` (with `WAI_SHOT_PROMPT`): the Agents tab (fase-2-agents.png).
 /// `WAI_SHOT_FILES=<dir>`: the Files tab with `<dir>` (relative to the project) expanded, and
 /// no terminal (fase-2-files.png).
 #[cfg(feature = "screenshot")]
@@ -264,6 +265,14 @@ fn screenshot(
                         })
                     })
                     .ok();
+                executor.timer(Duration::from_millis(500)).await;
+            }
+            // `WAI_SHOT_AGENTS`: the Agents tab (fase-2-agents.png).
+            if std::env::var("WAI_SHOT_AGENTS").is_ok() {
+                workspace.update(cx, |w, cx| {
+                    w.sidebar_tab = crate::sidebar::SidebarTab::Agents;
+                    cx.notify();
+                });
                 executor.timer(Duration::from_millis(500)).await;
             }
         } else if let Ok(dir) = std::env::var("WAI_SHOT_FILES") {

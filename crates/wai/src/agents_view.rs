@@ -18,15 +18,32 @@ pub struct AgentsView {
 
 impl EventEmitter<ShowSession> for AgentsView {}
 
-/// The status label of a session; `Idle` shows `Done` only once it has something to show for
-/// it (a session that never ran has no label).
-pub fn status_label(state: &TurnState, has_items: bool) -> Option<&'static str> {
+/// Plan rows a card shows before folding the rest into `+N more`.
+pub const MAX_PLAN_ROWS: usize = 8;
+
+/// The status label of a session. `Done` is `done`: the last turn of this run ended with
+/// `EndTurn`; an Idle session without that (resumed, cancelled, never ran) has no label.
+pub fn status_label(state: &TurnState, done: bool) -> Option<&'static str> {
     match state {
         TurnState::Working => Some("Working"),
         TurnState::NeedsYou => Some("Needs you"),
         TurnState::Error(_) => Some("Error"),
-        TurnState::Idle => has_items.then_some("Done"),
+        TurnState::Idle => done.then_some("Done"),
     }
+}
+
+/// What the card says, as the screen-reader name of the card: title, status, plan, tool.
+fn summary(title: &str, label: Option<&str>, plan: &[PlanEntry], tool: Option<&str>) -> String {
+    let mut text = title.to_string();
+    text.extend(label.map(|l| format!(", {l}")));
+    for e in plan.iter().take(MAX_PLAN_ROWS) {
+        text.push_str(&format!("; {} ({})", e.content, e.status));
+    }
+    if plan.len() > MAX_PLAN_ROWS {
+        text.push_str(&format!("; +{} more", plan.len() - MAX_PLAN_ROWS));
+    }
+    text.extend(tool.map(|t| format!("; running {t}")));
+    text
 }
 
 /// `12.3k / 200k (6%)`.
@@ -63,9 +80,10 @@ impl AgentsView {
         let s = session.read(cx);
         let m = &s.model;
         let color = crate::sidebar::status_color(&s.model.state, theme);
-        let label = status_label(&m.state, !m.items.is_empty());
+        let label = status_label(&m.state, m.done);
         let title = m.title.clone().unwrap_or("New session".into());
         let open = session.clone();
+        let summary = summary(&title, label, &m.plan, m.current_tool());
         // A `Button`, not a styled div: only components are reachable by element id in tests.
         let body = v_flex()
             .w_full()
@@ -85,7 +103,14 @@ impl AgentsView {
                     )
                     .children(label.map(|l| div().text_xs().text_color(color).child(l))),
             )
-            .children(m.plan.iter().map(|e| plan_row(e, cx)))
+            .children(m.plan.iter().take(MAX_PLAN_ROWS).map(|e| plan_row(e, cx)))
+            .children((m.plan.len() > MAX_PLAN_ROWS).then(|| {
+                let more = m.plan.len() - MAX_PLAN_ROWS;
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("+{more} more"))
+            }))
             .children(m.current_tool().map(|t| {
                 div()
                     .truncate()
@@ -102,6 +127,7 @@ impl AgentsView {
                     .children(m.usage.as_ref().map(|u| usage_text(u.used, u.size))),
             );
         Button::new(("agent-card", ix))
+            .accessibility_label(summary)
             .ghost()
             .w_full()
             .h_auto()
@@ -124,6 +150,7 @@ fn plan_row(entry: &PlanEntry, cx: &App) -> impl IntoElement {
     h_flex()
         .gap_1()
         .text_xs()
+        .text_color(theme.foreground)
         .child(Icon::new(icon).xsmall().text_color(color))
         .child(
             div()
@@ -164,11 +191,27 @@ mod tests {
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
 
-    use super::{status_label, usage_text};
+    use super::{PlanEntry, status_label, summary, usage_text};
     use crate::chat::TurnState;
 
     use crate::workspace::Workspace;
     use crate::workspace::tests::{fake_settings, open, wait_until};
+
+    #[test]
+    fn plan_rows_are_capped() {
+        let entry = |i: usize| PlanEntry {
+            content: format!("step {i}"),
+            status: "pending".into(),
+        };
+        let plan: Vec<_> = (0..11).map(entry).collect();
+        let text = summary("t", None, &plan, None);
+        assert!(
+            text.contains("step 7") && !text.contains("step 8"),
+            "{text}"
+        );
+        assert!(text.ends_with("; +3 more"), "{text}");
+        assert!(!summary("t", None, &plan[..8], None).contains("more"));
+    }
 
     #[test]
     fn labels_and_usage() {
@@ -178,6 +221,7 @@ mod tests {
         assert_eq!(status_label(&err, false), Some("Error"));
         assert_eq!(status_label(&TurnState::Idle, true), Some("Done"));
         assert_eq!(status_label(&TurnState::Idle, false), None);
+        assert_eq!(status_label(&err, true), Some("Error"));
         assert_eq!(usage_text(12_300, 200_000), "12.3k / 200k (6%)");
         assert_eq!(usage_text(0, 0), "0 / 0 (0%)");
     }
@@ -217,10 +261,17 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, cx| {
             window.render_frame(cx);
-            window.find(("agent-card", 0usize));
             window.find(("agent-card", 1usize));
-            let state = first.read(cx).model.state.clone();
-            assert_eq!(status_label(&state, true), Some("Needs you"));
+            let card = window.find(("agent-card", 0usize));
+            let label = card.label().unwrap_or_default();
+            for text in [
+                ", Needs you",
+                "; Read the code (completed)",
+                "; Write the change (in_progress)",
+                "; Run the tests (pending)",
+            ] {
+                assert!(label.contains(text), "{text:?} not in {label:?}");
+            }
             window.click(("agent-card", 0usize), cx);
         });
         cx.run_until_parked();

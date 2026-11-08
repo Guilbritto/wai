@@ -127,6 +127,8 @@ pub struct ChatModel {
     pub usage: Option<UsageInfo>,
     /// The agent's latest plan: a new one replaces it whole.
     pub plan: Vec<PlanEntry>,
+    /// The last turn of this run ended with `EndTurn` (the R13 "done"); a new prompt clears it.
+    pub done: bool,
     pub modes: Vec<ModeInfo>,
     pub current_mode: Option<String>,
     pub commands: Vec<CommandInfo>,
@@ -140,6 +142,7 @@ impl Default for ChatModel {
             title: None,
             usage: None,
             plan: Vec::new(),
+            done: false,
             modes: Vec::new(),
             current_mode: None,
             commands: Vec::new(),
@@ -171,6 +174,7 @@ impl ChatModel {
 
     pub fn push_user(&mut self, text: &str) -> usize {
         self.state = TurnState::Working;
+        self.done = false;
         self.push(ChatItem::User {
             text: text.to_string(),
         })
@@ -431,7 +435,7 @@ impl ChatModel {
 
     /// The title of the latest tool call still running; none when idle.
     pub fn current_tool(&self) -> Option<&str> {
-        if self.state != TurnState::Working {
+        if !matches!(self.state, TurnState::Working | TurnState::NeedsYou) {
             return None;
         }
         self.items.iter().rev().find_map(|item| match item {
@@ -446,6 +450,7 @@ impl ChatModel {
 
     pub fn on_turn_ended(&mut self, reason: &StopReason) {
         self.push_edits();
+        self.done = matches!(reason, StopReason::EndTurn);
         match reason {
             StopReason::EndTurn => self.state = TurnState::Idle,
             StopReason::Cancelled => {
@@ -525,6 +530,19 @@ mod tests {
     }
 
     #[test]
+    fn done_means_the_last_turn_ended_with_end_turn() {
+        let mut m = ChatModel::default();
+        assert!(!m.done);
+        m.push_user("hi");
+        m.on_turn_ended(&StopReason::EndTurn);
+        assert!(m.done);
+        m.push_user("again");
+        assert!(!m.done);
+        m.on_turn_ended(&StopReason::Cancelled);
+        assert!(!m.done);
+    }
+
+    #[test]
     fn current_tool_is_the_latest_running_one() {
         let mut m = ChatModel {
             state: TurnState::Working,
@@ -533,6 +551,8 @@ mod tests {
         m.apply(&tool("1", ToolStatus::Completed));
         assert_eq!(m.current_tool(), None);
         m.apply(&tool("2", ToolStatus::InProgress));
+        assert_eq!(m.current_tool(), Some("t"));
+        m.state = TurnState::NeedsYou;
         assert_eq!(m.current_tool(), Some("t"));
         m.state = TurnState::Idle;
         assert_eq!(m.current_tool(), None);
