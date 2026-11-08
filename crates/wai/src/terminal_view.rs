@@ -3,8 +3,11 @@ use std::path::PathBuf;
 use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::*;
 use wai_terminal::{
-    DEFAULT_BG, DEFAULT_FG, GridSize, GridSnapshot, Rgb, TerminalEvent, TerminalModel, key_to_bytes,
+    DEFAULT_BG, DEFAULT_FG, GridSize, GridSnapshot, Rgb, TerminalEvent, TerminalModel,
+    key_to_bytes, paste_bytes,
 };
+
+use crate::app::Paste;
 
 const EXITED: &str = "[process exited] Click to restart.";
 
@@ -118,6 +121,13 @@ impl TerminalView {
             cx.stop_propagation();
         }
     }
+
+    fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        let text = cx.read_from_clipboard().and_then(|item| item.text());
+        if let (Some(model), Some(text)) = (&self.model, text) {
+            model.write(&paste_bytes(&text, model.bracketed_paste()));
+        }
+    }
 }
 
 fn color(Rgb(r, g, b): Rgb) -> Hsla {
@@ -213,8 +223,10 @@ impl Render for TerminalView {
         .size_full();
 
         div()
+            .key_context("Terminal")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_action(cx.listener(Self::paste))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|t, _, window, cx| t.activate(window, cx)),
@@ -242,7 +254,7 @@ impl Render for TerminalView {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use gpui_kit::TestAppContext;
+    use gpui_kit::{ClipboardItem, TestAppContext};
     use wai_settings::Settings;
 
     use super::EXITED;
@@ -263,6 +275,32 @@ mod tests {
                 t.snapshot.rows.iter().any(|row| {
                     let text: String = row.iter().map(|run| run.text.as_str()).collect();
                     text.contains("wai-ok")
+                })
+            })
+        });
+    }
+
+    #[gpui_kit::test]
+    fn paste_writes_clipboard_to_shell(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the shell is a real process
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+
+        cx.write_to_clipboard(ClipboardItem::new_string("printf wai-%s pasted".into()));
+        let paste = if cfg!(target_os = "macos") {
+            "cmd-v"
+        } else {
+            "ctrl-shift-v"
+        };
+        cx.simulate_keystrokes(paste);
+        cx.simulate_keystrokes("enter");
+
+        wait_until(cx, "the pasted command's output", |cx| {
+            terminal.read_with(cx, |t, _| {
+                t.snapshot.rows.iter().any(|row| {
+                    let text: String = row.iter().map(|run| run.text.as_str()).collect();
+                    text.contains("wai-pasted")
                 })
             })
         });

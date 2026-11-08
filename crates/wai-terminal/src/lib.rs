@@ -1,5 +1,5 @@
 mod keys;
-pub use keys::key_to_bytes;
+pub use keys::{key_to_bytes, paste_bytes};
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -233,6 +233,10 @@ impl TerminalModel {
 
     pub fn app_cursor(&self) -> bool {
         self.term.lock().mode().contains(TermMode::APP_CURSOR)
+    }
+
+    pub fn bracketed_paste(&self) -> bool {
+        self.term.lock().mode().contains(TermMode::BRACKETED_PASTE)
     }
 
     pub fn snapshot(&self) -> GridSnapshot {

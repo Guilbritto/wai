@@ -38,9 +38,32 @@ pub fn key_to_bytes(
     Some(out)
 }
 
+/// The bytes a paste of `text` writes to the shell: raw, or between bracketed-paste markers when
+/// the shell turned that mode on, without ESC so the text cannot close the bracket itself.
+pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    if !bracketed {
+        return text.as_bytes().to_vec();
+    }
+    let mut out = b"\x1b[200~".to_vec();
+    out.extend(text.bytes().filter(|&b| b != 0x1b));
+    out.extend_from_slice(b"\x1b[201~");
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::key_to_bytes;
+    use super::{key_to_bytes, paste_bytes};
+
+    #[test]
+    fn paste_brackets_only_when_the_shell_asks() {
+        assert_eq!(paste_bytes("ls\necho", false), b"ls\necho");
+        assert_eq!(paste_bytes("ls\necho", true), b"\x1b[200~ls\necho\x1b[201~");
+        // Pasted text cannot close the bracket early and run the rest as typed.
+        assert_eq!(
+            paste_bytes("a\x1b[201~rm", true),
+            b"\x1b[200~a[201~rm\x1b[201~"
+        );
+    }
 
     #[test]
     fn key_mapping_table() {

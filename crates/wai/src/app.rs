@@ -19,7 +19,8 @@ actions!(
         CloseSession,
         FocusNextPane,
         OpenFolder,
-        CancelTurn
+        CancelTurn,
+        Paste
     ]
 );
 
@@ -40,7 +41,13 @@ pub fn init(settings: &Settings, cx: &mut App) {
 
 fn bind_keys(cx: &mut App) {
     let workspace = Some("Workspace");
-    let keymap: [(&str, Box<dyn Action>, Option<&str>); 7] = [
+    // ctrl-v reaches the shell as a literal ^V, so other platforms paste with ctrl-shift-v.
+    let paste = if cfg!(target_os = "macos") {
+        "cmd-v"
+    } else {
+        "ctrl-shift-v"
+    };
+    let keymap: [(&str, Box<dyn Action>, Option<&str>); 8] = [
         ("secondary-q", Box::new(Quit), None),
         ("secondary-n", Box::new(NewSession), workspace),
         ("ctrl-`", Box::new(ToggleTerminal), workspace),
@@ -49,6 +56,7 @@ fn bind_keys(cx: &mut App) {
         ("secondary-o", Box::new(OpenFolder), workspace),
         // The prompt box lets Escape through (it has nothing to clear).
         ("escape", Box::new(CancelTurn), Some("ChatSession")),
+        (paste, Box::new(Paste), Some("Terminal")),
     ];
     // `KeyBinding::new` rejects `secondary-`; `load` resolves it for the host OS.
     let bindings: Vec<_> = keymap
