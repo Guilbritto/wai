@@ -36,6 +36,16 @@ const TABS: [(SidebarTab, &str, &str); 4] = [
     (SidebarTab::Agents, "tab-agents", "Agents"),
 ];
 
+/// The status dot's colour, shared by the open list and the agent cards.
+pub(crate) fn status_color(state: &TurnState, theme: &gpui_kit::component::Theme) -> Hsla {
+    match state {
+        TurnState::Working => theme.blue,
+        TurnState::NeedsYou => theme.warning,
+        TurnState::Idle => theme.muted_foreground,
+        TurnState::Error(_) => theme.danger,
+    }
+}
+
 /// R3: `/tmp` and `/private/tmp` are one folder; a path that does not exist stays as given.
 pub fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
@@ -104,7 +114,10 @@ impl Workspace {
             SidebarTab::Sessions => self.render_sessions(cx).into_any_element(),
             SidebarTab::Files => self.files.clone().into_any_element(),
             SidebarTab::Search => self.search.clone().into_any_element(),
-            SidebarTab::Agents => coming_soon("Agents — coming soon", cx).into_any_element(),
+            SidebarTab::Agents => div()
+                .size_full()
+                .child(self.agents.clone())
+                .into_any_element(),
         };
         let tabs = TABS.map(|(tab, id, label)| {
             Button::new(id)
@@ -207,12 +220,8 @@ impl Workspace {
     ) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let s = session.read(cx);
-        let (dot, label) = match s.status() {
-            TurnState::Working => (theme.blue, None),
-            TurnState::NeedsYou => (theme.warning, Some("Needs you")),
-            TurnState::Idle => (theme.muted_foreground, None),
-            TurnState::Error(_) => (theme.danger, None),
-        };
+        let dot = status_color(s.status(), theme);
+        let label = matches!(s.status(), TurnState::NeedsYou).then_some("Needs you");
         let title = s.model.title.clone().unwrap_or("New session".into());
         let active = self.panes[self.focused_pane].session() == Some(session);
         let (open, side) = (session.clone(), session.clone());
@@ -301,14 +310,6 @@ fn heading(text: &'static str, cx: &App) -> impl IntoElement {
         .pb_1()
         .text_xs()
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(cx.theme().muted_foreground)
-        .child(text)
-}
-
-fn coming_soon(text: &'static str, cx: &App) -> impl IntoElement {
-    div()
-        .p_3()
-        .text_sm()
         .text_color(cx.theme().muted_foreground)
         .child(text)
 }

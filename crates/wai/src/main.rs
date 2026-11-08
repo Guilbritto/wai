@@ -1,4 +1,5 @@
 mod agents;
+mod agents_view;
 mod app;
 mod chat;
 mod editor;

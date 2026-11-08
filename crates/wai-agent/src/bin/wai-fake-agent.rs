@@ -63,6 +63,7 @@ struct Opts {
     reply_file: bool,
     chunk_delay: Duration,
     ask_permission: bool,
+    plan: bool,
     ask_question: bool,
     withdraw_question: bool,
     unsupported_question: bool,
@@ -85,6 +86,7 @@ fn parse_args() -> Opts {
         reply_file: false,
         chunk_delay: Duration::ZERO,
         ask_permission: false,
+        plan: false,
         ask_question: false,
         withdraw_question: false,
         unsupported_question: false,
@@ -120,6 +122,7 @@ fn parse_args() -> Opts {
             }
             "--chunk-delay-ms" => opts.chunk_delay = Duration::from_millis(number(value()) as u64),
             "--ask-permission" => opts.ask_permission = true,
+            "--plan" => opts.plan = true,
             "--ask-question" => opts.ask_question = true,
             "--withdraw-question" => opts.withdraw_question = true,
             "--ask-unsupported-question" => {
@@ -178,6 +181,19 @@ impl Fake {
                     text_block(text),
                 ))]);
             send(cx, session, acp::SessionUpdate::ToolCall(call))?;
+        }
+        if self.opts.plan {
+            let entry = |c: &str, s| acp::PlanEntry::new(c, acp::PlanEntryPriority::Medium, s);
+            let entries = vec![
+                entry("Read the code", acp::PlanEntryStatus::Completed),
+                entry("Write the change", acp::PlanEntryStatus::InProgress),
+                entry("Run the tests", acp::PlanEntryStatus::Pending),
+            ];
+            send(
+                cx,
+                session,
+                acp::SessionUpdate::Plan(acp::Plan::new(entries)),
+            )?;
         }
         for (i, (kind, path)) in self.opts.edits.iter().enumerate() {
             self.edit(cx, session, &format!("edit-file-{i}"), *kind, path)

@@ -15,6 +15,7 @@ use wai_project::{FsChange, ProjectWatcher};
 use wai_settings::{AppState, OpenSession, Settings};
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
+use crate::agents_view::{AgentsView, ShowSession};
 use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, Quit, Save, ToggleTerminal};
 use crate::chat::{ChatEvent, ChatSession, signed_out};
 use crate::editor::{self, EditorPane, Emptied, FileEditor};
@@ -83,6 +84,7 @@ pub struct Workspace {
     pub sidebar_tab: SidebarTab,
     pub files: Entity<FileTree>,
     pub search: Entity<SearchView>,
+    pub(crate) agents: Entity<AgentsView>,
     /// The project's one watcher and the task that hands its changes out; `None` when the
     /// project cannot be watched.
     watch: Option<(ProjectWatcher, Task<()>)>,
@@ -154,10 +156,19 @@ impl Workspace {
                 this.open_file(path.clone(), Some(*line), window, cx)
             },
         );
+        let agents = cx.new(|_| AgentsView::new());
+        let open_session = cx.subscribe_in(
+            &agents,
+            window,
+            |this, _, ShowSession(session), window, cx| {
+                this.show(session.clone(), false, window, cx)
+            },
+        );
         Self {
             project,
             settings,
             registry,
+            agents,
             sessions: Vec::new(),
             panes: vec![Pane::Empty(None)],
             focused_pane: 0,
@@ -173,7 +184,7 @@ impl Workspace {
             next_ticket: 0,
             state_path,
             focus,
-            _subscriptions: vec![routing, quit, open_file, open_match],
+            _subscriptions: vec![routing, quit, open_file, open_match, open_session],
         }
     }
 
@@ -409,6 +420,7 @@ impl Workspace {
                 // Its pane keeps the notice; the next launch does not try again.
                 ChatEvent::RestoreFailed => {
                     this.sessions.retain(|s| s != session);
+                    this.sync_agents(cx);
                     this.save_state(cx);
                 }
                 ChatEvent::OpenFile { path, line } => {
@@ -431,6 +443,12 @@ impl Workspace {
         })
         .detach();
         self.sessions.push(session);
+        self.sync_agents(cx);
+    }
+
+    /// The Agents tab follows the open sessions.
+    fn sync_agents(&self, cx: &mut Context<Self>) {
+        self.agents.update(cx, |a, cx| a.set(&self.sessions, cx));
     }
 
     /// Focuses pane `ix`: its prompt box, or the workspace when it has no session.
@@ -682,6 +700,7 @@ impl Workspace {
             Pane::Session(session) => {
                 session.read(cx).stop();
                 self.sessions.retain(|s| s != session);
+                self.sync_agents(cx);
             }
             _ => {}
         }

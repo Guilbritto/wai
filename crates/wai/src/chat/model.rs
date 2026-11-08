@@ -2,8 +2,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use wai_agent::{
-    CommandInfo, FileDiff, Location, ModeInfo, PermissionRequest, QuestionRequest, SessionEvent,
-    StopReason, ToolCallPatch, ToolContent, ToolStatus,
+    CommandInfo, FileDiff, Location, ModeInfo, PermissionRequest, PlanEntry, QuestionRequest,
+    SessionEvent, StopReason, ToolCallPatch, ToolContent, ToolStatus,
 };
 
 pub const TOOL_OUTPUT_MAX_LINES: usize = 2000;
@@ -125,6 +125,8 @@ pub struct ChatModel {
     pub state: TurnState,
     pub title: Option<String>,
     pub usage: Option<UsageInfo>,
+    /// The agent's latest plan: a new one replaces it whole.
+    pub plan: Vec<PlanEntry>,
     pub modes: Vec<ModeInfo>,
     pub current_mode: Option<String>,
     pub commands: Vec<CommandInfo>,
@@ -137,6 +139,7 @@ impl Default for ChatModel {
             state: TurnState::Idle,
             title: None,
             usage: None,
+            plan: Vec::new(),
             modes: Vec::new(),
             current_mode: None,
             commands: Vec::new(),
@@ -241,8 +244,10 @@ impl ChatModel {
                 self.commands = c.clone();
                 None
             }
-            // ponytail: plans are not rendered in phase 1
-            SessionEvent::Plan(_) => None,
+            SessionEvent::Plan(entries) => {
+                self.plan = entries.clone();
+                None
+            }
         }
     }
 
@@ -424,6 +429,21 @@ impl ChatModel {
         }
     }
 
+    /// The title of the latest tool call still running; none when idle.
+    pub fn current_tool(&self) -> Option<&str> {
+        if self.state != TurnState::Working {
+            return None;
+        }
+        self.items.iter().rev().find_map(|item| match item {
+            ChatItem::Tool(t)
+                if matches!(t.status, ToolStatus::Pending | ToolStatus::InProgress) =>
+            {
+                Some(t.title.as_str())
+            }
+            _ => None,
+        })
+    }
+
     pub fn on_turn_ended(&mut self, reason: &StopReason) {
         self.push_edits();
         match reason {
@@ -480,6 +500,42 @@ mod tests {
 
     fn text(s: &str) -> SessionEvent {
         SessionEvent::AgentText(s.into())
+    }
+
+    #[test]
+    fn plan_is_stored_and_replaced() {
+        let entry = |c: &str, s: &str| PlanEntry {
+            content: c.into(),
+            status: s.into(),
+        };
+        let mut m = ChatModel::default();
+        assert!(
+            m.apply(&SessionEvent::Plan(vec![entry("a", "pending")]))
+                .is_none()
+        );
+        m.apply(&SessionEvent::Plan(vec![
+            entry("b", "completed"),
+            entry("c", "in_progress"),
+        ]));
+        assert_eq!(
+            m.plan,
+            vec![entry("b", "completed"), entry("c", "in_progress")]
+        );
+        assert!(m.items.is_empty());
+    }
+
+    #[test]
+    fn current_tool_is_the_latest_running_one() {
+        let mut m = ChatModel {
+            state: TurnState::Working,
+            ..Default::default()
+        };
+        m.apply(&tool("1", ToolStatus::Completed));
+        assert_eq!(m.current_tool(), None);
+        m.apply(&tool("2", ToolStatus::InProgress));
+        assert_eq!(m.current_tool(), Some("t"));
+        m.state = TurnState::Idle;
+        assert_eq!(m.current_tool(), None);
     }
 
     #[test]
