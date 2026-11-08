@@ -24,7 +24,8 @@ use crate::agents::AgentRegistry;
 const STREAM_FLUSH: Duration = Duration::from_millis(100);
 
 pub enum ChatEvent {
-    StateChanged,
+    /// Carries the state before the change.
+    StateChanged(TurnState),
     TitleChanged,
 }
 
@@ -227,7 +228,7 @@ impl ChatSession {
         let (state, title) = (self.model.state.clone(), self.model.title.clone());
         let result = f(&mut self.model);
         if self.model.state != state {
-            cx.emit(ChatEvent::StateChanged);
+            cx.emit(ChatEvent::StateChanged(state));
         }
         if self.model.title != title {
             cx.emit(ChatEvent::TitleChanged);

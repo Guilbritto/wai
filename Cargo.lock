@@ -7949,10 +7949,12 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "gpui-kit",
+ "notify-rust",
  "serde_json",
  "similar",
  "wai-agent",
  "wai-settings",
+ "wai-terminal",
 ]
 
 [[package]]

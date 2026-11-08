@@ -10,7 +10,9 @@ use wai_settings::Settings;
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, ToggleTerminal};
 use crate::chat::{ChatEvent, ChatSession};
+use crate::notify::{self, should_notify};
 use crate::sidebar::canonical;
+use crate::terminal_view::TerminalView;
 
 const SIDEBAR_WIDTH: f32 = 260.;
 const TERMINAL_HEIGHT: f32 = 260.;
@@ -52,6 +54,8 @@ pub struct Workspace {
     pub panes: Vec<Pane>,
     pub focused_pane: usize,
     pub terminal_visible: bool,
+    /// Created on the first toggle, in the project folder.
+    pub terminal: Option<Entity<TerminalView>>,
     /// The default agent's sessions, each with its cwd canonicalized for the project filter.
     pub history: Vec<(PathBuf, SessionSummary)>,
     pub all_projects: bool,
@@ -81,6 +85,7 @@ impl Workspace {
             panes: vec![Pane::Empty(None)],
             focused_pane: 0,
             terminal_visible: false,
+            terminal: None,
             history: Vec::new(),
             all_projects: false,
             history_task: None,
@@ -171,10 +176,25 @@ impl Workspace {
         }
     }
 
-    /// Joins the open list; the sidebar follows its status and title.
-    fn add_session(&mut self, session: Entity<ChatSession>, cx: &mut Context<Self>) {
-        cx.subscribe(&session, |_, _, _: &ChatEvent, cx| cx.notify())
-            .detach();
+    /// Joins the open list; the sidebar follows its status and title. While the window is in the
+    /// background, the session notifies when it needs the user or finishes a turn.
+    fn add_session(
+        &mut self,
+        session: Entity<ChatSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe_in(&session, window, |_, session, event, window, cx| {
+            if let ChatEvent::StateChanged(prev) = event {
+                let model = &session.read(cx).model;
+                if let Some(kind) = should_notify(prev, &model.state, window.is_window_active()) {
+                    let (title, body) = notify::message(kind, model);
+                    notify::notify(&title, &body);
+                }
+            }
+            cx.notify();
+        })
+        .detach();
         self.sessions.push(session);
     }
 
@@ -246,7 +266,7 @@ impl Workspace {
             session
         });
         // Routed before it loads: the agent replays the conversation before it answers.
-        self.add_session(session.clone(), cx);
+        self.add_session(session.clone(), window, cx);
         self.show(session.clone(), side, window, cx);
         session.update(cx, |s, cx| s.load(window, cx));
     }
@@ -292,7 +312,7 @@ impl Workspace {
                         let session = cx.new(|cx| {
                             ChatSession::new(agent, started, cwd, handle, registry, window, cx)
                         });
-                        this.add_session(session.clone(), cx);
+                        this.add_session(session.clone(), window, cx);
                         this.refresh_history(cx);
                         Pane::Session(session)
                     }
@@ -319,8 +339,23 @@ impl Workspace {
         .detach();
     }
 
-    fn toggle_terminal(&mut self, _: &ToggleTerminal, _: &mut Window, cx: &mut Context<Self>) {
+    /// Shows the terminal, created on the first toggle in the project folder (a shell that exited
+    /// starts again), and focuses it. Hiding it hands the focus back to the focused pane.
+    fn toggle_terminal(&mut self, _: &ToggleTerminal, window: &mut Window, cx: &mut Context<Self>) {
         self.terminal_visible = !self.terminal_visible;
+        if !self.terminal_visible {
+            return self.focus_pane(self.focused_pane, window, cx);
+        }
+        let terminal = match &self.terminal {
+            Some(terminal) => terminal.clone(),
+            None => {
+                let (shell, cwd) = (self.settings.terminal.shell.clone(), self.project.clone());
+                let terminal = cx.new(|cx| TerminalView::new(shell, cwd, cx));
+                self.terminal = Some(terminal.clone());
+                terminal
+            }
+        };
+        terminal.update(cx, |t, cx| t.activate(window, cx));
         cx.notify();
     }
 
@@ -462,9 +497,7 @@ impl Render for Workspace {
         let terminal = div()
             .debug_selector(|| "terminal".into())
             .size_full()
-            .p_3()
-            .text_color(theme.muted_foreground)
-            .child("Terminal");
+            .children(self.terminal.clone());
 
         div()
             .key_context("Workspace")
@@ -665,6 +698,7 @@ pub(crate) mod tests {
 
     #[gpui_kit::test]
     fn toggle_terminal_action_flips_visibility(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the terminal runs a real shell
         let (workspace, cx) = open(cx, Settings::default());
         cx.simulate_keystrokes("ctrl-`");
         assert!(workspace.read_with(cx, |w, _| w.terminal_visible));
@@ -674,6 +708,7 @@ pub(crate) mod tests {
 
     #[gpui_kit::test]
     fn sidebar_and_terminal_keep_260_px(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the terminal runs a real shell
         let (_, cx) = open(cx, Settings::default());
         cx.simulate_resize(size(px(1400.), px(900.)));
         cx.simulate_keystrokes("ctrl-`");

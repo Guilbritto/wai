@@ -8,8 +8,10 @@ publish.workspace = true
 gpui-kit.workspace = true
 wai-agent = { path = "../wai-agent" }
 wai-settings = { path = "../wai-settings" }
+wai-terminal = { path = "../wai-terminal" }
 anyhow.workspace = true
 base64.workspace = true
+notify-rust.workspace = true
 serde_json.workspace = true
 similar.workspace = true
 
@@ -19,6 +21,7 @@ gpui-kit = { workspace = true, features = ["test-support"] }
 [features]
 # Scripted run, no extra dependencies: WAI_SHOT_PROMPT=<text> opens a session and sends it
 # (used to measure streaming CPU on a release build with the screen locked).
+# WAI_SHOT_TERMINAL=<command> opens the terminal and runs it (idle CPU with the terminal open).
 demo = []
 # Offscreen capture for docs/screens (needs GPUI's test-support for `render_to_image`):
 # WAI_SHOT=docs/screens/fase-1-shell.png cargo run -p wai --features screenshot -- <folder>

@@ -92,6 +92,15 @@ pub fn run(project: PathBuf, settings: Settings) {
         if let Ok(prompt) = std::env::var("WAI_SHOT_PROMPT") {
             send_prompt(opened.clone(), prompt, cx);
         }
+        #[cfg(feature = "demo")]
+        if let Ok(command) = std::env::var("WAI_SHOT_TERMINAL") {
+            let window = opened.0;
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                run_in_terminal(window, &command, cx).await;
+            })
+            .detach();
+        }
         #[cfg(feature = "screenshot")]
         if let Ok(path) = std::env::var("WAI_SHOT") {
             screenshot(opened, path, cx);
@@ -125,6 +134,23 @@ fn send_prompt(
     .detach();
 }
 
+/// Scripted run: shows the terminal and types `command` and Enter into it
+/// (`WAI_SHOT_TERMINAL=<command>`, after 2 s).
+#[cfg(feature = "demo")]
+async fn run_in_terminal(window: AnyWindowHandle, command: &str, cx: &mut AsyncApp) {
+    let executor = cx.background_executor().clone();
+    window
+        .update(cx, |_, window, cx| {
+            window.dispatch_action(Box::new(ToggleTerminal), cx)
+        })
+        .ok();
+    executor.timer(Duration::from_millis(500)).await;
+    window
+        .update(cx, |_, window, cx| type_text(command, window, cx))
+        .ok();
+    executor.timer(Duration::from_millis(500)).await;
+}
+
 /// Types `text` and Enter into the focused element, as the keyboard would.
 #[cfg(feature = "demo")]
 fn type_text(text: &str, window: &mut Window, cx: &mut App) {
@@ -145,7 +171,7 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 
 /// Saves the window to `path` and quits, offscreen so it also works with the screen locked.
 /// With `WAI_SHOT_PROMPT`, once that turn shows its permission card; otherwise after 2 s,
-/// with the terminal panel shown.
+/// with the terminal panel shown and `echo wai` run in it.
 /// `WAI_SHOT=docs/screens/fase-1-sidebar.png WAI_SHOT_PROMPT=… WAI_SHOT_SIDE=1` with a fake
 /// agent run with `--sessions 8 --ask-permission --reply-file …`.
 #[cfg(feature = "screenshot")]
@@ -182,10 +208,7 @@ fn screenshot(
                 executor.timer(Duration::from_millis(500)).await;
             }
         } else {
-            workspace.update(cx, |w, cx| {
-                w.terminal_visible = true;
-                cx.notify();
-            });
+            run_in_terminal(window, "echo wai", cx).await;
         }
         // A resizable group settles its sizes in a notify deferred past the draw, so each
         // draw gets its own update.

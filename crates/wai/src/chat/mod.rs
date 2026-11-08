@@ -4,5 +4,5 @@ mod permission;
 mod render;
 mod view;
 
-pub use model::TurnState;
+pub use model::{ChatItem, ChatModel, TurnState};
 pub use view::{ChatEvent, ChatSession};

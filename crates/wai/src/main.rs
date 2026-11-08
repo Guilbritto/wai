@@ -1,7 +1,9 @@
 mod agents;
 mod app;
 mod chat;
+mod notify;
 mod sidebar;
+mod terminal_view;
 mod workspace;
 
 use std::path::PathBuf;

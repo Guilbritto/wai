@@ -91,8 +91,9 @@ pub struct TerminalModel {
     child: Mutex<Box<dyn Child + Send + Sync>>,
 }
 
-const DEFAULT_FG: Rgb = Rgb(0xcc, 0xcc, 0xcc);
-const DEFAULT_BG: Rgb = Rgb(0x1e, 0x1e, 0x1e);
+/// Default text and background colours; a run with `DEFAULT_BG` has no background of its own.
+pub const DEFAULT_FG: Rgb = Rgb(0xcc, 0xcc, 0xcc);
+pub const DEFAULT_BG: Rgb = Rgb(0x1e, 0x1e, 0x1e);
 
 const ANSI16: [Rgb; 16] = [
     Rgb(0x00, 0x00, 0x00),
