@@ -26,5 +26,12 @@ base64 = "0.22"
 notify-rust = "4"
 url = "2"
 
-[profile.release]
+[profile.dev]
 debug = "limited"
+
+# Dependencies (GPUI stack) without debug info: keeps target/ small; our crates keep line tables.
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+debug = false
