@@ -29,6 +29,8 @@ pub enum ChatEvent {
     TitleChanged,
     /// A prompt's turn ended, with why. Loading a session replays it without one.
     TurnEnded(StopReason),
+    /// The agent no longer has the session restored at launch.
+    RestoreFailed,
 }
 
 /// A message's markdown and how many bytes of it the view already handed over.
@@ -352,9 +354,10 @@ impl ChatSession {
     }
 
     /// Respawns the agent through the registry if it died, then loads this session into an
-    /// empty list: Restart after a crash, and a history row. The replay arrives as events while
-    /// `load_session` is pending, so the session must already be routed.
-    pub fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// empty list: Restart after a crash, a history row, and with `restore` a session of the last
+    /// run. The replay arrives as events while `load_session` is pending, so the session must
+    /// already be routed.
+    pub fn load(&mut self, restore: bool, window: &mut Window, cx: &mut Context<Self>) {
         let agent = self.agent.clone();
         let Ok(Some(handle)) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
             return;
@@ -385,6 +388,18 @@ impl ChatSession {
                     }
                     // A death was already reported by the registry.
                     Err(_) if matches!(this.model.state, TurnState::Error(_)) => {}
+                    // The agent answered: it no longer has the session. The pane says so and
+                    // takes no prompt; the workspace forgets the session.
+                    Err(AgentError::Protocol(e)) if restore => {
+                        eprintln!("wai: could not restore session {}: {e}", this.id);
+                        let name = this.model.title.as_ref().unwrap_or(&this.id);
+                        let text = format!("Could not restore session {name}");
+                        this.update_model(cx, |m| {
+                            m.state = TurnState::Error(text.clone());
+                            m.notice(text, NoticeKind::Info);
+                        });
+                        cx.emit(ChatEvent::RestoreFailed);
+                    }
                     Err(e) => this.update_model(cx, |m| {
                         let error = format!("Could not load the session: {e}");
                         m.state = TurnState::Error(error.clone());

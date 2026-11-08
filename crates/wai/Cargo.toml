@@ -17,6 +17,7 @@ similar.workspace = true
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+tempfile = "3"
 
 [features]
 # Scripted run, no extra dependencies: WAI_SHOT_PROMPT=<text> opens a session and sends it

@@ -168,7 +168,11 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// Creates the folder on a first run.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
         let tmp = path.with_file_name("state.json.tmp");
         std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
         std::fs::rename(&tmp, path)
@@ -239,7 +243,7 @@ mod tests {
     #[test]
     fn state_roundtrip_and_corrupt_falls_back() {
         let d = tempfile::tempdir().unwrap();
-        let path = d.path().join("state.json");
+        let path = d.path().join("wai").join("state.json");
         let state = AppState {
             project: Some("/tmp/proj".into()),
             open_sessions: vec![OpenSession {

@@ -60,7 +60,8 @@ fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings);
 }
 
-pub fn run(project: PathBuf, settings: Settings) {
+/// `state_path`: where the open sessions, the project and the terminal's visibility are kept.
+pub fn run(project: PathBuf, settings: Settings, state_path: PathBuf) {
     // Without the asset source every component icon (status, chevrons) renders blank.
     let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
     app.run(move |cx| {
@@ -82,10 +83,18 @@ pub fn run(project: PathBuf, settings: Settings) {
             ..Default::default()
         };
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
-            cx.new(|cx| Workspace::new(project, settings, window, cx))
+            cx.new(|cx| Workspace::new(project, settings, Some(state_path), window, cx))
         })
         .expect("open window");
-        opened.1.update(cx, |w, cx| w.start_agent(cx));
+        let (window, workspace) = opened.clone();
+        window
+            .update(cx, |_, window, cx| {
+                workspace.update(cx, |w, cx| {
+                    w.start_agent(cx);
+                    w.restore(window, cx);
+                })
+            })
+            .expect("window just opened");
         cx.activate(true);
 
         #[cfg(feature = "demo")]

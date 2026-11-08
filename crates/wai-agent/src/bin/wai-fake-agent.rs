@@ -14,6 +14,9 @@
 //! - `--sessions <n>`: `session/list` returns n sessions titled `Session <i>`, 10 per page.
 //! - `--sessions-cwd <path>`: the cwd of those sessions; default `/tmp`.
 //! - `--pid-file <path>`: write the process id there at start.
+//!
+//! `session/load` replays `previous prompt` and `previous answer`; for an id starting with
+//! `missing` it fails with the ACP session-not-found error instead.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -281,6 +284,10 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
         .on_receive_request(
             async |request: acp::LoadSessionRequest, responder, cx: ConnectionTo<Client>| {
                 let session = &request.session_id;
+                if session.0.starts_with("missing") {
+                    return responder
+                        .respond_with_error(acp::Error::session_not_found(session.clone()).into());
+                }
                 send(
                     &cx,
                     session,

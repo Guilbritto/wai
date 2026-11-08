@@ -131,12 +131,9 @@ impl ChatSession {
                     })
                     .child(text.clone())
                     .when(restart, |el| {
-                        el.child(
-                            Button::new("restart")
-                                .small()
-                                .label("Restart")
-                                .on_click(cx.listener(|this, _, window, cx| this.load(window, cx))),
-                        )
+                        el.child(Button::new("restart").small().label("Restart").on_click(
+                            cx.listener(|this, _, window, cx| this.load(false, window, cx)),
+                        ))
                     })
                     .into_any_element()
             }

@@ -5,11 +5,11 @@ use gpui_kit::component::{ActiveTheme as _, h_resizable, resizable_panel, v_flex
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::{AgentError, SessionStarted, SessionSummary, StopReason};
-use wai_settings::Settings;
+use wai_settings::{AppState, OpenSession, Settings};
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, ToggleTerminal};
-use crate::chat::ChatSession;
+use crate::chat::{ChatEvent, ChatSession};
 use crate::notify::{self, should_notify};
 use crate::sidebar::canonical;
 use crate::terminal_view::TerminalView;
@@ -61,6 +61,9 @@ pub struct Workspace {
     pub all_projects: bool,
     pub(crate) history_task: Option<Task<()>>,
     next_ticket: u64,
+    /// Where the open sessions, the project and the terminal's visibility are kept between runs;
+    /// `None` keeps nothing (tests).
+    state_path: Option<PathBuf>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -69,11 +72,16 @@ impl Workspace {
     pub fn new(
         project: PathBuf,
         settings: Settings,
+        state_path: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let registry = cx.new(|_| AgentRegistry::new(&settings));
         let routing = cx.subscribe(&registry, |this, _, event, cx| this.route(event, cx));
+        let quit = cx.on_app_quit(|this, cx| {
+            this.save_state(cx);
+            async {}
+        });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         window.set_window_title(&title(&project));
@@ -90,8 +98,9 @@ impl Workspace {
             all_projects: false,
             history_task: None,
             next_ticket: 0,
+            state_path,
             focus,
-            _subscriptions: vec![routing],
+            _subscriptions: vec![routing, quit],
         }
     }
 
@@ -99,6 +108,67 @@ impl Workspace {
     pub fn start_agent(&mut self, cx: &mut Context<Self>) {
         let agent = self.settings.default_agent.clone();
         self.registry.update(cx, |r, cx| r.handle(&agent, cx));
+    }
+
+    /// Reopens the last run's sessions, which `load_session` replays, and its terminal. A session
+    /// goes back to its pane: the first one saved for a pane takes it, panes left empty close, and
+    /// one saved in no pane only joins the open list. Sessions of agents the settings no longer
+    /// have are dropped.
+    pub fn restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = &self.state_path else {
+            return;
+        };
+        let state = AppState::load(path);
+        let mut panes: [Option<Entity<ChatSession>>; MAX_PANES] = Default::default();
+        for saved in state.open_sessions {
+            let (agent, id, cwd) = (saved.agent, saved.session_id, saved.cwd);
+            let Some(session) = self.loading_session(agent, id, cwd, window, cx) else {
+                continue;
+            };
+            if let Some(slot @ None) = panes.get_mut(saved.pane) {
+                *slot = Some(session.clone());
+            }
+            session.update(cx, |s, cx| s.load(true, window, cx));
+        }
+        let panes: Vec<_> = panes.into_iter().flatten().map(Pane::Session).collect();
+        if !panes.is_empty() {
+            self.panes = panes;
+        }
+        if state.terminal_visible {
+            self.toggle_terminal(&ToggleTerminal, window, cx);
+        }
+        self.focus_pane(0, window, cx);
+        self.save_state(cx);
+    }
+
+    /// Writes what the next launch restores: on each structural change and at quit, never on a
+    /// timer. A session in no pane is saved with pane `MAX_PANES`.
+    fn save_state(&self, cx: &App) {
+        let Some(path) = &self.state_path else {
+            return;
+        };
+        let pane = |session| self.panes.iter().position(|p| p.session() == Some(session));
+        let open_sessions = self.sessions.iter().map(|session| {
+            let s = session.read(cx);
+            OpenSession {
+                agent: s.agent.clone(),
+                session_id: s.id.clone(),
+                cwd: s.cwd.clone(),
+                pane: pane(session).unwrap_or(MAX_PANES),
+            }
+        });
+        let state = AppState {
+            project: Some(self.project.clone()),
+            open_sessions: open_sessions.collect(),
+            terminal_visible: self.terminal_visible,
+            // ponytail: the sidebar does not resize yet; save its width once it does.
+            sidebar_width: SIDEBAR_WIDTH,
+        };
+        // ponytail: a few hundred bytes on the UI thread; move to the background executor if
+        // it ever shows in a frame.
+        if let Err(e) = state.save(path) {
+            eprintln!("wai: could not save {}: {e}", path.display());
+        }
     }
 
     fn session(&self, agent: &str, id: &str, cx: &App) -> Option<Entity<ChatSession>> {
@@ -184,7 +254,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        cx.subscribe_in(&session, window, |_, session, event, window, cx| {
+        cx.subscribe_in(&session, window, |this, session, event, window, cx| {
+            // Its pane keeps the notice; the next launch does not try again.
+            if matches!(event, ChatEvent::RestoreFailed) {
+                this.sessions.retain(|s| s != session);
+                this.save_state(cx);
+            }
             let model = &session.read(cx).model;
             if let Some(kind) = should_notify(event, &model.state, window.is_window_active()) {
                 let (title, body) = notify::message(kind, model);
@@ -235,6 +310,7 @@ impl Workspace {
             }
         };
         self.focus_pane(ix, window, cx);
+        self.save_state(cx);
     }
 
     /// Opens a history row: the open session with that id, else a new one that loads it.
@@ -249,24 +325,37 @@ impl Workspace {
         if let Some(session) = self.session(&agent, &summary.id, cx) {
             return self.show(session, side, window, cx);
         }
-        let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
+        let (id, cwd) = (summary.id.clone(), summary.cwd.clone());
+        let Some(session) = self.loading_session(agent, id, cwd, window, cx) else {
             return;
         };
+        session.update(cx, |s, _| s.model.title = summary.title.clone());
+        self.show(session.clone(), side, window, cx);
+        session.update(cx, |s, cx| s.load(false, window, cx));
+    }
+
+    /// A session about to load, in the open list and in no pane yet. Routed before it loads:
+    /// the agent replays the conversation before it answers. `None` when no agent has that name
+    /// in the settings.
+    fn loading_session(
+        &mut self,
+        agent: String,
+        id: String,
+        cwd: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<ChatSession>> {
+        let handle = self.registry.update(cx, |r, cx| r.handle(&agent, cx))?;
         let started = SessionStarted {
-            id: summary.id.clone(),
+            id,
             modes: Vec::new(),
             current_mode: None,
         };
-        let (cwd, registry) = (summary.cwd.clone(), self.registry.downgrade());
-        let session = cx.new(|cx| {
-            let mut session = ChatSession::new(agent, started, cwd, handle, registry, window, cx);
-            session.model.title = summary.title.clone();
-            session
-        });
-        // Routed before it loads: the agent replays the conversation before it answers.
+        let registry = self.registry.downgrade();
+        let session =
+            cx.new(|cx| ChatSession::new(agent, started, cwd, handle, registry, window, cx));
         self.add_session(session.clone(), window, cx);
-        self.show(session.clone(), side, window, cx);
-        session.update(cx, |s, cx| s.load(window, cx));
+        Some(session)
     }
 
     /// Starts a session in the focused pane, which shows `Preparing <agent>…` until the agent
@@ -330,6 +419,7 @@ impl Workspace {
                         this.focus_pane(ix, window, cx);
                     }
                 }
+                this.save_state(cx);
                 cx.notify();
             })
             .ok();
@@ -341,6 +431,7 @@ impl Workspace {
     /// starts again), and focuses it. Hiding it hands the focus back to the focused pane.
     fn toggle_terminal(&mut self, _: &ToggleTerminal, window: &mut Window, cx: &mut Context<Self>) {
         self.terminal_visible = !self.terminal_visible;
+        self.save_state(cx);
         if !self.terminal_visible {
             return self.focus_pane(self.focused_pane, window, cx);
         }
@@ -371,6 +462,7 @@ impl Workspace {
             self.panes[ix] = Pane::Empty(None);
         }
         self.focus_pane(ix.min(self.panes.len() - 1), window, cx);
+        self.save_state(cx);
     }
 
     fn focus_next_pane(&mut self, _: &FocusNextPane, window: &mut Window, cx: &mut Context<Self>) {
@@ -384,6 +476,7 @@ impl Workspace {
         if let Some(terminal) = &self.terminal {
             terminal.update(cx, |t, _| t.cwd = self.project.clone());
         }
+        self.save_state(cx);
         cx.notify();
     }
 
@@ -548,22 +641,34 @@ pub(crate) mod tests {
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
     use wai_agent::{PromptBlock, SessionSummary};
-    use wai_settings::{AgentConfig, Settings};
+    use wai_settings::{AgentConfig, AppState, OpenSession, Settings};
 
     use super::{Pane, Workspace};
     use crate::agents::AgentStatus;
     use crate::app;
+    use crate::chat::{ChatItem, NoticeKind, TurnState};
+    use crate::notify;
+    use crate::sidebar::canonical;
 
     pub(crate) fn open(
         cx: &mut TestAppContext,
+        settings: Settings,
+    ) -> (Entity<Workspace>, &mut VisualTestContext) {
+        open_at(cx, settings, None)
+    }
+
+    /// `open`, keeping the state in `state_path` (never the real `~/.config/wai/state.json`).
+    fn open_at(
+        cx: &mut TestAppContext,
         mut settings: Settings,
+        state_path: Option<PathBuf>,
     ) -> (Entity<Workspace>, &mut VisualTestContext) {
         // The terminal never loads the developer's shell or its rc files.
         let shell = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
         settings.terminal.shell = Some(shell.into());
         cx.update(|cx| app::init(&settings, cx));
         let project = std::env::temp_dir();
-        cx.add_window_view(|window, cx| Workspace::new(project, settings, window, cx))
+        cx.add_window_view(|window, cx| Workspace::new(project, settings, state_path, window, cx))
     }
 
     /// Settings whose default agent `fake` is `wai-fake-agent <flag>`.
@@ -779,5 +884,141 @@ pub(crate) mod tests {
             })
         });
         assert_eq!(workspace.read_with(cx, |w, cx| w.agent_problem(cx)), None);
+    }
+
+    /// What `app::run` does once the window is open.
+    fn launch(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.start_agent(cx);
+                w.restore(window, cx);
+            })
+        });
+    }
+
+    fn saved(agent: &str, id: &str, pane: usize) -> OpenSession {
+        OpenSession {
+            agent: agent.into(),
+            session_id: id.into(),
+            cwd: std::env::temp_dir(),
+            pane,
+        }
+    }
+
+    fn pane_session(
+        workspace: &Entity<Workspace>,
+        ix: usize,
+        cx: &mut VisualTestContext,
+    ) -> Entity<crate::chat::ChatSession> {
+        workspace.read_with(cx, |w, _| {
+            w.panes[ix].session().cloned().expect("a session")
+        })
+    }
+
+    #[gpui_kit::test]
+    fn state_saved_on_new_session(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        // The config dir does not exist yet on a first run.
+        let path = dir.path().join("wai").join("state.json");
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(path.clone()));
+
+        cx.simulate_keystrokes("secondary-n");
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
+        });
+
+        let state = AppState::load(&path);
+        assert_eq!(
+            state.open_sessions,
+            [OpenSession {
+                agent: "fake".into(),
+                session_id: "fake-1".into(),
+                cwd: canonical(&std::env::temp_dir()),
+                pane: 0,
+            }]
+        );
+        assert_eq!(state.project, Some(canonical(&std::env::temp_dir())));
+    }
+
+    /// Sessions come back into their panes, replayed by `load_session`, without notifying, and
+    /// the terminal shows again. A session saved in no pane only joins the open list; an agent the
+    /// settings no longer have drops its session.
+    #[gpui_kit::test]
+    fn restore_reopens_sessions(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let sessions = vec![
+            saved("fake", "abc", 0),
+            saved("ghost", "gone", 1),
+            saved("fake", "def", 1),
+            saved("fake", "ghi", super::MAX_PANES),
+        ];
+        let state = AppState {
+            open_sessions: sessions,
+            terminal_visible: true,
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(path.clone()));
+        cx.deactivate_window();
+
+        launch(&workspace, cx);
+
+        let previous = ChatItem::User {
+            text: "previous prompt".into(),
+        };
+        for ix in 0..2 {
+            let session = pane_session(&workspace, ix, cx);
+            wait_until(cx, "the replay", |cx| {
+                session.read_with(cx, |s, _| {
+                    s.model.state == TurnState::Idle && s.model.items.contains(&previous)
+                })
+            });
+        }
+        let ids = workspace.read_with(cx, |w, cx| {
+            let ids = w
+                .panes
+                .iter()
+                .map(|p| p.session().unwrap().read(cx).id.clone());
+            ids.collect::<Vec<_>>()
+        });
+        assert_eq!(ids, ["abc", "def"]);
+        assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 3);
+        assert!(workspace.read_with(cx, |w, _| w.terminal_visible && w.terminal.is_some()));
+        let kept = AppState::load(&path).open_sessions;
+        let hidden = saved("fake", "ghi", super::MAX_PANES);
+        assert_eq!(
+            kept,
+            [saved("fake", "abc", 0), saved("fake", "def", 1), hidden]
+        );
+        assert_eq!(notify::sent(), []);
+    }
+
+    #[gpui_kit::test]
+    fn restore_failure_shows_notice(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = AppState {
+            open_sessions: vec![saved("fake", "missing-1", 0)],
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(path.clone()));
+
+        launch(&workspace, cx);
+
+        let session = pane_session(&workspace, 0, cx);
+        let notice = ChatItem::Notice {
+            text: "Could not restore session missing-1".into(),
+            kind: NoticeKind::Info,
+        };
+        wait_until(cx, "the notice", |cx| {
+            session.read_with(cx, |s, _| s.model.items.contains(&notice))
+        });
+        assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
+        assert_eq!(AppState::load(&path).open_sessions, []);
     }
 }

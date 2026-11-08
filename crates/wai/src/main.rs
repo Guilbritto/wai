@@ -12,10 +12,13 @@ use anyhow::Context as _;
 use wai_settings::{AppState, Settings, config_dir};
 
 fn main() -> anyhow::Result<()> {
-    let state = AppState::load(&config_dir().join("state.json"));
+    // `WAI_STATE_PATH=<file>` keeps a manual run away from the real state.
+    let state_path = std::env::var_os("WAI_STATE_PATH")
+        .map_or_else(|| config_dir().join("state.json"), PathBuf::from);
+    let state = AppState::load(&state_path);
     let project = resolve_project(std::env::args_os().nth(1).map(PathBuf::from), state.project)?;
     let settings = Settings::load(&config_dir(), Some(&project))?;
-    app::run(project, settings);
+    app::run(project, settings, state_path);
     Ok(())
 }
 
