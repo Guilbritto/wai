@@ -32,6 +32,10 @@ pub enum RegistryEvent {
         request: QuestionRequest,
     },
     QuestionResolved(u64),
+    QuestionUnsupported {
+        agent: String,
+        session: String,
+    },
     TurnEnded {
         agent: String,
         session: String,
@@ -182,6 +186,12 @@ impl AgentRegistry {
             }
             AgentEvent::QuestionResolved { id } => {
                 return cx.emit(RegistryEvent::QuestionResolved(id));
+            }
+            AgentEvent::QuestionUnsupported { session } => {
+                return cx.emit(RegistryEvent::QuestionUnsupported {
+                    agent: agent.into(),
+                    session,
+                });
             }
             AgentEvent::TurnEnded { session, reason } => {
                 return cx.emit(RegistryEvent::TurnEnded {

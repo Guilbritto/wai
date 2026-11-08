@@ -11,7 +11,7 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use serde_json::{Map, Value};
-use wai_agent::{FieldKind, QuestionAnswer, QuestionField, QuestionRequest};
+use wai_agent::{Choice, FieldKind, QuestionAnswer, QuestionField, QuestionRequest};
 
 use super::model::ChatItem;
 use super::view::ChatSession;
@@ -229,6 +229,12 @@ pub fn card(
     card.children(fields).child(buttons).into_any_element()
 }
 
+/// An option's secondary text, under its label.
+fn option_description(choice: &Choice, muted: Hsla) -> Option<Div> {
+    let description = choice.description.clone()?;
+    Some(div().text_sm().text_color(muted).child(description))
+}
+
 /// The field's title (`*` when required), description and control.
 fn render_field(
     ix: usize,
@@ -245,11 +251,11 @@ fn render_field(
     let control = match (state, &field.kind) {
         (FieldState::Choice(selected), FieldKind::SingleChoice(choices)) => {
             RadioGroup::vertical(field_id(field))
-                .children(
-                    choices
-                        .iter()
-                        .map(|c| Radio::new(c.value.clone()).label(c.label.clone())),
-                )
+                .children(choices.iter().map(|c| {
+                    Radio::new(c.value.clone())
+                        .label(c.label.clone())
+                        .children(option_description(c, muted))
+                }))
                 .selected_index(*selected)
                 .on_click(edit(ix, i, cx, |state, choice: &usize| {
                     *state = FieldState::Choice(Some(*choice))
@@ -262,6 +268,7 @@ fn render_field(
             .children(choices.iter().zip(picked).enumerate().map(|(n, (c, on))| {
                 Checkbox::new(n)
                     .label(c.label.clone())
+                    .children(option_description(c, muted))
                     .checked(*on)
                     .on_click(edit(ix, i, cx, move |state, on: &bool| {
                         if let FieldState::Choices(picked) = state {

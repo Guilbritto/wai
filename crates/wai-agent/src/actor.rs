@@ -249,8 +249,9 @@ impl Broker {
         self.park(id, session, Parked::Permission(responder), event);
     }
 
-    /// Parks a session's form until the user answers; anything else is declined at once. If
-    /// the agent withdraws it (`$/cancel_request`), it resolves as cancelled.
+    /// Parks a session's form until the user answers; anything else is declined at once (a
+    /// session's form wai cannot show says so first). If the agent withdraws it
+    /// (`$/cancel_request`), it resolves as cancelled.
     fn park_question(
         self: &Arc<Self>,
         request: acp::CreateElicitationRequest,
@@ -258,8 +259,14 @@ impl Broker {
         cx: &ConnectionTo<Agent>,
     ) -> Result<(), Error> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let Some(question) = convert::question_request(id, request) else {
-            return responder.respond(convert::question_response(QuestionAnswer::Decline));
+        let question = match convert::question_request(id, request) {
+            Ok(question) => question,
+            Err(session) => {
+                if let Some(session) = session {
+                    self.emit(AgentEvent::QuestionUnsupported { session });
+                }
+                return responder.respond(convert::question_response(QuestionAnswer::Decline));
+            }
         };
         let withdrawn = responder.cancellation();
         let (watch, answered) = async_channel::bounded::<()>(1);

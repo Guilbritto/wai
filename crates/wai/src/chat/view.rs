@@ -14,7 +14,7 @@ use wai_agent::{
 };
 
 use super::input::Attachment;
-use super::model::{ChatItem, ChatModel, NoticeKind, TurnState};
+use super::model::{ChatItem, ChatModel, NoticeKind, TurnState, UNSUPPORTED_QUESTION};
 use super::permission::DiffView;
 use super::question::QuestionForm;
 use crate::agents::AgentRegistry;
@@ -211,6 +211,14 @@ impl ChatSession {
     pub fn handle_question(&mut self, req: QuestionRequest, cx: &mut Context<Self>) {
         let ix = self.update_model(cx, |m| m.on_question(req));
         self.sync_rows(Some(ix), cx);
+        cx.notify();
+    }
+
+    /// The agent's form had a field wai cannot show; wai-agent already declined it.
+    pub fn handle_question_unsupported(&mut self, cx: &mut Context<Self>) {
+        self.model
+            .notice(UNSUPPORTED_QUESTION.into(), NoticeKind::Info);
+        self.sync_rows(None, cx);
         cx.notify();
     }
 
@@ -451,7 +459,7 @@ mod tests {
 
     use super::ChatSession;
     use crate::agents::RegistryEvent;
-    use crate::chat::model::{ChatItem, NoticeKind, TurnState};
+    use crate::chat::model::{ChatItem, NoticeKind, TurnState, UNSUPPORTED_QUESTION};
     use crate::notify;
     use crate::workspace::Workspace;
     use crate::workspace::tests::{
@@ -589,6 +597,35 @@ mod tests {
             window.render_frame(cx);
             assert!(window.try_find("question-submit").is_none(), "form stays");
         });
+    }
+
+    /// R23: a form with a field wai cannot show is declined, and the chat says so.
+    #[gpui_kit::test]
+    fn unsupported_question_is_declined_with_notice(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--ask-unsupported-question"));
+        let session = start_session(&workspace, cx);
+
+        send("ask", cx);
+        wait_until(cx, "the reply", |cx| {
+            state(&session, cx) == TurnState::Idle && last_agent_text(&session, cx).is_some()
+        });
+        assert_eq!(
+            last_agent_text(&session, cx).as_deref(),
+            Some("answered:declined")
+        );
+        let items = session.read_with(cx, |s, _| s.model.items.clone());
+        let notice = ChatItem::Notice {
+            text: UNSUPPORTED_QUESTION.into(),
+            kind: NoticeKind::Info,
+        };
+        assert!(items.contains(&notice), "{items:?}");
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, ChatItem::Question { .. })),
+            "{items:?}"
+        );
     }
 
     #[gpui_kit::test]

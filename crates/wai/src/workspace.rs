@@ -232,6 +232,11 @@ impl Workspace {
                     s.update(cx, |s, cx| s.handle_permission_resolved(*id, cx));
                 }
             }
+            RegistryEvent::QuestionUnsupported { agent, session } => {
+                if let Some(s) = self.session(agent, session, cx) {
+                    s.update(cx, |s, cx| s.handle_question_unsupported(cx));
+                }
+            }
             RegistryEvent::QuestionResolved(id) => {
                 for s in &self.sessions {
                     s.update(cx, |s, cx| s.handle_question_resolved(*id, cx));

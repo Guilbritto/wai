@@ -135,17 +135,20 @@ pub(crate) fn permission_request(
     }
 }
 
-/// A form tied to a session; `None` for anything else (url mode, request scope, future modes).
+/// A form tied to a session. Not one: `Err(Some(session))` when a field has a schema wai cannot
+/// show (ACP: an unknown schema must not render as a known control), `Err(None)` for anything
+/// that is no session's form (url mode, request scope, future modes).
 pub(crate) fn question_request(
     id: QuestionId,
     req: acp::CreateElicitationRequest,
-) -> Option<QuestionRequest> {
+) -> Result<QuestionRequest, Option<SessionId>> {
     let acp::ElicitationMode::Form(form) = req.mode else {
-        return None;
+        return Err(None);
     };
     let acp::ElicitationScope::Session(scope) = form.scope else {
-        return None;
+        return Err(None);
     };
+    let session = scope.session_id.to_string();
     let schema = form.requested_schema;
     let required = schema.required.unwrap_or_default();
     // ponytail: the schema's map is sorted by key, so the agent's field order is lost; Claude's
@@ -153,20 +156,26 @@ pub(crate) fn question_request(
     let fields = schema
         .properties
         .into_iter()
-        .map(|(key, property)| QuestionField {
-            required: required.contains(&key),
-            ..question_field(key, &property)
+        .map(|(key, property)| {
+            Some(QuestionField {
+                required: required.contains(&key),
+                ..question_field(key, &property)?
+            })
         })
-        .collect();
-    Some(QuestionRequest {
+        .collect::<Option<_>>();
+    let Some(fields) = fields else {
+        return Err(Some(session));
+    };
+    Ok(QuestionRequest {
         id,
-        session: scope.session_id.to_string(),
+        session,
         message: req.message,
         fields,
     })
 }
 
-fn question_field(key: String, property: &acp::ElicitationPropertySchema) -> QuestionField {
+/// `None` for a schema wai cannot show.
+fn question_field(key: String, property: &acp::ElicitationPropertySchema) -> Option<QuestionField> {
     use acp::ElicitationPropertySchema as P;
     let titled = |options: &[acp::EnumOption]| {
         options
@@ -174,6 +183,7 @@ fn question_field(key: String, property: &acp::ElicitationPropertySchema) -> Que
             .map(|o| Choice {
                 value: o.value.clone(),
                 label: o.title.clone(),
+                description: o.description.clone(),
             })
             .collect()
     };
@@ -183,6 +193,7 @@ fn question_field(key: String, property: &acp::ElicitationPropertySchema) -> Que
             .map(|v| Choice {
                 value: v.clone(),
                 label: v.clone(),
+                description: None,
             })
             .collect()
     };
@@ -210,29 +221,17 @@ fn question_field(key: String, property: &acp::ElicitationPropertySchema) -> Que
                 &a.description,
                 FieldKind::MultiChoice(titled(&items.options)),
             ),
-            _ => return unsupported_field(key, property),
+            _ => return None,
         },
-        _ => return unsupported_field(key, property),
+        _ => return None,
     };
-    QuestionField {
+    Some(QuestionField {
         title: title.clone().unwrap_or_else(|| key.clone()),
         description: description.clone(),
         key,
         required: false,
         kind,
-    }
-}
-
-/// A schema wai cannot render: a text field titled with the raw JSON, so the user sees what
-/// was asked.
-fn unsupported_field(key: String, property: &acp::ElicitationPropertySchema) -> QuestionField {
-    QuestionField {
-        title: serde_json::to_string(property).unwrap_or_else(|_| key.clone()),
-        description: None,
-        key,
-        required: false,
-        kind: FieldKind::Text,
-    }
+    })
 }
 
 pub(crate) fn question_response(answer: QuestionAnswer) -> acp::CreateElicitationResponse {
@@ -373,11 +372,17 @@ mod tests {
             }
         }));
         let q = question_request(9, request).expect("a form for a session");
+        let described = |v: &str, d: &str| Choice {
+            value: v.into(),
+            label: v.into(),
+            description: Some(d.into()),
+        };
         assert_eq!((q.id, q.session.as_str()), (9, "s1"));
         assert_eq!(q.message, "Please answer the following questions.");
         let choice = |v: &str| Choice {
             value: v.into(),
             label: v.into(),
+            description: None,
         };
         assert_eq!(
             q.fields,
@@ -387,7 +392,10 @@ mod tests {
                     title: "Database".into(),
                     description: Some("Which database?".into()),
                     required: false,
-                    kind: FieldKind::SingleChoice(vec![choice("Postgres"), choice("Redis")]),
+                    kind: FieldKind::SingleChoice(vec![
+                        described("Postgres", "Relational"),
+                        choice("Redis")
+                    ]),
                 },
                 QuestionField {
                     key: "question_0_custom".into(),
@@ -415,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn plain_schemas_map_and_unknown_ones_become_text() {
+    fn plain_schemas_map_to_fields() {
         let request = elicitation(serde_json::json!({
             "mode": "form",
             "sessionId": "s1",
@@ -427,8 +435,7 @@ mod tests {
                     "c_ok": {"type": "boolean", "title": "OK"},
                     "d_count": {"type": "integer", "minimum": 1},
                     "e_ratio": {"type": "number"},
-                    "f_email": {"type": "string", "format": "email"},
-                    "g_shape": {"type": "_shape", "sides": 3}
+                    "f_email": {"type": "string", "format": "email"}
                 },
                 "required": ["d_count"]
             }
@@ -441,6 +448,7 @@ mod tests {
         let plain = |v: &str| Choice {
             value: v.into(),
             label: v.into(),
+            description: None,
         };
         assert_eq!(
             kinds,
@@ -451,11 +459,26 @@ mod tests {
                 (true, FieldKind::Number),
                 (false, FieldKind::Number),
                 (false, FieldKind::Text),
-                (false, FieldKind::Text),
             ]
         );
         assert_eq!(fields[2].title, "OK");
-        assert_eq!(fields[6].title, r#"{"type":"_shape","sides":3}"#);
+    }
+
+    /// ACP: an unknown property schema must not render as a known control.
+    #[test]
+    fn forms_with_unknown_schemas_are_unsupported() {
+        for unknown in [
+            serde_json::json!({"type": "_shape", "sides": 3}),
+            serde_json::json!({"type": "array", "items": {"type": "_shape"}}),
+        ] {
+            let request = elicitation(serde_json::json!({
+                "mode": "form",
+                "sessionId": "s1",
+                "message": "m",
+                "requestedSchema": {"properties": {"a": {"type": "string"}, "b": unknown}}
+            }));
+            assert_eq!(question_request(1, request), Err(Some("s1".into())));
+        }
     }
 
     #[test]
@@ -464,12 +487,12 @@ mod tests {
             "mode": "url", "sessionId": "s1", "message": "m",
             "elicitationId": "e1", "url": "https://example.com"
         }));
-        assert_eq!(question_request(1, url), None);
+        assert_eq!(question_request(1, url), Err(None));
         let request_scoped = elicitation(serde_json::json!({
             "mode": "form", "requestId": 4, "message": "m",
             "requestedSchema": {"type": "object", "properties": {}}
         }));
-        assert_eq!(question_request(1, request_scoped), None);
+        assert_eq!(question_request(1, request_scoped), Err(None));
     }
 
     #[test]

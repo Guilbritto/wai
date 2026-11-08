@@ -13,6 +13,8 @@
 //!   elicitation, and replies `answered:unsupported` otherwise.
 //! - `--withdraw-question`: with `--ask-question`, first ask the same form and withdraw it at
 //!   once (`$/cancel_request`).
+//! - `--ask-unsupported-question`: `--ask-question` with one more field `shape` of an unknown
+//!   schema type (`_shape`).
 //! - `--crash-after <n>`: after n chunks print `fake agent crashed` to stderr and exit 3.
 //! - `--require-auth`: `session/new` fails with the ACP auth-required error.
 //! - `--require-auth-on-prompt`: `session/prompt` fails with the ACP auth-required error.
@@ -43,6 +45,7 @@ struct Opts {
     ask_permission: bool,
     ask_question: bool,
     withdraw_question: bool,
+    unsupported_question: bool,
     crash_after: Option<usize>,
     require_auth: bool,
     require_auth_on_prompt: bool,
@@ -61,6 +64,7 @@ fn parse_args() -> Opts {
         ask_permission: false,
         ask_question: false,
         withdraw_question: false,
+        unsupported_question: false,
         crash_after: None,
         require_auth: false,
         require_auth_on_prompt: false,
@@ -92,6 +96,10 @@ fn parse_args() -> Opts {
             "--ask-permission" => opts.ask_permission = true,
             "--ask-question" => opts.ask_question = true,
             "--withdraw-question" => opts.withdraw_question = true,
+            "--ask-unsupported-question" => {
+                opts.ask_question = true;
+                opts.unsupported_question = true;
+            }
             "--crash-after" => opts.crash_after = Some(number(value())),
             "--require-auth" => opts.require_auth = true,
             "--require-auth-on-prompt" => opts.require_auth_on_prompt = true,
@@ -233,7 +241,7 @@ impl Fake {
         if !self.forms.load(Ordering::Relaxed) {
             return Ok("unsupported".into());
         }
-        let schema = acp::ElicitationSchema::new()
+        let mut schema = acp::ElicitationSchema::new()
             .property(
                 "color",
                 acp::StringPropertySchema::new()
@@ -249,6 +257,10 @@ impl Fake {
                 acp::StringPropertySchema::new().title("Note".to_string()),
                 false,
             );
+        if self.opts.unsupported_question {
+            let shape = acp::OtherElicitationPropertySchema::new("_shape", Default::default());
+            schema = schema.property("shape", acp::ElicitationPropertySchema::Other(shape), false);
+        }
         let form = acp::ElicitationFormMode::new(
             acp::ElicitationSessionScope::new(session.clone()),
             schema,

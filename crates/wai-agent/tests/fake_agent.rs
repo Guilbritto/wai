@@ -203,6 +203,7 @@ fn question_roundtrip() {
         let choice = |value: &str, label: &str| Choice {
             value: value.into(),
             label: label.into(),
+            description: None,
         };
         let fields: Vec<_> = q
             .fields

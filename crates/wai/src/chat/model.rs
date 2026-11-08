@@ -5,6 +5,9 @@ use wai_agent::{
 
 pub const TOOL_OUTPUT_MAX_LINES: usize = 2000;
 
+pub const UNSUPPORTED_QUESTION: &str =
+    "The agent asked a question wai can't display yet; it was declined.";
+
 /// What wai says when an agent is not signed in: it never shows a login of its own.
 pub fn signed_out(agent: &str) -> String {
     format!(
@@ -266,16 +269,33 @@ impl ChatModel {
         held
     }
 
+    /// `NeedsYou` while any permission or question card is unanswered (parallel tool calls can
+    /// open several), else `Working`.
+    fn after_answer(&self) -> TurnState {
+        let open = self.items.iter().any(|item| {
+            matches!(
+                item,
+                ChatItem::Permission { answered: None, .. }
+                    | ChatItem::Question { answered: None, .. }
+            )
+        });
+        if open {
+            TurnState::NeedsYou
+        } else {
+            TurnState::Working
+        }
+    }
+
     pub fn on_permission_answered(&mut self, id: u64, choice_name: &str) {
         self.set_answer(false, id, choice_name, true);
-        self.state = TurnState::Working;
+        self.state = self.after_answer();
     }
 
     /// The broker dropped the request (e.g. the turn was cancelled).
     /// Resolutions are broadcast to every session: ids this model does not hold are ignored.
     pub fn on_permission_resolved(&mut self, id: u64) {
         if self.set_answer(false, id, "Cancelled", false) && self.state == TurnState::NeedsYou {
-            self.state = TurnState::Working;
+            self.state = self.after_answer();
         }
     }
 
@@ -289,13 +309,13 @@ impl ChatModel {
 
     pub fn on_question_answered(&mut self, id: u64, summary: &str) {
         self.set_answer(true, id, summary, true);
-        self.state = TurnState::Working;
+        self.state = self.after_answer();
     }
 
     /// Cancelled with the turn or withdrawn by the agent; ids of other sessions are ignored.
     pub fn on_question_resolved(&mut self, id: u64) {
         if self.set_answer(true, id, "Cancelled", false) && self.state == TurnState::NeedsYou {
-            self.state = TurnState::Working;
+            self.state = self.after_answer();
         }
     }
 
@@ -487,6 +507,38 @@ mod tests {
             })
             .collect();
         assert_eq!(answers, [Some("Cancelled"), Some("Answered: Blue")]);
+        assert_eq!(m.state, TurnState::Working);
+    }
+
+    /// R24: parallel tool calls can open several cards; the session needs the user until the
+    /// last one is answered.
+    #[test]
+    fn needs_you_until_every_card_is_answered() {
+        let mut m = ChatModel::default();
+        m.on_permission(perm()); // id 7
+        m.on_question(QuestionRequest {
+            id: 8,
+            session: "s".into(),
+            message: "Pick".into(),
+            fields: vec![],
+        });
+        m.on_question_answered(8, "Answered: Blue");
+        assert_eq!(m.state, TurnState::NeedsYou);
+        m.on_question_resolved(8); // the broker reports the answer too
+        assert_eq!(m.state, TurnState::NeedsYou);
+        m.on_permission_answered(7, "Yes");
+        assert_eq!(m.state, TurnState::Working);
+
+        m.on_permission(PermissionRequest { id: 9, ..perm() });
+        m.on_question(QuestionRequest {
+            id: 10,
+            session: "s".into(),
+            message: "Pick".into(),
+            fields: vec![],
+        });
+        m.on_permission_resolved(9);
+        assert_eq!(m.state, TurnState::NeedsYou);
+        m.on_question_resolved(10);
         assert_eq!(m.state, TurnState::Working);
     }
 

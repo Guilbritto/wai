@@ -66,6 +66,10 @@ pub enum AgentEvent {
     QuestionResolved {
         id: QuestionId,
     },
+    /// The session's form had a field wai cannot show (an unknown schema): it was declined.
+    QuestionUnsupported {
+        session: SessionId,
+    },
     TurnEnded {
         session: SessionId,
         reason: StopReason,
@@ -203,6 +207,7 @@ pub enum FieldKind {
 pub struct Choice {
     pub value: String,
     pub label: String,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
