@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, h_resizable, resizable_panel, v_flex, v_resizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -367,12 +369,11 @@ impl Workspace {
         session.update(cx, |s, cx| s.load(false, window, cx));
     }
 
-    /// Whether the default agent advertised `session/fork`.
-    pub(crate) fn can_fork(&self, cx: &App) -> bool {
-        let agent = &self.settings.default_agent;
+    /// Whether `agent` advertised `session/fork` and `session/load` (a fork loads to replay).
+    pub(crate) fn can_fork(&self, agent: &str, cx: &App) -> bool {
         matches!(
             self.registry.read(cx).status(agent),
-            Some(AgentStatus::Ready(caps)) if caps.fork
+            Some(AgentStatus::Ready(caps)) if caps.fork && caps.load_session
         )
     }
 
@@ -381,13 +382,13 @@ impl Workspace {
     /// one. The fork's history comes from loading it, so it is routed before that load starts.
     pub fn fork(
         &mut self,
+        agent: String,
         id: String,
         title: Option<String>,
         cwd: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let agent = self.settings.default_agent.clone();
         let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
             return;
         };
@@ -404,7 +405,8 @@ impl Workspace {
                     this.show(session.clone(), true, window, cx);
                     session.update(cx, |s, cx| s.load(false, window, cx));
                 }
-                Err(e) => eprintln!("wai: could not fork the session: {e}"),
+                Err(e) => window
+                    .push_notification(Notification::error(fork_failure(&e)).autohide(false), cx),
             })
             .ok();
         })
@@ -711,14 +713,19 @@ impl Render for Workspace {
     }
 }
 
+fn fork_failure(error: &AgentError) -> String {
+    format!("Could not fork session: {error}")
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
+    use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
-    use wai_agent::{PromptBlock, SessionSummary};
+    use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
+    use wai_agent::{AgentError, PromptBlock, SessionSummary};
     use wai_settings::{AgentConfig, AppState, OpenSession, Settings};
 
     use super::{Pane, Workspace};
@@ -746,7 +753,17 @@ pub(crate) mod tests {
         settings.terminal.shell = Some(shell.into());
         cx.update(|cx| app::init(&settings, cx));
         let project = std::env::temp_dir();
-        cx.add_window_view(|window, cx| Workspace::new(project, settings, state_path, window, cx))
+        // Under a `Root`, like the app's window: notifications need its state.
+        let (_, workspace) = cx
+            .update(|cx| {
+                gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                    cx.new(|cx| Workspace::new(project, settings, state_path, window, cx))
+                })
+            })
+            .expect("open window");
+        let window = cx.update(|cx| cx.windows()[0]);
+        let cx = Box::leak(Box::new(VisualTestContext::from_window(window, cx)));
+        (workspace, cx)
     }
 
     /// Settings whose default agent `fake` is `wai-fake-agent <flag>`.
@@ -919,6 +936,60 @@ pub(crate) mod tests {
             w.panes[2].session().unwrap().read(cx).model.title.clone()
         });
         assert_eq!(title.as_deref(), Some("Session 0 (fork)"));
+    }
+
+    #[gpui_kit::test]
+    fn fork_failure_shows_a_notice_and_adds_no_pane(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let cwd = std::env::temp_dir();
+        let flags = format!(
+            "--fail-fork --sessions 2 --sessions-cwd '{}'",
+            cwd.display()
+        );
+        let (workspace, cx) = open(cx, fake_settings(&flags));
+        load_history(&workspace, 2, cx);
+
+        cx.update(|window, cx| window.click(("history-fork", 0usize), cx));
+        wait_until(cx, "the notice", |cx| {
+            cx.update(|window, cx| !window.notifications(cx).is_empty())
+        });
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 1);
+            assert!(w.sessions.is_empty());
+        });
+        let error = AgentError::Protocol("Internal error".into());
+        assert_eq!(
+            super::fork_failure(&error),
+            "Could not fork session: agent protocol error: Internal error"
+        );
+    }
+
+    /// Fork loads the copy to replay it, so it needs both capabilities, on the session's agent.
+    #[gpui_kit::test]
+    fn fork_needs_fork_and_load_on_the_sessions_agent(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let mut settings = fake_settings("");
+        let plain = fake_settings("--no-load").agents["fake"].clone();
+        settings.agents.insert("plain".into(), plain);
+        let (workspace, cx) = open(cx, settings);
+        workspace.update(cx, |w, cx| {
+            w.registry.update(cx, |r, cx| {
+                r.handle("fake", cx);
+                r.handle("plain", cx);
+            })
+        });
+        wait_until(cx, "both agents", |cx| {
+            workspace.read_with(cx, |w, cx| {
+                ["fake", "plain"]
+                    .iter()
+                    .all(|a| matches!(w.registry.read(cx).status(a), Some(AgentStatus::Ready(_))))
+            })
+        });
+        workspace.read_with(cx, |w, cx| {
+            assert!(w.can_fork("fake", cx));
+            assert!(!w.can_fork("plain", cx), "fork without load is hidden");
+            assert!(!w.can_fork("unknown", cx));
+        });
     }
 
     #[gpui_kit::test]

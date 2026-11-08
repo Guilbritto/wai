@@ -18,6 +18,8 @@
 //! - `--crash-after <n>`: after n chunks print `fake agent crashed` to stderr and exit 3.
 //! - `--require-auth`: `session/new` fails with the ACP auth-required error.
 //! - `--require-auth-on-prompt`: `session/prompt` fails with the ACP auth-required error.
+//! - `--fail-fork`: `session/fork` fails with an internal error.
+//! - `--no-load`: do not advertise `loadSession`.
 //! - `--flood <bytes>`: start the turn with one tool call carrying that many bytes of `x\n`.
 //! - `--sessions <n>`: `session/list` returns n sessions titled `Session <i>`, 10 per page.
 //! - `--sessions-cwd <path>`: the cwd of those sessions; default `/tmp`.
@@ -49,6 +51,8 @@ struct Opts {
     crash_after: Option<usize>,
     require_auth: bool,
     require_auth_on_prompt: bool,
+    fail_fork: bool,
+    no_load: bool,
     flood: Option<usize>,
     sessions: usize,
     sessions_cwd: PathBuf,
@@ -68,6 +72,8 @@ fn parse_args() -> Opts {
         crash_after: None,
         require_auth: false,
         require_auth_on_prompt: false,
+        fail_fork: false,
+        no_load: false,
         flood: None,
         sessions: 0,
         sessions_cwd: "/tmp".into(),
@@ -103,6 +109,8 @@ fn parse_args() -> Opts {
             "--crash-after" => opts.crash_after = Some(number(value())),
             "--require-auth" => opts.require_auth = true,
             "--require-auth-on-prompt" => opts.require_auth_on_prompt = true,
+            "--fail-fork" => opts.fail_fork = true,
+            "--no-load" => opts.no_load = true,
             "--flood" => opts.flood = Some(number(value())),
             "--sessions" => opts.sessions = number(value()),
             "--sessions-cwd" => opts.sessions_cwd = value().into(),
@@ -340,7 +348,7 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                         .is_some_and(|e| e.supports_form());
                     fake.forms.store(forms, Ordering::Relaxed);
                     let caps = acp::AgentCapabilities::new()
-                        .load_session(true)
+                        .load_session(!fake.opts.no_load)
                         .prompt_capabilities(acp::PromptCapabilities::new().image(true))
                         .session_capabilities(
                             acp::SessionCapabilities::new()
@@ -397,6 +405,9 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
             {
                 let fake = fake.clone();
                 async move |request: acp::ForkSessionRequest, responder, _cx| {
+                    if fake.opts.fail_fork {
+                        return responder.respond_with_error(Error::internal_error());
+                    }
                     if request.session_id.0.starts_with("missing") {
                         return responder.respond_with_error(
                             acp::Error::session_not_found(request.session_id).into(),

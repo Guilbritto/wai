@@ -169,7 +169,8 @@ impl Workspace {
         let title = s.model.title.clone().unwrap_or("New session".into());
         let active = self.panes[self.focused_pane].session() == Some(session);
         let (open, side) = (session.clone(), session.clone());
-        let (id, cwd, forkable) = (s.id.clone(), s.cwd.clone(), self.can_fork(cx));
+        let (agent, id, cwd) = (s.agent.clone(), s.id.clone(), s.cwd.clone());
+        let forkable = self.can_fork(&agent, cx);
         let fork_title = s.model.title.clone();
         row(active, cx)
             .child(
@@ -194,7 +195,14 @@ impl Workspace {
             .when(forkable, |el| {
                 el.child(fork_button(("open-fork", ix)).on_click(cx.listener(
                     move |this, _, window, cx| {
-                        this.fork(id.clone(), fork_title.clone(), cwd.clone(), window, cx)
+                        this.fork(
+                            agent.clone(),
+                            id.clone(),
+                            fork_title.clone(),
+                            cwd.clone(),
+                            window,
+                            cx,
+                        )
                     },
                 )))
             })
@@ -208,7 +216,7 @@ impl Workspace {
     ) -> impl IntoElement + use<> {
         let title = summary.title.clone().unwrap_or_else(|| summary.id.clone());
         let (open, side, source) = (summary.clone(), summary.clone(), summary.clone());
-        let forkable = self.can_fork(cx);
+        let forkable = self.can_fork(&self.settings.default_agent, cx);
         row(false, cx)
             .child(
                 div()
@@ -231,7 +239,8 @@ impl Workspace {
                     move |this, _, window, cx| {
                         let (id, title, cwd) =
                             (source.id.clone(), source.title.clone(), source.cwd.clone());
-                        this.fork(id, title, cwd, window, cx)
+                        let agent = this.settings.default_agent.clone();
+                        this.fork(agent, id, title, cwd, window, cx)
                     },
                 )))
             })
