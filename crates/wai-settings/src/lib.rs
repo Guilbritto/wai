@@ -76,7 +76,7 @@ fn merge(base: &mut toml::Value, over: toml::Value) {
     }
 }
 
-fn read_layer(path: &Path) -> Result<Option<toml::Value>, SettingsError> {
+fn read_layer(path: &Path) -> Result<Option<toml::Table>, SettingsError> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -87,9 +87,19 @@ fn read_layer(path: &Path) -> Result<Option<toml::Value>, SettingsError> {
             });
         }
     };
-    toml::from_str::<toml::Table>(&text)
-        .map(|t| Some(toml::Value::Table(t)))
-        .map_err(|e| SettingsError::Parse {
+    toml::from_str(&text)
+        .map(Some)
+        .map_err(|e: toml::de::Error| SettingsError::Parse {
+            path: path.into(),
+            message: e.to_string(),
+        })
+}
+
+/// `path` is the file whose layer was merged last.
+fn parse(merged: toml::Value, path: &Path) -> Result<Settings, SettingsError> {
+    merged
+        .try_into()
+        .map_err(|e: toml::de::Error| SettingsError::Parse {
             path: path.into(),
             message: e.to_string(),
         })
@@ -97,23 +107,45 @@ fn read_layer(path: &Path) -> Result<Option<toml::Value>, SettingsError> {
 
 impl Settings {
     /// Merges defaults, then `<user_dir>/settings.toml`, then `<project_dir>/.wai/settings.toml`.
-    pub fn load(user_dir: &Path, project_dir: Option<&Path>) -> Result<Settings, SettingsError> {
+    /// An error in the user's file fails the load. The project file may not set `agents` or
+    /// `terminal` (R15: opening a cloned repository must not choose what wai runs), so its
+    /// `default_agent` can only name an agent the defaults or the user define. Those tables, or a
+    /// project file that does not load, are left out; the returned notices say so.
+    pub fn load(
+        user_dir: &Path,
+        project_dir: Option<&Path>,
+    ) -> Result<(Settings, Vec<String>), SettingsError> {
+        let user_path = user_dir.join("settings.toml");
         let mut merged = toml::Value::try_from(Settings::default()).expect("defaults serialize");
-        let mut paths = vec![user_dir.join("settings.toml")];
-        paths.extend(project_dir.map(|p| p.join(".wai").join("settings.toml")));
-        for path in paths {
-            if let Some(layer) = read_layer(&path)? {
-                merge(&mut merged, layer);
+        if let Some(layer) = read_layer(&user_path)? {
+            merge(&mut merged, toml::Value::Table(layer));
+        }
+        let user = parse(merged.clone(), &user_path)?;
+        let Some(path) = project_dir.map(|p| p.join(".wai").join("settings.toml")) else {
+            return Ok((user, Vec::new()));
+        };
+        let mut notices = Vec::new();
+        let project = read_layer(&path).and_then(|layer| {
+            let Some(mut layer) = layer else {
+                return Ok(None);
+            };
+            let stripped = ["agents", "terminal"].map(|key| layer.remove(key));
+            if stripped.iter().any(Option::is_some) {
+                notices.push(format!(
+                    "Ignored agents/terminal settings from {}: project settings cannot change commands.",
+                    path.display()
+                ));
+            }
+            merge(&mut merged, toml::Value::Table(layer));
+            parse(merged, &path).map(Some)
+        });
+        match project {
+            Ok(settings) => Ok((settings.unwrap_or(user), notices)),
+            Err(e) => {
+                notices.push(format!("Ignored project settings: {e}"));
+                Ok((user, notices))
             }
         }
-        // The last file read is the one that can be at fault only if types are wrong;
-        // report the user file path as the best available location.
-        merged
-            .try_into()
-            .map_err(|e: toml::de::Error| SettingsError::Parse {
-                path: user_dir.join("settings.toml"),
-                message: e.to_string(),
-            })
     }
 }
 
@@ -192,7 +224,7 @@ mod tests {
     #[test]
     fn defaults_when_no_files() {
         let d = tempfile::tempdir().unwrap();
-        let s = Settings::load(d.path(), None).unwrap();
+        let (s, _) = Settings::load(d.path(), None).unwrap();
         assert_eq!(s.default_agent, "claude");
         assert_eq!(
             s.agents["claude"].command,
@@ -204,28 +236,77 @@ mod tests {
     fn user_file_overrides_default() {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "settings.toml", "theme = \"light\"\n");
-        let s = Settings::load(d.path(), None).unwrap();
+        let (s, _) = Settings::load(d.path(), None).unwrap();
         assert_eq!(s.theme, ThemeChoice::Light);
         assert!(s.agents.contains_key("claude"));
     }
 
+    /// R15: opening a cloned repository must not run what its settings say.
     #[test]
-    fn project_overrides_user_per_key() {
+    fn project_cannot_set_agent_commands_or_shell() {
         let u = tempfile::tempdir().unwrap();
         let p = tempfile::tempdir().unwrap();
         write(
             u.path(),
             "settings.toml",
-            "[agents.claude]\ncommand = \"a\"\n[terminal]\nshell = \"/bin/zsh\"\n",
+            "[terminal]\nshell = \"/bin/zsh\"\n",
         );
         write(
             p.path(),
             ".wai/settings.toml",
-            "[agents.claude]\ncommand = \"b\"\n",
+            "[agents.claude]\ncommand = \"evil\"\n[terminal]\nshell = \"/bin/evil\"\n",
         );
-        let s = Settings::load(u.path(), Some(p.path())).unwrap();
-        assert_eq!(s.agents["claude"].command, "b");
+        let (s, notices) = Settings::load(u.path(), Some(p.path())).unwrap();
+        assert_eq!(s.agents, Settings::default().agents);
         assert_eq!(s.terminal.shell.as_deref(), Some("/bin/zsh"));
+        let path = p.path().join(".wai").join("settings.toml");
+        assert_eq!(
+            notices,
+            [format!(
+                "Ignored agents/terminal settings from {}: project settings cannot change commands.",
+                path.display()
+            )]
+        );
+    }
+
+    #[test]
+    fn project_overrides_theme_and_default_agent() {
+        let u = tempfile::tempdir().unwrap();
+        let p = tempfile::tempdir().unwrap();
+        write(
+            u.path(),
+            "settings.toml",
+            "theme = \"dark\"\n[agents.other]\ncommand = \"other-acp\"\n",
+        );
+        write(
+            p.path(),
+            ".wai/settings.toml",
+            "theme = \"light\"\ndefault_agent = \"other\"\n",
+        );
+        let (s, notices) = Settings::load(u.path(), Some(p.path())).unwrap();
+        assert_eq!(s.theme, ThemeChoice::Light);
+        assert_eq!(s.default_agent, "other");
+        assert_eq!(notices, Vec::<String>::new());
+    }
+
+    /// A broken project file costs the project its settings, not the launch.
+    #[test]
+    fn invalid_project_settings_fall_back_to_user() {
+        let u = tempfile::tempdir().unwrap();
+        write(u.path(), "settings.toml", "theme = \"light\"\n");
+        for body in ["theme = [", "theme = 3\n"] {
+            let p = tempfile::tempdir().unwrap();
+            write(p.path(), ".wai/settings.toml", body);
+            let (s, notices) = Settings::load(u.path(), Some(p.path())).unwrap();
+            assert_eq!(s.theme, ThemeChoice::Light, "{body}");
+            let path = p.path().join(".wai").join("settings.toml");
+            let want = format!(
+                "Ignored project settings: invalid settings in {}: ",
+                path.display()
+            );
+            assert_eq!(notices.len(), 1, "{body}: {notices:?}");
+            assert!(notices[0].starts_with(&want), "{body}: {notices:?}");
+        }
     }
 
     #[test]

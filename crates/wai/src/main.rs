@@ -17,8 +17,11 @@ fn main() -> anyhow::Result<()> {
         .map_or_else(|| config_dir().join("state.json"), PathBuf::from);
     let state = AppState::load(&state_path);
     let project = resolve_project(std::env::args_os().nth(1).map(PathBuf::from), state.project)?;
-    let settings = Settings::load(&config_dir(), Some(&project))?;
-    app::run(project, settings, state_path);
+    let (settings, notices) = Settings::load(&config_dir(), Some(&project))?;
+    for notice in &notices {
+        eprintln!("wai: {notice}");
+    }
+    app::run(project, settings, notices, state_path);
     Ok(())
 }
 

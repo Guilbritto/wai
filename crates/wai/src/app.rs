@@ -3,7 +3,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::component::input::CursorBlink;
-use gpui_kit::component::{Theme, ThemeMode};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::{Theme, ThemeMode, WindowExt as _};
 use gpui_kit::*;
 use wai_settings::{Settings, ThemeChoice};
 
@@ -60,8 +61,9 @@ fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings);
 }
 
+/// `notices`: what the settings left out, shown once in the window.
 /// `state_path`: where the open sessions, the project and the terminal's visibility are kept.
-pub fn run(project: PathBuf, settings: Settings, state_path: PathBuf) {
+pub fn run(project: PathBuf, settings: Settings, notices: Vec<String>, state_path: PathBuf) {
     // Without the asset source every component icon (status, chevrons) renders blank.
     let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
     app.run(move |cx| {
@@ -92,7 +94,10 @@ pub fn run(project: PathBuf, settings: Settings, state_path: PathBuf) {
                 workspace.update(cx, |w, cx| {
                     w.start_agent(cx);
                     w.restore(window, cx);
-                })
+                });
+                for notice in notices {
+                    window.push_notification(Notification::warning(notice).autohide(false), cx);
+                }
             })
             .expect("window just opened");
         cx.activate(true);
