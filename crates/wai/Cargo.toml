@@ -9,6 +9,7 @@ gpui-kit.workspace = true
 wai-agent = { path = "../wai-agent" }
 wai-settings = { path = "../wai-settings" }
 anyhow.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

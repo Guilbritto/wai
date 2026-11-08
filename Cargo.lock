@@ -7948,6 +7948,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui-kit",
+ "serde_json",
  "wai-agent",
  "wai-settings",
 ]
