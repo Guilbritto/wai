@@ -1,8 +1,10 @@
-//! The sidebar: the project, its open sessions with their status, and the agent's history.
+//! The sidebar: the project, then tabs: its open sessions with their status and the agent's
+//! history, its files, search, and the agents.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
@@ -16,6 +18,23 @@ use crate::chat::{ChatSession, TurnState};
 use crate::workspace::{MAX_PANES, Workspace, folder_name};
 
 const ROW_HEIGHT: f32 = 28.;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SidebarTab {
+    #[default]
+    Sessions,
+    Files,
+    Search,
+    Agents,
+}
+
+/// Each tab with its element id and label.
+const TABS: [(SidebarTab, &str, &str); 4] = [
+    (SidebarTab::Sessions, "tab-sessions", "Sessions"),
+    (SidebarTab::Files, "tab-files", "Files"),
+    (SidebarTab::Search, "tab-search", "Search"),
+    (SidebarTab::Agents, "tab-agents", "Agents"),
+];
 
 /// R3: `/tmp` and `/private/tmp` are one folder; a path that does not exist stays as given.
 pub fn canonical(path: &Path) -> PathBuf {
@@ -81,7 +100,23 @@ impl Workspace {
 
     pub(crate) fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
-        let rows = self.history_rows().len();
+        let content = match self.sidebar_tab {
+            SidebarTab::Sessions => self.render_sessions(cx).into_any_element(),
+            SidebarTab::Files => self.files.clone().into_any_element(),
+            SidebarTab::Search => coming_soon("Search — coming soon", cx).into_any_element(),
+            SidebarTab::Agents => coming_soon("Agents — coming soon", cx).into_any_element(),
+        };
+        let tabs = TABS.map(|(tab, id, label)| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .label(label)
+                .selected(self.sidebar_tab == tab)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.sidebar_tab = tab;
+                    cx.notify();
+                }))
+        });
         v_flex()
             .debug_selector(|| "sidebar".into())
             .size_full()
@@ -113,6 +148,14 @@ impl Workspace {
                             })),
                     ),
             )
+            .child(h_flex().px_2().gap_1().children(tabs))
+            .child(v_flex().flex_1().min_h_0().child(content))
+    }
+
+    fn render_sessions(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let rows = self.history_rows().len();
+        v_flex()
+            .size_full()
             .child(heading("Open", cx))
             .children(
                 self.sessions
@@ -258,7 +301,15 @@ fn heading(text: &'static str, cx: &App) -> impl IntoElement {
         .child(text)
 }
 
-fn row(active: bool, cx: &App) -> Div {
+fn coming_soon(text: &'static str, cx: &App) -> impl IntoElement {
+    div()
+        .p_3()
+        .text_sm()
+        .text_color(cx.theme().muted_foreground)
+        .child(text)
+}
+
+pub(crate) fn row(active: bool, cx: &App) -> Div {
     let theme = cx.theme();
     h_flex()
         .w_full()

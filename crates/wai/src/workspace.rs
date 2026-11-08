@@ -10,13 +10,15 @@ use wai_agent::{
     AgentError, AgentHandle, BrokerError, QuestionAnswer, SessionStarted, SessionSummary,
     StopReason,
 };
+use wai_project::ProjectWatcher;
 use wai_settings::{AppState, OpenSession, Settings};
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, ToggleTerminal};
 use crate::chat::{ChatEvent, ChatSession, signed_out};
+use crate::files::{FileTree, OpenFile};
 use crate::notify::{self, should_notify};
-use crate::sidebar::canonical;
+use crate::sidebar::{SidebarTab, canonical};
 use crate::terminal_view::TerminalView;
 
 const SIDEBAR_WIDTH: f32 = 260.;
@@ -65,6 +67,13 @@ pub struct Workspace {
     pub history: Vec<(PathBuf, SessionSummary)>,
     pub all_projects: bool,
     pub(crate) history_task: Option<Task<()>>,
+    pub sidebar_tab: SidebarTab,
+    pub files: Entity<FileTree>,
+    /// ponytail: the last file the tree asked to open, until the editor (Task 2.4) opens it.
+    pub requested_file: Option<PathBuf>,
+    /// The project's one watcher and the task that hands its changes out; `None` when the
+    /// project cannot be watched.
+    watch: Option<(ProjectWatcher, Task<()>)>,
     next_ticket: u64,
     /// Where the open sessions, the project and the terminal's visibility are kept between runs;
     /// `None` keeps nothing (tests).
@@ -94,8 +103,13 @@ impl Workspace {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         window.set_window_title(&title(&project));
+        let project = canonical(&project);
+        let files = cx.new(|cx| FileTree::new(project.clone(), cx));
+        let open_file = cx.subscribe_in(&files, window, |this, _, OpenFile(path), _, _| {
+            this.requested_file = Some(path.clone())
+        });
         Self {
-            project: canonical(&project),
+            project,
             settings,
             registry,
             sessions: Vec::new(),
@@ -106,11 +120,45 @@ impl Workspace {
             history: Vec::new(),
             all_projects: false,
             history_task: None,
+            sidebar_tab: SidebarTab::default(),
+            files,
+            requested_file: None,
+            watch: None,
             next_ticket: 0,
             state_path,
             focus,
-            _subscriptions: vec![routing, quit],
+            _subscriptions: vec![routing, quit, open_file],
         }
+    }
+
+    /// Starts the project's watcher, replacing the last project's: once the window is open, like
+    /// the agent (tests that need it start it), and again on each new project. Its changes reach
+    /// the tree in batches (at most one per 100 ms), each wake-up drained before one update.
+    pub fn watch_project(&mut self, cx: &mut Context<Self>) {
+        // ponytail: on Linux, inotify walks the whole tree here (node_modules too) on the UI
+        // thread; move the start to the background executor if Linux matters.
+        let (watcher, changes) = match ProjectWatcher::start(&self.project) {
+            Ok(started) => started,
+            Err(e) => {
+                self.watch = None;
+                return eprintln!("wai: cannot watch {}: {e}", self.project.display());
+            }
+        };
+        let task = cx.spawn(async move |this, cx| {
+            while let Ok(change) = changes.recv().await {
+                let mut batch = vec![change];
+                while let Ok(more) = changes.try_recv() {
+                    batch.push(more);
+                }
+                let applied = this.update(cx, |this, cx| {
+                    this.files.update(cx, |files, cx| files.apply(batch, cx))
+                });
+                if applied.is_err() {
+                    break;
+                }
+            }
+        });
+        self.watch = Some((watcher, task));
     }
 
     /// Starts the default agent, so the history fills in once it is ready.
@@ -555,6 +603,9 @@ impl Workspace {
         if let Some(terminal) = &self.terminal {
             terminal.update(cx, |t, _| t.cwd = self.project.clone());
         }
+        let root = self.project.clone();
+        self.files.update(cx, |files, cx| files.set_root(root, cx));
+        self.watch_project(cx);
         self.save_state(cx);
         cx.notify();
     }
@@ -1117,7 +1168,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// What `app::run` does once the window is open.
+    /// What `app::run` does once the window is open, but the watcher.
     fn launch(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| {

@@ -1,6 +1,7 @@
 mod agents;
 mod app;
 mod chat;
+mod files;
 mod notify;
 mod sidebar;
 mod terminal_view;

@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 gpui-kit.workspace = true
 wai-agent = { path = "../wai-agent" }
+wai-project = { path = "../wai-project" }
 wai-settings = { path = "../wai-settings" }
 wai-terminal = { path = "../wai-terminal" }
 anyhow.workspace = true

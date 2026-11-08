@@ -7954,6 +7954,7 @@ dependencies = [
  "similar",
  "tempfile",
  "wai-agent",
+ "wai-project",
  "wai-settings",
  "wai-terminal",
 ]
@@ -7970,6 +7971,17 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "url",
+]
+
+[[package]]
+name = "wai-project"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "ignore",
+ "notify",
+ "tempfile",
 ]
 
 [[package]]

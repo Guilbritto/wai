@@ -101,6 +101,7 @@ pub fn run(project: PathBuf, settings: Settings, notices: Vec<String>, state_pat
             .update(cx, |_, window, cx| {
                 workspace.update(cx, |w, cx| {
                     w.start_agent(cx);
+                    w.watch_project(cx);
                     w.restore(window, cx);
                 });
                 for notice in notices {
@@ -197,6 +198,8 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 /// with the terminal panel shown and `echo wai` run in it.
 /// `WAI_SHOT=docs/screens/fase-1-sidebar.png WAI_SHOT_PROMPT=… WAI_SHOT_SIDE=1` with a fake
 /// agent run with `--sessions 8 --ask-permission --reply-file …`.
+/// `WAI_SHOT_FILES=<dir>`: the Files tab with `<dir>` (relative to the project) expanded, and
+/// no terminal (fase-2-files.png).
 #[cfg(feature = "screenshot")]
 fn screenshot(
     (window, workspace): (AnyWindowHandle, Entity<Workspace>),
@@ -229,6 +232,13 @@ fn screenshot(
                     .ok();
                 executor.timer(Duration::from_millis(500)).await;
             }
+        } else if let Ok(dir) = std::env::var("WAI_SHOT_FILES") {
+            workspace.update(cx, |w, cx| {
+                w.sidebar_tab = crate::sidebar::SidebarTab::Files;
+                let dir = w.project.join(dir);
+                w.files.update(cx, |files, cx| files.toggle(dir, cx));
+            });
+            executor.timer(Duration::from_millis(500)).await;
         } else {
             run_in_terminal(window, "echo wai", cx).await;
         }
