@@ -1,0 +1,11 @@
+[package]
+name = "s1-acp"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+agent-client-protocol = { workspace = true, features = ["process"] }
+anyhow.workspace = true
+smol = "2"
+serde_json.workspace = true
