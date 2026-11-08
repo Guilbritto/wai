@@ -7,6 +7,7 @@
 //!   reply `chose:<option_id>` or `chose:cancelled`.
 //! - `--crash-after <n>`: after n chunks print `fake agent crashed` to stderr and exit 3.
 //! - `--require-auth`: `session/new` fails with the ACP auth-required error.
+//! - `--require-auth-on-prompt`: `session/prompt` fails with the ACP auth-required error.
 //! - `--flood <bytes>`: start the turn with one tool call carrying that many bytes of `x\n`.
 //! - `--sessions <n>`: `session/list` returns n sessions titled `Session <i>`, 10 per page.
 //! - `--sessions-cwd <path>`: the cwd of those sessions; default `/tmp`.
@@ -29,6 +30,7 @@ struct Opts {
     ask_permission: bool,
     crash_after: Option<usize>,
     require_auth: bool,
+    require_auth_on_prompt: bool,
     flood: Option<usize>,
     sessions: usize,
     sessions_cwd: PathBuf,
@@ -42,6 +44,7 @@ fn parse_args() -> Opts {
         ask_permission: false,
         crash_after: None,
         require_auth: false,
+        require_auth_on_prompt: false,
         flood: None,
         sessions: 0,
         sessions_cwd: "/tmp".into(),
@@ -63,6 +66,7 @@ fn parse_args() -> Opts {
             "--ask-permission" => opts.ask_permission = true,
             "--crash-after" => opts.crash_after = Some(number(value())),
             "--require-auth" => opts.require_auth = true,
+            "--require-auth-on-prompt" => opts.require_auth_on_prompt = true,
             "--flood" => opts.flood = Some(number(value())),
             "--sessions" => opts.sessions = number(value()),
             "--sessions-cwd" => opts.sessions_cwd = value().into(),
@@ -300,6 +304,9 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
             {
                 let fake = fake.clone();
                 async move |request: acp::PromptRequest, responder, cx: ConnectionTo<Client>| {
+                    if fake.opts.require_auth_on_prompt {
+                        return responder.respond_with_error(Error::auth_required());
+                    }
                     fake.cancelled
                         .lock()
                         .expect("cancel set poisoned")

@@ -381,7 +381,13 @@ async fn actor_loop(
                     .on_receiving_result(async move |result| {
                         let reason = match result {
                             Ok(response) => convert::stop_reason(response.stop_reason),
-                            Err(e) => StopReason::Other(e.to_string()),
+                            // claude-agent-acp reports a signed-out user here, not at session/new.
+                            Err(e) => match turn.agent_error(e.clone()) {
+                                AgentError::AuthRequired => {
+                                    StopReason::Other("auth_required".into())
+                                }
+                                _ => StopReason::Other(e.to_string()),
+                            },
                         };
                         turn.end_turn(session, reason);
                         Ok(())

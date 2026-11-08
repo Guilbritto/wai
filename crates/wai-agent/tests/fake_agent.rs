@@ -246,6 +246,31 @@ fn require_auth_emits_auth_required() {
 }
 
 #[test]
+fn prompt_auth_required_emits_auth_required() {
+    run(async {
+        let (agent, rx) = spawn(&["--require-auth-on-prompt"]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd()).await.unwrap();
+        agent.prompt(session.id.clone(), hello());
+
+        let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+        assert!(
+            events.contains(&AgentEvent::AuthRequired {
+                agent: "fake".into()
+            }),
+            "{events:?}"
+        );
+        assert_eq!(
+            events.last(),
+            Some(&AgentEvent::TurnEnded {
+                session: session.id,
+                reason: StopReason::Other("auth_required".into())
+            })
+        );
+    });
+}
+
+#[test]
 fn flood_tool_output_arrives_intact() {
     run(async {
         let (agent, rx) = spawn(&["--flood", "5000000"]);
