@@ -1,0 +1,22 @@
+[workspace]
+members = ["crates/*", "spikes/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+gpui-kit = "=0.9.0"
+agent-client-protocol = "5"
+alacritty_terminal = "0.26"
+portable-pty = "0.9"
+notify = "8"
+similar = "3"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+debug = "limited"
