@@ -4,7 +4,10 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, h_resizable, resizable_panel, v_flex, v_resizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use wai_agent::{AgentError, SessionStarted, SessionSummary, StopReason};
+use wai_agent::{
+    AgentError, AgentHandle, BrokerError, QuestionAnswer, SessionStarted, SessionSummary,
+    StopReason,
+};
 use wai_settings::{AppState, OpenSession, Settings};
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
@@ -199,18 +202,15 @@ impl Workspace {
             RegistryEvent::Permission { agent, request } => {
                 match self.session(agent, &request.session, cx) {
                     Some(s) => s.update(cx, |s, cx| s.handle_permission(request.clone(), cx)),
-                    // A dead agent's requests died with it (and `handle` would respawn it).
-                    None if matches!(
-                        self.registry.read(cx).status(agent),
-                        Some(AgentStatus::Failed(_))
-                    ) => {}
-                    // Nobody can answer it: cancel it so the agent's turn goes on.
-                    None => {
-                        if let Some(handle) = self.registry.update(cx, |r, cx| r.handle(agent, cx))
-                        {
-                            handle.answer_permission(request.id, None).ok();
-                        }
-                    }
+                    None => self.unrouted(agent, cx, |h| h.answer_permission(request.id, None)),
+                }
+            }
+            RegistryEvent::Question { agent, request } => {
+                match self.session(agent, &request.session, cx) {
+                    Some(s) => s.update(cx, |s, cx| s.handle_question(request.clone(), cx)),
+                    None => self.unrouted(agent, cx, |h| {
+                        h.answer_question(request.id, QuestionAnswer::Cancel)
+                    }),
                 }
             }
             RegistryEvent::TurnEnded {
@@ -232,6 +232,11 @@ impl Workspace {
                     s.update(cx, |s, cx| s.handle_permission_resolved(*id, cx));
                 }
             }
+            RegistryEvent::QuestionResolved(id) => {
+                for s in &self.sessions {
+                    s.update(cx, |s, cx| s.handle_question_resolved(*id, cx));
+                }
+            }
             RegistryEvent::StatusChanged(agent) => {
                 match self.registry.read(cx).status(agent).cloned() {
                     Some(AgentStatus::Failed(error)) => {
@@ -247,6 +252,25 @@ impl Workspace {
                 // Empty panes show the default agent's problem, if any.
                 cx.notify();
             }
+        }
+    }
+
+    /// Cancels a request no open session can show, so the agent's turn goes on. A dead agent's
+    /// requests died with it (and `handle` would respawn it).
+    fn unrouted(
+        &mut self,
+        agent: &str,
+        cx: &mut Context<Self>,
+        cancel: impl FnOnce(&AgentHandle) -> Result<(), BrokerError>,
+    ) {
+        if matches!(
+            self.registry.read(cx).status(agent),
+            Some(AgentStatus::Failed(_))
+        ) {
+            return;
+        }
+        if let Some(handle) = self.registry.update(cx, |r, cx| r.handle(agent, cx)) {
+            cancel(&handle).ok();
         }
     }
 

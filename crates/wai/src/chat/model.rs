@@ -1,6 +1,6 @@
 use wai_agent::{
-    CommandInfo, FileDiff, ModeInfo, PermissionRequest, SessionEvent, StopReason, ToolCallPatch,
-    ToolContent, ToolStatus,
+    CommandInfo, FileDiff, ModeInfo, PermissionRequest, QuestionRequest, SessionEvent, StopReason,
+    ToolCallPatch, ToolContent, ToolStatus,
 };
 
 pub const TOOL_OUTPUT_MAX_LINES: usize = 2000;
@@ -40,6 +40,11 @@ pub enum ChatItem {
     Tool(ToolItem),
     Permission {
         request: PermissionRequest,
+        answered: Option<String>,
+    },
+    /// `answered` is what the card shows once closed: `Answered: …`, `Declined` or `Cancelled`.
+    Question {
+        request: QuestionRequest,
         answered: Option<String>,
     },
     Notice {
@@ -240,31 +245,56 @@ impl ChatModel {
         })
     }
 
-    /// Whether this model holds the request `id`.
-    fn set_permission_answer(&mut self, id: u64, answer: &str, overwrite: bool) -> bool {
+    /// Whether this model holds the permission request (or the question) `id`.
+    fn set_answer(&mut self, question: bool, id: u64, answer: &str, overwrite: bool) -> bool {
         let mut held = false;
         for item in &mut self.items {
-            if let ChatItem::Permission { request, answered } = item
-                && request.id == id
-            {
-                held = true;
-                if overwrite || answered.is_none() {
-                    *answered = Some(answer.to_string());
+            let answered = match item {
+                ChatItem::Permission { request, answered } if !question && request.id == id => {
+                    answered
                 }
+                ChatItem::Question { request, answered } if question && request.id == id => {
+                    answered
+                }
+                _ => continue,
+            };
+            held = true;
+            if overwrite || answered.is_none() {
+                *answered = Some(answer.to_string());
             }
         }
         held
     }
 
     pub fn on_permission_answered(&mut self, id: u64, choice_name: &str) {
-        self.set_permission_answer(id, choice_name, true);
+        self.set_answer(false, id, choice_name, true);
         self.state = TurnState::Working;
     }
 
     /// The broker dropped the request (e.g. the turn was cancelled).
     /// Resolutions are broadcast to every session: ids this model does not hold are ignored.
     pub fn on_permission_resolved(&mut self, id: u64) {
-        if self.set_permission_answer(id, "Cancelled", false) && self.state == TurnState::NeedsYou {
+        if self.set_answer(false, id, "Cancelled", false) && self.state == TurnState::NeedsYou {
+            self.state = TurnState::Working;
+        }
+    }
+
+    pub fn on_question(&mut self, req: QuestionRequest) -> usize {
+        self.state = TurnState::NeedsYou;
+        self.push(ChatItem::Question {
+            request: req,
+            answered: None,
+        })
+    }
+
+    pub fn on_question_answered(&mut self, id: u64, summary: &str) {
+        self.set_answer(true, id, summary, true);
+        self.state = TurnState::Working;
+    }
+
+    /// Cancelled with the turn or withdrawn by the agent; ids of other sessions are ignored.
+    pub fn on_question_resolved(&mut self, id: u64) {
+        if self.set_answer(true, id, "Cancelled", false) && self.state == TurnState::NeedsYou {
             self.state = TurnState::Working;
         }
     }
@@ -428,6 +458,36 @@ mod tests {
         assert!(
             matches!(&m.items[0], ChatItem::Permission { answered, .. } if answered.as_deref() == Some("Cancelled"))
         );
+    }
+
+    #[test]
+    fn question_sets_needs_you_until_resolved() {
+        let mut m = ChatModel::default();
+        let question = |id| QuestionRequest {
+            id,
+            session: "s".into(),
+            message: "Pick".into(),
+            fields: vec![],
+        };
+        m.on_question(question(7));
+        assert_eq!(m.state, TurnState::NeedsYou);
+        m.on_permission_resolved(7); // a permission with the same id is another request
+        assert_eq!(m.state, TurnState::NeedsYou);
+        m.on_question_resolved(7);
+        assert_eq!(m.state, TurnState::Working);
+        m.on_question(question(8));
+        m.on_question_answered(8, "Answered: Blue");
+        m.on_question_resolved(8); // the broker reports the answer too
+        let answers: Vec<_> = m
+            .items
+            .iter()
+            .map(|item| match item {
+                ChatItem::Question { answered, .. } => answered.as_deref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answers, [Some("Cancelled"), Some("Answered: Blue")]);
+        assert_eq!(m.state, TurnState::Working);
     }
 
     #[test]

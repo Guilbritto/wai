@@ -7,6 +7,12 @@
 //! - `--chunk-delay-ms <n>`: pause before each chunk.
 //! - `--ask-permission`: send an Edit tool call for `notes.md`, ask permission and
 //!   reply `chose:<option_id>` or `chose:cancelled`.
+//! - `--ask-question`: ask a form (a required single choice `color`: `red`/`blue`, and an
+//!   optional text `note`) and reply `answered:<json>`, `answered:declined` or
+//!   `answered:cancelled`. Like claude-agent-acp, it asks only a client that advertises form
+//!   elicitation, and replies `answered:unsupported` otherwise.
+//! - `--withdraw-question`: with `--ask-question`, first ask the same form and withdraw it at
+//!   once (`$/cancel_request`).
 //! - `--crash-after <n>`: after n chunks print `fake agent crashed` to stderr and exit 3.
 //! - `--require-auth`: `session/new` fails with the ACP auth-required error.
 //! - `--require-auth-on-prompt`: `session/prompt` fails with the ACP auth-required error.
@@ -21,7 +27,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,6 +41,8 @@ struct Opts {
     reply_file: bool,
     chunk_delay: Duration,
     ask_permission: bool,
+    ask_question: bool,
+    withdraw_question: bool,
     crash_after: Option<usize>,
     require_auth: bool,
     require_auth_on_prompt: bool,
@@ -51,6 +59,8 @@ fn parse_args() -> Opts {
         reply_file: false,
         chunk_delay: Duration::ZERO,
         ask_permission: false,
+        ask_question: false,
+        withdraw_question: false,
         crash_after: None,
         require_auth: false,
         require_auth_on_prompt: false,
@@ -80,6 +90,8 @@ fn parse_args() -> Opts {
             }
             "--chunk-delay-ms" => opts.chunk_delay = Duration::from_millis(number(value()) as u64),
             "--ask-permission" => opts.ask_permission = true,
+            "--ask-question" => opts.ask_question = true,
+            "--withdraw-question" => opts.withdraw_question = true,
             "--crash-after" => opts.crash_after = Some(number(value())),
             "--require-auth" => opts.require_auth = true,
             "--require-auth-on-prompt" => opts.require_auth_on_prompt = true,
@@ -98,6 +110,8 @@ struct Fake {
     opts: Opts,
     next_session: AtomicU64,
     cancelled: Mutex<HashSet<String>>,
+    /// The client advertised `elicitation.form` at initialize.
+    forms: AtomicBool,
 }
 
 impl Fake {
@@ -134,6 +148,8 @@ impl Fake {
         }
         let reply = if self.opts.ask_permission {
             format!("chose:{}", self.ask_permission(cx, session).await?)
+        } else if self.opts.ask_question {
+            format!("answered:{}", self.ask_question(cx, session).await?)
         } else {
             self.opts.reply.clone()
         };
@@ -208,6 +224,50 @@ impl Fake {
             _ => "cancelled".into(),
         })
     }
+
+    async fn ask_question(
+        &self,
+        cx: &ConnectionTo<Client>,
+        session: &acp::SessionId,
+    ) -> Result<String, Error> {
+        if !self.forms.load(Ordering::Relaxed) {
+            return Ok("unsupported".into());
+        }
+        let schema = acp::ElicitationSchema::new()
+            .property(
+                "color",
+                acp::StringPropertySchema::new()
+                    .title("Color".to_string())
+                    .one_of(vec![
+                        acp::EnumOption::new("red", "Red"),
+                        acp::EnumOption::new("blue", "Blue"),
+                    ]),
+                true,
+            )
+            .property(
+                "note",
+                acp::StringPropertySchema::new().title("Note".to_string()),
+                false,
+            );
+        let form = acp::ElicitationFormMode::new(
+            acp::ElicitationSessionScope::new(session.clone()),
+            schema,
+        );
+        let request = acp::CreateElicitationRequest::new(form, "Pick a color");
+        if self.opts.withdraw_question {
+            // Dropping the sent request withdraws it with `$/cancel_request`.
+            drop(cx.send_request(request.clone()));
+        }
+        let response = cx.send_request(request).block_task().await?;
+        Ok(match response.action {
+            acp::ElicitationAction::Accept(accept) => {
+                serde_json::to_string(&accept.content.unwrap_or_default())
+                    .map_err(Error::into_internal_error)?
+            }
+            acp::ElicitationAction::Decline => "declined".into(),
+            _ => "cancelled".into(),
+        })
+    }
 }
 
 fn text_block(text: impl Into<String>) -> acp::ContentBlock {
@@ -249,6 +309,7 @@ fn main() -> Result<(), Error> {
         opts,
         next_session: AtomicU64::new(1),
         cancelled: Mutex::default(),
+        forms: AtomicBool::new(false),
     });
     smol::block_on(serve(fake))
 }
@@ -258,21 +319,30 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
         .v1()
         .name("wai-fake-agent")
         .on_receive_request(
-            async |request: acp::InitializeRequest, responder, _cx| {
-                let caps = acp::AgentCapabilities::new()
-                    .load_session(true)
-                    .prompt_capabilities(acp::PromptCapabilities::new().image(true))
-                    .session_capabilities(
-                        acp::SessionCapabilities::new().list(acp::SessionListCapabilities::new()),
-                    );
-                responder.respond(
-                    acp::InitializeResponse::new(request.protocol_version)
-                        .agent_info(acp::Implementation::new(
-                            "wai-fake-agent",
-                            env!("CARGO_PKG_VERSION"),
-                        ))
-                        .agent_capabilities(caps),
-                )
+            {
+                let fake = fake.clone();
+                async move |request: acp::InitializeRequest, responder, _cx| {
+                    let forms = request
+                        .client_capabilities
+                        .elicitation
+                        .is_some_and(|e| e.supports_form());
+                    fake.forms.store(forms, Ordering::Relaxed);
+                    let caps = acp::AgentCapabilities::new()
+                        .load_session(true)
+                        .prompt_capabilities(acp::PromptCapabilities::new().image(true))
+                        .session_capabilities(
+                            acp::SessionCapabilities::new()
+                                .list(acp::SessionListCapabilities::new()),
+                        );
+                    responder.respond(
+                        acp::InitializeResponse::new(request.protocol_version)
+                            .agent_info(acp::Implementation::new(
+                                "wai-fake-agent",
+                                env!("CARGO_PKG_VERSION"),
+                            ))
+                            .agent_capabilities(caps),
+                    )
+                }
             },
             agent_client_protocol::on_receive_request!(),
         )

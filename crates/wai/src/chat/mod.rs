@@ -1,6 +1,7 @@
 mod input;
 mod model;
 mod permission;
+mod question;
 mod render;
 mod view;
 

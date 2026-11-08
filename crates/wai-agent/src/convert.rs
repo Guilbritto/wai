@@ -135,6 +135,123 @@ pub(crate) fn permission_request(
     }
 }
 
+/// A form tied to a session; `None` for anything else (url mode, request scope, future modes).
+pub(crate) fn question_request(
+    id: QuestionId,
+    req: acp::CreateElicitationRequest,
+) -> Option<QuestionRequest> {
+    let acp::ElicitationMode::Form(form) = req.mode else {
+        return None;
+    };
+    let acp::ElicitationScope::Session(scope) = form.scope else {
+        return None;
+    };
+    let schema = form.requested_schema;
+    let required = schema.required.unwrap_or_default();
+    // ponytail: the schema's map is sorted by key, so the agent's field order is lost; Claude's
+    // `question_<n>` keys sort right for up to 10 questions (AskUserQuestion asks at most 4).
+    let fields = schema
+        .properties
+        .into_iter()
+        .map(|(key, property)| QuestionField {
+            required: required.contains(&key),
+            ..question_field(key, &property)
+        })
+        .collect();
+    Some(QuestionRequest {
+        id,
+        session: scope.session_id.to_string(),
+        message: req.message,
+        fields,
+    })
+}
+
+fn question_field(key: String, property: &acp::ElicitationPropertySchema) -> QuestionField {
+    use acp::ElicitationPropertySchema as P;
+    let titled = |options: &[acp::EnumOption]| {
+        options
+            .iter()
+            .map(|o| Choice {
+                value: o.value.clone(),
+                label: o.title.clone(),
+            })
+            .collect()
+    };
+    let plain = |values: &[String]| {
+        values
+            .iter()
+            .map(|v| Choice {
+                value: v.clone(),
+                label: v.clone(),
+            })
+            .collect()
+    };
+    let (title, description, kind) = match property {
+        P::String(s) => (
+            &s.title,
+            &s.description,
+            match (&s.one_of, &s.enum_values) {
+                (Some(options), _) => FieldKind::SingleChoice(titled(options)),
+                (None, Some(values)) => FieldKind::SingleChoice(plain(values)),
+                (None, None) => FieldKind::Text,
+            },
+        ),
+        P::Number(n) => (&n.title, &n.description, FieldKind::Number),
+        P::Integer(n) => (&n.title, &n.description, FieldKind::Number),
+        P::Boolean(b) => (&b.title, &b.description, FieldKind::Boolean),
+        P::Array(a) => match &a.items {
+            acp::MultiSelectItems::String(items) => (
+                &a.title,
+                &a.description,
+                FieldKind::MultiChoice(plain(&items.values)),
+            ),
+            acp::MultiSelectItems::Titled(items) => (
+                &a.title,
+                &a.description,
+                FieldKind::MultiChoice(titled(&items.options)),
+            ),
+            _ => return unsupported_field(key, property),
+        },
+        _ => return unsupported_field(key, property),
+    };
+    QuestionField {
+        title: title.clone().unwrap_or_else(|| key.clone()),
+        description: description.clone(),
+        key,
+        required: false,
+        kind,
+    }
+}
+
+/// A schema wai cannot render: a text field titled with the raw JSON, so the user sees what
+/// was asked.
+fn unsupported_field(key: String, property: &acp::ElicitationPropertySchema) -> QuestionField {
+    QuestionField {
+        title: serde_json::to_string(property).unwrap_or_else(|_| key.clone()),
+        description: None,
+        key,
+        required: false,
+        kind: FieldKind::Text,
+    }
+}
+
+pub(crate) fn question_response(answer: QuestionAnswer) -> acp::CreateElicitationResponse {
+    let action = match answer {
+        QuestionAnswer::Accept(content) => {
+            // ponytail: values ACP v1 cannot carry (objects, null) are dropped; the form never
+            // produces them.
+            let content = content
+                .into_iter()
+                .filter_map(|(key, value)| Some((key, serde_json::from_value(value).ok()?)))
+                .collect::<std::collections::BTreeMap<_, _>>();
+            acp::ElicitationAction::Accept(acp::ElicitationAcceptAction::new().content(content))
+        }
+        QuestionAnswer::Decline => acp::ElicitationAction::Decline,
+        QuestionAnswer::Cancel => acp::ElicitationAction::Cancel,
+    };
+    acp::CreateElicitationResponse::new(action)
+}
+
 pub(crate) fn stop_reason(reason: acp::StopReason) -> StopReason {
     match reason {
         acp::StopReason::EndTurn => StopReason::EndTurn,
@@ -212,6 +329,147 @@ mod tests {
         assert_eq!(link.name, "a b.md");
         assert!(link.uri.starts_with("file:///"), "{}", link.uri);
         assert!(link.uri.ends_with("/a%20b.md"), "{}", link.uri);
+    }
+
+    fn elicitation(json: serde_json::Value) -> acp::CreateElicitationRequest {
+        serde_json::from_value(json).unwrap()
+    }
+
+    /// The form claude-agent-acp 0.101.0 builds for AskUserQuestion
+    /// (`askUserQuestionsToCreateRequest`): a titled single-select (`oneOf`), a titled
+    /// multi-select (`items.anyOf`) and a free-text "Other" per question, nothing required.
+    #[test]
+    fn ask_user_question_form_maps_to_fields() {
+        let other = "Type your own answer, or add a note to the option you chose above (optional).";
+        let request = elicitation(serde_json::json!({
+            "mode": "form",
+            "sessionId": "s1",
+            "toolCallId": "toolu_1",
+            "message": "Please answer the following questions.",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "question_0": {
+                        "type": "string",
+                        "title": "Database",
+                        "description": "Which database?",
+                        "oneOf": [
+                            {"const": "Postgres", "title": "Postgres", "description": "Relational"},
+                            {"const": "Redis", "title": "Redis"}
+                        ]
+                    },
+                    "question_0_custom": {"type": "string", "title": "Other", "description": other},
+                    "question_1": {
+                        "type": "array",
+                        "description": "Which features?",
+                        "items": {"anyOf": [
+                            {"const": "Auth", "title": "Auth"},
+                            {"const": "Search", "title": "Search",
+                             "_meta": {"_claude/askUserQuestionOption": {"preview": "…"}}}
+                        ]}
+                    },
+                    "question_1_custom": {"type": "string", "title": "Other"}
+                }
+            }
+        }));
+        let q = question_request(9, request).expect("a form for a session");
+        assert_eq!((q.id, q.session.as_str()), (9, "s1"));
+        assert_eq!(q.message, "Please answer the following questions.");
+        let choice = |v: &str| Choice {
+            value: v.into(),
+            label: v.into(),
+        };
+        assert_eq!(
+            q.fields,
+            [
+                QuestionField {
+                    key: "question_0".into(),
+                    title: "Database".into(),
+                    description: Some("Which database?".into()),
+                    required: false,
+                    kind: FieldKind::SingleChoice(vec![choice("Postgres"), choice("Redis")]),
+                },
+                QuestionField {
+                    key: "question_0_custom".into(),
+                    title: "Other".into(),
+                    description: Some(other.into()),
+                    required: false,
+                    kind: FieldKind::Text,
+                },
+                QuestionField {
+                    key: "question_1".into(),
+                    title: "question_1".into(),
+                    description: Some("Which features?".into()),
+                    required: false,
+                    kind: FieldKind::MultiChoice(vec![choice("Auth"), choice("Search")]),
+                },
+                QuestionField {
+                    key: "question_1_custom".into(),
+                    title: "Other".into(),
+                    description: None,
+                    required: false,
+                    kind: FieldKind::Text,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_schemas_map_and_unknown_ones_become_text() {
+        let request = elicitation(serde_json::json!({
+            "mode": "form",
+            "sessionId": "s1",
+            "message": "m",
+            "requestedSchema": {
+                "properties": {
+                    "a_size": {"type": "string", "enum": ["S", "M"]},
+                    "b_tags": {"type": "array", "items": {"type": "string", "enum": ["x"]}},
+                    "c_ok": {"type": "boolean", "title": "OK"},
+                    "d_count": {"type": "integer", "minimum": 1},
+                    "e_ratio": {"type": "number"},
+                    "f_email": {"type": "string", "format": "email"},
+                    "g_shape": {"type": "_shape", "sides": 3}
+                },
+                "required": ["d_count"]
+            }
+        }));
+        let fields = question_request(1, request).unwrap().fields;
+        let kinds: Vec<_> = fields
+            .iter()
+            .map(|f| (f.required, f.kind.clone()))
+            .collect();
+        let plain = |v: &str| Choice {
+            value: v.into(),
+            label: v.into(),
+        };
+        assert_eq!(
+            kinds,
+            [
+                (false, FieldKind::SingleChoice(vec![plain("S"), plain("M")])),
+                (false, FieldKind::MultiChoice(vec![plain("x")])),
+                (false, FieldKind::Boolean),
+                (true, FieldKind::Number),
+                (false, FieldKind::Number),
+                (false, FieldKind::Text),
+                (false, FieldKind::Text),
+            ]
+        );
+        assert_eq!(fields[2].title, "OK");
+        assert_eq!(fields[6].title, r#"{"type":"_shape","sides":3}"#);
+    }
+
+    #[test]
+    fn url_and_request_scoped_elicitations_are_not_questions() {
+        let url = elicitation(serde_json::json!({
+            "mode": "url", "sessionId": "s1", "message": "m",
+            "elicitationId": "e1", "url": "https://example.com"
+        }));
+        assert_eq!(question_request(1, url), None);
+        let request_scoped = elicitation(serde_json::json!({
+            "mode": "form", "requestId": 4, "message": "m",
+            "requestedSchema": {"type": "object", "properties": {}}
+        }));
+        assert_eq!(question_request(1, request_scoped), None);
     }
 
     #[test]

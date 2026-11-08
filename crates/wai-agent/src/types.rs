@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 pub type SessionId = String;
 pub type PermissionRequestId = u64;
+pub type QuestionId = u64;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentSpec {
@@ -58,6 +59,12 @@ pub enum AgentEvent {
     PermissionRequested(PermissionRequest),
     PermissionResolved {
         id: PermissionRequestId,
+    },
+    /// An ACP form elicitation (Claude's AskUserQuestion); answer with `answer_question`.
+    QuestionAsked(QuestionRequest),
+    /// Answered, cancelled with the turn, or withdrawn by the agent.
+    QuestionResolved {
+        id: QuestionId,
     },
     TurnEnded {
         session: SessionId,
@@ -166,6 +173,46 @@ pub enum ChoiceKind {
     RejectAlways,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuestionRequest {
+    pub id: QuestionId,
+    pub session: SessionId,
+    pub message: String,
+    pub fields: Vec<QuestionField>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuestionField {
+    pub key: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub required: bool,
+    pub kind: FieldKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FieldKind {
+    SingleChoice(Vec<Choice>),
+    MultiChoice(Vec<Choice>),
+    Text,
+    Boolean,
+    Number,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Choice {
+    pub value: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum QuestionAnswer {
+    /// The form's values by field key: strings, numbers, booleans and string arrays.
+    Accept(serde_json::Map<String, serde_json::Value>),
+    Decline,
+    Cancel,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
     EndTurn,
@@ -187,6 +234,6 @@ pub enum AgentError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BrokerError {
-    #[error("the permission request is no longer pending")]
+    #[error("the request is no longer pending")]
     Stale,
 }

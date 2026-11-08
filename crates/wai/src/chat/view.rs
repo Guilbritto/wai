@@ -9,13 +9,14 @@ use gpui_kit::component::select::{SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::text::TextViewState;
 use gpui_kit::*;
 use wai_agent::{
-    AgentError, AgentHandle, ModeInfo, PermissionChoice, PermissionRequest, SessionEvent,
-    SessionStarted, StopReason,
+    AgentError, AgentHandle, ModeInfo, PermissionChoice, PermissionRequest, QuestionRequest,
+    SessionEvent, SessionStarted, StopReason,
 };
 
 use super::input::Attachment;
 use super::model::{ChatItem, ChatModel, NoticeKind, TurnState};
 use super::permission::DiffView;
+use super::question::QuestionForm;
 use crate::agents::AgentRegistry;
 
 /// How often a streaming message takes its new text. Each push costs a parse and a window
@@ -69,6 +70,8 @@ pub struct ChatSession {
     /// Per `Tool`/`Permission` row.
     pub(super) diffs: HashMap<usize, Vec<DiffView>>,
     pub(super) open_thoughts: HashSet<usize>,
+    /// Per open `Question` row, made when it first draws.
+    pub(super) questions: HashMap<usize, QuestionForm>,
     pub(super) scroller: Entity<MessageScrollerState>,
     pub(super) modes: Option<Entity<SelectState<Vec<Mode>>>>,
     /// Pending while streamed text waits for `STREAM_FLUSH`.
@@ -117,6 +120,7 @@ impl ChatSession {
             texts: HashMap::new(),
             diffs: HashMap::new(),
             open_thoughts: HashSet::new(),
+            questions: HashMap::new(),
             scroller: cx.new(|cx| MessageScrollerState::new(0, cx)),
             modes: None,
             flush: None,
@@ -201,6 +205,25 @@ impl ChatSession {
     /// Resolutions are broadcast to every session; the model ignores ids it does not hold.
     pub fn handle_permission_resolved(&mut self, id: u64, cx: &mut Context<Self>) {
         self.update_model(cx, |m| m.on_permission_resolved(id));
+        cx.notify();
+    }
+
+    pub fn handle_question(&mut self, req: QuestionRequest, cx: &mut Context<Self>) {
+        let ix = self.update_model(cx, |m| m.on_question(req));
+        self.sync_rows(Some(ix), cx);
+        cx.notify();
+    }
+
+    /// Like permissions, resolutions reach every session.
+    pub fn handle_question_resolved(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.update_model(cx, |m| m.on_question_resolved(id));
+        let items = &self.model.items;
+        self.questions.retain(|ix, _| {
+            matches!(
+                items.get(*ix),
+                Some(ChatItem::Question { answered: None, .. })
+            )
+        });
         cx.notify();
     }
 
@@ -313,7 +336,7 @@ impl ChatSession {
                 };
                 self.diffs.insert(ix, diffs);
             }
-            ChatItem::User { .. } | ChatItem::Notice { .. } => {}
+            ChatItem::User { .. } | ChatItem::Question { .. } | ChatItem::Notice { .. } => {}
         }
     }
 
@@ -367,6 +390,7 @@ impl ChatSession {
         self.texts.clear();
         self.diffs.clear();
         self.open_thoughts.clear();
+        self.questions.clear();
         self.scroller.update(cx, |list, cx| list.reset(0, cx));
         self.update_model(cx, |m| m.state = TurnState::Working);
         let (id, cwd, registry) = (self.id.clone(), self.cwd.clone(), self.registry.clone());
@@ -523,6 +547,47 @@ mod tests {
         cx.update(|window, cx| {
             window.render_frame(cx);
             assert!(window.try_find("perm-allow_once").is_none(), "buttons stay");
+        });
+    }
+
+    /// Submit waits for the required choice; then the answer reaches the agent.
+    #[gpui_kit::test]
+    fn question_card_submits_choice(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--ask-question"));
+        let session = start_session(&workspace, cx);
+
+        send("ask", cx);
+        wait_until(cx, "the question card", |cx| {
+            state(&session, cx) == TurnState::NeedsYou
+        });
+        cx.update(|window, cx| window.click("question-submit", cx));
+        assert_eq!(
+            state(&session, cx),
+            TurnState::NeedsYou,
+            "submitted unanswered"
+        );
+        cx.update(|window, cx| window.within("field-color").click(1usize, cx)); // blue
+        cx.update(|window, cx| window.click("question-submit", cx));
+
+        wait_until(cx, "the answer", |cx| {
+            state(&session, cx) == TurnState::Idle
+        });
+        let reply = last_agent_text(&session, cx).unwrap_or_default();
+        assert!(
+            reply.starts_with("answered:") && reply.contains(r#""color":"blue""#),
+            "{reply}"
+        );
+        let answered = session.read_with(cx, |s, _| {
+            s.model.items.iter().find_map(|item| match item {
+                ChatItem::Question { answered, .. } => answered.clone(),
+                _ => None,
+            })
+        });
+        assert_eq!(answered.as_deref(), Some("Answered: Blue"));
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("question-submit").is_none(), "form stays");
         });
     }
 

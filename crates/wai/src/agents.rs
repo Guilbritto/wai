@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use gpui_kit::*;
 use wai_agent::{
-    AgentCaps, AgentEvent, AgentHandle, AgentSpec, PermissionRequest, SessionEvent, StopReason,
+    AgentCaps, AgentEvent, AgentHandle, AgentSpec, PermissionRequest, QuestionRequest,
+    SessionEvent, StopReason,
 };
 use wai_settings::{AgentConfig, Settings};
 
@@ -26,6 +27,11 @@ pub enum RegistryEvent {
         request: PermissionRequest,
     },
     PermissionResolved(u64),
+    Question {
+        agent: String,
+        request: QuestionRequest,
+    },
+    QuestionResolved(u64),
     TurnEnded {
         agent: String,
         session: String,
@@ -167,6 +173,15 @@ impl AgentRegistry {
             }
             AgentEvent::PermissionResolved { id } => {
                 return cx.emit(RegistryEvent::PermissionResolved(id));
+            }
+            AgentEvent::QuestionAsked(request) => {
+                return cx.emit(RegistryEvent::Question {
+                    agent: agent.into(),
+                    request,
+                });
+            }
+            AgentEvent::QuestionResolved { id } => {
+                return cx.emit(RegistryEvent::QuestionResolved(id));
             }
             AgentEvent::TurnEnded { session, reason } => {
                 return cx.emit(RegistryEvent::TurnEnded {

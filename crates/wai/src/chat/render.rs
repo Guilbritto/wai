@@ -12,8 +12,8 @@ use gpui_kit::*;
 use wai_agent::{PermissionChoice, ToolStatus};
 
 use super::model::{ChatItem, NoticeKind, ToolItem, TurnState, UsageInfo};
-use super::permission;
 use super::view::ChatSession;
+use super::{permission, question};
 
 /// `43k`, `1M`, `1.5M`.
 fn tokens(n: u64) -> String {
@@ -66,7 +66,12 @@ impl ChatSession {
             }))
     }
 
-    fn render_item(&mut self, ix: usize, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_item(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         match &self.model.items[ix] {
@@ -119,6 +124,14 @@ impl ChatSession {
                 permission::card(ix, request, answered.as_deref(), diffs, on_choose, cx)
                     .into_any_element()
             }
+            ChatItem::Question { request, answered } => question::card(
+                ix,
+                request,
+                answered.as_deref(),
+                &mut self.questions,
+                window,
+                cx,
+            ),
             ChatItem::Notice { text, kind } => {
                 let restart = *kind == NoticeKind::Error
                     && ix + 1 == self.model.items.len()
