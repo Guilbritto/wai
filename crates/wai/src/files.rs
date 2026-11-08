@@ -31,12 +31,14 @@ pub struct FileTree {
     children: HashMap<PathBuf, (u64, Vec<Entry>)>,
     pub rows: Vec<Row>,
     requests: u64,
+    /// Whether the user's global git excludes apply (`false` in tests: no `~/.gitconfig`).
+    global_ignores: bool,
 }
 
 impl EventEmitter<OpenFile> for FileTree {}
 
 impl FileTree {
-    pub fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub fn new(root: PathBuf, global_ignores: bool, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             expanded: HashSet::from([root.clone()]),
             root,
@@ -44,6 +46,7 @@ impl FileTree {
             children: HashMap::new(),
             rows: Vec::new(),
             requests: 0,
+            global_ignores,
         };
         this.list(vec![this.root.clone()], cx);
         this
@@ -102,12 +105,12 @@ impl FileTree {
     /// Lists `dirs` on the background executor, then shows them.
     fn list(&mut self, dirs: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.requests += 1;
-        let (request, root) = (self.requests, self.root.clone());
+        let (request, root, global) = (self.requests, self.root.clone(), self.global_ignores);
         cx.spawn(async move |this, cx| {
             let listed = cx
                 .background_spawn(async move {
                     let listed = dirs.into_iter().map(|dir| {
-                        let entries = list_dir(&root, &dir);
+                        let entries = list_dir(&root, &dir, global);
                         (dir, entries)
                     });
                     listed.collect::<Vec<_>>()

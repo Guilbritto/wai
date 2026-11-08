@@ -15,7 +15,11 @@ pub struct Entry {
 /// a git repo); hidden files show, `.git` does not. Only `dir` is read, never below it, so a huge
 /// ignored or collapsed folder costs nothing. An entry that cannot be read is left out; `Err` means
 /// `dir` itself is gone or unreadable.
-pub fn list_dir(root: &Path, dir: &Path) -> io::Result<Vec<Entry>> {
+///
+/// `global_ignores`: also apply the user's global excludes file (git's `core.excludesFile`, e.g.
+/// `.DS_Store`), relative to `root` as git does. It is read from git's config, so tests pass
+/// `false` to keep away from the developer's `~/.gitconfig`.
+pub fn list_dir(root: &Path, dir: &Path, global_ignores: bool) -> io::Result<Vec<Entry>> {
     debug_assert!(
         dir.starts_with(root),
         "{} is outside the project",
@@ -25,9 +29,8 @@ pub fn list_dir(root: &Path, dir: &Path) -> io::Result<Vec<Entry>> {
     let walk = WalkBuilder::new(dir)
         .max_depth(Some(1))
         .hidden(false)
-        // ponytail: the user's global excludes file (from ~/.gitconfig) is not read: same tree
-        // on every machine and in tests. Read it if people miss their global ignores.
-        .git_global(false)
+        .git_global(global_ignores)
+        .current_dir(root)
         .filter_entry(|e| e.file_name() != ".git")
         .build();
     let mut entries: Vec<_> = walk
@@ -84,7 +87,7 @@ mod tests {
         }
 
         let names = |dir: &Path| -> Vec<String> {
-            let entries = list_dir(root, dir).unwrap();
+            let entries = list_dir(root, dir, false).unwrap();
             for entry in &entries {
                 assert_eq!(entry.path, dir.join(&entry.name), "nothing below depth 1");
                 assert_eq!(entry.is_dir, entry.path.is_dir());
@@ -102,6 +105,49 @@ mod tests {
             names(&root.join("src")),
             ["nested", ".gitignore", "main.rs"]
         );
-        assert!(list_dir(root, &root.join("missing")).is_err());
+        assert!(list_dir(root, &root.join("missing"), false).is_err());
+    }
+
+    /// `ignore` finds the global excludes file only through git's config (`GIT_CONFIG_GLOBAL`,
+    /// `~/.gitconfig`, XDG), so this test runs itself again in a child process whose
+    /// `GIT_CONFIG_GLOBAL` names a temp config: nothing here sets this process's environment or
+    /// reads the developer's `~/.gitconfig`.
+    #[test]
+    fn global_ignores_follow_the_flag() {
+        const CHILD: &str = "WAI_TEST_GLOBAL_IGNORES_ROOT";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = PathBuf::from(root);
+            let names = |global| -> Vec<String> {
+                let entries = list_dir(&root, &root, global).unwrap();
+                entries.into_iter().map(|e| e.name).collect()
+            };
+            assert_eq!(names(true), ["kept.txt"]);
+            assert_eq!(names(false), [".DS_Store", "kept.txt"]);
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".DS_Store"), "").unwrap();
+        fs::write(root.join("kept.txt"), "").unwrap();
+        let excludes = dir.path().join("excludes");
+        fs::write(&excludes, ".DS_Store\n").unwrap();
+        let config = dir.path().join("gitconfig");
+        let body = format!("[core]\n\texcludesFile = {}\n", excludes.display());
+        fs::write(&config, body).unwrap();
+
+        let test = "tree::tests::global_ignores_follow_the_flag";
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([test, "--exact", "--nocapture"])
+            .env(CHILD, &root)
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .output()
+            .unwrap();
+        let output = String::from_utf8_lossy(&child.stderr);
+        assert!(child.status.success(), "{output}");
+        assert!(
+            String::from_utf8_lossy(&child.stdout).contains("1 passed"),
+            "the child ran the test"
+        );
     }
 }

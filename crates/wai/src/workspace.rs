@@ -87,6 +87,7 @@ impl Workspace {
         project: PathBuf,
         settings: Settings,
         state_path: Option<PathBuf>,
+        global_ignores: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -104,7 +105,7 @@ impl Workspace {
         window.focus(&focus, cx);
         window.set_window_title(&title(&project));
         let project = canonical(&project);
-        let files = cx.new(|cx| FileTree::new(project.clone(), cx));
+        let files = cx.new(|cx| FileTree::new(project.clone(), global_ignores, cx));
         let open_file = cx.subscribe_in(&files, window, |this, _, OpenFile(path), _, _| {
             this.requested_file = Some(path.clone())
         });
@@ -808,7 +809,8 @@ pub(crate) mod tests {
         let (_, workspace) = cx
             .update(|cx| {
                 gpui_kit::open_window(Default::default(), cx, |window, cx| {
-                    cx.new(|cx| Workspace::new(project, settings, state_path, window, cx))
+                    // No global git excludes: they come from the developer's ~/.gitconfig.
+                    cx.new(|cx| Workspace::new(project, settings, state_path, false, window, cx))
                 })
             })
             .expect("open window");

@@ -93,7 +93,7 @@ pub fn run(project: PathBuf, settings: Settings, notices: Vec<String>, state_pat
             ..Default::default()
         };
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
-            cx.new(|cx| Workspace::new(project, settings, Some(state_path), window, cx))
+            cx.new(|cx| Workspace::new(project, settings, Some(state_path), true, window, cx))
         })
         .expect("open window");
         let (window, workspace) = opened.clone();

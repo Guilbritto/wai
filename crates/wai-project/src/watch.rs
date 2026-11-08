@@ -7,8 +7,9 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 
 /// At most one batch per this long.
 const DEBOUNCE: Duration = Duration::from_millis(100);
-/// A bigger batch (`npm install`, a branch switch) becomes a `Rescan`: re-listing the open
-/// folders is cheaper than walking that many paths.
+/// A window with more paths (`npm install`, `rm -rf node_modules`, a branch switch) becomes a
+/// `Rescan` and stops collecting: re-listing the open folders is cheaper than walking that many
+/// paths, and the memory a flood takes stays bounded.
 const MAX_BATCH: usize = 10_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,7 +54,7 @@ fn debounce(events: mpsc::Receiver<notify::Result<Event>>, tx: async_channel::Se
         {
             add(event, &mut paths, &mut rescan);
         }
-        let change = if rescan || paths.len() > MAX_BATCH {
+        let change = if rescan {
             FsChange::Rescan
         } else if paths.is_empty() {
             continue;
@@ -67,6 +68,9 @@ fn debounce(events: mpsc::Receiver<notify::Result<Event>>, tx: async_channel::Se
 }
 
 fn add(event: notify::Result<Event>, paths: &mut BTreeSet<PathBuf>, rescan: &mut bool) {
+    if *rescan {
+        return;
+    }
     match event {
         // Reads change nothing, and listing a folder reads it: without this, a re-list on Linux
         // would report itself.
@@ -75,6 +79,10 @@ fn add(event: notify::Result<Event>, paths: &mut BTreeSet<PathBuf>, rescan: &mut
         Ok(event) => paths.extend(event.paths),
         // A watch error may have lost events.
         Err(_) => *rescan = true,
+    }
+    if *rescan || paths.len() > MAX_BATCH {
+        *rescan = true;
+        paths.clear();
     }
 }
 
@@ -111,5 +119,39 @@ mod tests {
         assert!((1..=5).contains(&batches), "{batches} batches");
         let missing: Vec<_> = created.difference(&seen).collect();
         assert!(missing.is_empty(), "missing {missing:?}");
+    }
+
+    /// A real flood never fills one window here: 12,000 files take ~600 ms to write and FSEvents
+    /// hands them over as they come, ~2,000 per 100 ms. So the debouncer gets the 12,000 events
+    /// already queued, as a faster `rm -rf node_modules` or a coalesced burst delivers them.
+    #[test]
+    fn flood_becomes_rescan_without_growing() {
+        let created = |i| {
+            let kind = EventKind::Create(notify::event::CreateKind::File);
+            Ok(Event::new(kind).add_path(PathBuf::from(format!("/project/f{i}"))))
+        };
+
+        // Past the cap, the window stops collecting paths.
+        let (mut paths, mut rescan) = (BTreeSet::new(), false);
+        for i in 0..12_000 {
+            add(created(i), &mut paths, &mut rescan);
+            assert!(paths.len() <= MAX_BATCH, "{} paths held", paths.len());
+        }
+        assert!(rescan);
+
+        let (events_tx, events) = mpsc::channel();
+        for i in 0..12_000 {
+            events_tx.send(created(i)).unwrap();
+        }
+        drop(events_tx);
+        let (tx, changes) = async_channel::unbounded();
+        debounce(events, tx);
+        let changes: Vec<_> = std::iter::from_fn(|| changes.try_recv().ok()).collect();
+        assert!(changes.contains(&FsChange::Rescan));
+        for change in &changes {
+            if let FsChange::Changed(paths) = change {
+                assert!(paths.len() <= MAX_BATCH, "a batch of {}", paths.len());
+            }
+        }
     }
 }
