@@ -2,30 +2,61 @@ use std::path::{Path, PathBuf};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, h_resizable, resizable_panel, v_flex, v_resizable};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use wai_agent::{AgentError, StopReason};
+use wai_agent::{AgentError, SessionStarted, SessionSummary, StopReason};
 use wai_settings::Settings;
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, ToggleTerminal};
-use crate::chat::ChatSession;
+use crate::chat::{ChatEvent, ChatSession};
+use crate::sidebar::canonical;
 
 const SIDEBAR_WIDTH: f32 = 260.;
 const TERMINAL_HEIGHT: f32 = 260.;
+pub const MAX_PANES: usize = 4;
 const START_HINT: &str = if cfg!(target_os = "macos") {
     "Start a session (⌘N)"
 } else {
     "Start a session (Ctrl+N)"
 };
 
+pub enum Pane {
+    /// The start hint, and why the last start failed, if it did.
+    Empty(Option<String>),
+    /// Reserved while `new_session` runs; `ticket` tells this request's placeholder apart.
+    Preparing {
+        agent: String,
+        ticket: u64,
+    },
+    Session(Entity<ChatSession>),
+}
+
+impl Pane {
+    pub fn session(&self) -> Option<&Entity<ChatSession>> {
+        match self {
+            Pane::Session(session) => Some(session),
+            _ => None,
+        }
+    }
+}
+
 /// The window's root view: sidebar | chat panes over the terminal panel.
 pub struct Workspace {
+    /// Canonical, so history cwds compare with it (R3).
     pub project: PathBuf,
     pub settings: Settings,
     pub registry: Entity<AgentRegistry>,
-    pub panes: Vec<Option<Entity<ChatSession>>>,
+    /// Every open session, shown in a pane or not, in the order they opened.
+    pub sessions: Vec<Entity<ChatSession>>,
+    pub panes: Vec<Pane>,
     pub focused_pane: usize,
     pub terminal_visible: bool,
+    /// The default agent's sessions, each with its cwd canonicalized for the project filter.
+    pub history: Vec<(PathBuf, SessionSummary)>,
+    pub all_projects: bool,
+    pub(crate) history_task: Option<Task<()>>,
+    next_ticket: u64,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -43,21 +74,31 @@ impl Workspace {
         window.focus(&focus, cx);
         window.set_window_title(&title(&project));
         Self {
-            project,
+            project: canonical(&project),
             settings,
             registry,
-            panes: vec![None],
+            sessions: Vec::new(),
+            panes: vec![Pane::Empty(None)],
             focused_pane: 0,
             terminal_visible: false,
+            history: Vec::new(),
+            all_projects: false,
+            history_task: None,
+            next_ticket: 0,
             focus,
             _subscriptions: vec![routing],
         }
     }
 
+    /// Starts the default agent, so the history fills in once it is ready.
+    pub fn start_agent(&mut self, cx: &mut Context<Self>) {
+        let agent = self.settings.default_agent.clone();
+        self.registry.update(cx, |r, cx| r.handle(&agent, cx));
+    }
+
     fn session(&self, agent: &str, id: &str, cx: &App) -> Option<Entity<ChatSession>> {
-        self.panes
+        self.sessions
             .iter()
-            .flatten()
             .find(|session| {
                 let session = session.read(cx);
                 session.agent == agent && session.id == id
@@ -104,22 +145,25 @@ impl Workspace {
                 if !matches!(reason, StopReason::Other(r) if r == "auth_required") {
                     self.registry.update(cx, |r, cx| r.mark_ready(agent, cx));
                 }
+                self.refresh_history(cx);
             }
             // R7: carries no session id; sessions ignore ids they do not hold.
             RegistryEvent::PermissionResolved(id) => {
-                for s in self.panes.iter().flatten() {
+                for s in &self.sessions {
                     s.update(cx, |s, cx| s.handle_permission_resolved(*id, cx));
                 }
             }
             RegistryEvent::StatusChanged(agent) => {
-                if let Some(AgentStatus::Failed(error)) =
-                    self.registry.read(cx).status(agent).cloned()
-                {
-                    for s in self.panes.iter().flatten() {
-                        if s.read(cx).agent == *agent {
-                            s.update(cx, |s, cx| s.handle_agent_exited(&error, cx));
+                match self.registry.read(cx).status(agent).cloned() {
+                    Some(AgentStatus::Failed(error)) => {
+                        for s in &self.sessions {
+                            if s.read(cx).agent == *agent {
+                                s.update(cx, |s, cx| s.handle_agent_exited(&error, cx));
+                            }
                         }
                     }
+                    Some(AgentStatus::Ready(_)) => self.refresh_history(cx),
+                    _ => {}
                 }
                 // Empty panes show the default agent's problem, if any.
                 cx.notify();
@@ -127,31 +171,143 @@ impl Workspace {
         }
     }
 
-    fn new_session(&mut self, _: &NewSession, window: &mut Window, cx: &mut Context<Self>) {
+    /// Joins the open list; the sidebar follows its status and title.
+    fn add_session(&mut self, session: Entity<ChatSession>, cx: &mut Context<Self>) {
+        cx.subscribe(&session, |_, _, _: &ChatEvent, cx| cx.notify())
+            .detach();
+        self.sessions.push(session);
+    }
+
+    /// Focuses pane `ix`: its prompt box, or the workspace when it has no session.
+    fn focus_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.focused_pane = ix;
+        match &self.panes[ix] {
+            Pane::Session(session) => session.update(cx, |s, cx| s.focus(window, cx)),
+            _ => window.focus(&self.focus, cx),
+        }
+        cx.notify();
+    }
+
+    /// Shows `session` in the focused pane, or with `side` in a new pane while there are fewer
+    /// than `MAX_PANES` (an empty focused pane is used instead). A session already in a pane is
+    /// focused there: one session is drawn once.
+    pub fn show(
+        &mut self,
+        session: Entity<ChatSession>,
+        side: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ix = match self
+            .panes
+            .iter()
+            .position(|p| p.session() == Some(&session))
+        {
+            Some(ix) => ix,
+            None => {
+                let empty = matches!(self.panes[self.focused_pane], Pane::Empty(_));
+                let ix = if side && !empty && self.panes.len() < MAX_PANES {
+                    self.panes.push(Pane::Empty(None));
+                    self.panes.len() - 1
+                } else {
+                    self.focused_pane
+                };
+                self.panes[ix] = Pane::Session(session);
+                ix
+            }
+        };
+        self.focus_pane(ix, window, cx);
+    }
+
+    /// Opens a history row: the open session with that id, else a new one that loads it.
+    pub fn resume(
+        &mut self,
+        summary: &SessionSummary,
+        side: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let agent = self.settings.default_agent.clone();
+        if let Some(session) = self.session(&agent, &summary.id, cx) {
+            return self.show(session, side, window, cx);
+        }
+        let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
+            return;
+        };
+        let started = SessionStarted {
+            id: summary.id.clone(),
+            modes: Vec::new(),
+            current_mode: None,
+        };
+        let (cwd, registry) = (summary.cwd.clone(), self.registry.downgrade());
+        let session = cx.new(|cx| {
+            let mut session = ChatSession::new(agent, started, cwd, handle, registry, window, cx);
+            session.model.title = summary.title.clone();
+            session
+        });
+        // Routed before it loads: the agent replays the conversation before it answers.
+        self.add_session(session.clone(), cx);
+        self.show(session.clone(), side, window, cx);
+        session.update(cx, |s, cx| s.load(window, cx));
+    }
+
+    /// Starts a session in the focused pane, which shows `Preparing <agent>…` until the agent
+    /// answers. A second ⌘N on that pane waits for the first.
+    pub(crate) fn new_session(
+        &mut self,
+        _: &NewSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ix = self.focused_pane;
+        if matches!(self.panes[ix], Pane::Preparing { .. }) {
+            return;
+        }
         let agent = self.settings.default_agent.clone();
         let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
-            return eprintln!("wai: no agent named {agent} in the settings");
+            self.panes[ix] = Pane::Empty(Some(format!("No agent named {agent} in the settings.")));
+            return cx.notify();
         };
-        let (cwd, pane) = (self.project.clone(), self.focused_pane);
+        let ticket = self.next_ticket;
+        self.next_ticket += 1;
+        self.panes[ix] = Pane::Preparing {
+            agent: agent.clone(),
+            ticket,
+        };
+        cx.notify();
+        let cwd = self.project.clone();
         let registry = self.registry.downgrade();
         cx.spawn_in(window, async move |this, cx| {
             let started = handle.new_session(cwd.clone()).await;
-            this.update_in(cx, |this, window, cx| match started {
-                Ok(started) => {
-                    // A session that starts proves the agent works (signed in again, say).
-                    this.registry.update(cx, |r, cx| r.mark_ready(&agent, cx));
-                    let session = cx.new(|cx| {
-                        ChatSession::new(agent, started, cwd, handle, registry, window, cx)
-                    });
-                    let pane = pane.min(this.panes.len() - 1);
-                    this.panes[pane] = Some(session);
-                    cx.notify();
+            this.update_in(cx, |this, window, cx| {
+                // Closed or replaced meanwhile, the placeholder is gone: the session still opens.
+                let pane = this
+                    .panes
+                    .iter()
+                    .position(|p| matches!(p, Pane::Preparing { ticket: t, .. } if *t == ticket));
+                let shown = match started {
+                    Ok(started) => {
+                        // A session that starts proves the agent works (signed in again, say).
+                        this.registry.update(cx, |r, cx| r.mark_ready(&agent, cx));
+                        let session = cx.new(|cx| {
+                            ChatSession::new(agent, started, cwd, handle, registry, window, cx)
+                        });
+                        this.add_session(session.clone(), cx);
+                        this.refresh_history(cx);
+                        Pane::Session(session)
+                    }
+                    // The empty pane shows the sign-in message.
+                    Err(AgentError::AuthRequired) => {
+                        this.registry
+                            .update(cx, |r, cx| r.set_status(&agent, AgentStatus::SignedOut, cx));
+                        Pane::Empty(None)
+                    }
+                    Err(e) => Pane::Empty(Some(format!("Could not start a {agent} session: {e}"))),
+                };
+                if let Some(ix) = pane {
+                    this.panes[ix] = shown;
                 }
-                Err(AgentError::AuthRequired) => this
-                    .registry
-                    .update(cx, |r, cx| r.set_status(&agent, AgentStatus::SignedOut, cx)),
-                // ponytail: stderr only until Task 1.7's "Preparing…" placeholder can show it.
-                Err(e) => eprintln!("wai: could not start a {agent} session: {e}"),
+                cx.notify();
             })
             .ok();
         })
@@ -163,13 +319,29 @@ impl Workspace {
         cx.notify();
     }
 
-    fn close_session(&mut self, _: &CloseSession, _: &mut Window, cx: &mut Context<Self>) {
-        self.panes[self.focused_pane] = None;
-        cx.notify();
+    /// Drops the focused pane's session from the panes and the open list (the agent keeps it in
+    /// its history). With more than one pane, the pane goes too.
+    fn close_session(&mut self, _: &CloseSession, window: &mut Window, cx: &mut Context<Self>) {
+        let ix = self.focused_pane;
+        if let Pane::Session(session) = &self.panes[ix] {
+            session.read(cx).stop();
+            self.sessions.retain(|s| s != session);
+        }
+        if self.panes.len() > 1 {
+            self.panes.remove(ix);
+        } else {
+            self.panes[ix] = Pane::Empty(None);
+        }
+        self.focus_pane(ix.min(self.panes.len() - 1), window, cx);
     }
 
-    fn focus_next_pane(&mut self, _: &FocusNextPane, _: &mut Window, cx: &mut Context<Self>) {
-        self.focused_pane = (self.focused_pane + 1) % self.panes.len();
+    fn focus_next_pane(&mut self, _: &FocusNextPane, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_pane((self.focused_pane + 1) % self.panes.len(), window, cx);
+    }
+
+    pub fn set_project(&mut self, project: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        window.set_window_title(&title(&project));
+        self.project = canonical(&project);
         cx.notify();
     }
 
@@ -187,12 +359,8 @@ impl Workspace {
             let Some(project) = paths.pop() else {
                 return;
             };
-            this.update_in(cx, |this, window, cx| {
-                window.set_window_title(&title(&project));
-                this.project = project;
-                cx.notify();
-            })
-            .ok();
+            this.update_in(cx, |this, window, cx| this.set_project(project, window, cx))
+                .ok();
         })
         .detach();
     }
@@ -209,9 +377,14 @@ impl Workspace {
         }
     }
 
-    fn empty_pane(&self, ix: usize, cx: &Context<Self>) -> impl IntoElement {
+    fn empty_pane(
+        &self,
+        ix: usize,
+        error: Option<&String>,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
-        let problem = self.agent_problem(cx);
+        let problem = error.cloned().or_else(|| self.agent_problem(cx));
         v_flex()
             .size_full()
             .items_center()
@@ -231,7 +404,7 @@ impl Workspace {
     }
 }
 
-fn folder_name(project: &Path) -> String {
+pub(crate) fn folder_name(project: &Path) -> String {
     project
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -244,32 +417,43 @@ fn title(project: &Path) -> String {
 
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let sidebar = self.render_sidebar(cx);
         let theme = cx.theme();
+        let split = self.panes.len() > 1;
         let panes = self.panes.iter().enumerate().map(|(ix, pane)| {
-            resizable_panel().child(match pane {
-                Some(session) => session.clone().into_any_element(),
-                None => self.empty_pane(ix, cx).into_any_element(),
-            })
-        });
-        // ponytail: sidebar and terminal are placeholders until Tasks 1.7 and 1.8.
-        let sidebar = v_flex()
-            .debug_selector(|| "sidebar".into())
-            .size_full()
-            .p_3()
-            .gap_2()
-            .bg(theme.sidebar)
-            .text_color(theme.sidebar_foreground)
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(folder_name(&self.project)),
+            let focused = split && ix == self.focused_pane;
+            resizable_panel().child(
+                v_flex()
+                    .size_full()
+                    .when(split, |el| {
+                        el.border_t_2().border_color(if focused {
+                            theme.blue
+                        } else {
+                            transparent_black()
+                        })
+                    })
+                    // Clicking into a pane focuses it, whatever the click lands on.
+                    .capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                        if this.focused_pane != ix {
+                            this.focused_pane = ix;
+                            cx.notify();
+                        }
+                    }))
+                    .child(match pane {
+                        Pane::Session(session) => session.clone().into_any_element(),
+                        Pane::Preparing { agent, .. } => v_flex()
+                            .size_full()
+                            .items_center()
+                            .justify_center()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("Preparing {agent}…"))
+                            .into_any_element(),
+                        Pane::Empty(error) => {
+                            self.empty_pane(ix, error.as_ref(), cx).into_any_element()
+                        }
+                    }),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child("Sessions"),
-            );
+        });
         let terminal = div()
             .debug_selector(|| "terminal".into())
             .size_full()
@@ -299,9 +483,10 @@ impl Render for Workspace {
                     .child(
                         resizable_panel().child(
                             v_resizable("center")
-                                .child(
-                                    resizable_panel().child(h_resizable("panes").children(panes)),
-                                )
+                                .child(resizable_panel().child(
+                                    // Keyed by count: each split starts with equal widths.
+                                    h_resizable(("panes", self.panes.len())).children(panes),
+                                ))
                                 .child(
                                     resizable_panel()
                                         .size(px(TERMINAL_HEIGHT))
@@ -320,11 +505,12 @@ pub(crate) mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
+    use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
-    use wai_agent::PromptBlock;
+    use wai_agent::{PromptBlock, SessionSummary};
     use wai_settings::{AgentConfig, Settings};
 
-    use super::Workspace;
+    use super::{Pane, Workspace};
     use crate::agents::AgentStatus;
     use crate::app;
 
@@ -371,12 +557,104 @@ pub(crate) mod tests {
         }
     }
 
+    /// The fake agent with `n` history sessions, all in the test project (the temp dir).
+    pub(crate) fn history_settings(n: usize) -> Settings {
+        let cwd = std::env::temp_dir();
+        fake_settings(&format!(
+            "--sessions {n} --sessions-cwd '{}'",
+            cwd.display()
+        ))
+    }
+
+    fn history_rows(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> usize {
+        workspace.read_with(cx, |w, _| w.history_rows().len())
+    }
+
+    /// Starts the agent and waits for its `n` history rows; returns them.
+    pub(crate) fn load_history(
+        workspace: &Entity<Workspace>,
+        n: usize,
+        cx: &mut VisualTestContext,
+    ) -> Vec<SessionSummary> {
+        workspace.update(cx, |w, cx| w.start_agent(cx));
+        wait_until(cx, "the history", |cx| history_rows(workspace, cx) == n);
+        workspace.read_with(cx, |w, _| w.history_rows().into_iter().cloned().collect())
+    }
+
+    #[gpui_kit::test]
+    fn new_session_appears_in_open_list(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+
+        cx.simulate_keystrokes("secondary-n");
+        workspace.read_with(cx, |w, _| {
+            assert!(
+                matches!(&w.panes[0], Pane::Preparing { agent, .. } if agent == "fake"),
+                "the pane is reserved while the agent prepares the session"
+            )
+        });
+        // Ignored: the pane is already waiting for a session.
+        cx.simulate_keystrokes("secondary-n");
+
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
+        });
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.sessions.len(), 1);
+            assert_eq!(w.panes[0].session(), w.sessions.first());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn history_filters_by_project(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(25));
+
+        // The project is the sessions' folder.
+        load_history(&workspace, 25, cx);
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.set_project("/nonexistent".into(), window, cx))
+        });
+        assert_eq!(history_rows(&workspace, cx), 0);
+
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.click("all-projects", cx);
+        });
+        assert_eq!(history_rows(&workspace, cx), 25);
+    }
+
+    #[gpui_kit::test]
+    fn open_to_side_caps_at_four_panes(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(5));
+        let rows = load_history(&workspace, 5, cx);
+
+        let mut panes = Vec::new();
+        for row in &rows {
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(row, true, window, cx)));
+            panes.push(workspace.read_with(cx, |w, _| w.panes.len()));
+        }
+
+        // The empty pane takes the first; at four, the focused pane takes the fifth.
+        assert_eq!(panes, [1, 2, 3, 4, 4]);
+        assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 5);
+
+        let focused = workspace.read_with(cx, |w, _| w.focused_pane);
+        cx.simulate_keystrokes("secondary-alt-right");
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w.focused_pane),
+            (focused + 1) % 4
+        );
+    }
+
     #[gpui_kit::test]
     fn opens_with_one_empty_pane(cx: &mut TestAppContext) {
         let (workspace, cx) = open(cx, Settings::default());
         workspace.read_with(cx, |w, _| {
             assert_eq!(w.panes.len(), 1);
-            assert!(w.panes[0].is_none());
+            assert!(matches!(w.panes[0], Pane::Empty(None)));
         });
     }
 
@@ -430,10 +708,11 @@ pub(crate) mod tests {
 
         cx.simulate_keystrokes("secondary-n");
         wait_until(cx, "a session", |cx| {
-            workspace.read_with(cx, |w, _| w.panes[0].is_some())
+            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
         });
-        let session =
-            workspace.read_with(cx, |w, cx| w.panes[0].as_ref().unwrap().read(cx).id.clone());
+        let session = workspace.read_with(cx, |w, cx| {
+            w.panes[0].session().unwrap().read(cx).id.clone()
+        });
         let handle = registry.update(cx, |r, cx| r.handle("fake", cx)).unwrap();
         handle.prompt(session, vec![PromptBlock::Text("hi".into())]);
         wait_until(cx, "SignedOut", |cx| {

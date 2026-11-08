@@ -81,19 +81,20 @@ pub fn run(project: PathBuf, settings: Settings) {
             ))),
             ..Default::default()
         };
-        let _opened = gpui_kit::open_window(options, cx, |window, cx| {
+        let opened = gpui_kit::open_window(options, cx, |window, cx| {
             cx.new(|cx| Workspace::new(project, settings, window, cx))
         })
         .expect("open window");
+        opened.1.update(cx, |w, cx| w.start_agent(cx));
         cx.activate(true);
 
         #[cfg(feature = "demo")]
         if let Ok(prompt) = std::env::var("WAI_SHOT_PROMPT") {
-            send_prompt(_opened.clone(), prompt, cx);
+            send_prompt(opened.clone(), prompt, cx);
         }
         #[cfg(feature = "screenshot")]
         if let Ok(path) = std::env::var("WAI_SHOT") {
-            screenshot(_opened, path, cx);
+            screenshot(opened, path, cx);
         }
     });
 }
@@ -114,7 +115,7 @@ fn send_prompt(
             })
             .ok();
         // ponytail: a script-only wait; the product never polls.
-        while workspace.read_with(cx, |w, _| w.panes[0].is_none()) {
+        while workspace.read_with(cx, |w, _| w.panes[0].session().is_none()) {
             executor.timer(Duration::from_millis(50)).await;
         }
         window
@@ -145,6 +146,8 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 /// Saves the window to `path` and quits, offscreen so it also works with the screen locked.
 /// With `WAI_SHOT_PROMPT`, once that turn shows its permission card; otherwise after 2 s,
 /// with the terminal panel shown.
+/// `WAI_SHOT=docs/screens/fase-1-sidebar.png WAI_SHOT_PROMPT=… WAI_SHOT_SIDE=1` with a fake
+/// agent run with `--sessions 8 --ask-permission --reply-file …`.
 #[cfg(feature = "screenshot")]
 fn screenshot(
     (window, workspace): (AnyWindowHandle, Entity<Workspace>),
@@ -159,11 +162,24 @@ fn screenshot(
             // The prompt, the reply, the tool call and its permission card.
             let rows = |w: &Workspace, cx: &App| {
                 w.panes[0]
-                    .as_ref()
+                    .session()
                     .map_or(0, |s| s.read(cx).model.items.len())
             };
             while workspace.read_with(cx, rows) < 4 {
                 executor.timer(Duration::from_millis(50)).await;
+            }
+            // `WAI_SHOT_SIDE`: the first history row opens to the side (fase-1-sidebar.png).
+            if std::env::var("WAI_SHOT_SIDE").is_ok() {
+                window
+                    .update(cx, |_, window, cx| {
+                        workspace.update(cx, |w, cx| {
+                            if let Some(row) = w.history_rows().first().map(|&row| row.clone()) {
+                                w.resume(&row, true, window, cx);
+                            }
+                        })
+                    })
+                    .ok();
+                executor.timer(Duration::from_millis(500)).await;
             }
         } else {
             workspace.update(cx, |w, cx| {

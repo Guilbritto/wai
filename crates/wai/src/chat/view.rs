@@ -91,7 +91,7 @@ impl ChatSession {
             input
         });
         input.update(cx, |input, cx| input.focus(window, cx));
-        let mut subscriptions =
+        let subscriptions =
             vec![
                 cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
                     // Shift+Enter inserted a newline already.
@@ -100,30 +100,8 @@ impl ChatSession {
                     }
                 }),
             ];
-        let modes = (!started.modes.is_empty()).then(|| {
-            let items: Vec<Mode> = started.modes.iter().cloned().map(Mode).collect();
-            let selected = items
-                .iter()
-                .position(|m| Some(&m.0.id) == started.current_mode.as_ref())
-                .map(IndexPath::new);
-            let select = cx.new(|cx| SelectState::new(items, selected, window, cx));
-            subscriptions.push(cx.subscribe(
-                &select,
-                |this, _, event: &SelectEvent<Vec<Mode>>, cx| {
-                    let SelectEvent::Confirm(Some(mode)) = event else {
-                        return;
-                    };
-                    this.set_mode(mode.clone(), cx);
-                },
-            ));
-            select
-        });
-        Self {
-            model: ChatModel {
-                modes: started.modes,
-                current_mode: started.current_mode,
-                ..ChatModel::default()
-            },
+        let mut this = Self {
+            model: ChatModel::default(),
             agent,
             id: started.id,
             cwd,
@@ -135,15 +113,58 @@ impl ChatSession {
             diffs: HashMap::new(),
             open_thoughts: HashSet::new(),
             scroller: cx.new(|cx| MessageScrollerState::new(0, cx)),
-            modes,
+            modes: None,
             flush: None,
             _subscriptions: subscriptions,
-        }
+        };
+        this.set_modes(started.modes, started.current_mode, window, cx);
+        this
     }
 
-    #[expect(dead_code, reason = "the sidebar reads it from Task 1.7 on")]
+    /// The agent's modes and the header's mode picker, when it has modes.
+    fn set_modes(
+        &mut self,
+        modes: Vec<ModeInfo>,
+        current: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !modes.is_empty() {
+            let items: Vec<Mode> = modes.iter().cloned().map(Mode).collect();
+            let selected = items
+                .iter()
+                .position(|m| Some(&m.0.id) == current.as_ref())
+                .map(IndexPath::new);
+            let select = cx.new(|cx| SelectState::new(items, selected, window, cx));
+            self._subscriptions.push(cx.subscribe(
+                &select,
+                |this, _, event: &SelectEvent<Vec<Mode>>, cx| {
+                    let SelectEvent::Confirm(Some(mode)) = event else {
+                        return;
+                    };
+                    this.set_mode(mode.clone(), cx);
+                },
+            ));
+            self.modes = Some(select);
+        }
+        self.model.modes = modes;
+        self.model.current_mode = current;
+    }
+
     pub fn status(&self) -> &TurnState {
         &self.model.state
+    }
+
+    /// Puts the caret in the prompt box.
+    pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// Cancels a running turn: a closed session must not keep working out of sight.
+    pub fn stop(&self) {
+        if matches!(self.model.state, TurnState::Working | TurnState::NeedsYou) {
+            self.handle.cancel(self.id.clone());
+        }
     }
 
     pub fn handle_event(&mut self, ev: &SessionEvent, cx: &mut Context<Self>) {
@@ -326,9 +347,10 @@ impl ChatSession {
         cx.notify();
     }
 
-    /// Respawns the agent through the registry if it died, then reloads this session into an
-    /// empty list. The replay arrives as events while `load_session` is pending.
-    pub(super) fn restart(&mut self, cx: &mut Context<Self>) {
+    /// Respawns the agent through the registry if it died, then loads this session into an
+    /// empty list: Restart after a crash, and a history row. The replay arrives as events while
+    /// `load_session` is pending, so the session must already be routed.
+    pub fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let agent = self.agent.clone();
         let Ok(Some(handle)) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
             return;
@@ -341,21 +363,29 @@ impl ChatSession {
         self.scroller.update(cx, |list, cx| list.reset(0, cx));
         self.update_model(cx, |m| m.state = TurnState::Working);
         let (id, cwd, registry) = (self.id.clone(), self.cwd.clone(), self.registry.clone());
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let loaded = handle.load_session(id, cwd).await;
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 let agent = this.agent.clone();
                 match loaded {
-                    Ok(_) => {
+                    Ok(started) => {
                         registry.update(cx, |r, cx| r.mark_ready(&agent, cx)).ok();
+                        // A history row learns its modes here.
+                        if this.modes.is_none() {
+                            this.set_modes(started.modes, started.current_mode, window, cx);
+                        }
                         this.update_model(cx, |m| m.state = TurnState::Idle);
                     }
                     Err(AgentError::AuthRequired) => {
                         this.update_model(cx, |m| m.on_auth_required(&agent));
                     }
-                    // A second death was already reported by the registry.
+                    // A death was already reported by the registry.
                     Err(_) if matches!(this.model.state, TurnState::Error(_)) => {}
-                    Err(e) => this.update_model(cx, |m| m.on_exited(Some(&e.to_string()))),
+                    Err(e) => this.update_model(cx, |m| {
+                        let error = format!("Could not load the session: {e}");
+                        m.state = TurnState::Error(error.clone());
+                        m.notice(error, NoticeKind::Error);
+                    }),
                 }
                 this.sync_rows(None, cx);
                 cx.notify();
@@ -375,7 +405,9 @@ mod tests {
     use super::ChatSession;
     use crate::chat::model::{ChatItem, NoticeKind, TurnState};
     use crate::workspace::Workspace;
-    use crate::workspace::tests::{fake_settings, open, wait_until};
+    use crate::workspace::tests::{
+        fake_settings, history_settings, load_history, open, wait_until,
+    };
 
     /// ⌘N, then the session that lands in pane 0.
     fn start_session(
@@ -384,9 +416,9 @@ mod tests {
     ) -> Entity<ChatSession> {
         cx.simulate_keystrokes("secondary-n");
         wait_until(cx, "a session", |cx| {
-            workspace.read_with(cx, |w, _| w.panes[0].is_some())
+            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
         });
-        workspace.read_with(cx, |w, _| w.panes[0].clone().unwrap())
+        workspace.read_with(cx, |w, _| w.panes[0].session().cloned().unwrap())
     }
 
     fn send(prompt: &str, cx: &mut VisualTestContext) {
@@ -493,6 +525,45 @@ mod tests {
         });
         assert_eq!(state(&session, cx), TurnState::Idle);
         assert!(last_agent_text(&session, cx).unwrap().len() < reply.len());
+    }
+
+    /// The agent replays a loaded session before `load_session` returns, so the session must
+    /// be routed by then.
+    #[gpui_kit::test]
+    fn history_row_resumes_with_replay(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(3));
+        let rows = load_history(&workspace, 3, cx);
+
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
+        let session = workspace
+            .read_with(cx, |w, _| w.panes[0].session().cloned())
+            .expect("the focused pane shows it");
+
+        wait_until(cx, "the replay", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.state == TurnState::Idle && s.model.items.len() == 2
+            })
+        });
+        session.read_with(cx, |s, _| {
+            assert_eq!(s.id, "session-0");
+            assert_eq!(s.model.title.as_deref(), Some("Session 0"));
+            assert_eq!(
+                s.model.items,
+                [
+                    ChatItem::User {
+                        text: "previous prompt".into()
+                    },
+                    ChatItem::Agent {
+                        text: "previous answer".into()
+                    },
+                ]
+            );
+        });
+
+        // Clicked again, it shows the open session instead of loading a second copy.
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
+        assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 1);
     }
 
     #[gpui_kit::test]

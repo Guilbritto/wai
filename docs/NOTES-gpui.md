@@ -222,6 +222,10 @@ v_resizable("main")
 - [U] `.size_range(a..b)`, `.fixed()` (keeps its size when the window resizes), `.visible(bool)`; owned group
   state with `.with_state(&Entity<ResizableState>)`, read back with `ResizableState::sizes()` for persistence.
 - Do not call `.flex_basis`, `.absolute` or `.overflow_hidden` on a `resizable_panel()`: they break the group. [D]
+- [U] (read in `ResizableState::sync_panels_count`) A group whose panel count changes keeps the old sizes and
+  adds new panels at the minimum size before refitting. [V] wai keys its pane group by count,
+  `h_resizable(("panes", n))`, so each split starts with equal widths (`docs/screens/fase-1-sidebar.png`);
+  manual resizes reset when a pane is added or removed.
 
 ## 10. Dock (tabs, drag-to-split, persisted layout)
 
@@ -310,6 +314,9 @@ Three options, read in source:
   what `TextView` and `MessageScroller` are built on.
 - `v_virtual_list(view, id, Rc<Vec<Size<Pixels>>>, |view, range, window, cx| -> Vec<_>)`: needs every item's size up
   front; good for uniform rows (file tree, tables).
+- [V] (wai sidebar history) GPUI `uniform_list(id, count, cx.processor(|this, range, window, cx| rows))` renders
+  only the visible rows. Its rows are not stretched: give each row `.w_full()`, or `flex_1` children stay
+  content-sized.
 
 ## 14. Theme, fonts and icons
 

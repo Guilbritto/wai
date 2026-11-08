@@ -135,7 +135,7 @@ impl ChatSession {
                             Button::new("restart")
                                 .small()
                                 .label("Restart")
-                                .on_click(cx.listener(|this, _, _, cx| this.restart(cx))),
+                                .on_click(cx.listener(|this, _, window, cx| this.load(window, cx))),
                         )
                     })
                     .into_any_element()
