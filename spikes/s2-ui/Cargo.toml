@@ -7,3 +7,12 @@ publish.workspace = true
 [dependencies]
 gpui-kit.workspace = true
 anyhow.workspace = true
+alacritty_terminal.workspace = true
+portable-pty.workspace = true
+smol = "2"
+# Only to switch on GPUI's test-support (Window::render_to_image, TestAppContext).
+# `gpui-kit/test-support` does not resolve in this workspace, see NOTES-gpui.md.
+gpui-pre-platform = { version = "=0.3.11", optional = true, features = ["test-support"] }
+
+[features]
+test-support = ["dep:gpui-pre-platform"]
