@@ -17,7 +17,7 @@ use crate::app::NewSession;
 use crate::chat::{ChatSession, TurnState};
 use crate::workspace::{MAX_PANES, Workspace, folder_name};
 
-const ROW_HEIGHT: f32 = 28.;
+pub(crate) const ROW_HEIGHT: f32 = 28.;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SidebarTab {
@@ -103,7 +103,7 @@ impl Workspace {
         let content = match self.sidebar_tab {
             SidebarTab::Sessions => self.render_sessions(cx).into_any_element(),
             SidebarTab::Files => self.files.clone().into_any_element(),
-            SidebarTab::Search => coming_soon("Search — coming soon", cx).into_any_element(),
+            SidebarTab::Search => self.search.clone().into_any_element(),
             SidebarTab::Agents => coming_soon("Agents — coming soon", cx).into_any_element(),
         };
         let tabs = TABS.map(|(tab, id, label)| {
@@ -112,8 +112,12 @@ impl Workspace {
                 .xsmall()
                 .label(label)
                 .selected(self.sidebar_tab == tab)
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     this.sidebar_tab = tab;
+                    if tab == SidebarTab::Search {
+                        let focus = this.search.read(cx).query_focus(cx);
+                        window.focus(&focus, cx);
+                    }
                     cx.notify();
                 }))
         });

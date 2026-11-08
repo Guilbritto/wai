@@ -20,6 +20,7 @@ use crate::chat::{ChatEvent, ChatSession, signed_out};
 use crate::editor::{self, EditorPane, Emptied, FileEditor};
 use crate::files::{FileTree, OpenFile};
 use crate::notify::{self, should_notify};
+use crate::search_view::{OpenMatch, SearchView};
 use crate::sidebar::{SidebarTab, canonical};
 use crate::terminal_view::TerminalView;
 
@@ -81,6 +82,7 @@ pub struct Workspace {
     pub(crate) history_task: Option<Task<()>>,
     pub sidebar_tab: SidebarTab,
     pub files: Entity<FileTree>,
+    pub search: Entity<SearchView>,
     /// The project's one watcher and the task that hands its changes out; `None` when the
     /// project cannot be watched.
     watch: Option<(ProjectWatcher, Task<()>)>,
@@ -144,6 +146,14 @@ impl Workspace {
         let open_file = cx.subscribe_in(&files, window, |this, _, OpenFile(path), window, cx| {
             this.open_file(path.clone(), None, window, cx)
         });
+        let search = cx.new(|cx| SearchView::new(project.clone(), global_ignores, window, cx));
+        let open_match = cx.subscribe_in(
+            &search,
+            window,
+            |this, _, OpenMatch { path, line }, window, cx| {
+                this.open_file(path.clone(), Some(*line), window, cx)
+            },
+        );
         Self {
             project,
             settings,
@@ -158,11 +168,12 @@ impl Workspace {
             history_task: None,
             sidebar_tab: SidebarTab::default(),
             files,
+            search,
             watch: None,
             next_ticket: 0,
             state_path,
             focus,
-            _subscriptions: vec![routing, quit, open_file],
+            _subscriptions: vec![routing, quit, open_file, open_match],
         }
     }
 
@@ -890,6 +901,8 @@ impl Workspace {
             terminal.update(cx, |t, _| t.cwd = self.project.clone());
         }
         let root = self.project.clone();
+        self.search
+            .update(cx, |search, cx| search.set_root(root.clone(), cx));
         self.files.update(cx, |files, cx| files.set_root(root, cx));
         self.watch_project(window, cx);
         self.save_state(cx);

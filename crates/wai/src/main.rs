@@ -4,6 +4,7 @@ mod chat;
 mod editor;
 mod files;
 mod notify;
+mod search_view;
 mod sidebar;
 mod terminal_view;
 mod workspace;
