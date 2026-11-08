@@ -79,7 +79,7 @@ pub fn run(project: PathBuf, settings: Settings, notices: Vec<String>, state_pat
     let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
     app.run(move |cx| {
         init(&settings, cx);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        // Quit is the workspace's: it asks about unsaved edits first.
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();

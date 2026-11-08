@@ -33,12 +33,7 @@ pub struct FileEditor {
 impl FileEditor {
     pub fn new(path: PathBuf, loaded: Loaded, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let read_only = loaded.mode == OpenMode::ReadOnlyLarge;
-        // The extension names the grammar ("rs", "ts", "py"…); a large file shows plain, since
-        // its parse would hold a tree as big as the file.
-        let language = match path.extension() {
-            Some(ext) if !read_only => ext.to_string_lossy().into_owned(),
-            _ => "text".into(),
-        };
+        let language = language(&path, read_only);
         let editor = cx.new(|cx| {
             let mut state = EditorState::new(window, cx)
                 .soft_wrap(false)
@@ -109,9 +104,10 @@ impl FileEditor {
             return;
         }
         self.stamp = now;
-        // A read-only file is large: reloading it on each change (a growing log) would block
-        // the main thread each time.
-        if self.dirty || self.read_only || now.is_none() {
+        // R30: a large file, read-only already or grown past 20 MB now, is not reloaded on each
+        // change (a growing log would block the main thread each time).
+        let large = |(_, len): Stamp| len > file::READ_ONLY_ABOVE;
+        if self.dirty || self.read_only || now.is_none_or(large) {
             self.disk_changed = true;
             cx.notify();
         } else {
@@ -143,23 +139,39 @@ impl FileEditor {
         match loaded {
             Ok(_) if self.dirty && !force => self.disk_changed = true,
             Ok(loaded) => {
-                self.read_only = loaded.mode == OpenMode::ReadOnlyLarge;
+                let read_only = loaded.mode == OpenMode::ReadOnlyLarge;
                 self.stamp = loaded.stamp;
                 (self.dirty, self.disk_changed) = (false, false);
                 self.editor.update(cx, |s, cx| {
+                    // Crossing 20 MB either way switches the grammar too (before the text).
+                    if read_only != self.read_only {
+                        s.set_highlighter(language(&self.path, read_only), cx);
+                    }
                     // The caret and the scroll stay where they were, as far as the text allows.
                     let (selection, scroll) = (s.selected_range(), s.scroll_offset());
                     s.set_value(loaded.text, window, cx);
                     s.set_selected_range(selection, cx);
                     s.set_scroll_offset(scroll, cx);
                 });
+                self.read_only = read_only;
             }
             Err(e) => {
+                // R31: the buffer no longer shows the file; a Save must not pass for one.
+                self.disk_changed = true;
                 let notice = format!("Could not reload {}: {e}", self.name());
                 window.push_notification(Notification::error(notice), cx);
             }
         }
         cx.notify();
+    }
+}
+
+/// The grammar the extension names ("rs", "ts", "py"…). A large file shows plain: its parse
+/// would hold a tree as big as the file.
+fn language(path: &Path, read_only: bool) -> String {
+    match path.extension() {
+        Some(ext) if !read_only => ext.to_string_lossy().into_owned(),
+        _ => "text".into(),
     }
 }
 

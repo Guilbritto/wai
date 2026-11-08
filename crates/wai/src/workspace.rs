@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, h_resizable, resizable_panel, v_flex, v_resizable};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -14,7 +15,7 @@ use wai_project::{FsChange, ProjectWatcher};
 use wai_settings::{AppState, OpenSession, Settings};
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
-use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, Save, ToggleTerminal};
+use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, Quit, Save, ToggleTerminal};
 use crate::chat::{ChatEvent, ChatSession, signed_out};
 use crate::editor::{self, EditorPane, Emptied, FileEditor};
 use crate::files::{FileTree, OpenFile};
@@ -51,6 +52,14 @@ impl Pane {
             _ => None,
         }
     }
+}
+
+/// What waits on the question about unsaved edits.
+#[derive(Clone)]
+pub(crate) enum Leave {
+    Quit,
+    Close,
+    Open(PathBuf),
 }
 
 /// The window's root view: sidebar | chat panes over the terminal panel.
@@ -101,6 +110,31 @@ impl Workspace {
                 terminal.update(cx, |t, _| t.stop());
             }
             this.registry.read(cx).shutdown_all()
+        });
+        // R28: quitting or closing the window asks about unsaved edits first. Deferred: a key
+        // dispatch holds the window until it ends.
+        let (this, handle) = (cx.weak_entity(), window.window_handle());
+        App::on_action(cx, move |_: &Quit, cx| {
+            let this = this.clone();
+            cx.defer(move |cx| {
+                let leave = |_: AnyView, window: &mut Window, cx: &mut App| {
+                    this.update(cx, |this, cx| this.leave(Leave::Quit, window, cx))
+                };
+                if !matches!(handle.update(cx, leave), Ok(Ok(()))) {
+                    cx.quit();
+                }
+            });
+        });
+        let this = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            let ask = |this: &mut Self, cx: &mut Context<Self>| {
+                let clean = this.dirty_tabs(cx).is_empty();
+                if !clean {
+                    this.leave(Leave::Close, window, cx);
+                }
+                clean
+            };
+            this.update(cx, ask).unwrap_or(true)
         });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -642,6 +676,74 @@ impl Workspace {
         self.save_state(cx);
     }
 
+    fn dirty_tabs(&self, cx: &App) -> Vec<Entity<FileEditor>> {
+        let tabs = self.panes.iter().flat_map(|pane| match pane {
+            Pane::Editor(pane) => pane.read(cx).tabs.clone(),
+            _ => Vec::new(),
+        });
+        tabs.filter(|tab| tab.read(cx).dirty).collect()
+    }
+
+    /// Quits, closes the window or opens another project (R28, R29): at once when no tab holds
+    /// unsaved edits, else after asking "Save all / Discard / Cancel". Save all stops, and
+    /// everything stays, at the first save that fails.
+    pub(crate) fn leave(&mut self, then: Leave, window: &mut Window, cx: &mut Context<Self>) {
+        let dirty = self.dirty_tabs(cx);
+        if dirty.is_empty() {
+            return self.proceed(then, window, cx);
+        }
+        let title = match dirty.len() {
+            1 => format!("Save changes to {}?", dirty[0].read(cx).name()),
+            n => format!("Save changes to {n} files?"),
+        };
+        let this = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let answer = |save: bool| {
+                let (this, then, dirty) = (this.clone(), then.clone(), dirty.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    window.close_dialog(cx);
+                    let saved =
+                        |tab: &Entity<FileEditor>| tab.update(cx, |t, cx| t.save(window, cx));
+                    if save && !dirty.iter().all(saved) {
+                        return;
+                    }
+                    this.update(cx, |this, cx| this.proceed(then.clone(), window, cx))
+                        .ok();
+                }
+            };
+            dialog
+                .title(title.clone())
+                .child("Your changes are lost if you don't save them.")
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("discard")
+                                .label("Discard")
+                                .on_click(answer(false)),
+                        )
+                        .child(
+                            Button::new("save-all")
+                                .primary()
+                                .label("Save all")
+                                .on_click(answer(true)),
+                        ),
+                )
+        });
+    }
+
+    fn proceed(&mut self, then: Leave, window: &mut Window, cx: &mut Context<Self>) {
+        match then {
+            Leave::Quit => cx.quit(),
+            Leave::Close => window.remove_window(),
+            Leave::Open(project) => self.set_project(project, window, cx),
+        }
+    }
+
     /// ⌘S: saves the focused editor pane's active tab.
     fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
         if let Pane::Editor(pane) = &self.panes[self.focused_pane] {
@@ -660,6 +762,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // One tab per file, named as the watcher reports it (`/private/var`, not `/var`).
+        let path = canonical(&path);
         if self.reveal(&path, line, window, cx) {
             return;
         }
@@ -761,7 +865,12 @@ impl Workspace {
         self.focus_pane((self.focused_pane + 1) % self.panes.len(), window, cx);
     }
 
+    /// Shows `project`, closing the old project's files: callers ask about unsaved edits first
+    /// (`leave`).
     pub fn set_project(&mut self, project: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.panes.iter().position(|p| matches!(p, Pane::Editor(_))) {
+            self.drop_pane(ix, window, cx);
+        }
         window.set_window_title(&title(&project));
         self.project = canonical(&project);
         // The next shell starts there; a running one stays where it is.
@@ -789,8 +898,10 @@ impl Workspace {
             let Some(project) = paths.pop() else {
                 return;
             };
-            this.update_in(cx, |this, window, cx| this.set_project(project, window, cx))
-                .ok();
+            this.update_in(cx, |this, window, cx| {
+                this.leave(Leave::Open(project), window, cx)
+            })
+            .ok();
         })
         .detach();
     }

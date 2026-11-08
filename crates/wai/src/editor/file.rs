@@ -94,11 +94,21 @@ pub fn save(path: &Path, text: &str) -> io::Result<Option<Stamp>> {
     let name = target.file_name().ok_or(io::ErrorKind::InvalidInput)?;
     let tmp = target.with_file_name(format!(".{}.wai-save", name.to_string_lossy()));
     let written = (|| {
-        let mut file = fs::File::create(&tmp)?;
-        file.write_all(text.as_bytes())?;
-        if let Ok(meta) = fs::metadata(&target) {
-            file.set_permissions(meta.permissions())?;
+        // The target's mode before any content: a private file is never readable by others,
+        // not even as a temp file (one left by a crash included).
+        let permissions = fs::metadata(&target).ok().map(|meta| meta.permissions());
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        if let Some(permissions) = &permissions {
+            use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+            options.mode(permissions.mode());
         }
+        let mut file = options.open(&tmp)?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.write_all(text.as_bytes())?;
         file.sync_all()?;
         fs::rename(&tmp, &target)
     })();
@@ -107,4 +117,30 @@ pub fn save(path: &Path, text: &str) -> io::Result<Option<Stamp>> {
     }
     written?;
     Ok(stamp(path))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// R31: the temp file takes the target's mode before any content, so a private file is never
+    /// readable by others, not even for a moment (a stale temp file included).
+    #[test]
+    fn save_sets_the_mode_before_the_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.env");
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let stale = dir.path().join(".secret.env.wai-save");
+        fs::write(&stale, "stale").unwrap();
+        fs::set_permissions(&stale, fs::Permissions::from_mode(0o644)).unwrap();
+
+        super::save(&path, "new").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(!stale.exists());
+    }
 }
