@@ -35,6 +35,8 @@ pub enum RegistryEvent {
 struct Agent {
     handle: AgentHandle,
     status: AgentStatus,
+    /// From `Ready`, kept so `mark_ready` can restore it after a sign-out.
+    caps: Option<AgentCaps>,
     _pump: Task<()>,
 }
 
@@ -91,6 +93,7 @@ impl AgentRegistry {
             Agent {
                 handle: handle.clone(),
                 status: AgentStatus::Starting,
+                caps: None,
                 _pump: pump,
             },
         );
@@ -103,15 +106,30 @@ impl AgentRegistry {
     }
 
     pub fn set_status(&mut self, name: &str, status: AgentStatus, cx: &mut Context<Self>) {
-        if let Some(agent) = self.agents.get_mut(name) {
+        if let Some(agent) = self.agents.get_mut(name)
+            && agent.status != status
+        {
             agent.status = status;
             cx.emit(RegistryEvent::StatusChanged(name.into()));
         }
     }
 
+    /// Back to `Ready` once the agent did real work again: call it after a successful
+    /// `new_session`/`load_session` or a turn that did not end in a sign-out. No-op before `Ready`.
+    pub fn mark_ready(&mut self, name: &str, cx: &mut Context<Self>) {
+        if let Some(caps) = self.agents.get(name).and_then(|agent| agent.caps) {
+            self.set_status(name, AgentStatus::Ready(caps), cx);
+        }
+    }
+
     fn apply(&mut self, agent: &str, event: AgentEvent, cx: &mut Context<Self>) {
         let status = match event {
-            AgentEvent::Ready { caps, .. } => AgentStatus::Ready(caps),
+            AgentEvent::Ready { caps, .. } => {
+                if let Some(entry) = self.agents.get_mut(agent) {
+                    entry.caps = Some(caps);
+                }
+                AgentStatus::Ready(caps)
+            }
             AgentEvent::AuthRequired { .. } => AgentStatus::SignedOut,
             AgentEvent::Exited { error } => {
                 AgentStatus::Failed(error.unwrap_or_else(|| "the agent exited".into()))

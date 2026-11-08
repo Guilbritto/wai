@@ -99,17 +99,21 @@ fn screenshot(
 ) {
     cx.spawn(async move |cx| {
         cx.background_executor().timer(Duration::from_secs(2)).await;
-        let image = window.update(cx, |_, window, cx| {
-            workspace.update(cx, |w, cx| {
-                w.terminal_visible = true;
-                cx.notify();
-            });
-            // The resizable groups settle their sizes over a couple of frames.
-            for _ in 0..3 {
-                window.draw(cx).clear(cx);
-            }
-            window.render_to_image()
+        workspace.update(cx, |w, cx| {
+            w.terminal_visible = true;
+            cx.notify();
         });
+        // A resizable group settles its sizes in a notify deferred past the draw, so each
+        // draw gets its own update.
+        for _ in 0..3 {
+            window
+                .update(cx, |_, window, cx| window.draw(cx).clear(cx))
+                .ok();
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+        }
+        let image = window.update(cx, |_, window, _| window.render_to_image());
         match image.and_then(|image| Ok(image?.save(&path)?)) {
             Ok(()) => eprintln!("wai: screenshot saved to {path}"),
             Err(e) => eprintln!("wai: screenshot failed: {e}"),
