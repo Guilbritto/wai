@@ -56,21 +56,30 @@ fn send_bytes(w: &SharedWriter, bytes: &[u8]) {
     }
 }
 
+/// Runs under the term lock, so it must never block: replies go to a writer
+/// thread through an unbounded channel and events are queued for the reader
+/// thread to forward after the lock is released.
 #[derive(Clone)]
 struct Listener {
-    writer: SharedWriter,
-    tx: async_channel::Sender<TerminalEvent>,
+    replies: std::sync::mpsc::Sender<String>,
+    events: Arc<Mutex<Vec<TerminalEvent>>>,
 }
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
-        match event {
+        let ev = match event {
             // Replies to cursor-position / device-attribute queries.
-            Event::PtyWrite(text) => send_bytes(&self.writer, text.as_bytes()),
-            Event::Title(t) => {
-                let _ = self.tx.send_blocking(TerminalEvent::Title(t));
+            Event::PtyWrite(text) => {
+                let _ = self.replies.send(text);
+                return;
             }
-            _ => {}
+            Event::Title(t) => TerminalEvent::Title(t),
+            Event::ResetTitle => TerminalEvent::Title(String::new()),
+            Event::ChildExit(_) | Event::Exit => TerminalEvent::Exited,
+            _ => return,
+        };
+        if let Ok(mut q) = self.events.lock() {
+            q.push(ev);
         }
     }
 }
@@ -155,29 +164,46 @@ impl TerminalModel {
         let mut reader = pair.master.try_clone_reader()?;
         let writer: SharedWriter = Arc::new(Mutex::new(pair.master.take_writer()?));
         let (tx, rx) = async_channel::bounded(1);
+        let (replies_tx, replies_rx) = std::sync::mpsc::channel::<String>();
+        let events = Arc::new(Mutex::new(Vec::new()));
         let term = Arc::new(FairMutex::new(Term::new(
             Config::default(),
             &TermSize::new(size.cols as usize, size.rows as usize),
             Listener {
-                writer: writer.clone(),
-                tx: tx.clone(),
+                replies: replies_tx,
+                events: events.clone(),
             },
         )));
+        let reply_writer = writer.clone();
+        std::thread::spawn(move || {
+            while let Ok(text) = replies_rx.recv() {
+                send_bytes(&reply_writer, text.as_bytes());
+            }
+        });
 
         let thread_term = term.clone();
         std::thread::spawn(move || {
             let mut parser: Processor = Processor::new();
             let mut buf = [0u8; 16 * 1024];
+            let mut exited = false;
             // Blocks on read; no polling.
             while let Ok(n) = reader.read(&mut buf) {
                 if n == 0 {
                     break;
                 }
                 parser.advance(&mut *thread_term.lock(), &buf[..n]);
+                // Term lock is released here; blocking sends are safe now.
+                let queued = std::mem::take(&mut *events.lock().unwrap());
+                for ev in queued {
+                    exited |= ev == TerminalEvent::Exited;
+                    let _ = tx.send_blocking(ev);
+                }
                 // A full channel already holds a pending Wakeup: coalesce.
                 let _ = tx.try_send(TerminalEvent::Wakeup);
             }
-            let _ = tx.send_blocking(TerminalEvent::Exited);
+            if !exited {
+                let _ = tx.send_blocking(TerminalEvent::Exited);
+            }
         });
 
         Ok((
@@ -345,6 +371,37 @@ mod tests {
 
     fn text(row: &[CellRun]) -> String {
         row.iter().map(|r| r.text.as_str()).collect()
+    }
+
+    #[test]
+    fn title_does_not_block_snapshot() {
+        let (m, rx, _d) = spawn();
+        m.write(b"printf 'a\\033]0;wai-title\\007b'; printf 'again'\r");
+        // Events are deliberately not drained; snapshot must still return.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let m = std::sync::Arc::new(m);
+        let m2 = m.clone();
+        std::thread::spawn(move || {
+            for _ in 0..50 {
+                m2.snapshot();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("snapshot blocked under term lock");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match rx.recv_blocking_timeout(deadline) {
+                Some(TerminalEvent::Title(t)) => {
+                    assert_eq!(t, "wai-title");
+                    break;
+                }
+                Some(_) => {}
+                None => panic!("no Title event"),
+            }
+        }
     }
 
     #[test]
