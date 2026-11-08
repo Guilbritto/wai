@@ -293,7 +293,13 @@ TextView::new(&md).scrollable(true).size_full().p_3()         // scrollable need
 
 ## 13. Lists for chat messages
 
-[U] Three options, read in source:
+[V] wai's chat (`crates/wai/src/chat`) uses `MessageScroller` as described below: rows come from
+`cx.processor(Self::render_item)` (a `Fn(usize, &mut Window, &mut App)` that updates the view), the
+state grows with `append(n, cx)`, and visible rows are remeasured on every layout, so a growing
+message follows the tail without `remeasure_items`. Its scrollbar shows on scroll and fades out
+2 s later with a 500 ms animation at the display rate (~60 frames on a 120 Hz screen).
+
+Three options, read in source:
 
 - `gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState}`: the chat component.
   `MessageScrollerState::new(item_count, cx)` (follows the tail), `.append(n, cx)`, `.splice(..)`,
@@ -305,7 +311,12 @@ TextView::new(&md).scrollable(true).size_full().p_3()         // scrollable need
 - `v_virtual_list(view, id, Rc<Vec<Size<Pixels>>>, |view, range, window, cx| -> Vec<_>)`: needs every item's size up
   front; good for uniform rows (file tree, tables).
 
-## 14. Theme and fonts
+## 14. Theme, fonts and icons
+
+- [V] **Icons need the asset source**: `gpui_kit::application().with_assets(gpui_kit::assets::Assets)`.
+  Without it every `Icon` (button icons, the Select chevron, status icons) renders blank, with no error.
+- [V] `Select`'s own view is `size_full()`; `.w(..)` on `Select` styles only its inner trigger. Put it
+  in a sized box: `div().w(px(140.)).child(Select::new(&state))`.
 
 [V]
 
@@ -368,6 +379,10 @@ term.resize(TermSize::new(cols, rows)); pair.master.resize(PtySize { .. })?;
   `cx.update(|window, cx| …)` from an `AsyncWindowContext`. It measures render + layout + prepaint + paint. Do not
   ship it: a drawn but never presented frame keeps the display link running.
 - [D] `profiler` feature on gpui-kit enables GPUI frame-event instrumentation.
+- [V] Chat streaming (release, 943 chunks at 25 ms, ~40 tokens/s): one `push_str` per token gave one
+  redraw per token (~4 ms each) and **12–18 %** of a core. Pushing the buffered delta once per
+  100 ms (a timer that exists only while text is pending) gave **~5 %**. Skip `cx.notify()` for the
+  append itself: the `TextViewState` notifies once its background parse lands.
 
 ## 17. Tests (`#[gpui_kit::test]`)
 
@@ -413,6 +428,10 @@ mod tests {
 - Real I/O (a PTY, a child process) runs outside the deterministic scheduler: call `cx.executor().allow_parking()`
   first, then loop `std::thread::sleep(..)` + `cx.run_until_parked()` until the state you expect shows up
   (see `keys_reach_the_shell`).
+- [V] Timers (`background_executor().timer`) run on the test scheduler's fake clock and never fire on
+  their own: `cx.executor().advance_clock(d)` moves it (wai's `wait_until` advances it with each sleep).
+- [V] `gpui_kit::test::TestWindowExt`: `cx.update(|window, cx| window.click("perm-allow_once", cx))` clicks a
+  `Button` by its element id with real hit testing; `window.try_find(id)` after `window.render_frame(cx)`.
 - Richer queries (`window.find("id")`, `click`, `input`, `ElementSnapshot`) come from `gpui_kit::test::*`
   (`TestWindowExt`, …) behind `gpui-kit/test-support`. [D] (`gpui-kit-0.9.0/TESTING.md`, `tests/ui.rs`). See the
   gotcha below about enabling it.
