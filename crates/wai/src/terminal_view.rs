@@ -46,6 +46,11 @@ impl TerminalView {
         window.focus(&self.focus, cx);
     }
 
+    /// Kills the shell (dropping the model does).
+    pub fn stop(&mut self) {
+        self.model = None;
+    }
+
     fn start(&mut self, cx: &mut Context<Self>) {
         let spawned = TerminalModel::spawn(self.shell.as_deref(), &self.cwd, self.size);
         let (model, events) = match spawned {

@@ -78,9 +78,13 @@ impl Workspace {
     ) -> Self {
         let registry = cx.new(|_| AgentRegistry::new(&settings));
         let routing = cx.subscribe(&registry, |this, _, event, cx| this.route(event, cx));
+        // The process ends ~200 ms after the quit hooks: nothing it started may outlive it.
         let quit = cx.on_app_quit(|this, cx| {
             this.save_state(cx);
-            async {}
+            if let Some(terminal) = &this.terminal {
+                terminal.update(cx, |t, _| t.stop());
+            }
+            this.registry.read(cx).shutdown_all()
         });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -884,6 +888,42 @@ pub(crate) mod tests {
             })
         });
         assert_eq!(workspace.read_with(cx, |w, cx| w.agent_problem(cx)), None);
+    }
+
+    /// The process ends ~200 ms after the quit hooks: the agents must be killed by then.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn quit_stops_agents(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("agent.pid");
+        let flag = format!("--pid-file '{}'", pid_file.display());
+        let (workspace, cx) = open(cx, fake_settings(&flag));
+        let registry = workspace.read_with(cx, |w, _| w.registry.clone());
+        workspace.update(cx, |w, cx| w.start_agent(cx));
+        wait_until(cx, "Ready", |cx| {
+            registry.read_with(cx, |r, _| {
+                matches!(r.status("fake"), Some(AgentStatus::Ready(_)))
+            })
+        });
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+
+        // What the platform's quit runs: the quit hooks, then the windows close.
+        cx.cx.update(|app| app.shutdown());
+
+        let alive = || {
+            std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while alive() {
+            assert!(Instant::now() < deadline, "agent {pid} still alive");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// What `app::run` does once the window is open.

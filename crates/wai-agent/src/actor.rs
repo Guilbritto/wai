@@ -46,7 +46,6 @@ enum Command {
     Cancel {
         session: SessionId,
     },
-    Shutdown,
 }
 
 /// A cheap, cloneable handle to one agent process.
@@ -54,6 +53,10 @@ enum Command {
 pub struct AgentHandle {
     commands: Sender<Command>,
     broker: Arc<Broker>,
+    /// Closed by `shutdown` (or once every handle is gone): the agent is killed.
+    stop: Sender<()>,
+    /// Closes when the connection thread ends, after `Exited`.
+    done: Receiver<()>,
 }
 
 impl AgentHandle {
@@ -68,9 +71,20 @@ impl AgentHandle {
             next_id: AtomicU64::new(1),
             pending: Mutex::default(),
         });
+        let (stop, stop_rx) = async_channel::bounded(1);
+        let (done_tx, done) = async_channel::bounded::<()>(1);
         let thread_broker = broker.clone();
-        std::thread::spawn(move || smol::block_on(run(spec, command_rx, thread_broker)));
-        (AgentHandle { commands, broker }, event_rx)
+        std::thread::spawn(move || {
+            let _done = done_tx;
+            smol::block_on(run(spec, command_rx, stop_rx, thread_broker))
+        });
+        let handle = AgentHandle {
+            commands,
+            broker,
+            stop,
+            done,
+        };
+        (handle, event_rx)
     }
 
     pub async fn new_session(&self, cwd: PathBuf) -> Result<SessionStarted, AgentError> {
@@ -130,8 +144,15 @@ impl AgentHandle {
         self.broker.answer(id, choice)
     }
 
-    pub fn shutdown(&self) {
-        self.send(Command::Shutdown);
+    /// Kills the agent now (its whole process group on unix): the SDK's graceful exit waits
+    /// seconds, and a quitting app has about 200 ms. Resolves once it is gone, after `Exited`.
+    pub fn shutdown(&self) -> impl Future<Output = ()> + use<> {
+        self.stop.close();
+        let done = self.done.clone();
+        async move {
+            // ponytail: it only ever closes.
+            let _ = done.recv().await;
+        }
     }
 
     fn send(&self, command: Command) {
@@ -247,8 +268,18 @@ impl Broker {
     }
 }
 
-async fn run(spec: AgentSpec, commands: Receiver<Command>, broker: Arc<Broker>) {
-    let result = connect(&spec, &commands, &broker).await;
+async fn run(
+    spec: AgentSpec,
+    commands: Receiver<Command>,
+    stop: Receiver<()>,
+    broker: Arc<Broker>,
+) {
+    // A stop drops the connection, and with it the process guard that kills the agent.
+    let stopped = async {
+        let _ = stop.recv().await;
+        Ok(true)
+    };
+    let result = smol::future::or(connect(&spec, &commands, &broker), stopped).await;
     // Fail every queued request and refuse new ones before announcing the exit.
     commands.close();
     while commands.try_recv().is_ok() {}
@@ -397,7 +428,6 @@ async fn actor_loop(
                 broker.cancel_pending(Some(&session));
                 cx.send_notification(acp::CancelNotification::new(session))?;
             }
-            Command::Shutdown => return Ok(true),
         }
     }
 }

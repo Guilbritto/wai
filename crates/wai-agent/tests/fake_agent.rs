@@ -351,7 +351,7 @@ fn shutdown_kills_agent_process() {
         let pid = std::fs::read_to_string(&pid_file).unwrap();
         std::fs::remove_file(&pid_file).unwrap();
 
-        agent.shutdown();
+        agent.shutdown().await;
         let events = until(&rx, |e| matches!(e, AgentEvent::Exited { .. })).await;
         assert_eq!(events.last(), Some(&AgentEvent::Exited { error: None }));
 

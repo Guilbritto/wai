@@ -103,6 +103,16 @@ impl AgentRegistry {
         Some(handle)
     }
 
+    /// Kills every agent (at quit); resolves once they are all gone.
+    pub fn shutdown_all(&self) -> impl Future<Output = ()> + use<> {
+        let stopped: Vec<_> = self.agents.values().map(|a| a.handle.shutdown()).collect();
+        async move {
+            for stopped in stopped {
+                stopped.await;
+            }
+        }
+    }
+
     pub fn status(&self, name: &str) -> Option<&AgentStatus> {
         self.agents.get(name).map(|agent| &agent.status)
     }
