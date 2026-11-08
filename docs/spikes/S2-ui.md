@@ -91,7 +91,7 @@ pendente: precisa do CI `windows-latest` (Fase 3) ou de uma máquina Windows.
 
 `docs/screens/s2-ui.png`, aos 12 s do stream. A tela do Mac ficou **bloqueada a sessão inteira** e o `screencapture`
 falhou. A imagem saiu do próprio GPUI (`window.render_to_image()`, renderização fora da tela; por isso sem a barra de
-título). O terminal mostra o início do zsh do usuário (inclusive um erro do `gvm` no `.zshrc`, que não é do wai).
+título). A faixa do terminal foi recortada da imagem, porque mostrava caminhos da pasta pessoal do dono.
 
 ## Limitações deste spike
 

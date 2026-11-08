@@ -15,7 +15,7 @@
 
 | Area | Choice |
 |---|---|
-| Language | Rust (stable) |
+| Language | Rust (stable, pinned 1.99.1) |
 | UI | `gpui-kit =0.9.0` (pins `gpui-pre =0.3.11`) |
 | Agent protocol | `agent-client-protocol 5` |
 | Claude adapter | `@agentclientprotocol/claude-agent-acp` (npm, run with `npx`) |
@@ -214,11 +214,40 @@
 
 - [ ] **Step 1:** Apply the kill criteria. Update this roadmap's Tech Stack if anything changed.
 - [ ] **Step 2:** Write `docs/superpowers/plans/2026-11-08-wai-fase-1.md`, using the real APIs from the NOTES files.
-- [ ] **Step 3:** Delete `spikes/` and run `cargo clean`. Merge `feat/fase-0-spikes` → `development` → `main`, tag `fase-0`.
+- [ ] **Step 3:** Merge `feat/fase-0-spikes` → `development` → `main`, tag `fase-0`. `spikes/` are deleted in Phase 1 Task 1.1, after the new crates keep the gpui-kit lock entries alive.
 
 ---
 
-## Phase 1 — Core MVP on macOS (detailed plan written in Task 0.5)
+## Phase 0 gate result (2026-11-08)
+
+Phase 0 is done. Both spikes passed the gate.
+
+**S1 ACP: GO** (`docs/spikes/S1-acp.md`). It works with the owner's subscription login and no API key.
+
+| Change | Why |
+|---|---|
+| `wai-history` dropped | `session/list` (74 ms for 94 sessions) and `load_session` (replays history) replace parsing `~/.claude/projects` |
+| One ACP connection per agent kind, many sessions on it | Avoids paying adapter startup per session |
+| Edit review uses `ToolCallContent::Diff` + permission requests + post-hoc Revert | claude-agent-acp writes files itself and does not call client `fs/write_text_file`, so wai cannot intercept writes |
+| Usage panel moves into the core | It is fed by `UsageUpdate` (`used`/`size`/`cost`, optional `_claude/rateLimit` meta) |
+
+**S2 GPUI: GO with conditions** (`docs/spikes/S2-ui.md`, `docs/NOTES-gpui.md`).
+
+| Area | Measured |
+|---|---|
+| Launch | ~180 ms |
+| Idle CPU | 0.0% |
+| Memory without files | 153 MB footprint |
+| 112 MB file scroll | 0.6–2.6 ms/frame |
+
+Conditions that are now Global Constraints for every phase:
+- Every code `EditorState` uses `soft_wrap(false)`. Soft wrap on a 1.25 M-line file froze the app for 53 s and used 7.1 GB.
+- Set the caret blink idle timeout at startup: `CursorBlink::default().with_idle_timeout(5 s)`. Without it, a focused editor keeps ~0.9% CPU.
+- Streaming text must not redraw more than once per frame. Coalesce channel bursts (`try_recv` loop) and keep panes that did not change cheap. Measured: 14–17% of one core while streaming 40 tokens/s; the Phase 1 target is below 10%.
+- Files above 20 MB open read-only in the editor with a banner. `set_value` blocks ~350 ms per 100 MB; this is accepted for explicit opens of huge files.
+- Windows: `cargo check` from macOS stops at `llvm-rc` (resource compiler). Windows builds are verified only by CI.
+
+## Phase 1 — Core MVP on macOS (detailed plan: `2026-11-08-wai-fase-1.md`)
 
 **Target workspace:**
 
@@ -227,7 +256,6 @@ crates/
   wai/              bin: main.rs, app.rs (bootstrap, actions, keymap), views/ (sidebar, chat, terminal, notifications)
   wai-agent/        ACP client, no GPUI
   wai-fake-agent/   bin: scripted ACP agent for tests (--crash-after N, --require-auth, --flood SIZE, --ask-permission)
-  wai-history/      ~/.claude/projects index, incremental, no GPUI
   wai-terminal/     PTY + alacritty_terminal model, no GPUI
   wai-settings/     settings.toml + layout.json persistence, no GPUI
 ```
@@ -244,11 +272,6 @@ crates/
   - `SessionHandle::events(&self) -> async_channel::Receiver<AgentEvent>`
   - `AgentEvent`: `MessageChunk{role, text}`, `ThoughtChunk(String)`, `ToolCall(ToolCallView)`, `ToolCallUpdate(ToolCallView)`, `Plan(Vec<PlanEntry>)`, `PermissionRequested(PermissionRequest)`, `TurnEnded(StopReason)`, `AuthRequired{agent}`, `Exited{code: Option<i32>, stderr_tail: Vec<String>}`
   - `PermissionBroker::answer(id: RequestId, option: OptionId) -> Result<(), BrokerError>`, where `BrokerError::Stale` covers a cancelled or unknown request.
-- **`wai-history`:**
-  - `HistoryIndex::open(root: &Path) -> Result<HistoryIndex>`
-  - `HistoryIndex::sessions(&self) -> Vec<SessionSummary{id, title, cwd, updated_at, message_count}>`
-  - `HistoryIndex::apply_fs_event(&mut self, ev: notify::Event)`
-  - Reads only appended bytes (tracks `(inode, offset)` per file).
 - **`wai-terminal`:**
   - `TerminalModel::spawn(shell: &str, cwd: &Path, size: GridSize) -> Result<TerminalModel>`
   - `write(&self, bytes: &[u8])`
@@ -259,18 +282,7 @@ crates/
   - `Settings::load(user_dir: &Path, project_dir: Option<&Path>) -> Settings`; project `.wai/settings.toml` overrides user `~/.config/wai/settings.toml`.
   - `Layout::load/save(path)`.
 
-**Tasks** (each has unit tests; UI tasks add a screenshot):
-
-| Task | Deliverable |
-|---|---|
-| 1.1 | Workspace crates skeleton + `wai-settings` with tests for override precedence and a missing-file default |
-| 1.2 | `wai-agent` + `wai-fake-agent`. Integration tests for streaming, permission, cancel, crash, auth-required, and no orphan process (Review Focus 1, 2, 4, 5) |
-| 1.3 | Chat view: virtualized message list, streaming markdown, tool-call rows with truncation (Review Focus 3), permission card with option buttons, prompt input (Enter sends, Shift+Enter newline, Esc cancels), image/file drop → ACP content blocks |
-| 1.4 | Sessions sidebar: live sessions with state dot (working / needs-you / done / error) + history list from `wai-history` (watcher-driven), New, Resume (`load_session`), Fork (only when the agent advertises it), Close, "Open to the side" (up to 4 chat panes side by side) |
-| 1.5 | Terminal panel: `wai-terminal` model + grid view, key input, resize, cmd+` toggle |
-| 1.6 | Native notifications on needs-you / done while the window is unfocused; dock badge count |
-| 1.7 | Layout and open-session persistence; restore on launch with `load_session` |
-| 1.8 | Phase review + perf measurement against budgets → `docs/RELATORIO-fase-1.md` |
+**Tasks:** see `2026-11-08-wai-fase-1.md` (1.1 settings, 1.2 agent actor + fake agent, 1.3 terminal model, 1.4 app shell, 1.5 chat model, 1.6 chat view, 1.7 sidebar/history/panes, 1.8 terminal view + notifications, 1.9 persist/restore, 1.10 review + report).
 
 ## Phase 2 — IDE
 
@@ -278,7 +290,7 @@ crates/
 |---|---|
 | 2.1 | File tree (gitignore-aware via `ignore`, live via `notify`) |
 | 2.2 | Editor tabs with gpui-component code editor, tree-sitter highlighting, save, large-file read-only mode above 20 MB |
-| 2.3 | Agent edit review. wai advertises ACP client fs capabilities; agent writes go through `write_text_file`, are staged, and are shown as hunks (`similar`) with Accept / Reject per hunk and Accept all. Nothing touches disk before acceptance unless the session is in auto-accept mode |
+| 2.3 | Agent edit review (per S1): every `ToolCallContent::Diff` is rendered as a diff (gpui-component `diff` module or `similar` hunks). In permission-asking modes the diff sits inside the permission card (Accept / Reject before the write). In every mode the turn keeps an "Edits" list with Open and Revert (rewrites `old_text`; refuses when the file changed since). Per-hunk reject before writing is not possible with claude-agent-acp |
 | 2.4 | Project search (`ignore` + `grep-regex`/`grep-searcher`), results open in the editor |
 | 2.5 | Agents panel: every session with plan entries, current tool call, sub-tool-calls; replaces the Central's "Escritório" in 2D |
 | 2.6 | `.wai/` project config: conversation templates (name, agent, cwd, first prompt not sent), default agent |
