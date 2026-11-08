@@ -59,6 +59,20 @@ impl Workspace {
                 .await;
             this.update(cx, |this, cx| {
                 this.history = rows;
+                // R14: the saved state keeps no titles, so an untitled open session takes its
+                // history title; a title the agent sends later still replaces it.
+                for session in &this.sessions {
+                    session.update(cx, |s, cx| {
+                        if s.agent != agent || s.model.title.is_some() {
+                            return;
+                        }
+                        let row = this.history.iter().find(|(_, row)| row.id == s.id);
+                        if let Some((_, row)) = row {
+                            s.model.title = row.title.clone();
+                            cx.notify();
+                        }
+                    });
+                }
                 cx.notify();
             })
             .ok();

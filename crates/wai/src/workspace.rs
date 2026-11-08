@@ -996,6 +996,27 @@ pub(crate) mod tests {
         assert_eq!(notify::sent(), []);
     }
 
+    /// R14: the state keeps no titles; a restored session takes its title from the history.
+    #[gpui_kit::test]
+    fn restored_session_takes_history_title(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = AppState {
+            open_sessions: vec![saved("fake", "session-1", 0)],
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        let (workspace, cx) = open_at(cx, history_settings(3), Some(path));
+
+        launch(&workspace, cx);
+
+        let session = pane_session(&workspace, 0, cx);
+        wait_until(cx, "the history title", |cx| {
+            session.read_with(cx, |s, _| s.model.title.as_deref() == Some("Session 1"))
+        });
+    }
+
     #[gpui_kit::test]
     fn restore_failure_shows_notice(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
