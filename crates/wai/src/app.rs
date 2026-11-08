@@ -20,7 +20,8 @@ actions!(
         FocusNextPane,
         OpenFolder,
         CancelTurn,
-        Paste
+        Paste,
+        Save
     ]
 );
 
@@ -47,11 +48,13 @@ fn bind_keys(cx: &mut App) {
     } else {
         "ctrl-shift-v"
     };
-    let keymap: [(&str, Box<dyn Action>, Option<&str>); 8] = [
+    let keymap: [(&str, Box<dyn Action>, Option<&str>); 9] = [
         ("secondary-q", Box::new(Quit), None),
         ("secondary-n", Box::new(NewSession), workspace),
         ("ctrl-`", Box::new(ToggleTerminal), workspace),
+        // R20: in an editor pane it closes the active tab.
         ("secondary-w", Box::new(CloseSession), workspace),
+        ("secondary-s", Box::new(Save), workspace),
         ("secondary-alt-right", Box::new(FocusNextPane), workspace),
         ("secondary-o", Box::new(OpenFolder), workspace),
         // The prompt box lets Escape through (it has nothing to clear).
@@ -101,7 +104,7 @@ pub fn run(project: PathBuf, settings: Settings, notices: Vec<String>, state_pat
             .update(cx, |_, window, cx| {
                 workspace.update(cx, |w, cx| {
                     w.start_agent(cx);
-                    w.watch_project(cx);
+                    w.watch_project(window, cx);
                     w.restore(window, cx);
                 });
                 for notice in notices {
@@ -123,6 +126,10 @@ pub fn run(project: PathBuf, settings: Settings, notices: Vec<String>, state_pat
                 run_in_terminal(window, &command, cx).await;
             })
             .detach();
+        }
+        #[cfg(feature = "demo")]
+        if let Ok(files) = std::env::var("WAI_SHOT_OPEN") {
+            open_files(opened.clone(), files, cx);
         }
         #[cfg(feature = "screenshot")]
         if let Ok(path) = std::env::var("WAI_SHOT") {
@@ -152,6 +159,29 @@ fn send_prompt(
         }
         window
             .update(cx, |_, window, cx| type_text(&prompt, window, cx))
+            .ok();
+    })
+    .detach();
+}
+
+/// Scripted run (`WAI_SHOT_OPEN=<files>`): after 1 s, opens `files` (comma-separated, relative
+/// to the project) in the editor, the one read last focused; each logs its main-thread time.
+#[cfg(feature = "demo")]
+fn open_files(
+    (window, workspace): (AnyWindowHandle, Entity<Workspace>),
+    files: String,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(Duration::from_secs(1)).await;
+        window
+            .update(cx, |_, window, cx| {
+                workspace.update(cx, |w, cx| {
+                    for file in files.split(',') {
+                        w.open_file(w.project.join(file), None, window, cx);
+                    }
+                })
+            })
             .ok();
     })
     .detach();

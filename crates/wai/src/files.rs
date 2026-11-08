@@ -236,8 +236,8 @@ mod tests {
     use wai_settings::Settings;
 
     use crate::sidebar::canonical;
-    use crate::workspace::Workspace;
     use crate::workspace::tests::{open, wait_until};
+    use crate::workspace::{Pane, Workspace};
 
     fn names(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<String> {
         workspace.read_with(cx, |w, cx| {
@@ -290,10 +290,13 @@ mod tests {
             ["src", "main.rs", ".gitignore", "README.md"]
         );
 
-        // A file asks the workspace to open it.
+        // A file opens in the editor.
         click(("file", 1usize), cx);
-        let requested = workspace.read_with(cx, |w, _| w.requested_file.clone());
-        assert_eq!(requested, Some(src.join("main.rs")));
+        let opened = workspace.read_with(cx, |w, cx| match &w.panes[..] {
+            [Pane::Editor(pane)] => Some(pane.read(cx).tabs[0].read(cx).path.clone()),
+            _ => None,
+        });
+        assert_eq!(opened, Some(src.join("main.rs")));
 
         // The watcher re-lists the open folder.
         fs::write(src.join("lib.rs"), "").unwrap();

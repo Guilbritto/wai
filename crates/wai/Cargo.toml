@@ -5,7 +5,20 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-gpui-kit.workspace = true
+# Editor highlighting. JSON comes with every grammar (gpui-component's base `tree-sitter`).
+gpui-kit = { workspace = true, features = [
+    "tree-sitter-bash",
+    "tree-sitter-css",
+    "tree-sitter-go",
+    "tree-sitter-html",
+    "tree-sitter-javascript",
+    "tree-sitter-markdown",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-toml",
+    "tree-sitter-typescript",
+    "tree-sitter-yaml",
+] }
 wai-agent = { path = "../wai-agent" }
 wai-project = { path = "../wai-project" }
 wai-settings = { path = "../wai-settings" }

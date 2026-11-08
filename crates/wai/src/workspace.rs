@@ -10,12 +10,13 @@ use wai_agent::{
     AgentError, AgentHandle, BrokerError, QuestionAnswer, SessionStarted, SessionSummary,
     StopReason,
 };
-use wai_project::ProjectWatcher;
+use wai_project::{FsChange, ProjectWatcher};
 use wai_settings::{AppState, OpenSession, Settings};
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
-use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, ToggleTerminal};
+use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, Save, ToggleTerminal};
 use crate::chat::{ChatEvent, ChatSession, signed_out};
+use crate::editor::{self, EditorPane, Emptied, FileEditor};
 use crate::files::{FileTree, OpenFile};
 use crate::notify::{self, should_notify};
 use crate::sidebar::{SidebarTab, canonical};
@@ -39,6 +40,8 @@ pub enum Pane {
         ticket: u64,
     },
     Session(Entity<ChatSession>),
+    /// Open files in tabs; one pane at most. Not kept between runs.
+    Editor(Entity<EditorPane>),
 }
 
 impl Pane {
@@ -69,8 +72,6 @@ pub struct Workspace {
     pub(crate) history_task: Option<Task<()>>,
     pub sidebar_tab: SidebarTab,
     pub files: Entity<FileTree>,
-    /// ponytail: the last file the tree asked to open, until the editor (Task 2.4) opens it.
-    pub requested_file: Option<PathBuf>,
     /// The project's one watcher and the task that hands its changes out; `None` when the
     /// project cannot be watched.
     watch: Option<(ProjectWatcher, Task<()>)>,
@@ -106,8 +107,8 @@ impl Workspace {
         window.set_window_title(&title(&project));
         let project = canonical(&project);
         let files = cx.new(|cx| FileTree::new(project.clone(), global_ignores, cx));
-        let open_file = cx.subscribe_in(&files, window, |this, _, OpenFile(path), _, _| {
-            this.requested_file = Some(path.clone())
+        let open_file = cx.subscribe_in(&files, window, |this, _, OpenFile(path), window, cx| {
+            this.open_file(path.clone(), None, window, cx)
         });
         Self {
             project,
@@ -123,7 +124,6 @@ impl Workspace {
             history_task: None,
             sidebar_tab: SidebarTab::default(),
             files,
-            requested_file: None,
             watch: None,
             next_ticket: 0,
             state_path,
@@ -134,8 +134,9 @@ impl Workspace {
 
     /// Starts the project's watcher, replacing the last project's: once the window is open, like
     /// the agent (tests that need it start it), and again on each new project. Its changes reach
-    /// the tree in batches (at most one per 100 ms), each wake-up drained before one update.
-    pub fn watch_project(&mut self, cx: &mut Context<Self>) {
+    /// the open files and the tree in batches (at most one per 100 ms), each wake-up drained
+    /// before one update.
+    pub fn watch_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // ponytail: on Linux, inotify walks the whole tree here (node_modules too) on the UI
         // thread; move the start to the background executor if Linux matters.
         let (watcher, changes) = match ProjectWatcher::start(&self.project) {
@@ -145,13 +146,14 @@ impl Workspace {
                 return eprintln!("wai: cannot watch {}: {e}", self.project.display());
             }
         };
-        let task = cx.spawn(async move |this, cx| {
+        let task = cx.spawn_in(window, async move |this, cx| {
             while let Ok(change) = changes.recv().await {
                 let mut batch = vec![change];
                 while let Ok(more) = changes.try_recv() {
                     batch.push(more);
                 }
-                let applied = this.update(cx, |this, cx| {
+                let applied = this.update_in(cx, |this, window, cx| {
+                    this.disk_changed(&batch, window, cx);
                     this.files.update(cx, |files, cx| files.apply(batch, cx))
                 });
                 if applied.is_err() {
@@ -160,6 +162,25 @@ impl Workspace {
             }
         });
         self.watch = Some((watcher, task));
+    }
+
+    /// Hands a watcher batch to the open files it touches.
+    fn disk_changed(&self, batch: &[FsChange], window: &mut Window, cx: &mut Context<Self>) {
+        let touched = |path: &Path| {
+            batch.iter().any(|change| match change {
+                FsChange::Rescan => true,
+                FsChange::Changed(paths) => paths.iter().any(|p| p == path),
+            })
+        };
+        for pane in &self.panes {
+            if let Pane::Editor(pane) = pane {
+                for tab in pane.read(cx).tabs.clone() {
+                    if touched(&tab.read(cx).path) {
+                        tab.update(cx, |tab, cx| tab.disk_event(window, cx));
+                    }
+                }
+            }
+        }
     }
 
     /// Starts the default agent, so the history fills in once it is ready.
@@ -360,14 +381,15 @@ impl Workspace {
         self.focused_pane = ix;
         match &self.panes[ix] {
             Pane::Session(session) => session.update(cx, |s, cx| s.focus(window, cx)),
+            Pane::Editor(pane) => pane.update(cx, |p, cx| p.focus(window, cx)),
             _ => window.focus(&self.focus, cx),
         }
         cx.notify();
     }
 
-    /// Shows `session` in the focused pane, or with `side` in a new pane while there are fewer
-    /// than `MAX_PANES` (an empty focused pane is used instead). A session already in a pane is
-    /// focused there: one session is drawn once.
+    /// Shows `session` in the focused pane (beside the editor pane, see `session_pane`), or with
+    /// `side` in a new pane while there are fewer than `MAX_PANES` (an empty focused pane is used
+    /// instead). A session already in a pane is focused there: one session is drawn once.
     pub fn show(
         &mut self,
         session: Entity<ChatSession>,
@@ -387,7 +409,7 @@ impl Workspace {
                     self.panes.push(Pane::Empty(None));
                     self.panes.len() - 1
                 } else {
-                    self.focused_pane
+                    self.session_pane()
                 };
                 self.panes[ix] = Pane::Session(session);
                 ix
@@ -395,6 +417,19 @@ impl Workspace {
         };
         self.focus_pane(ix, window, cx);
         self.save_state(cx);
+    }
+
+    /// The pane a session takes: the focused one, unless it is the editor pane (its unsaved edits
+    /// would go with it); then a new pane to the right, or at `MAX_PANES` the next pane.
+    fn session_pane(&mut self) -> usize {
+        if !matches!(self.panes[self.focused_pane], Pane::Editor(_)) {
+            self.focused_pane
+        } else if self.panes.len() < MAX_PANES {
+            self.panes.push(Pane::Empty(None));
+            self.panes.len() - 1
+        } else {
+            (self.focused_pane + 1) % self.panes.len()
+        }
     }
 
     /// Opens a history row: the open session with that id, else a new one that loads it.
@@ -486,17 +521,21 @@ impl Workspace {
         Some(session)
     }
 
-    /// Starts a session in the focused pane, which shows `Preparing <agent>…` until the agent
-    /// answers. A second ⌘N on that pane waits for the first.
+    /// Starts a session in the focused pane (beside the editor pane, see `session_pane`), which
+    /// shows `Preparing <agent>…` until the agent answers. A second ⌘N on that pane waits for
+    /// the first.
     pub(crate) fn new_session(
         &mut self,
         _: &NewSession,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ix = self.focused_pane;
+        let ix = self.session_pane();
         if matches!(self.panes[ix], Pane::Preparing { .. }) {
             return;
+        }
+        if ix != self.focused_pane {
+            self.focus_pane(ix, window, cx);
         }
         let agent = self.settings.default_agent.clone();
         let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
@@ -577,13 +616,23 @@ impl Workspace {
     }
 
     /// Drops the focused pane's session from the panes and the open list (the agent keeps it in
-    /// its history). With more than one pane, the pane goes too.
+    /// its history). With more than one pane, the pane goes too. R20: in an editor pane it
+    /// closes the active tab instead (the pane goes with the last one).
     fn close_session(&mut self, _: &CloseSession, window: &mut Window, cx: &mut Context<Self>) {
         let ix = self.focused_pane;
-        if let Pane::Session(session) = &self.panes[ix] {
-            session.read(cx).stop();
-            self.sessions.retain(|s| s != session);
+        match &self.panes[ix] {
+            Pane::Editor(pane) => return pane.update(cx, |p, cx| p.close(p.active, window, cx)),
+            Pane::Session(session) => {
+                session.read(cx).stop();
+                self.sessions.retain(|s| s != session);
+            }
+            _ => {}
         }
+        self.drop_pane(ix, window, cx);
+    }
+
+    /// Removes pane `ix` (empties it when it is the only one) and focuses its neighbour.
+    fn drop_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.panes.len() > 1 {
             self.panes.remove(ix);
         } else {
@@ -591,6 +640,121 @@ impl Workspace {
         }
         self.focus_pane(ix.min(self.panes.len() - 1), window, cx);
         self.save_state(cx);
+    }
+
+    /// ⌘S: saves the focused editor pane's active tab.
+    fn save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
+        if let Pane::Editor(pane) = &self.panes[self.focused_pane] {
+            pane.update(cx, |p, cx| p.save(window, cx));
+        }
+    }
+
+    /// Opens `path` with the caret at `line` (1-based), in the editor pane: its tab when the
+    /// file has one, else a new tab. Without an editor pane, the first empty pane becomes one,
+    /// else a new pane to the right; at `MAX_PANES` the last pane does. The file is read on the
+    /// background executor; one that cannot open says why in a notice.
+    pub fn open_file(
+        &mut self,
+        path: PathBuf,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.reveal(&path, line, window, cx) {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let read = path.clone();
+            let loaded = cx
+                .background_spawn(async move { editor::load(&read) })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                let loaded = match loaded {
+                    Ok(loaded) => loaded,
+                    Err(e) => {
+                        let name = folder_name(&path);
+                        let notice = Notification::error(e.to_string()).title(name);
+                        return window.push_notification(notice, cx);
+                    }
+                };
+                // Opened meanwhile (a double click): one tab per file.
+                if !this.reveal(&path, line, window, cx) {
+                    #[cfg(feature = "demo")]
+                    let started = std::time::Instant::now();
+                    let tab = cx.new(|cx| FileEditor::new(path.clone(), loaded, window, cx));
+                    let pane = this.editor_pane(window, cx);
+                    pane.update(cx, |p, cx| p.add(tab, window, cx));
+                    this.reveal(&path, line, window, cx);
+                    #[cfg(feature = "demo")]
+                    eprintln!(
+                        "wai: {} took {:?} on the main thread",
+                        path.display(),
+                        started.elapsed()
+                    );
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Focuses `path`'s tab, at `line`, if a pane has one.
+    fn reveal(
+        &mut self,
+        path: &Path,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let found = self
+            .panes
+            .iter()
+            .enumerate()
+            .find_map(|(ix, pane)| match pane {
+                Pane::Editor(pane) => Some((ix, pane.clone(), pane.read(cx).find(path, cx)?)),
+                _ => None,
+            });
+        let Some((ix, pane, tab)) = found else {
+            return false;
+        };
+        pane.update(cx, |p, cx| p.activate(tab, window, cx));
+        self.focus_pane(ix, window, cx);
+        if let Some(line) = line {
+            let tab = pane.read(cx).tabs[tab].clone();
+            tab.update(cx, |tab, cx| tab.go_to(line, window, cx));
+        }
+        true
+    }
+
+    /// The editor pane, made from the first empty pane, else a new pane to the right, else
+    /// (at `MAX_PANES`) the last pane, whose session stays in the open list.
+    fn editor_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<EditorPane> {
+        let found = self.panes.iter().find_map(|pane| match pane {
+            Pane::Editor(pane) => Some(pane.clone()),
+            _ => None,
+        });
+        if let Some(pane) = found {
+            return pane;
+        }
+        let pane = cx.new(|_| EditorPane::new());
+        cx.subscribe_in(&pane, window, |this, pane, _: &Emptied, window, cx| {
+            let ix = (this.panes.iter()).position(|p| matches!(p, Pane::Editor(e) if e == pane));
+            if let Some(ix) = ix {
+                this.drop_pane(ix, window, cx);
+            }
+        })
+        .detach();
+        let ix = match self.panes.iter().position(|p| matches!(p, Pane::Empty(_))) {
+            Some(ix) => ix,
+            None if self.panes.len() < MAX_PANES => {
+                self.panes.push(Pane::Empty(None));
+                self.panes.len() - 1
+            }
+            None => self.panes.len() - 1,
+        };
+        self.panes[ix] = Pane::Editor(pane.clone());
+        self.save_state(cx);
+        pane
     }
 
     fn focus_next_pane(&mut self, _: &FocusNextPane, window: &mut Window, cx: &mut Context<Self>) {
@@ -606,7 +770,7 @@ impl Workspace {
         }
         let root = self.project.clone();
         self.files.update(cx, |files, cx| files.set_root(root, cx));
-        self.watch_project(cx);
+        self.watch_project(window, cx);
         self.save_state(cx);
         cx.notify();
     }
@@ -708,6 +872,7 @@ impl Render for Workspace {
                     }))
                     .child(match pane {
                         Pane::Session(session) => session.clone().into_any_element(),
+                        Pane::Editor(pane) => pane.clone().into_any_element(),
                         Pane::Preparing { agent, .. } => v_flex()
                             .size_full()
                             .items_center()
@@ -732,6 +897,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::new_session))
             .on_action(cx.listener(Self::toggle_terminal))
             .on_action(cx.listener(Self::close_session))
+            .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::focus_next_pane))
             .on_action(cx.listener(Self::open_folder))
             .size_full()
