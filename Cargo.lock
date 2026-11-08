@@ -7947,8 +7947,10 @@ name = "wai"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "gpui-kit",
  "serde_json",
+ "similar",
  "wai-agent",
  "wai-settings",
 ]

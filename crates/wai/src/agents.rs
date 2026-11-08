@@ -15,14 +15,16 @@ pub enum AgentStatus {
 }
 
 #[derive(Debug, Clone)]
-#[expect(dead_code, reason = "some fields are read only from Task 1.6 on")]
 pub enum RegistryEvent {
     Session {
         agent: String,
         session: String,
         event: SessionEvent,
     },
-    Permission(PermissionRequest),
+    Permission {
+        agent: String,
+        request: PermissionRequest,
+    },
     PermissionResolved(u64),
     TurnEnded {
         agent: String,
@@ -115,7 +117,8 @@ impl AgentRegistry {
     }
 
     /// Back to `Ready` once the agent did real work again: call it after a successful
-    /// `new_session`/`load_session` or a turn that did not end in a sign-out. No-op before `Ready`.
+    /// `new_session`/`load_session` or a turn that did not end in a sign-out. No-op before `Ready`
+    /// and after the process exited.
     pub fn mark_ready(&mut self, name: &str, cx: &mut Context<Self>) {
         if let Some(caps) = self.agents.get(name).and_then(|agent| agent.caps) {
             self.set_status(name, AgentStatus::Ready(caps), cx);
@@ -132,6 +135,11 @@ impl AgentRegistry {
             }
             AgentEvent::AuthRequired { .. } => AgentStatus::SignedOut,
             AgentEvent::Exited { error } => {
+                // A dead process is never ready again: `mark_ready` (say, for a `TurnEnded` of
+                // the same batch, routed after it) must not hide the exit.
+                if let Some(entry) = self.agents.get_mut(agent) {
+                    entry.caps = None;
+                }
                 AgentStatus::Failed(error.unwrap_or_else(|| "the agent exited".into()))
             }
             AgentEvent::Update { session, event } => {
@@ -142,7 +150,10 @@ impl AgentRegistry {
                 });
             }
             AgentEvent::PermissionRequested(request) => {
-                return cx.emit(RegistryEvent::Permission(request));
+                return cx.emit(RegistryEvent::Permission {
+                    agent: agent.into(),
+                    request,
+                });
             }
             AgentEvent::PermissionResolved { id } => {
                 return cx.emit(RegistryEvent::PermissionResolved(id));

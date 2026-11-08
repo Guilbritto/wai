@@ -123,7 +123,7 @@ impl ChatModel {
         self.items.len() - 1
     }
 
-    fn notice(&mut self, text: String, kind: NoticeKind) {
+    pub fn notice(&mut self, text: String, kind: NoticeKind) {
         self.push(ChatItem::Notice { text, kind });
     }
 
@@ -233,15 +233,20 @@ impl ChatModel {
         })
     }
 
-    fn set_permission_answer(&mut self, id: u64, answer: &str, overwrite: bool) {
+    /// Whether this model holds the request `id`.
+    fn set_permission_answer(&mut self, id: u64, answer: &str, overwrite: bool) -> bool {
+        let mut held = false;
         for item in &mut self.items {
             if let ChatItem::Permission { request, answered } = item
                 && request.id == id
-                && (overwrite || answered.is_none())
             {
-                *answered = Some(answer.to_string());
+                held = true;
+                if overwrite || answered.is_none() {
+                    *answered = Some(answer.to_string());
+                }
             }
         }
+        held
     }
 
     pub fn on_permission_answered(&mut self, id: u64, choice_name: &str) {
@@ -250,9 +255,9 @@ impl ChatModel {
     }
 
     /// The broker dropped the request (e.g. the turn was cancelled).
+    /// Resolutions are broadcast to every session: ids this model does not hold are ignored.
     pub fn on_permission_resolved(&mut self, id: u64) {
-        self.set_permission_answer(id, "Cancelled", false);
-        if self.state == TurnState::NeedsYou {
+        if self.set_permission_answer(id, "Cancelled", false) && self.state == TurnState::NeedsYou {
             self.state = TurnState::Working;
         }
     }
@@ -404,6 +409,19 @@ mod tests {
         assert_eq!(m.state, TurnState::Working);
         assert!(
             matches!(&m.items[0], ChatItem::Permission { answered, .. } if answered.as_deref() == Some("Yes"))
+        );
+    }
+
+    #[test]
+    fn resolution_of_another_sessions_request_is_ignored() {
+        let mut m = ChatModel::default();
+        m.on_permission(perm());
+        m.on_permission_resolved(8);
+        assert_eq!(m.state, TurnState::NeedsYou);
+        m.on_permission_resolved(7);
+        assert_eq!(m.state, TurnState::Working);
+        assert!(
+            matches!(&m.items[0], ChatItem::Permission { answered, .. } if answered.as_deref() == Some("Cancelled"))
         );
     }
 

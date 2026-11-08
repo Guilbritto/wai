@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, h_resizable, resizable_panel, v_flex, v_resizable};
 use gpui_kit::*;
-use wai_agent::AgentError;
+use wai_agent::{AgentError, StopReason};
 use wai_settings::Settings;
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
@@ -54,37 +54,76 @@ impl Workspace {
         }
     }
 
-    fn session(&self, id: &str, cx: &App) -> Option<Entity<ChatSession>> {
+    fn session(&self, agent: &str, id: &str, cx: &App) -> Option<Entity<ChatSession>> {
         self.panes
             .iter()
             .flatten()
-            .find(|session| session.read(cx).id == id)
+            .find(|session| {
+                let session = session.read(cx);
+                session.agent == agent && session.id == id
+            })
             .cloned()
     }
 
     fn route(&mut self, event: &RegistryEvent, cx: &mut Context<Self>) {
         match event {
-            RegistryEvent::Session { session, event, .. } => {
-                if let Some(s) = self.session(session, cx) {
+            RegistryEvent::Session {
+                agent,
+                session,
+                event,
+            } => {
+                if let Some(s) = self.session(agent, session, cx) {
                     s.update(cx, |s, cx| s.handle_event(event, cx));
                 }
             }
-            RegistryEvent::Permission(request) => {
-                if let Some(s) = self.session(&request.session, cx) {
-                    s.update(cx, |s, cx| s.handle_permission(request.clone(), cx));
+            RegistryEvent::Permission { agent, request } => {
+                match self.session(agent, &request.session, cx) {
+                    Some(s) => s.update(cx, |s, cx| s.handle_permission(request.clone(), cx)),
+                    // A dead agent's requests died with it (and `handle` would respawn it).
+                    None if matches!(
+                        self.registry.read(cx).status(agent),
+                        Some(AgentStatus::Failed(_))
+                    ) => {}
+                    // Nobody can answer it: cancel it so the agent's turn goes on.
+                    None => {
+                        if let Some(handle) = self.registry.update(cx, |r, cx| r.handle(agent, cx))
+                        {
+                            handle.answer_permission(request.id, None).ok();
+                        }
+                    }
                 }
             }
             RegistryEvent::TurnEnded {
-                session, reason, ..
+                agent,
+                session,
+                reason,
             } => {
-                if let Some(s) = self.session(session, cx) {
+                if let Some(s) = self.session(agent, session, cx) {
                     s.update(cx, |s, cx| s.handle_turn_ended(reason, cx));
                 }
+                if !matches!(reason, StopReason::Other(r) if r == "auth_required") {
+                    self.registry.update(cx, |r, cx| r.mark_ready(agent, cx));
+                }
             }
-            // ponytail: carries no session id; Task 1.6 decides which sessions it reaches.
-            RegistryEvent::PermissionResolved(_) => {}
-            // Empty panes show the default agent's problem, if any.
-            RegistryEvent::StatusChanged(_) => cx.notify(),
+            // R7: carries no session id; sessions ignore ids they do not hold.
+            RegistryEvent::PermissionResolved(id) => {
+                for s in self.panes.iter().flatten() {
+                    s.update(cx, |s, cx| s.handle_permission_resolved(*id, cx));
+                }
+            }
+            RegistryEvent::StatusChanged(agent) => {
+                if let Some(AgentStatus::Failed(error)) =
+                    self.registry.read(cx).status(agent).cloned()
+                {
+                    for s in self.panes.iter().flatten() {
+                        if s.read(cx).agent == *agent {
+                            s.update(cx, |s, cx| s.handle_agent_exited(&error, cx));
+                        }
+                    }
+                }
+                // Empty panes show the default agent's problem, if any.
+                cx.notify();
+            }
         }
     }
 
@@ -94,16 +133,15 @@ impl Workspace {
             return eprintln!("wai: no agent named {agent} in the settings");
         };
         let (cwd, pane) = (self.project.clone(), self.focused_pane);
+        let registry = self.registry.downgrade();
         cx.spawn_in(window, async move |this, cx| {
             let started = handle.new_session(cwd.clone()).await;
-            this.update(cx, |this, cx| match started {
+            this.update_in(cx, |this, window, cx| match started {
                 Ok(started) => {
                     // A session that starts proves the agent works (signed in again, say).
                     this.registry.update(cx, |r, cx| r.mark_ready(&agent, cx));
-                    let session = cx.new(|_| ChatSession {
-                        agent,
-                        id: started.id,
-                        cwd,
+                    let session = cx.new(|cx| {
+                        ChatSession::new(agent, started, cwd, handle, registry, window, cx)
                     });
                     let pane = pane.min(this.panes.len() - 1);
                     this.panes[pane] = Some(session);
@@ -278,7 +316,7 @@ impl Render for Workspace {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
@@ -290,7 +328,7 @@ mod tests {
     use crate::agents::AgentStatus;
     use crate::app;
 
-    fn open(
+    pub(crate) fn open(
         cx: &mut TestAppContext,
         settings: Settings,
     ) -> (Entity<Workspace>, &mut VisualTestContext) {
@@ -300,7 +338,7 @@ mod tests {
     }
 
     /// Settings whose default agent `fake` is `wai-fake-agent <flag>`.
-    fn fake_settings(flag: &str) -> Settings {
+    pub(crate) fn fake_settings(flag: &str) -> Settings {
         // `target/<profile>/wai-fake-agent`, next to the test binary's `deps/`.
         let name = format!("wai-fake-agent{}", std::env::consts::EXE_SUFFIX);
         let fake: PathBuf = std::env::current_exe()
@@ -318,7 +356,7 @@ mod tests {
     }
 
     /// Real agent I/O runs outside the test scheduler: sleep, run, check, for up to 10 s.
-    fn wait_until(
+    pub(crate) fn wait_until(
         cx: &mut VisualTestContext,
         what: &str,
         mut done: impl FnMut(&mut VisualTestContext) -> bool,
@@ -327,6 +365,8 @@ mod tests {
         while !done(cx) {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             std::thread::sleep(Duration::from_millis(20));
+            // Test timers run on a fake clock: keep it in step with the real one.
+            cx.executor().advance_clock(Duration::from_millis(20));
             cx.run_until_parked();
         }
     }

@@ -1,6 +1,7 @@
-// Consumed by the chat view in Task 1.6.
-#[allow(dead_code)]
+mod input;
 mod model;
+mod permission;
+mod render;
 mod view;
 
 pub use view::ChatSession;

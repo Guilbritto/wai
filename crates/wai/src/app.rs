@@ -17,7 +17,8 @@ actions!(
         ToggleTerminal,
         CloseSession,
         FocusNextPane,
-        OpenFolder
+        OpenFolder,
+        CancelTurn
     ]
 );
 
@@ -38,13 +39,15 @@ pub fn init(settings: &Settings, cx: &mut App) {
 
 fn bind_keys(cx: &mut App) {
     let workspace = Some("Workspace");
-    let keymap: [(&str, Box<dyn Action>, Option<&str>); 6] = [
+    let keymap: [(&str, Box<dyn Action>, Option<&str>); 7] = [
         ("secondary-q", Box::new(Quit), None),
         ("secondary-n", Box::new(NewSession), workspace),
         ("ctrl-`", Box::new(ToggleTerminal), workspace),
         ("secondary-w", Box::new(CloseSession), workspace),
         ("secondary-alt-right", Box::new(FocusNextPane), workspace),
         ("secondary-o", Box::new(OpenFolder), workspace),
+        // The prompt box lets Escape through (it has nothing to clear).
+        ("escape", Box::new(CancelTurn), Some("ChatSession")),
     ];
     // `KeyBinding::new` rejects `secondary-`; `load` resolves it for the host OS.
     let bindings: Vec<_> = keymap
@@ -58,7 +61,9 @@ fn bind_keys(cx: &mut App) {
 }
 
 pub fn run(project: PathBuf, settings: Settings) {
-    gpui_kit::application().run(move |cx| {
+    // Without the asset source every component icon (status, chevrons) renders blank.
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    app.run(move |cx| {
         init(&settings, cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_window_closed(|cx, _| {
@@ -82,6 +87,10 @@ pub fn run(project: PathBuf, settings: Settings) {
         .expect("open window");
         cx.activate(true);
 
+        #[cfg(feature = "demo")]
+        if let Ok(prompt) = std::env::var("WAI_SHOT_PROMPT") {
+            send_prompt(_opened.clone(), prompt, cx);
+        }
         #[cfg(feature = "screenshot")]
         if let Ok(path) = std::env::var("WAI_SHOT") {
             screenshot(_opened, path, cx);
@@ -89,29 +98,86 @@ pub fn run(project: PathBuf, settings: Settings) {
     });
 }
 
-/// Saves the window, with the terminal panel shown, to `path` and quits. Offscreen, so it
-/// also works with the screen locked.
+/// Scripted run (screen locked, no keyboard): after 2 s, opens a session and types `prompt`.
+#[cfg(feature = "demo")]
+fn send_prompt(
+    (window, workspace): (AnyWindowHandle, Entity<Workspace>),
+    prompt: String,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        let executor = cx.background_executor().clone();
+        executor.timer(Duration::from_secs(2)).await;
+        window
+            .update(cx, |_, window, cx| {
+                window.dispatch_action(Box::new(NewSession), cx)
+            })
+            .ok();
+        // ponytail: a script-only wait; the product never polls.
+        while workspace.read_with(cx, |w, _| w.panes[0].is_none()) {
+            executor.timer(Duration::from_millis(50)).await;
+        }
+        window
+            .update(cx, |_, window, cx| type_text(&prompt, window, cx))
+            .ok();
+    })
+    .detach();
+}
+
+/// Types `text` and Enter into the focused element, as the keyboard would.
+#[cfg(feature = "demo")]
+fn type_text(text: &str, window: &mut Window, cx: &mut App) {
+    let os = cx.platform_info().os;
+    for ch in text.chars() {
+        let key = if ch == ' ' {
+            "space".into()
+        } else {
+            ch.to_string()
+        };
+        let mut keystroke = Keystroke::parse_with_os(&key, os).expect("a typed character");
+        keystroke.key_char = Some(ch.to_string());
+        window.dispatch_keystroke(keystroke, cx);
+    }
+    let enter = Keystroke::parse_with_os("enter", os).expect("enter");
+    window.dispatch_keystroke(enter, cx);
+}
+
+/// Saves the window to `path` and quits, offscreen so it also works with the screen locked.
+/// With `WAI_SHOT_PROMPT`, once that turn shows its permission card; otherwise after 2 s,
+/// with the terminal panel shown.
 #[cfg(feature = "screenshot")]
 fn screenshot(
     (window, workspace): (AnyWindowHandle, Entity<Workspace>),
     path: String,
     cx: &mut App,
 ) {
+    let chat = std::env::var("WAI_SHOT_PROMPT").is_ok();
     cx.spawn(async move |cx| {
-        cx.background_executor().timer(Duration::from_secs(2)).await;
-        workspace.update(cx, |w, cx| {
-            w.terminal_visible = true;
-            cx.notify();
-        });
+        let executor = cx.background_executor().clone();
+        executor.timer(Duration::from_secs(2)).await;
+        if chat {
+            // The prompt, the reply, the tool call and its permission card.
+            let rows = |w: &Workspace, cx: &App| {
+                w.panes[0]
+                    .as_ref()
+                    .map_or(0, |s| s.read(cx).model.items.len())
+            };
+            while workspace.read_with(cx, rows) < 4 {
+                executor.timer(Duration::from_millis(50)).await;
+            }
+        } else {
+            workspace.update(cx, |w, cx| {
+                w.terminal_visible = true;
+                cx.notify();
+            });
+        }
         // A resizable group settles its sizes in a notify deferred past the draw, so each
         // draw gets its own update.
         for _ in 0..3 {
             window
                 .update(cx, |_, window, cx| window.draw(cx).clear(cx))
                 .ok();
-            cx.background_executor()
-                .timer(Duration::from_millis(100))
-                .await;
+            executor.timer(Duration::from_millis(100)).await;
         }
         let image = window.update(cx, |_, window, _| window.render_to_image());
         match image.and_then(|image| Ok(image?.save(&path)?)) {

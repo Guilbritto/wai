@@ -2,6 +2,8 @@
 //!
 //! - `--reply <text>`: the turn's answer, streamed one word per chunk
 //!   ("one", " two", " three"); default `Hello from fake agent`.
+//! - `--reply-file <path>`: like `--reply`, read from a file (multi-line markdown).
+//!   With `--ask-permission` it streams before the tool call.
 //! - `--chunk-delay-ms <n>`: pause before each chunk.
 //! - `--ask-permission`: send an Edit tool call for `notes.md`, ask permission and
 //!   reply `chose:<option_id>` or `chose:cancelled`.
@@ -26,6 +28,7 @@ const PAGE: usize = 10;
 
 struct Opts {
     reply: String,
+    reply_file: bool,
     chunk_delay: Duration,
     ask_permission: bool,
     crash_after: Option<usize>,
@@ -40,6 +43,7 @@ struct Opts {
 fn parse_args() -> Opts {
     let mut opts = Opts {
         reply: "Hello from fake agent".into(),
+        reply_file: false,
         chunk_delay: Duration::ZERO,
         ask_permission: false,
         crash_after: None,
@@ -62,6 +66,12 @@ fn parse_args() -> Opts {
         };
         match flag.as_str() {
             "--reply" => opts.reply = value(),
+            "--reply-file" => {
+                let path = value();
+                opts.reply = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("--reply-file {path}: {e}"));
+                opts.reply_file = true;
+            }
             "--chunk-delay-ms" => opts.chunk_delay = Duration::from_millis(number(value()) as u64),
             "--ask-permission" => opts.ask_permission = true,
             "--crash-after" => opts.crash_after = Some(number(value())),
@@ -109,11 +119,27 @@ impl Fake {
                 ))]);
             send(cx, session, acp::SessionUpdate::ToolCall(call))?;
         }
+        if self.opts.ask_permission && self.opts.reply_file {
+            let reason = self.stream(cx, session, &self.opts.reply).await?;
+            if reason != acp::StopReason::EndTurn {
+                return Ok(reason);
+            }
+        }
         let reply = if self.opts.ask_permission {
             format!("chose:{}", self.ask_permission(cx, session).await?)
         } else {
             self.opts.reply.clone()
         };
+        self.stream(cx, session, &reply).await
+    }
+
+    /// Streams `reply` one word per chunk.
+    async fn stream(
+        &self,
+        cx: &ConnectionTo<Client>,
+        session: &acp::SessionId,
+        reply: &str,
+    ) -> Result<acp::StopReason, Error> {
         for (i, word) in reply.split(' ').enumerate() {
             if !self.opts.chunk_delay.is_zero() {
                 smol::Timer::after(self.opts.chunk_delay).await;
