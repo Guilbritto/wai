@@ -169,6 +169,8 @@ impl Workspace {
         let title = s.model.title.clone().unwrap_or("New session".into());
         let active = self.panes[self.focused_pane].session() == Some(session);
         let (open, side) = (session.clone(), session.clone());
+        let (id, cwd, forkable) = (s.id.clone(), s.cwd.clone(), self.can_fork(cx));
+        let fork_title = s.model.title.clone();
         row(active, cx)
             .child(
                 h_flex()
@@ -189,6 +191,13 @@ impl Workspace {
                     move |this, _, window, cx| this.show(side.clone(), true, window, cx),
                 )))
             })
+            .when(forkable, |el| {
+                el.child(fork_button(("open-fork", ix)).on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        this.fork(id.clone(), fork_title.clone(), cwd.clone(), window, cx)
+                    },
+                )))
+            })
     }
 
     fn history_row(
@@ -198,7 +207,8 @@ impl Workspace {
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
         let title = summary.title.clone().unwrap_or_else(|| summary.id.clone());
-        let (open, side) = (summary.clone(), summary.clone());
+        let (open, side, source) = (summary.clone(), summary.clone(), summary.clone());
+        let forkable = self.can_fork(cx);
         row(false, cx)
             .child(
                 div()
@@ -215,6 +225,15 @@ impl Workspace {
                 el.child(side_button(("history-side", ix)).on_click(
                     cx.listener(move |this, _, window, cx| this.resume(&side, true, window, cx)),
                 ))
+            })
+            .when(forkable, |el| {
+                el.child(fork_button(("history-fork", ix)).on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        let (id, title, cwd) =
+                            (source.id.clone(), source.title.clone(), source.cwd.clone());
+                        this.fork(id, title, cwd, window, cx)
+                    },
+                )))
             })
     }
 }
@@ -253,4 +272,12 @@ fn side_button(id: impl Into<ElementId>) -> Button {
         .xsmall()
         .icon(IconName::PanelRightOpen)
         .tooltip("Open to the side")
+}
+
+fn fork_button(id: impl Into<ElementId>) -> Button {
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .icon(IconName::Copy)
+        .tooltip("Fork")
 }

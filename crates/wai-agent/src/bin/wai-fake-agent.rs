@@ -344,7 +344,8 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                         .prompt_capabilities(acp::PromptCapabilities::new().image(true))
                         .session_capabilities(
                             acp::SessionCapabilities::new()
-                                .list(acp::SessionListCapabilities::new()),
+                                .list(acp::SessionListCapabilities::new())
+                                .fork(acp::SessionForkCapabilities::new()),
                         );
                     responder.respond(
                         acp::InitializeResponse::new(request.protocol_version)
@@ -389,6 +390,21 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                     acp::SessionUpdate::AgentMessageChunk(chunk("previous answer")),
                 )?;
                 responder.respond(acp::LoadSessionResponse::new().modes(modes()))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let fake = fake.clone();
+                async move |request: acp::ForkSessionRequest, responder, _cx| {
+                    if request.session_id.0.starts_with("missing") {
+                        return responder.respond_with_error(
+                            acp::Error::session_not_found(request.session_id).into(),
+                        );
+                    }
+                    let id = format!("fork-{}", fake.next_session.fetch_add(1, Ordering::Relaxed));
+                    responder.respond(acp::ForkSessionResponse::new(id).modes(modes()))
+                }
             },
             agent_client_protocol::on_receive_request!(),
         )

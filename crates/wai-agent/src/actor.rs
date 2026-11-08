@@ -30,6 +30,11 @@ enum Command {
         cwd: PathBuf,
         reply: Reply<SessionStarted>,
     },
+    ForkSession {
+        id: SessionId,
+        cwd: PathBuf,
+        reply: Reply<SessionStarted>,
+    },
     ListSessions {
         cursor: Option<String>,
         reply: Reply<Page>,
@@ -98,6 +103,17 @@ impl AgentHandle {
         cwd: PathBuf,
     ) -> Result<SessionStarted, AgentError> {
         self.request(|reply| Command::LoadSession { id, cwd, reply })
+            .await
+    }
+
+    /// Copies session `id` into a new one (the agent must advertise `AgentCaps::fork`). The
+    /// copy is not replayed here: `load_session` of the returned id does that.
+    pub async fn fork_session(
+        &self,
+        id: SessionId,
+        cwd: PathBuf,
+    ) -> Result<SessionStarted, AgentError> {
+        self.request(|reply| Command::ForkSession { id, cwd, reply })
             .await
     }
 
@@ -462,6 +478,7 @@ async fn actor_loop(
         caps: AgentCaps {
             load_session: caps.load_session,
             list_sessions: caps.session_capabilities.list.is_some(),
+            fork: caps.session_capabilities.fork.is_some(),
             images: caps.prompt_capabilities.image,
         },
     });
@@ -491,6 +508,13 @@ async fn actor_loop(
                 acp::LoadSessionRequest::new(id.clone(), cwd),
                 reply,
                 |r| convert::session_started(id, r.modes),
+            )?,
+            Command::ForkSession { id, cwd, reply } => request(
+                &cx,
+                broker,
+                acp::ForkSessionRequest::new(id, cwd),
+                reply,
+                |r| convert::session_started(r.session_id.to_string(), r.modes),
             )?,
             Command::ListSessions { cursor, reply } => request(
                 &cx,

@@ -367,6 +367,50 @@ impl Workspace {
         session.update(cx, |s, cx| s.load(false, window, cx));
     }
 
+    /// Whether the default agent advertised `session/fork`.
+    pub(crate) fn can_fork(&self, cx: &App) -> bool {
+        let agent = &self.settings.default_agent;
+        matches!(
+            self.registry.read(cx).status(agent),
+            Some(AgentStatus::Ready(caps)) if caps.fork
+        )
+    }
+
+    /// Copies session `id` into a new one that opens in a new pane to the side (the focused
+    /// pane at `MAX_PANES`). It is titled like its source plus " (fork)" until the agent sends
+    /// one. The fork's history comes from loading it, so it is routed before that load starts.
+    pub fn fork(
+        &mut self,
+        id: String,
+        title: Option<String>,
+        cwd: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let agent = self.settings.default_agent.clone();
+        let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
+            return;
+        };
+        let title = title.map(|t| format!("{t} (fork)"));
+        cx.spawn_in(window, async move |this, cx| {
+            let forked = handle.fork_session(id, cwd.clone()).await;
+            this.update_in(cx, |this, window, cx| match forked {
+                Ok(started) => {
+                    let Some(session) = this.loading_session(agent, started.id, cwd, window, cx)
+                    else {
+                        return;
+                    };
+                    session.update(cx, |s, _| s.model.title = title);
+                    this.show(session.clone(), true, window, cx);
+                    session.update(cx, |s, cx| s.load(false, window, cx));
+                }
+                Err(e) => eprintln!("wai: could not fork the session: {e}"),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// A session about to load, in the open list and in no pane yet. Routed before it loads:
     /// the agent replays the conversation before it answers. `None` when no agent has that name
     /// in the settings.
@@ -829,6 +873,52 @@ pub(crate) mod tests {
             workspace.read_with(cx, |w, _| w.focused_pane),
             (focused + 1) % 4
         );
+    }
+
+    #[gpui_kit::test]
+    fn fork_opens_side_pane_with_history(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(3));
+        let rows = load_history(&workspace, 3, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
+
+        // The sidebar offers Fork on the history rows and on the open session.
+        cx.update(|window, cx| window.click(("history-fork", 1usize), cx));
+        wait_until(cx, "the fork", |cx| {
+            workspace.read_with(cx, |w, _| w.panes.len() == 2)
+        });
+        let session = workspace
+            .read_with(cx, |w, _| w.panes[1].session().cloned())
+            .expect("the fork opens to the side");
+        wait_until(cx, "the replay", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.state == TurnState::Idle && s.model.items.len() == 2
+            })
+        });
+        session.read_with(cx, |s, _| {
+            assert!(s.id.starts_with("fork-"), "{}", s.id);
+            assert_eq!(s.model.title.as_deref(), Some("Session 1 (fork)"));
+            assert_eq!(
+                s.model.items[0],
+                ChatItem::User {
+                    text: "previous prompt".into()
+                }
+            );
+        });
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.sessions.len(), 2);
+            assert_eq!(w.focused_pane, 1);
+        });
+
+        // An open session forks too, by its row.
+        cx.update(|window, cx| window.click(("open-fork", 0usize), cx));
+        wait_until(cx, "the second fork", |cx| {
+            workspace.read_with(cx, |w, _| w.panes.len() == 3)
+        });
+        let title = workspace.read_with(cx, |w, cx| {
+            w.panes[2].session().unwrap().read(cx).model.title.clone()
+        });
+        assert_eq!(title.as_deref(), Some("Session 0 (fork)"));
     }
 
     #[gpui_kit::test]

@@ -104,6 +104,7 @@ fn streams_agent_text_and_ends_turn() {
                     AgentCaps {
                         load_session: true,
                         list_sessions: true,
+                        fork: true,
                         images: true
                     }
                 );
@@ -468,6 +469,40 @@ fn load_session_replays_history() {
             ]
         );
         assert_eq!(agent.set_mode("abc".into(), "plan".into()).await, Ok(()));
+    });
+}
+
+#[test]
+fn fork_replays_source_history() {
+    run(async {
+        let (agent, rx) = spawn(&[]);
+        ready(&rx).await;
+        let forked = agent.fork_session("abc".into(), cwd()).await.unwrap();
+        assert_ne!(forked.id, "abc");
+        assert_eq!(forked.modes.len(), 2);
+
+        // The fork holds the source's conversation: loading it replays it under the new id.
+        agent.load_session(forked.id.clone(), cwd()).await.unwrap();
+        let replay: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(
+            replay,
+            vec![
+                AgentEvent::Update {
+                    session: forked.id.clone(),
+                    event: SessionEvent::UserText("previous prompt".into())
+                },
+                AgentEvent::Update {
+                    session: forked.id,
+                    event: SessionEvent::AgentText("previous answer".into())
+                },
+            ]
+        );
+
+        let missing = agent.fork_session("missing".into(), cwd()).await;
+        assert!(
+            matches!(missing, Err(AgentError::Protocol(_))),
+            "{missing:?}"
+        );
     });
 }
 

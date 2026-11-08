@@ -42,6 +42,7 @@ pub enum PromptBlock {
 pub struct AgentCaps {
     pub load_session: bool,
     pub list_sessions: bool,
+    pub fork: bool,
     pub images: bool,
 }
 

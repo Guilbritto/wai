@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use async_channel::Receiver;
 use wai_agent::{
-    AgentEvent, AgentHandle, AgentSpec, ChoiceKind, PromptBlock, SessionEvent, StopReason,
-    ToolContent,
+    AgentCaps, AgentEvent, AgentHandle, AgentSpec, ChoiceKind, PromptBlock, SessionEvent,
+    StopReason, ToolContent,
 };
 
 const COMMAND: &str = "npx -y @agentclientprotocol/claude-agent-acp@0.101.0";
@@ -27,12 +27,16 @@ fn spawn() -> (AgentHandle, Receiver<AgentEvent>) {
     })
 }
 
-async fn ready(rx: &Receiver<AgentEvent>) {
+async fn ready(rx: &Receiver<AgentEvent>) -> AgentCaps {
     loop {
         match rx.recv().await.expect("event channel closed") {
-            AgentEvent::Ready { name, version, .. } => {
+            AgentEvent::Ready {
+                name,
+                version,
+                caps,
+            } => {
                 println!("ready: {name} {version}");
-                return;
+                return caps;
             }
             AgentEvent::Exited { error } => panic!("agent exited before ready: {error:?}"),
             _ => {}
@@ -123,7 +127,7 @@ fn write_a_file_then_resume() {
         agent.shutdown().await;
 
         let (agent, rx) = spawn();
-        ready(&rx).await;
+        let caps = ready(&rx).await;
         let t = Instant::now();
         agent
             .load_session(session.id.clone(), dir.clone())
@@ -150,6 +154,40 @@ fn write_a_file_then_resume() {
             t.elapsed()
         );
         assert!(replayed, "replay did not contain the user prompt");
+
+        println!("fork advertised: {}", caps.fork);
+        if caps.fork {
+            let t = Instant::now();
+            let forked = agent
+                .fork_session(session.id.clone(), dir.clone())
+                .await
+                .expect("fork_session");
+            assert_ne!(forked.id, session.id);
+            // claude-agent-acp answers a fork without replaying it: loading the copy does.
+            agent
+                .load_session(forked.id.clone(), dir.clone())
+                .await
+                .expect("load_session of the fork");
+            let mut replayed = false;
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !replayed && Instant::now() < deadline {
+                let Ok(Ok(event)) = smol::future::or(async { Ok(rx.recv().await) }, async {
+                    smol::Timer::after(Duration::from_secs(1)).await;
+                    Err(())
+                })
+                .await
+                else {
+                    continue;
+                };
+                replayed = matches!(
+                    event,
+                    AgentEvent::Update { session: ref id, event: SessionEvent::UserText(ref s) }
+                        if *id == forked.id && s.contains("hello.txt")
+                );
+            }
+            println!("fork + load: {:?}, replayed: {replayed}", t.elapsed());
+            assert!(replayed, "the fork did not carry the conversation");
+        }
 
         let sessions = agent.list_sessions().await.expect("list_sessions");
         println!("list_sessions: {} sessions", sessions.len());
