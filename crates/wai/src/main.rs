@@ -13,10 +13,14 @@ use wai_settings::{AppState, Settings, config_dir};
 
 fn main() -> anyhow::Result<()> {
     // `WAI_STATE_PATH=<file>` keeps a manual run away from the real state.
-    let state_path = std::env::var_os("WAI_STATE_PATH")
-        .map_or_else(|| config_dir().join("state.json"), PathBuf::from);
+    let state_path = std::env::var_os("WAI_STATE_PATH").map_or_else(
+        || Ok(config_dir().join("state.json")),
+        |p| std::path::absolute(PathBuf::from(p)),
+    )?;
     let state = AppState::load(&state_path);
     let project = resolve_project(std::env::args_os().nth(1).map(PathBuf::from), state.project)?;
+    // Everything relative is resolved by now; agents spawn from a neutral dir, not a repo.
+    wai_agent::enter_neutral_dir(&config_dir()).context("cannot enter the config dir")?;
     let (settings, notices) = Settings::load(&config_dir(), Some(&project))?;
     for notice in &notices {
         eprintln!("wai: {notice}");

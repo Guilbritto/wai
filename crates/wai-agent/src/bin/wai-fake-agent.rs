@@ -14,6 +14,7 @@
 //! - `--sessions <n>`: `session/list` returns n sessions titled `Session <i>`, 10 per page.
 //! - `--sessions-cwd <path>`: the cwd of those sessions; default `/tmp`.
 //! - `--pid-file <path>`: write the process id there at start.
+//! - `--cwd-file <path>`: write the process working directory there at start.
 //!
 //! `session/load` replays `previous prompt` and `previous answer`; for an id starting with
 //! `missing` it fails with the ACP session-not-found error instead.
@@ -41,6 +42,7 @@ struct Opts {
     sessions: usize,
     sessions_cwd: PathBuf,
     pid_file: Option<PathBuf>,
+    cwd_file: Option<PathBuf>,
 }
 
 fn parse_args() -> Opts {
@@ -56,6 +58,7 @@ fn parse_args() -> Opts {
         sessions: 0,
         sessions_cwd: "/tmp".into(),
         pid_file: None,
+        cwd_file: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -84,6 +87,7 @@ fn parse_args() -> Opts {
             "--sessions" => opts.sessions = number(value()),
             "--sessions-cwd" => opts.sessions_cwd = value().into(),
             "--pid-file" => opts.pid_file = Some(value().into()),
+            "--cwd-file" => opts.cwd_file = Some(value().into()),
             other => panic!("unknown flag {other}"),
         }
     }
@@ -236,6 +240,10 @@ fn main() -> Result<(), Error> {
     let opts = parse_args();
     if let Some(path) = &opts.pid_file {
         std::fs::write(path, std::process::id().to_string()).expect("write pid file");
+    }
+    if let Some(path) = &opts.cwd_file {
+        let cwd = std::env::current_dir().expect("current dir");
+        std::fs::write(path, cwd.to_string_lossy().as_bytes()).expect("write cwd file");
     }
     let fake = Arc::new(Fake {
         opts,
