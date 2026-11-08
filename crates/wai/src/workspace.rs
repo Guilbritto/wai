@@ -394,10 +394,22 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         cx.subscribe_in(&session, window, |this, session, event, window, cx| {
-            // Its pane keeps the notice; the next launch does not try again.
-            if matches!(event, ChatEvent::RestoreFailed) {
-                this.sessions.retain(|s| s != session);
-                this.save_state(cx);
+            match event {
+                // Its pane keeps the notice; the next launch does not try again.
+                ChatEvent::RestoreFailed => {
+                    this.sessions.retain(|s| s != session);
+                    this.save_state(cx);
+                }
+                ChatEvent::OpenFile { path, line } => {
+                    return this.open_file(path.clone(), Some(*line), window, cx);
+                }
+                // The watcher may not see it (a file outside the project): tell the tabs now. A
+                // tab the watcher reached first finds its stamp current and does nothing.
+                ChatEvent::Reverted(path) => {
+                    let changed = [FsChange::Changed(vec![path.clone()])];
+                    return this.disk_changed(&changed, window, cx);
+                }
+                _ => {}
             }
             let model = &session.read(cx).model;
             if let Some(kind) = should_notify(event, &model.state, window.is_window_active()) {

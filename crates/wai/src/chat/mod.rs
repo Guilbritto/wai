@@ -1,3 +1,4 @@
+mod edits;
 mod input;
 mod model;
 mod permission;

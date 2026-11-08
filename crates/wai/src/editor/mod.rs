@@ -3,7 +3,7 @@
 mod file;
 mod pane;
 
-pub use file::load;
+pub use file::{load, save};
 pub use pane::{EditorPane, Emptied, FileEditor};
 
 #[cfg(test)]
@@ -369,6 +369,7 @@ mod tests {
     /// R29: switching project asks about unsaved edits, then closes the old project's files.
     #[gpui_kit::test]
     fn switching_project_asks_then_closes_editors(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // each project's watcher reports from a real thread
         let dirs = [(); 2].map(|_| tempfile::tempdir().unwrap());
         let [one, two] = [0, 1].map(|ix| canonical(dirs[ix].path()));
         let [a, b] = [one.join("a.txt"), two.join("b.txt")];

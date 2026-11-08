@@ -21,6 +21,8 @@
 //! - `--fail-fork`: `session/fork` fails with an internal error.
 //! - `--no-load`: do not advertise `loadSession`.
 //! - `--flood <bytes>`: start the turn with one tool call carrying that many bytes of `x\n`.
+//! - `--edit <path>` (repeatable): start the turn by appending `edited by the fake agent` to the
+//!   file (creating it if missing) and reporting a completed Edit tool call with its diff.
 //! - `--sessions <n>`: `session/list` returns n sessions titled `Session <i>`, 10 per page.
 //! - `--sessions-cwd <path>`: the cwd of those sessions; default `/tmp`.
 //! - `--pid-file <path>`: write the process id there at start.
@@ -54,6 +56,7 @@ struct Opts {
     fail_fork: bool,
     no_load: bool,
     flood: Option<usize>,
+    edits: Vec<PathBuf>,
     sessions: usize,
     sessions_cwd: PathBuf,
     pid_file: Option<PathBuf>,
@@ -75,6 +78,7 @@ fn parse_args() -> Opts {
         fail_fork: false,
         no_load: false,
         flood: None,
+        edits: Vec::new(),
         sessions: 0,
         sessions_cwd: "/tmp".into(),
         pid_file: None,
@@ -112,6 +116,7 @@ fn parse_args() -> Opts {
             "--fail-fork" => opts.fail_fork = true,
             "--no-load" => opts.no_load = true,
             "--flood" => opts.flood = Some(number(value())),
+            "--edit" => opts.edits.push(value().into()),
             "--sessions" => opts.sessions = number(value()),
             "--sessions-cwd" => opts.sessions_cwd = value().into(),
             "--pid-file" => opts.pid_file = Some(value().into()),
@@ -154,6 +159,20 @@ impl Fake {
                 .content(vec![acp::ToolCallContent::Content(acp::Content::new(
                     text_block(text),
                 ))]);
+            send(cx, session, acp::SessionUpdate::ToolCall(call))?;
+        }
+        for (i, path) in self.opts.edits.iter().enumerate() {
+            let old = std::fs::read_to_string(path).ok();
+            let new = format!("{}edited by the fake agent\n", old.as_deref().unwrap_or(""));
+            std::fs::write(path, &new).map_err(Error::into_internal_error)?;
+            let diff = acp::Diff::new(path.clone(), new).old_text(old);
+            let call = acp::ToolCall::new(
+                format!("edit-file-{i}"),
+                format!("Edit {}", path.file_name().unwrap_or_default().display()),
+            )
+            .kind(acp::ToolKind::Edit)
+            .status(acp::ToolCallStatus::Completed)
+            .content(vec![acp::ToolCallContent::Diff(diff)]);
             send(cx, session, acp::SessionUpdate::ToolCall(call))?;
         }
         if self.opts.ask_permission && self.opts.reply_file {

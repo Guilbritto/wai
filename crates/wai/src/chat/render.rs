@@ -121,8 +121,17 @@ impl ChatSession {
                         this.answer(id, choice, cx)
                     }));
                 let diffs = self.diffs.get(&ix).map_or(&[][..], Vec::as_slice);
-                permission::card(ix, request, answered.as_deref(), diffs, on_choose, cx)
-                    .into_any_element()
+                let on_open = Self::on_open(cx);
+                permission::card(
+                    ix,
+                    request,
+                    answered.as_deref(),
+                    diffs,
+                    on_choose,
+                    &on_open,
+                    cx,
+                )
+                .into_any_element()
             }
             ChatItem::Question { request, answered } => question::card(
                 ix,
@@ -150,6 +159,9 @@ impl ChatSession {
                     })
                     .into_any_element()
             }
+            ChatItem::Edits { turn, files } => {
+                self.render_edits(ix, *turn, files, cx).into_any_element()
+            }
         }
     }
 
@@ -167,7 +179,9 @@ impl ChatSession {
             ToolStatus::Failed => (IconName::CircleX, theme.danger),
         };
         let (output, hidden) = tool.visible_text();
+        let on_open = Self::on_open(cx);
         v_flex()
+            .id(("tool", ix))
             .gap_2()
             .p_2()
             .rounded_md()
@@ -210,7 +224,8 @@ impl ChatSession {
                     .get(&ix)
                     .into_iter()
                     .flatten()
-                    .map(|d| d.render(cx)),
+                    .enumerate()
+                    .map(|(k, d)| d.render(("diff", k).into(), &on_open, cx)),
             )
     }
 

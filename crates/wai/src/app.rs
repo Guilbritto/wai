@@ -223,8 +223,8 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 }
 
 /// Saves the window to `path` and quits, offscreen so it also works with the screen locked.
-/// With `WAI_SHOT_PROMPT`, once that turn needs the user (a permission or question card);
-/// otherwise after 2 s,
+/// With `WAI_SHOT_PROMPT`, once that turn needs the user (a permission or question card) or ends
+/// with an Edits block (a fake agent run with `--edit`, fase-2-edits.png); otherwise after 2 s,
 /// with the terminal panel shown and `echo wai` run in it.
 /// `WAI_SHOT=docs/screens/fase-1-sidebar.png WAI_SHOT_PROMPT=… WAI_SHOT_SIDE=1` with a fake
 /// agent run with `--sessions 8 --ask-permission --reply-file …`.
@@ -242,9 +242,13 @@ fn screenshot(
         executor.timer(Duration::from_secs(2)).await;
         if chat {
             let needs_you = |w: &Workspace, cx: &App| {
-                w.panes[0]
-                    .session()
-                    .is_some_and(|s| *s.read(cx).status() == crate::chat::TurnState::NeedsYou)
+                w.panes[0].session().is_some_and(|s| {
+                    let model = &s.read(cx).model;
+                    model.state == crate::chat::TurnState::NeedsYou
+                        || (model.state == crate::chat::TurnState::Idle
+                            && (model.items.iter())
+                                .any(|i| matches!(i, crate::chat::ChatItem::Edits { .. })))
+                })
             };
             while !workspace.read_with(cx, needs_you) {
                 executor.timer(Duration::from_millis(50)).await;

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use wai_agent::{
     CommandInfo, FileDiff, ModeInfo, PermissionRequest, QuestionRequest, SessionEvent, StopReason,
     ToolCallPatch, ToolContent, ToolStatus,
@@ -54,6 +56,22 @@ pub enum ChatItem {
         text: String,
         kind: NoticeKind,
     },
+    /// Ends a turn that edited files: one row per file, in the order first edited.
+    Edits {
+        turn: usize,
+        files: Vec<EditedFile>,
+    },
+}
+
+/// A file a turn edited: its steps (indices into `turn_edits`, oldest first) and how many of the
+/// latest ones Revert undid.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditedFile {
+    pub path: PathBuf,
+    pub steps: Vec<usize>,
+    pub reverted: usize,
+    /// Why the last Revert did nothing.
+    pub failed: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -319,7 +337,54 @@ impl ChatModel {
         }
     }
 
+    /// The diffs of turn `turn` (0-based, one per user message), in order. Only completed tool
+    /// calls count: a rejected or cancelled edit never reached the disk.
+    pub fn turn_edits(&self, turn: usize) -> Vec<&FileDiff> {
+        let mut users = 0;
+        let mut edits = Vec::new();
+        for item in &self.items {
+            match item {
+                ChatItem::User { .. } if users > turn => break,
+                ChatItem::User { .. } => users += 1,
+                ChatItem::Tool(t) if users == turn + 1 && t.status == ToolStatus::Completed => {
+                    edits.extend(&t.diffs)
+                }
+                _ => {}
+            }
+        }
+        edits
+    }
+
+    /// The Edits block of the turn that just ended, if it edited files.
+    fn push_edits(&mut self) {
+        let users = self
+            .items
+            .iter()
+            .filter(|i| matches!(i, ChatItem::User { .. }));
+        let Some(turn) = users.count().checked_sub(1) else {
+            return;
+        };
+        let mut files: Vec<EditedFile> = Vec::new();
+        // ponytail: one file is one path as the agent spelled it; two spellings of a file
+        // (`/var` and `/private/var`) make two rows.
+        for (step, diff) in self.turn_edits(turn).into_iter().enumerate() {
+            match files.iter_mut().find(|f| f.path == diff.path) {
+                Some(file) => file.steps.push(step),
+                None => files.push(EditedFile {
+                    path: diff.path.clone(),
+                    steps: vec![step],
+                    reverted: 0,
+                    failed: None,
+                }),
+            }
+        }
+        if !files.is_empty() {
+            self.push(ChatItem::Edits { turn, files });
+        }
+    }
+
     pub fn on_turn_ended(&mut self, reason: &StopReason) {
+        self.push_edits();
         match reason {
             StopReason::EndTurn => self.state = TurnState::Idle,
             StopReason::Cancelled => {
@@ -592,6 +657,68 @@ mod tests {
             m.usage.unwrap().rate_limit_status.as_deref(),
             Some("allowed")
         );
+    }
+
+    fn edit(
+        id: &str,
+        path: &str,
+        old: Option<&str>,
+        new: &str,
+        status: ToolStatus,
+    ) -> SessionEvent {
+        SessionEvent::ToolCall(ToolCallView {
+            id: id.into(),
+            title: format!("Edit {path}"),
+            kind: "edit".into(),
+            status,
+            content: vec![ToolContent::Diff(FileDiff {
+                path: path.into(),
+                old_text: old.map(str::to_string),
+                new_text: new.into(),
+            })],
+        })
+    }
+
+    #[test]
+    fn turn_end_lists_the_turns_edits_by_file() {
+        let mut m = ChatModel::default();
+        m.push_user("first");
+        m.apply(&edit("t0", "/p/x", Some("0"), "1", ToolStatus::Completed));
+        m.on_turn_ended(&StopReason::EndTurn);
+        m.push_user("second");
+        m.apply(&edit("t1", "/p/a", Some("a0"), "a1", ToolStatus::Completed));
+        m.apply(&edit("t2", "/p/b", None, "b", ToolStatus::Completed));
+        m.apply(&edit("t3", "/p/c", None, "c", ToolStatus::Failed)); // rejected
+        m.apply(&edit("t4", "/p/a", Some("a1"), "a2", ToolStatus::Completed));
+        m.on_turn_ended(&StopReason::Cancelled);
+
+        let paths = |turn| -> Vec<String> {
+            let edits = m.turn_edits(turn);
+            edits.iter().map(|d| d.path.display().to_string()).collect()
+        };
+        assert_eq!(paths(0), ["/p/x"]);
+        assert_eq!(paths(1), ["/p/a", "/p/b", "/p/a"]);
+        let file = |path: &str, steps: Vec<usize>| EditedFile {
+            path: path.into(),
+            steps,
+            reverted: 0,
+            failed: None,
+        };
+        // The block comes before the turn's closing notice.
+        let n = m.items.len();
+        assert_eq!(
+            m.items[n - 2],
+            ChatItem::Edits {
+                turn: 1,
+                files: vec![file("/p/a", vec![0, 2]), file("/p/b", vec![1])],
+            }
+        );
+        assert!(matches!(&m.items[n - 1], ChatItem::Notice { text, .. } if text == "Cancelled"));
+
+        // A turn without edits ends without a block.
+        m.push_user("third");
+        m.on_turn_ended(&StopReason::EndTurn);
+        assert!(matches!(m.items.last(), Some(ChatItem::User { .. })));
     }
 
     #[test]
