@@ -150,7 +150,13 @@ impl ChatModel {
                 }
                 _ => self.push(ChatItem::Thought { text: t.clone() }),
             }),
-            SessionEvent::UserText(t) => Some(self.push(ChatItem::User { text: t.clone() })),
+            SessionEvent::UserText(t) => Some(match self.items.last_mut() {
+                Some(ChatItem::User { text }) => {
+                    text.push_str(t);
+                    self.items.len() - 1
+                }
+                _ => self.push(ChatItem::User { text: t.clone() }),
+            }),
             SessionEvent::ToolCall(v) => {
                 let (text, diffs) = split_content(&v.content);
                 Some(self.push(ChatItem::Tool(ToolItem {
@@ -451,6 +457,14 @@ mod tests {
             m.usage.unwrap().rate_limit_status.as_deref(),
             Some("allowed")
         );
+    }
+
+    #[test]
+    fn user_chunks_merge_into_one_message() {
+        let mut m = ChatModel::default();
+        m.apply(&SessionEvent::UserText("a".into()));
+        m.apply(&SessionEvent::UserText("b".into()));
+        assert_eq!(m.items, vec![ChatItem::User { text: "ab".into() }]);
     }
 
     #[test]
