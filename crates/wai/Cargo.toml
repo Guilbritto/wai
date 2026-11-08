@@ -6,6 +6,14 @@ publish.workspace = true
 
 [dependencies]
 gpui-kit.workspace = true
+wai-agent = { path = "../wai-agent" }
+wai-settings = { path = "../wai-settings" }
+anyhow.workspace = true
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+
+[features]
+# Offscreen capture for docs/screens (needs GPUI's test-support for `render_to_image`):
+# WAI_SHOT=docs/screens/fase-1-shell.png cargo run -p wai --features screenshot -- <folder>
+screenshot = ["gpui-kit/test-support"]

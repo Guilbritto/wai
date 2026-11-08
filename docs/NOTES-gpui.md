@@ -155,8 +155,10 @@ v_flex()
 ```
 
 - A context binding fires only when the focused element is inside that `key_context`. Something must have focus.
-- `"secondary-k"` means cmd on macOS and ctrl elsewhere: use it for cross-platform bindings. [U] (read in
-  `gpui-pre-0.3.11/src/platform/keystroke.rs`)
+- `"secondary-k"` means cmd on macOS and ctrl elsewhere: use it for cross-platform bindings. [V] (wai
+  `app.rs`) **`KeyBinding::new` panics on it** (`InvalidKeystrokeError`: it parses without an OS). Use
+  `KeyBinding::load(keys, Box::new(action), context.map(|c| Rc::new(KeyBindingContextPredicate::parse(c)?)),
+  false, None, cx)`. `simulate_keystrokes("secondary-n")` in tests resolves it fine.
 
 ## 7. Focus and raw key input
 
@@ -416,6 +418,10 @@ mod tests {
   gotcha below about enabling it.
 - Offscreen screenshot of a real window (works with the screen locked): `window.render_to_image()` →
   `image::RgbaImage` (`.save("x.png")`), test-support only. [V] (`S2_SHOT` in the spike)
+  **Not inside `#[gpui_kit::test]`:** its `TestPlatform` has no headless renderer ("render_to_image not
+  available") and a no-op text system. `VisualTestAppContext` (real Mac platform) needs the process main thread,
+  and libtest runs tests on spawned threads even with `--test-threads=1`. wai captures from the real app
+  instead, behind its `screenshot` feature (`WAI_SHOT=<png> cargo run -p wai --features screenshot -- <dir>`).
 
 ## 18. Gotchas hit in the spike
 
