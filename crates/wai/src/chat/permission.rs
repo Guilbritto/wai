@@ -9,7 +9,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::{ChoiceKind, FileDiff, PermissionChoice, PermissionRequest};
 
-use super::edits::{DiffLine, bounded_diff, first_changed_line};
+use super::edits::{DiffLine, bounded_diff};
 
 /// What a choice button calls.
 pub type OnChoose = Rc<dyn Fn(&PermissionChoice, &mut Window, &mut App)>;
@@ -26,8 +26,9 @@ pub struct DiffView {
 }
 
 impl DiffView {
-    /// The path shows relative to `cwd`, the session's folder, when it is inside.
-    pub fn new(diff: &FileDiff, cwd: &Path) -> Self {
+    /// The path shows relative to `cwd`, the session's folder, when it is inside; `line` is
+    /// where Open puts the caret.
+    pub fn new(diff: &FileDiff, cwd: &Path, line: u32) -> Self {
         let old = diff.old_text.as_deref().unwrap_or("");
         let mut truncated = false;
         let lines = bounded_diff(old, &diff.new_text)
@@ -41,7 +42,7 @@ impl DiffView {
             })
             .collect();
         Self {
-            at: (diff.path.clone(), first_changed_line(old, &diff.new_text)),
+            at: (diff.path.clone(), line),
             label: (diff.path.strip_prefix(cwd).unwrap_or(&diff.path))
                 .display()
                 .to_string()

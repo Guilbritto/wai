@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui_kit::component::IndexPath;
@@ -9,10 +9,11 @@ use gpui_kit::component::select::{SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::text::TextViewState;
 use gpui_kit::*;
 use wai_agent::{
-    AgentError, AgentHandle, ModeInfo, PermissionChoice, PermissionRequest, QuestionRequest,
-    SessionEvent, SessionStarted, StopReason,
+    AgentError, AgentHandle, FileDiff, Location, ModeInfo, PermissionChoice, PermissionRequest,
+    QuestionRequest, SessionEvent, SessionStarted, StopReason,
 };
 
+use super::edits::open_line;
 use super::input::Attachment;
 use super::model::{ChatItem, ChatModel, NoticeKind, TurnState, UNSUPPORTED_QUESTION};
 use super::permission::DiffView;
@@ -197,6 +198,8 @@ impl ChatSession {
         {
             return self.schedule_flush(cx);
         }
+        // R34: before the agent can write, note which of its files exist.
+        self.model.note_files(ix, &self.cwd);
         self.sync_row(ix, cx);
         self.sync_rows(Some(ix), cx);
         cx.notify();
@@ -330,29 +333,21 @@ impl ChatSession {
                 }
             }
             ChatItem::Tool(tool) => {
-                let diffs = tool
-                    .diffs
-                    .iter()
-                    .map(|d| DiffView::new(d, &self.cwd))
-                    .collect();
+                let diffs = diff_views(&tool.diffs, &tool.locations, &self.cwd);
                 self.diffs.insert(ix, diffs);
             }
             // R5: the request's own diff, else the diffs of its tool call.
             ChatItem::Permission { request, .. } => {
+                let tool = self.model.items.iter().rev().find_map(|item| match item {
+                    ChatItem::Tool(t) if t.id == request.tool_call_id => Some(t),
+                    _ => None,
+                });
+                let locations = tool.map_or(&[][..], |t| &t.locations[..]);
                 let diffs = match &request.diff {
-                    Some(diff) => vec![DiffView::new(diff, &self.cwd)],
-                    None => self
-                        .model
-                        .items
-                        .iter()
-                        .rev()
-                        .find_map(|item| match item {
-                            ChatItem::Tool(t) if t.id == request.tool_call_id => Some(&t.diffs),
-                            _ => None,
-                        })
-                        .map(|diffs| diffs.iter().map(|d| DiffView::new(d, &self.cwd)).collect())
-                        .unwrap_or_default(),
+                    Some(diff) => std::slice::from_ref(diff),
+                    None => tool.map_or(&[][..], |t| &t.diffs[..]),
                 };
+                let diffs = diff_views(diffs, locations, &self.cwd);
                 self.diffs.insert(ix, diffs);
             }
             ChatItem::User { .. }
@@ -462,10 +457,17 @@ impl ChatSession {
     }
 }
 
+/// A tool call's diffs, each opening at its line (`open_line`).
+fn diff_views(diffs: &[FileDiff], locations: &[Location], cwd: &Path) -> Vec<DiffView> {
+    let view = |k| DiffView::new(&diffs[k], cwd, open_line(locations, diffs, k));
+    (0..diffs.len()).map(view).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
     use std::fs;
+    use std::path::PathBuf;
     use std::rc::Rc;
 
     use gpui_kit::component::WindowExt as _;
@@ -475,7 +477,7 @@ mod tests {
 
     use super::ChatSession;
     use crate::agents::RegistryEvent;
-    use crate::chat::model::{ChatItem, NoticeKind, TurnState, UNSUPPORTED_QUESTION};
+    use crate::chat::model::{ChatItem, EditedFile, NoticeKind, TurnState, UNSUPPORTED_QUESTION};
     use crate::notify;
     use crate::sidebar::canonical;
     use crate::workspace::tests::{
@@ -723,6 +725,64 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Sends `edit` and allows the fake agent's `n` edits, one permission card at a time (it
+    /// writes each file only then), until the turn ends with its Edits block: its row and files.
+    fn run_edits(
+        session: &Entity<ChatSession>,
+        n: usize,
+        cx: &mut VisualTestContext,
+    ) -> (usize, Vec<EditedFile>) {
+        send("edit", cx);
+        for _ in 0..n {
+            wait_until(cx, "an edit's permission card", |cx| {
+                state(session, cx) == TurnState::NeedsYou
+            });
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.click("perm-allow_once", cx);
+            });
+        }
+        wait_until(cx, "the Edits block", |cx| {
+            state(session, cx) == TurnState::Idle
+                && session.read_with(cx, |s, _| {
+                    matches!(s.model.items.last(), Some(ChatItem::Edits { .. }))
+                })
+        });
+        session.read_with(cx, |s, _| match s.model.items.last() {
+            Some(ChatItem::Edits { files, .. }) => (s.model.items.len() - 1, files.clone()),
+            _ => unreachable!(),
+        })
+    }
+
+    /// The editor tab of `path` after Open: its path and the caret's (0-based) line.
+    fn opened(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> (PathBuf, u32) {
+        let tab = workspace.read_with(cx, |w, cx| {
+            w.panes.iter().find_map(|pane| match pane {
+                Pane::Editor(pane) => {
+                    let pane = pane.read(cx);
+                    pane.tabs.get(pane.active).cloned()
+                }
+                _ => None,
+            })
+        });
+        let tab = tab.expect("an editor tab");
+        tab.read_with(cx, |t, cx| {
+            (t.path.clone(), t.editor.read(cx).cursor_position().line)
+        })
+    }
+
+    fn failed(
+        session: &Entity<ChatSession>,
+        ix: usize,
+        file: usize,
+        cx: &mut VisualTestContext,
+    ) -> Option<String> {
+        session.read_with(cx, |s, _| match &s.model.items[ix] {
+            ChatItem::Edits { files, .. } => files[file].failed.clone(),
+            _ => None,
+        })
+    }
+
     fn revert(ix: usize, file: usize, cx: &mut VisualTestContext) {
         click_edits(Some(ix), ("edit-revert", file), cx);
         assert!(
@@ -750,17 +810,7 @@ mod tests {
         let session = start_session(&workspace, cx);
         let edited = "edited by the fake agent\n";
 
-        send("edit", cx);
-        wait_until(cx, "the Edits block", |cx| {
-            state(&session, cx) == TurnState::Idle
-                && session.read_with(cx, |s, _| {
-                    matches!(s.model.items.last(), Some(ChatItem::Edits { .. }))
-                })
-        });
-        let (ix, files) = session.read_with(cx, |s, _| match s.model.items.last() {
-            Some(ChatItem::Edits { files, .. }) => (s.model.items.len() - 1, files.clone()),
-            _ => unreachable!(),
-        });
+        let (ix, files) = run_edits(&session, 3, cx);
         let paths: Vec<_> = files.iter().map(|f| f.path.clone()).collect();
         assert_eq!(paths, [a.clone(), b.clone()]);
         assert_eq!(files[0].steps, [0, 2]);
@@ -813,12 +863,8 @@ mod tests {
         fs::write(&b, "mine\n").unwrap();
         revert(ix, 1, cx);
         assert_eq!(fs::read_to_string(&b).unwrap(), "mine\n");
-        let failed = session.read_with(cx, |s, _| match &s.model.items[ix] {
-            ChatItem::Edits { files, .. } => files[1].failed.clone(),
-            _ => None,
-        });
         assert_eq!(
-            failed.as_deref(),
+            failed(&session, ix, 1, cx).as_deref(),
             Some("File changed since this edit — open it to compare")
         );
 
@@ -826,6 +872,66 @@ mod tests {
         fs::write(&b, edited).unwrap();
         revert(ix, 1, cx);
         assert!(!b.exists());
+    }
+
+    /// R32, R33, R35, R34 end to end, with edits shaped like claude-agent-acp's: an Edit reported
+    /// as a hunk with its location opens at the changed line and reverts just that hunk; Revert
+    /// waits while a turn runs; a Write over an existing file (no old text) is never reverted.
+    #[gpui_kit::test]
+    fn snippet_reverts_and_write_over_existing_refuses(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let (lib, keep) = (dir.path().join("lib.rs"), dir.path().join("keep.txt"));
+        let original: String = (1..=9).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        fs::write(&lib, &original).unwrap();
+        fs::write(&keep, "mine\n").unwrap();
+        let flags = format!(
+            "--edit-hunk '{}' --write '{}'",
+            lib.display(),
+            keep.display()
+        );
+        let (workspace, cx) = open(cx, fake_settings(&flags));
+        let session = start_session(&workspace, cx);
+
+        let (ix, files) = run_edits(&session, 2, cx);
+        let paths: Vec<_> = files.iter().map(|f| f.path.clone()).collect();
+        assert_eq!(paths, [lib.clone(), keep.clone()]);
+        let edited = original.replace("fn f5() {}", "fn f5() {} // edited");
+        assert_eq!(fs::read_to_string(&lib).unwrap(), edited);
+
+        // The hunk starts at line 2 (its location); its change is on its 4th line: line 5.
+        click_edits(Some(ix), ("edit-open", 0usize), cx);
+        assert_eq!(opened(&workspace, cx), (canonical(&lib), 4));
+
+        // R35: no Revert while a turn runs.
+        let set_state = |state: TurnState, cx: &mut VisualTestContext| {
+            session.update(cx, |s, cx| s.update_model(cx, |m| m.state = state));
+        };
+        set_state(TurnState::Working, cx);
+        click_edits(Some(ix), ("edit-revert", 0usize), cx);
+        assert!(!cx.update(|window, cx| window.has_active_dialog(cx)));
+        set_state(TurnState::Idle, cx);
+
+        // Only the hunk goes back: a change elsewhere in the file stays.
+        let mine = edited.replace("fn f1() {}", "fn f1() { mine() }");
+        fs::write(&lib, &mine).unwrap();
+        revert(ix, 0, cx);
+        assert_eq!(
+            fs::read_to_string(&lib).unwrap(),
+            original.replace("fn f1() {}", "fn f1() { mine() }")
+        );
+        assert_eq!(failed(&session, ix, 0, cx), None);
+
+        // R34: the Write had no old text and keep.txt was there before it: it stays.
+        revert(ix, 1, cx);
+        assert_eq!(
+            fs::read_to_string(&keep).unwrap(),
+            "written by the fake agent\n"
+        );
+        assert_eq!(
+            failed(&session, ix, 1, cx).as_deref(),
+            Some("Can't revert: the file existed before this edit.")
+        );
     }
 
     fn typed(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> String {

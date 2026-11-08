@@ -109,6 +109,7 @@ pub struct ToolCallView {
     pub kind: String,
     pub status: ToolStatus,
     pub content: Vec<ToolContent>,
+    pub locations: Vec<Location>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -117,6 +118,16 @@ pub struct ToolCallPatch {
     pub title: Option<String>,
     pub status: Option<ToolStatus>,
     pub content: Option<Vec<ToolContent>>,
+    /// Replaces the call's locations as a whole, like `content`.
+    pub locations: Option<Vec<Location>>,
+}
+
+/// A file a tool call touches and, when the agent knows it, the 1-based line (for an edit hunk,
+/// the hunk's first line in the new file).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Location {
+    pub path: PathBuf,
+    pub line: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

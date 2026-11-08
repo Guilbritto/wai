@@ -21,8 +21,17 @@
 //! - `--fail-fork`: `session/fork` fails with an internal error.
 //! - `--no-load`: do not advertise `loadSession`.
 //! - `--flood <bytes>`: start the turn with one tool call carrying that many bytes of `x\n`.
-//! - `--edit <path>` (repeatable): start the turn by appending `edited by the fake agent` to the
-//!   file (creating it if missing) and reporting a completed Edit tool call with its diff.
+//! - `--edit <path>`, `--write <path>`, `--edit-hunk <path>` (repeatable, run in order): start the
+//!   turn with file edits, each like claude-agent-acp's: a pending Edit tool call (diff and
+//!   location), a permission request (`allow-once` writes the file, `reject-once` fails the call),
+//!   then a completed (or failed) update.
+//!   - `--edit`: appends `edited by the fake agent` (creating the file if missing); the diff holds
+//!     the whole file.
+//!   - `--write`: replaces the file with `written by the fake agent`; the diff has no old text,
+//!     like a Write, even when the file existed.
+//!   - `--edit-hunk`: appends ` // edited` to the file's middle line; the call starts with that
+//!     line as the snippet, and completes with the hunk (3 lines of context, no trailing newline)
+//!     and its first line as the location.
 //! - `--sessions <n>`: `session/list` returns n sessions titled `Session <i>`, 10 per page.
 //! - `--sessions-cwd <path>`: the cwd of those sessions; default `/tmp`.
 //! - `--pid-file <path>`: write the process id there at start.
@@ -42,6 +51,13 @@ use agent_client_protocol::{Agent, Client, Error, Stdio};
 
 const PAGE: usize = 10;
 
+#[derive(Clone, Copy)]
+enum EditKind {
+    Append,
+    Write,
+    Hunk,
+}
+
 struct Opts {
     reply: String,
     reply_file: bool,
@@ -56,7 +72,7 @@ struct Opts {
     fail_fork: bool,
     no_load: bool,
     flood: Option<usize>,
-    edits: Vec<PathBuf>,
+    edits: Vec<(EditKind, PathBuf)>,
     sessions: usize,
     sessions_cwd: PathBuf,
     pid_file: Option<PathBuf>,
@@ -116,7 +132,9 @@ fn parse_args() -> Opts {
             "--fail-fork" => opts.fail_fork = true,
             "--no-load" => opts.no_load = true,
             "--flood" => opts.flood = Some(number(value())),
-            "--edit" => opts.edits.push(value().into()),
+            "--edit" => opts.edits.push((EditKind::Append, value().into())),
+            "--write" => opts.edits.push((EditKind::Write, value().into())),
+            "--edit-hunk" => opts.edits.push((EditKind::Hunk, value().into())),
             "--sessions" => opts.sessions = number(value()),
             "--sessions-cwd" => opts.sessions_cwd = value().into(),
             "--pid-file" => opts.pid_file = Some(value().into()),
@@ -161,19 +179,9 @@ impl Fake {
                 ))]);
             send(cx, session, acp::SessionUpdate::ToolCall(call))?;
         }
-        for (i, path) in self.opts.edits.iter().enumerate() {
-            let old = std::fs::read_to_string(path).ok();
-            let new = format!("{}edited by the fake agent\n", old.as_deref().unwrap_or(""));
-            std::fs::write(path, &new).map_err(Error::into_internal_error)?;
-            let diff = acp::Diff::new(path.clone(), new).old_text(old);
-            let call = acp::ToolCall::new(
-                format!("edit-file-{i}"),
-                format!("Edit {}", path.file_name().unwrap_or_default().display()),
-            )
-            .kind(acp::ToolKind::Edit)
-            .status(acp::ToolCallStatus::Completed)
-            .content(vec![acp::ToolCallContent::Diff(diff)]);
-            send(cx, session, acp::SessionUpdate::ToolCall(call))?;
+        for (i, (kind, path)) in self.opts.edits.iter().enumerate() {
+            self.edit(cx, session, &format!("edit-file-{i}"), *kind, path)
+                .await?;
         }
         if self.opts.ask_permission && self.opts.reply_file {
             let reason = self.stream(cx, session, &self.opts.reply).await?;
@@ -221,6 +229,88 @@ impl Fake {
             }
         }
         Ok(acp::StopReason::EndTurn)
+    }
+
+    /// One file edit, shaped like claude-agent-acp's (see `--edit`).
+    async fn edit(
+        &self,
+        cx: &ConnectionTo<Client>,
+        session: &acp::SessionId,
+        id: &str,
+        kind: EditKind,
+        path: &PathBuf,
+    ) -> Result<(), Error> {
+        let old = std::fs::read_to_string(path).ok();
+        // The diff the call starts with, the file written, and the hunk the update reports.
+        let (start, new, hunk) = match kind {
+            EditKind::Append => {
+                let new = format!("{}edited by the fake agent\n", old.as_deref().unwrap_or(""));
+                (
+                    acp::Diff::new(path.clone(), new.clone()).old_text(old),
+                    new,
+                    None,
+                )
+            }
+            EditKind::Write => {
+                let new = "written by the fake agent\n".to_string();
+                (acp::Diff::new(path.clone(), new.clone()), new, None)
+            }
+            EditKind::Hunk => {
+                let old = old.expect("--edit-hunk needs an existing file");
+                let old_lines: Vec<&str> = old.lines().collect();
+                let n = old_lines.len() / 2;
+                let edited = format!("{} // edited", old_lines[n]);
+                let mut lines = old_lines.clone();
+                lines[n] = &edited;
+                let (from, to) = (n.saturating_sub(3), (n + 3).min(lines.len() - 1));
+                let old_hunk = old_lines[from..=to].join("\n");
+                let new_hunk = lines[from..=to].join("\n");
+                let snippet = acp::Diff::new(path.clone(), edited.clone()).old_text(old_lines[n]);
+                let mut new = lines.join("\n");
+                if old.ends_with('\n') {
+                    new.push('\n');
+                }
+                let hunk = acp::Diff::new(path.clone(), new_hunk).old_text(old_hunk);
+                (snippet, new, Some((hunk, from as u32 + 1)))
+            }
+        };
+        let title = format!("Edit {}", path.file_name().unwrap_or_default().display());
+        let call = acp::ToolCall::new(id.to_string(), title.clone())
+            .kind(acp::ToolKind::Edit)
+            .status(acp::ToolCallStatus::Pending)
+            .content(vec![acp::ToolCallContent::Diff(start)])
+            .locations(vec![acp::ToolCallLocation::new(path.clone())]);
+        send(cx, session, acp::SessionUpdate::ToolCall(call))?;
+
+        let options = vec![
+            acp::PermissionOption::new("allow-once", "Yes", acp::PermissionOptionKind::AllowOnce),
+            acp::PermissionOption::new("reject-once", "No", acp::PermissionOptionKind::RejectOnce),
+        ];
+        let fields = acp::ToolCallUpdateFields::new().title(title);
+        let request = acp::RequestPermissionRequest::new(
+            session.clone(),
+            acp::ToolCallUpdate::new(id.to_string(), fields),
+            options,
+        );
+        let response = cx.send_request(request).block_task().await?;
+        let allowed = matches!(
+            response.outcome,
+            acp::RequestPermissionOutcome::Selected(s) if s.option_id.to_string() == "allow-once"
+        );
+        let fields = if allowed {
+            std::fs::write(path, &new).map_err(Error::into_internal_error)?;
+            let done = acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Completed);
+            match hunk {
+                Some((hunk, line)) => done
+                    .content(vec![acp::ToolCallContent::Diff(hunk)])
+                    .locations(vec![acp::ToolCallLocation::new(path.clone()).line(line)]),
+                None => done,
+            }
+        } else {
+            acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Failed)
+        };
+        let update = acp::ToolCallUpdate::new(id.to_string(), fields);
+        send(cx, session, acp::SessionUpdate::ToolCallUpdate(update))
     }
 
     async fn ask_permission(

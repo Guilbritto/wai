@@ -1,8 +1,9 @@
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use wai_agent::{
-    CommandInfo, FileDiff, ModeInfo, PermissionRequest, QuestionRequest, SessionEvent, StopReason,
-    ToolCallPatch, ToolContent, ToolStatus,
+    CommandInfo, FileDiff, Location, ModeInfo, PermissionRequest, QuestionRequest, SessionEvent,
+    StopReason, ToolCallPatch, ToolContent, ToolStatus,
 };
 
 pub const TOOL_OUTPUT_MAX_LINES: usize = 2000;
@@ -82,6 +83,11 @@ pub struct ToolItem {
     pub status: ToolStatus,
     pub text: String,
     pub diffs: Vec<FileDiff>,
+    pub locations: Vec<Location>,
+    /// R34: each file this call names (diff or location, as the agent spelled it) and whether
+    /// it existed when wai first saw it. Only a file seen absent before the call ran was created
+    /// by it.
+    pub first_sight: Vec<(PathBuf, bool)>,
     pub expanded: bool,
 }
 
@@ -199,6 +205,8 @@ impl ChatModel {
                     status: v.status,
                     text,
                     diffs,
+                    locations: v.locations.clone(),
+                    first_sight: Vec::new(),
                     expanded: false,
                 })))
             }
@@ -254,6 +262,9 @@ impl ChatModel {
         }
         if let Some(content) = &p.content {
             (t.text, t.diffs) = split_content(content);
+        }
+        if let Some(locations) = &p.locations {
+            t.locations = locations.clone();
         }
         Some(idx)
     }
@@ -340,19 +351,49 @@ impl ChatModel {
     /// The diffs of turn `turn` (0-based, one per user message), in order. Only completed tool
     /// calls count: a rejected or cancelled edit never reached the disk.
     pub fn turn_edits(&self, turn: usize) -> Vec<&FileDiff> {
+        let steps = self.turn_steps(turn).into_iter();
+        steps.map(|(tool, k)| &tool.diffs[k]).collect()
+    }
+
+    /// `turn_edits` as (tool call, index into its diffs): the call also knows the diff's location
+    /// and whether its file existed before.
+    pub fn turn_steps(&self, turn: usize) -> Vec<(&ToolItem, usize)> {
         let mut users = 0;
-        let mut edits = Vec::new();
+        let mut steps = Vec::new();
         for item in &self.items {
             match item {
                 ChatItem::User { .. } if users > turn => break,
                 ChatItem::User { .. } => users += 1,
                 ChatItem::Tool(t) if users == turn + 1 && t.status == ToolStatus::Completed => {
-                    edits.extend(&t.diffs)
+                    steps.extend((0..t.diffs.len()).map(|k| (t, k)))
                 }
                 _ => {}
             }
         }
-        edits
+        steps
+    }
+
+    /// R34: stats each file tool row `ix` names for the first time (`cwd` resolves relative
+    /// paths). Before the call runs (Pending, InProgress) a missing file means the call will
+    /// create it; once it ran, wai can no longer tell, and the file counts as existing. So does a
+    /// file wai cannot stat.
+    pub fn note_files(&mut self, ix: usize, cwd: &Path) {
+        let Some(ChatItem::Tool(t)) = self.items.get_mut(ix) else {
+            return;
+        };
+        let ran = matches!(t.status, ToolStatus::Completed | ToolStatus::Failed);
+        let paths = (t.diffs.iter().map(|d| &d.path)).chain(t.locations.iter().map(|l| &l.path));
+        let paths: Vec<PathBuf> = paths.cloned().collect();
+        for path in paths {
+            if t.first_sight.iter().any(|(seen, _)| *seen == path) {
+                continue;
+            }
+            let missing = matches!(
+                std::fs::symlink_metadata(cwd.join(&path)),
+                Err(e) if e.kind() == io::ErrorKind::NotFound
+            );
+            t.first_sight.push((path, ran || !missing));
+        }
     }
 
     /// The Edits block of the turn that just ended, if it edited files.
@@ -433,6 +474,7 @@ mod tests {
             kind: "execute".into(),
             status,
             content: vec![],
+            locations: vec![],
         })
     }
 
@@ -472,6 +514,7 @@ mod tests {
             title: None,
             status: Some(ToolStatus::Completed),
             content: Some(vec![ToolContent::Text("out".into())]),
+            locations: None,
         }));
         assert_eq!(idx, Some(0));
         let ChatItem::Tool(t) = &m.items[0] else {
@@ -494,6 +537,8 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n"),
             diffs: vec![],
+            locations: vec![],
+            first_sight: vec![],
             expanded: false,
         };
         let (v, hidden) = item.visible_text();
@@ -676,6 +721,7 @@ mod tests {
                 old_text: old.map(str::to_string),
                 new_text: new.into(),
             })],
+            locations: vec![],
         })
     }
 
@@ -719,6 +765,73 @@ mod tests {
         m.push_user("third");
         m.on_turn_ended(&StopReason::EndTurn);
         assert!(matches!(m.items.last(), Some(ChatItem::User { .. })));
+    }
+
+    /// R34: a file counts as created by a call only if wai saw it missing before the call ran.
+    #[test]
+    fn note_files_records_absence_before_the_call_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("old.txt");
+        std::fs::write(&existing, "old").unwrap();
+        let mut m = ChatModel::default();
+        let call = |id: &str, status, diffs: Vec<FileDiff>, locations| {
+            SessionEvent::ToolCall(ToolCallView {
+                id: id.into(),
+                title: "Edit".into(),
+                kind: "edit".into(),
+                status,
+                content: diffs.into_iter().map(ToolContent::Diff).collect(),
+                locations,
+            })
+        };
+        let diff = |path: &Path| FileDiff {
+            path: path.into(),
+            old_text: None,
+            new_text: "new".into(),
+        };
+        let at = |path: &str| Location {
+            path: path.into(),
+            line: None,
+        };
+
+        // Relative paths resolve against the session's folder.
+        let pending = vec![diff("new.txt".as_ref()), diff(&existing)];
+        m.apply(&call(
+            "t1",
+            ToolStatus::Pending,
+            pending,
+            vec![at("loc.txt")],
+        ));
+        m.note_files(0, dir.path());
+        std::fs::write(dir.path().join("new.txt"), "new").unwrap();
+        m.apply(&SessionEvent::ToolCallUpdate(ToolCallPatch {
+            id: "t1".into(),
+            title: None,
+            status: Some(ToolStatus::Completed),
+            content: None,
+            locations: Some(vec![at("new.txt")]),
+        }));
+        m.note_files(0, dir.path());
+        // First seen once it ran: wai can't tell, so it existed.
+        m.apply(&call(
+            "t2",
+            ToolStatus::Completed,
+            vec![diff("x.txt".as_ref())],
+            vec![],
+        ));
+        m.note_files(1, dir.path());
+
+        let seen = |ix: usize| match &m.items[ix] {
+            ChatItem::Tool(t) => t.first_sight.clone(),
+            _ => panic!(),
+        };
+        let first_sight = vec![
+            (PathBuf::from("new.txt"), false),
+            (existing.clone(), true),
+            (PathBuf::from("loc.txt"), false),
+        ];
+        assert_eq!(seen(0), first_sight);
+        assert_eq!(seen(1), [(PathBuf::from("x.txt"), true)]);
     }
 
     #[test]

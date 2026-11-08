@@ -224,7 +224,7 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 
 /// Saves the window to `path` and quits, offscreen so it also works with the screen locked.
 /// With `WAI_SHOT_PROMPT`, once that turn needs the user (a permission or question card) or ends
-/// with an Edits block (a fake agent run with `--edit`, fase-2-edits.png); otherwise after 2 s,
+/// with an Edits block (fase-2-edits.png); otherwise after 2 s,
 /// with the terminal panel shown and `echo wai` run in it.
 /// `WAI_SHOT=docs/screens/fase-1-sidebar.png WAI_SHOT_PROMPT=… WAI_SHOT_SIDE=1` with a fake
 /// agent run with `--sessions 8 --ask-permission --reply-file …`.

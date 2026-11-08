@@ -33,12 +33,14 @@ pub(crate) fn session_event(update: acp::SessionUpdate) -> Option<SessionEvent> 
             kind: wire_name(&t.kind),
             status: tool_status(t.status),
             content: tool_contents(t.content),
+            locations: locations(t.locations),
         }),
         U::ToolCallUpdate(u) => SessionEvent::ToolCallUpdate(ToolCallPatch {
             id: u.tool_call_id.to_string(),
             title: u.fields.title,
             status: u.fields.status.map(tool_status),
             content: u.fields.content.map(tool_contents),
+            locations: u.fields.locations.map(locations),
         }),
         U::Plan(p) => SessionEvent::Plan(
             p.entries
@@ -93,6 +95,14 @@ fn tool_content(content: acp::ToolCallContent) -> Option<ToolContent> {
         acp::ToolCallContent::Terminal(t) => Some(ToolContent::Terminal(t.terminal_id.to_string())),
         _ => None,
     }
+}
+
+fn locations(locations: Vec<acp::ToolCallLocation>) -> Vec<Location> {
+    let location = |l: acp::ToolCallLocation| Location {
+        path: l.path,
+        line: l.line,
+    };
+    locations.into_iter().map(location).collect()
 }
 
 fn file_diff(d: acp::Diff) -> FileDiff {
