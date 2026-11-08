@@ -9,7 +9,7 @@ use wai_settings::{AppState, OpenSession, Settings};
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, ToggleTerminal};
-use crate::chat::{ChatEvent, ChatSession};
+use crate::chat::{ChatEvent, ChatSession, signed_out};
 use crate::notify::{self, should_notify};
 use crate::sidebar::canonical;
 use crate::terminal_view::TerminalView;
@@ -508,9 +508,7 @@ impl Workspace {
     fn agent_problem(&self, cx: &App) -> Option<String> {
         let agent = &self.settings.default_agent;
         match self.registry.read(cx).status(agent)? {
-            AgentStatus::SignedOut => Some(format!(
-                "{agent} is not signed in. Open a terminal and run its login (for Claude: claude /login)."
-            )),
+            AgentStatus::SignedOut => Some(signed_out(agent)),
             AgentStatus::Failed(error) => Some(error.clone()),
             _ => None,
         }

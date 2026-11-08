@@ -5,6 +5,13 @@ use wai_agent::{
 
 pub const TOOL_OUTPUT_MAX_LINES: usize = 2000;
 
+/// What wai says when an agent is not signed in: it never shows a login of its own.
+pub fn signed_out(agent: &str) -> String {
+    format!(
+        "{agent} is not signed in. Open a terminal and run its login (for Claude: claude /login)."
+    )
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TurnState {
     Idle,
@@ -287,9 +294,7 @@ impl ChatModel {
     }
 
     pub fn on_auth_required(&mut self, agent: &str) {
-        let text = format!(
-            "{agent} is not signed in. Open a terminal and run its login (for Claude: claude /login)."
-        );
+        let text = signed_out(agent);
         self.state = TurnState::Error(text.clone());
         self.notice(text, NoticeKind::Error);
     }
