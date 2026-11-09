@@ -12,7 +12,7 @@ use super::file::{self, Stamp};
 
 /// A recovery entry over this is neither written nor read (R61): it would hold up the UI thread
 /// and the launch.
-const MAX_BYTES: u64 = 50 * 1024 * 1024;
+pub const MAX_BYTES: u64 = 50 * 1024 * 1024;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -121,14 +121,14 @@ fn skip(file: &Path, why: &str) -> Option<Recovered> {
     None
 }
 
-/// A recovery file name in `dir` that no entry has: `<n>.json` from `*next` on. Names a tab
-/// holds stay below `*next` (`number`), so none is handed out twice. ponytail: one wai at a
-/// time; two would share these names (and `state.json`).
 /// The `n` of a `<n>.json` recovery file.
 pub fn number(file: &Path) -> Option<u64> {
     file.file_stem()?.to_str()?.parse().ok()
 }
 
+/// A recovery file name in `dir` that no entry has: `<n>.json` from `*next` on. Names a tab
+/// holds stay below `*next` (`number`), so none is handed out twice. ponytail: one wai at a
+/// time; two would share these names (and `state.json`).
 pub fn next_file(dir: &Path, next: &mut u64) -> PathBuf {
     loop {
         let file = dir.join(format!("{next}.json"));

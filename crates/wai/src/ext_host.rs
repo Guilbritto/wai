@@ -483,14 +483,17 @@ pub(crate) mod tests {
         replies.into_iter().find(|r| r["id"] == id).unwrap()
     }
 
+    /// The first session in a pane, once one shows: the user's open in the focused pane, an
+    /// extension's beside it (R61).
     fn pane_session(
         workspace: &Entity<Workspace>,
         cx: &mut VisualTestContext,
     ) -> Entity<ChatSession> {
-        wait_until(cx, "a session in pane 0", |cx| {
-            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
-        });
-        workspace.read_with(cx, |w, _| w.panes[0].session().cloned().unwrap())
+        let shown = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, _| w.panes.iter().find_map(|p| p.session().cloned()))
+        };
+        wait_until(cx, "a session in a pane", |cx| shown(cx).is_some());
+        shown(cx).unwrap()
     }
 
     fn items(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> Vec<ChatItem> {
@@ -920,8 +923,9 @@ pub(crate) mod tests {
         assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 1);
     }
 
-    /// R56: the user's ⌘N is never refused while an extension's session prepares: it takes
-    /// the pane, and the extension's session still opens (in the open list, in no pane).
+    /// R56: the user's ⌘N is never refused while an extension's session prepares: in that pane
+    /// (once the user is in it; R61: it prepares beside the focused pane) ⌘N takes it, and the
+    /// extension's session still opens (in the open list, in no pane).
     #[gpui_kit::test]
     fn new_session_takes_over_an_extensions_preparing_pane(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
@@ -942,12 +946,13 @@ pub(crate) mod tests {
         wait_until(cx, "the extension's session to prepare", |cx| {
             workspace.read_with(
                 cx,
-                |w, _| matches!(&w.panes[0], Pane::Preparing { agent, .. } if agent == "slow"),
+                |w, _| matches!(w.panes.get(1), Some(Pane::Preparing { agent, .. }) if agent == "slow"),
             )
         });
+        workspace.update(cx, |w, _| w.focused_pane = 1);
         cx.simulate_keystrokes("secondary-n");
         workspace.read_with(cx, |w, _| {
-            assert!(matches!(&w.panes[0], Pane::Preparing { agent, .. } if agent == "fake"))
+            assert!(matches!(&w.panes[1], Pane::Preparing { agent, .. } if agent == "fake"))
         });
         let mine = pane_session(&workspace, cx);
         assert_eq!(mine.read_with(cx, |s, _| s.agent.clone()), "fake");
@@ -956,8 +961,9 @@ pub(crate) mod tests {
         assert_eq!(theirs["agent"], "slow");
         workspace.read_with(cx, |w, cx| {
             assert_eq!(w.sessions.len(), 2, "the extension's session opens too");
-            assert_eq!(w.panes.len(), 1);
-            assert_eq!(w.panes[0].session(), Some(&mine), "in no pane");
+            assert_eq!(w.panes.len(), 2);
+            assert!(matches!(w.panes[0], Pane::Empty(_)));
+            assert_eq!(w.panes[1].session(), Some(&mine), "in no pane");
             let draft = |s: &Entity<ChatSession>| s.read(cx).draft(cx);
             assert_eq!(draft(&w.sessions[1]), "theirs");
         });

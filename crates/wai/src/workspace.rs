@@ -654,7 +654,8 @@ impl Workspace {
     /// R57: the pane an extension's session takes: its last session's (or its start's), else an
     /// empty one, else a new one while there are fewer than `MAX_PANES`. `None` when no pane is
     /// free (each shows a user's session, the editor or another start): it opens in the open
-    /// list only. R61: never the focused pane's session, even its own: the user is in it.
+    /// list only. R61: never the focused pane, its own session's or an empty one (the user is
+    /// in it, maybe reading why their start failed).
     fn ext_pane(&mut self, ext: &ExtId) -> Option<usize> {
         let (last, focused) = (self.ext_sessions.get(ext), self.focused_pane);
         let theirs = self
@@ -666,7 +667,10 @@ impl Workspace {
                 Pane::Preparing { by_extension, .. } => by_extension.as_ref() == Some(ext),
                 _ => false,
             });
-        let empty = || self.panes.iter().position(|p| matches!(p, Pane::Empty(_)));
+        let empty = || {
+            (self.panes.iter().enumerate())
+                .position(|(ix, p)| ix != focused && matches!(p, Pane::Empty(_)))
+        };
         if let Some(ix) = theirs.or_else(empty) {
             return Some(ix);
         }
@@ -2575,24 +2579,28 @@ pub(crate) mod tests {
             assert_eq!(w.focused_pane, 1);
         });
 
-        // Every pane the user's (a session, three starts): none is free.
+        // Every pane the user's (a session, two starts) but the focused one, empty and saying
+        // why their own start failed: none is free (R61: not even the focused empty pane).
         let users = |ticket| Pane::Preparing {
             agent: "fake".into(),
             ticket,
             by_extension: None,
         };
         workspace.update(cx, |w, _| {
-            w.panes = vec![Pane::Session(mine.clone()), users(90), users(91), users(92)];
+            let failed = Pane::Empty(Some("Could not start".into()));
+            w.panes = vec![Pane::Session(mine.clone()), users(90), users(91), failed];
+            w.focused_pane = 3;
         });
         let fourth = theirs("four", cx);
         workspace.read_with(cx, |w, _| {
             assert_eq!(w.panes.len(), super::MAX_PANES);
             assert_eq!(w.panes[0].session(), Some(&mine));
             assert!(
-                w.panes[1..]
+                w.panes[1..3]
                     .iter()
                     .all(|p| matches!(p, Pane::Preparing { .. }))
             );
+            assert!(matches!(&w.panes[3], Pane::Empty(Some(why)) if why == "Could not start"));
             assert!(w.sessions.contains(&fourth), "in the open list only");
         });
     }

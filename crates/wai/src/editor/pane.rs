@@ -160,15 +160,20 @@ impl FileEditor {
     }
 
     /// Writes the unsaved edits to the recovery file, now: after typing pauses, and at quit.
-    /// ponytail: on the main thread, like Save (an entry over 50 MB is not written, so tens of
-    /// ms at worst), so no write can land after the save or discard that deletes it.
+    /// ponytail: on the main thread, like Save, so no write can land after the save or discard
+    /// that deletes it; a buffer over 50 MB is not even copied, so up to 50 MB of JSON per pause.
     pub fn keep_edits(&self, cx: &App) -> io::Result<()> {
         let Some(file) = self.recovery.as_ref().filter(|_| self.dirty) else {
             return Ok(());
         };
+        let text = self.editor.read(cx).text();
+        if text.len() as u64 > recovery::MAX_BYTES {
+            eprintln!("wai: too large to back up: {}", self.path.display());
+            return Err(io::ErrorKind::FileTooLarge.into());
+        }
         let entry = recovery::Entry {
             path: self.path.clone(),
-            text: self.editor.read(cx).text().to_string(),
+            text: text.to_string(),
             crlf: self.crlf,
             stamp: self.stamp,
         };
