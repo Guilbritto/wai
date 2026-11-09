@@ -384,10 +384,13 @@ impl Workspace {
                 }
                 self.refresh_history(cx);
             }
-            // R7: carries no session id; sessions ignore ids they do not hold.
-            RegistryEvent::PermissionResolved(id) => {
+            // R7: carries no session id; the agent's sessions ignore ids they do not hold. R41:
+            // ids restart at 1 per agent, so other agents' sessions never see it.
+            RegistryEvent::PermissionResolved { agent, id } => {
                 for s in &self.sessions {
-                    s.update(cx, |s, cx| s.handle_permission_resolved(*id, cx));
+                    if s.read(cx).agent == *agent {
+                        s.update(cx, |s, cx| s.handle_permission_resolved(*id, cx));
+                    }
                 }
             }
             RegistryEvent::QuestionUnsupported { agent, session } => {
@@ -395,9 +398,11 @@ impl Workspace {
                     s.update(cx, |s, cx| s.handle_question_unsupported(cx));
                 }
             }
-            RegistryEvent::QuestionResolved(id) => {
+            RegistryEvent::QuestionResolved { agent, id } => {
                 for s in &self.sessions {
-                    s.update(cx, |s, cx| s.handle_question_resolved(*id, cx));
+                    if s.read(cx).agent == *agent {
+                        s.update(cx, |s, cx| s.handle_question_resolved(*id, cx));
+                    }
                 }
             }
             RegistryEvent::StatusChanged(agent) => {
@@ -1859,6 +1864,77 @@ pub(crate) mod tests {
             dead < Duration::from_millis(150),
             "the agent died {dead:?} into quit"
         );
+    }
+
+    /// R41: each agent numbers its requests from 1, so a resolution reaches only the sessions of
+    /// the agent it came from. Agents `a` and `b` each ask request #1 (`flag`); `a`'s cancels.
+    fn resolution_stays_with_its_agent(flag: &str, cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agents are real processes
+        let mut settings = fake_settings(flag);
+        let fake = settings.agents.remove("fake").unwrap();
+        settings.agents = [("a".into(), fake.clone()), ("b".into(), fake)].into();
+        settings.default_agent = "a".into();
+        let (workspace, cx) = open(cx, settings);
+        let registry = workspace.read_with(cx, |w, _| w.registry.clone());
+        let mut sessions = Vec::new();
+        for agent in ["a", "b"] {
+            cx.update(|window, cx| {
+                workspace.update(cx, |w, cx| w.start_session(agent.into(), None, window, cx))
+            });
+            let find = |cx: &mut VisualTestContext| {
+                workspace.read_with(cx, |w, cx| {
+                    w.sessions
+                        .iter()
+                        .find(|s| s.read(cx).agent == agent)
+                        .cloned()
+                })
+            };
+            wait_until(cx, "the session", |cx| find(cx).is_some());
+            let session = find(cx).unwrap();
+            let id = session.read_with(cx, |s, _| s.id.clone());
+            let handle = registry.update(cx, |r, cx| r.handle(agent, cx)).unwrap();
+            handle.prompt(id, vec![PromptBlock::Text("go".into())]);
+            sessions.push(session);
+        }
+        let request = |ix: usize, cx: &mut VisualTestContext| {
+            sessions[ix].read_with(cx, |s, _| {
+                s.model.items.iter().find_map(|item| match item {
+                    ChatItem::Permission { request, answered } => {
+                        Some((request.id, answered.clone()))
+                    }
+                    ChatItem::Question { request, answered } => {
+                        Some((request.id, answered.clone()))
+                    }
+                    _ => None,
+                })
+            })
+        };
+        wait_until(cx, "both requests", |cx| {
+            request(0, cx).is_some() && request(1, cx).is_some()
+        });
+        assert_eq!(request(0, cx), Some((1, None)));
+        assert_eq!(request(1, cx), Some((1, None)));
+
+        let (a, id) = sessions[0].read_with(cx, |s, _| (s.agent.clone(), s.id.clone()));
+        let handle = registry.update(cx, |r, cx| r.handle(&a, cx)).unwrap();
+        handle.cancel(id);
+        wait_until(cx, "a's request resolved", |cx| {
+            request(0, cx).is_some_and(|(_, answered)| answered.is_some())
+        });
+
+        assert_eq!(request(1, cx), Some((1, None)), "b's request still waits");
+        let state = sessions[1].read_with(cx, |s, _| s.model.state.clone());
+        assert_eq!(state, TurnState::NeedsYou);
+    }
+
+    #[gpui_kit::test]
+    fn permission_resolution_stays_with_its_agent(cx: &mut TestAppContext) {
+        resolution_stays_with_its_agent("--ask-permission", cx);
+    }
+
+    #[gpui_kit::test]
+    fn question_resolution_stays_with_its_agent(cx: &mut TestAppContext) {
+        resolution_stays_with_its_agent("--ask-question", cx);
     }
 
     /// What `app::run` does once the window is open, but the watcher.

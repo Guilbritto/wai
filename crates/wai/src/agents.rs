@@ -26,12 +26,19 @@ pub enum RegistryEvent {
         agent: String,
         request: PermissionRequest,
     },
-    PermissionResolved(u64),
+    /// Request ids restart at 1 per agent: only `agent`'s sessions hold this one.
+    PermissionResolved {
+        agent: String,
+        id: u64,
+    },
     Question {
         agent: String,
         request: QuestionRequest,
     },
-    QuestionResolved(u64),
+    QuestionResolved {
+        agent: String,
+        id: u64,
+    },
     QuestionUnsupported {
         agent: String,
         session: String,
@@ -176,7 +183,10 @@ impl AgentRegistry {
                 });
             }
             AgentEvent::PermissionResolved { id } => {
-                return cx.emit(RegistryEvent::PermissionResolved(id));
+                return cx.emit(RegistryEvent::PermissionResolved {
+                    agent: agent.into(),
+                    id,
+                });
             }
             AgentEvent::QuestionAsked(request) => {
                 return cx.emit(RegistryEvent::Question {
@@ -185,7 +195,10 @@ impl AgentRegistry {
                 });
             }
             AgentEvent::QuestionResolved { id } => {
-                return cx.emit(RegistryEvent::QuestionResolved(id));
+                return cx.emit(RegistryEvent::QuestionResolved {
+                    agent: agent.into(),
+                    id,
+                });
             }
             AgentEvent::QuestionUnsupported { session } => {
                 return cx.emit(RegistryEvent::QuestionUnsupported {

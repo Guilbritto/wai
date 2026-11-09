@@ -217,7 +217,7 @@ impl ChatSession {
         cx.notify();
     }
 
-    /// Resolutions are broadcast to every session; the model ignores ids it does not hold.
+    /// Resolutions reach every session of the agent; the model ignores ids it does not hold.
     pub fn handle_permission_resolved(&mut self, id: u64, cx: &mut Context<Self>) {
         self.update_model(cx, |m| m.on_permission_resolved(id));
         cx.notify();
@@ -237,7 +237,7 @@ impl ChatSession {
         cx.notify();
     }
 
-    /// Like permissions, resolutions reach every session.
+    /// Like permissions, resolutions reach every session of the agent.
     pub fn handle_question_resolved(&mut self, id: u64, cx: &mut Context<Self>) {
         self.update_model(cx, |m| m.on_question_resolved(id));
         let items = &self.model.items;
