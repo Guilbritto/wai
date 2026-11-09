@@ -1,6 +1,7 @@
 mod agents;
 mod agents_view;
 mod app;
+mod aurora;
 mod chat;
 mod editor;
 mod ext_host;

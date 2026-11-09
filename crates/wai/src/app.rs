@@ -30,6 +30,7 @@ actions!(
 /// Everything a window needs before it opens: components, theme, caret blink, keymap.
 pub fn init(settings: &Settings, cx: &mut App) {
     gpui_kit::init(cx);
+    crate::aurora::register(cx);
     let mode = match settings.theme {
         ThemeChoice::Dark => ThemeMode::Dark,
         ThemeChoice::Light => ThemeMode::Light,

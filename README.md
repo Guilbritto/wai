@@ -88,3 +88,5 @@ To build the app bundle and DMG yourself, see [docs/building.md](docs/building.m
 ## License
 
 Not chosen yet.
+
+Bundled: the Nunito font (`crates/wai/assets/fonts/`), under the SIL Open Font License 1.1.
