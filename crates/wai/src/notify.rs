@@ -88,10 +88,16 @@ fn notification_identity(info_plist: Option<&str>) -> &str {
 }
 
 /// `<bundle>/Contents/Info.plist` when this binary is `<bundle>/Contents/MacOS/wai`.
+#[cfg(any(target_os = "macos", test))]
+fn info_plist_path(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let macos = exe.parent().filter(|dir| dir.ends_with("Contents/MacOS"))?;
+    Some(macos.parent()?.join("Info.plist"))
+}
+
 #[cfg(all(target_os = "macos", not(test)))]
 fn bundle_info_plist() -> Option<String> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
-    std::fs::read_to_string(exe.parent()?.parent()?.join("Info.plist")).ok()
+    std::fs::read_to_string(info_plist_path(&exe)?).ok()
 }
 
 /// Off the UI thread: on macOS, delivery waits up to 2 s for confirmation.
@@ -127,7 +133,7 @@ fn show(title: String, body: String) {
 mod tests {
     use wai_agent::{PermissionRequest, StopReason};
 
-    use super::{NotifyKind, message, notification_identity, should_notify};
+    use super::{NotifyKind, info_plist_path, message, notification_identity, should_notify};
     use crate::chat::{ChatEvent, ChatItem, ChatModel, TurnState};
 
     #[test]
@@ -141,6 +147,18 @@ mod tests {
         assert_eq!(notification_identity(None), "com.apple.Terminal");
         let no_id = "<plist><dict><key>CFBundleName</key><string>wai</string></dict></plist>";
         assert_eq!(notification_identity(Some(no_id)), "com.apple.Terminal");
+        // Only a binary inside a bundle has one.
+        let bundled = std::path::Path::new("/Applications/wai.app/Contents/MacOS/wai");
+        assert_eq!(
+            info_plist_path(bundled).as_deref(),
+            Some(std::path::Path::new(
+                "/Applications/wai.app/Contents/Info.plist"
+            ))
+        );
+        assert_eq!(
+            info_plist_path("/src/wai/target/release/wai".as_ref()),
+            None
+        );
     }
 
     #[test]

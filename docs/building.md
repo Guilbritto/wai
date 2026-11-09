@@ -17,12 +17,14 @@ cargo build -p wai            # target/debug/wai
 cargo build --release -p wai  # target/release/wai
 ```
 
-`wai [FOLDER]` opens FOLDER, else the last project, else the current directory. It keeps its
-settings and state in `~/.config/wai`. To try a build without touching your own config, give it a
-throwaway home:
+`wai [FOLDER]` opens FOLDER, else the last project, else the current directory. When the
+current directory is the one a launcher picked (`/` from Finder, the Dock or `open`, or the
+install folder from a Windows shortcut), it opens your home folder instead. It keeps its settings
+and state in `~/.config/wai` (`%APPDATA%\wai` on Windows). To try a build without touching your
+own config, give it a throwaway home:
 
 ```sh
-HOME=$(mktemp -d) target/debug/wai /tmp/wai-demo
+mkdir -p /tmp/wai-demo && HOME=$(mktemp -d) target/debug/wai /tmp/wai-demo
 ```
 
 Run the built binary this way, never `cargo run`: under a fake `HOME`, rustup installs a whole
@@ -64,6 +66,7 @@ CI=true cargo packager --release
 
 - It builds the release binary first, then writes `target/release/wai.app` and
   `target/release/wai_<version>_aarch64.dmg`.
+- Always pass `--release`; the hook builds only the release binary.
 - `CI=true` skips the create-dmg step that drives Finder through AppleScript to arrange the DMG
   window; that step needs permission to control Finder. Only the `CI=true` form has been verified.
 - The first DMG build downloads the create-dmg script (pinned to a commit) into
@@ -89,9 +92,9 @@ installer uses `assets/icon/icon.ico`; `wai.exe` itself has no embedded icon yet
 
 ## Icon
 
-`crates/wai/assets/icon/icon.svg` is the source. After editing it, regenerate `icon.png` (from which
-cargo-packager builds the `.icns`) and `icon.ico` (the NSIS installer icon). This needs macOS
-(`sips`):
+`crates/wai/assets/icon/icon.svg` is the source. After editing it, regenerate `icon.png` and
+`icon@2x.png` (from which cargo-packager builds the `.icns`) and `icon.ico` (the NSIS installer
+icon). This needs macOS (`sips`):
 
 ```sh
 crates/wai/assets/icon/generate.sh
