@@ -145,3 +145,48 @@ fn fs_permission_edges_nul_and_nested_unknown() {
     let c = format!("{h}[[contributes.commands]]\nid=\"c\"\ntitle=\"C\"\nprompt=\"p\"\nbogus=1\n");
     assert!(matches!(parse(&c), Err(ManifestError::Parse(_))));
 }
+
+/// The first-party extensions in `extensions/` follow the same rules as any other.
+#[test]
+fn first_party_manifests_validate() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions");
+    let read = |id: &str| {
+        let dir = root.join(id);
+        let text = std::fs::read_to_string(dir.join(MANIFEST_FILE)).unwrap();
+        parse_manifest(&text, &dir).unwrap()
+    };
+
+    // wai-navegador: manifest-only; Playwright's MCP server through npx, at an exact version.
+    let nav = read("wai-navegador");
+    assert!(nav.process.is_none());
+    assert_eq!(nav.permissions, [Permission::Process, Permission::Network]);
+    let [mcp] = nav.contributes.mcp_servers.as_slice() else {
+        panic!("one MCP server: {nav:?}")
+    };
+    assert_eq!(
+        (mcp.name.as_str(), mcp.command.as_str()),
+        ("playwright", "npx")
+    );
+    let [yes, package] = mcp.args.as_slice() else {
+        panic!("{:?}", mcp.args)
+    };
+    let version = package.strip_prefix("@playwright/mcp@").unwrap_or_default();
+    let exact =
+        version.split('.').count() == 3 && version.split('.').all(|n| n.parse::<u32>().is_ok());
+    assert!(yes == "-y" && exact, "pinned: {package}");
+
+    // wai-rotinas: its own process, a panel and notifications.
+    let rotinas = read("wai-rotinas");
+    assert_eq!(
+        rotinas.permissions,
+        [Permission::Process, Permission::Notify, Permission::Panels]
+    );
+    assert_eq!(rotinas.process.unwrap().command, "bin/wai-rotinas");
+    assert_eq!(rotinas.contributes.panels[0].id, "rotinas");
+
+    // wai-remoto: a skeleton; no process, nothing contributed.
+    let remoto = read("wai-remoto");
+    assert!(remoto.process.is_none());
+    assert_eq!(remoto.permissions, [Permission::SessionsControl]);
+    assert_eq!(remoto.contributes, Contributes::default());
+}

@@ -1,0 +1,11 @@
+id = "wai-navegador"
+name = "Navegador"
+version = "0.1.0"
+description = "Gives agents a browser: Playwright's MCP server, started with npx"
+# `network`: npx downloads the server and the browser goes online (informational in v1).
+permissions = ["process", "network"]
+
+[[contributes.mcp_servers]]
+name = "playwright"
+command = "npx"
+args = ["-y", "@playwright/mcp@0.0.84"]

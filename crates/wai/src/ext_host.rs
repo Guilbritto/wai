@@ -628,6 +628,40 @@ pub(crate) mod tests {
         assert_eq!(turn(&second, "hi", cx), "mcp:");
     }
 
+    /// `extensions/wai-navegador`, installed from its folder with consent: its pinned Playwright
+    /// MCP server reaches the agent's `new_session` (npx itself never runs here).
+    #[gpui_kit::test]
+    fn navegador_mcp_reaches_new_session(cx: &mut TestAppContext) {
+        let Some(npx) = wai_settings::find_program(Path::new("npx")) else {
+            // wai leaves out an MCP server whose command is not on PATH.
+            return eprintln!("SKIPPED: npx is not on PATH");
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions/wai-navegador");
+        let mut store = ExtStore::open(&config);
+        let staged = store.stage(&Source::Folder(src)).unwrap();
+        let granted = staged.manifest().permissions.clone();
+        store.commit(staged, granted).unwrap();
+
+        let (workspace, cx) = workspace_at(&config, fake_settings("--echo-mcp"), cx);
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        let servers = host.read_with(cx, |h, _| h.mcp_servers());
+        let [server] = servers.as_slice() else {
+            panic!("one MCP server: {servers:?}")
+        };
+        assert_eq!(server.command, Path::new("npx"));
+        assert!(
+            server.args[1].starts_with("@playwright/mcp@"),
+            "{servers:?}"
+        );
+
+        cx.simulate_keystrokes("secondary-n");
+        let session = pane_session(&workspace, cx);
+        let want = format!("mcp:playwright={}", npx.display());
+        assert_eq!(turn(&session, "hi", cx), want);
+    }
+
     /// R51 `sessions/open`: `send: false` pre-fills like a template and answers the session; an
     /// unknown agent is an error (asked by a second extension: one opens once per 2 s).
     #[gpui_kit::test]

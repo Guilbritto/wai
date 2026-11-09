@@ -1,0 +1,7 @@
+# A skeleton: not functional yet (see DESIGN.md). It has no process, so installing it runs nothing.
+# Once built it also needs `listen`, a permission wai does not have yet.
+id = "wai-remoto"
+name = "Remoto"
+version = "0.0.0"
+description = "Phone access to your sessions. Design only: not functional yet"
+permissions = ["sessions:control"]

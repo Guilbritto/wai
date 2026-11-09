@@ -19,7 +19,7 @@ jobs:
       # The toolchain, its components and targets come from rust-toolchain.toml.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      # wai-waycarbon's own tests, and its end-to-end test in wai (unix only).
+      # The Go extensions' own tests, and wai-waycarbon's end-to-end test in wai (unix only).
       - uses: actions/setup-go@v5
         with:
           go-version-file: extensions/wai-waycarbon/go.mod
@@ -40,6 +40,12 @@ jobs:
       - run: go test ./...
         if: runner.os != 'Windows'
         working-directory: extensions/wai-waycarbon
+      - run: go vet ./...
+        working-directory: extensions/wai-rotinas
+      # Its tests run /bin/sh scripts, and it refuses every script on Windows: unix only.
+      - run: go test ./...
+        if: runner.os != 'Windows'
+        working-directory: extensions/wai-rotinas
 
   licenses:
     runs-on: ubuntu-latest
