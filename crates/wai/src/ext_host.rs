@@ -347,7 +347,7 @@ pub(crate) mod tests {
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
     use serde_json::{Value, json};
     use wai_ext::{ExtStore, MANIFEST_FILE, Source, parse_manifest};
-    use wai_settings::Settings;
+    use wai_settings::{AgentConfig, Settings};
 
     use crate::chat::{ChatItem, ChatSession, TurnState};
     use crate::workspace::tests::{fake_settings, open, wait_until};
@@ -780,6 +780,127 @@ pub(crate) mod tests {
         logged(&log, "three answers", cx, |l| bodies(l, "reply").len() == 3);
         cx.run_until_parked();
         assert_eq!(crate::notify::sent(), [("one".into(), "1".into())]);
+    }
+
+    const OPENER: &str = "id = \"opener\"\nname = \"Opener\"\nversion = \"1.0.0\"\n\
+        permissions = [\"process\", \"sessions:control\"]\n[process]\ncommand = \"bin/run\"\n";
+
+    /// `open`, its extensions in `config` started only after `before` ran.
+    fn start_after<'a>(
+        config: &Path,
+        settings: Settings,
+        cx: &'a mut TestAppContext,
+        before: impl FnOnce(&Entity<Workspace>, &mut VisualTestContext),
+    ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+        cx.executor().allow_parking(); // agents and extensions are real processes
+        let (workspace, cx) = open(cx, settings);
+        before(&workspace, cx);
+        workspace.update(cx, |w, cx| {
+            w.user_dir = config.to_path_buf();
+            w.start_extensions(cx);
+        });
+        (workspace, cx)
+    }
+
+    /// R56: an extension's session never takes the keyboard. Typing in the terminal stays
+    /// there: Enter never sends the extension's prompt.
+    #[gpui_kit::test]
+    fn extension_session_leaves_the_terminal_focused(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let calls = r#"--call 'sessions/open {"prompt": "draft me"}'"#;
+        install(tmp.path(), &config, OPENER, calls, "");
+        let (workspace, cx) = start_after(&config, fake_settings(""), cx, |_, cx| {
+            cx.simulate_keystrokes("ctrl-`");
+        });
+        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("the terminal"));
+
+        let session = pane_session(&workspace, cx);
+        cx.simulate_input("echo typed-in-terminal");
+        assert_eq!(session.read_with(cx, |s, cx| s.draft(cx)), "draft me");
+        wait_until(cx, "the typing in the terminal", |cx| {
+            terminal.read_with(cx, |t, _| {
+                (t.snapshot.rows.iter())
+                    .any(|runs| runs.iter().any(|r| r.text.contains("typed-in-terminal")))
+            })
+        });
+    }
+
+    /// R56: nor does it take the editor's keyboard, in the pane it opens beside the editor.
+    #[gpui_kit::test]
+    fn extension_session_leaves_the_editor_focused(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let file = tmp.path().join("notes.md");
+        std::fs::write(&file, "notes\n").unwrap();
+        let calls = r#"--call 'sessions/open {"prompt": "draft me"}'"#;
+        install(tmp.path(), &config, OPENER, calls, "");
+        let (workspace, cx) = start_after(&config, fake_settings(""), cx, |workspace, cx| {
+            let path = file.clone();
+            cx.update(|window, cx| {
+                workspace.update(cx, |w, cx| w.open_file(path, None, window, cx))
+            });
+            cx.run_until_parked();
+        });
+
+        wait_until(cx, "the session beside the editor", |cx| {
+            workspace.read_with(cx, |w, _| {
+                w.panes.len() == 2 && w.panes[1].session().is_some()
+            })
+        });
+        assert_eq!(workspace.read_with(cx, |w, _| w.focused_pane), 0);
+        cx.simulate_input("typed ");
+        let editor = workspace.read_with(cx, |w, _| match &w.panes[0] {
+            Pane::Editor(pane) => pane.clone(),
+            _ => unreachable!("the editor stays in pane 0"),
+        });
+        let text = editor.read_with(cx, |p, cx| {
+            p.tabs[p.active].read(cx).editor.read(cx).text().to_string()
+        });
+        assert_eq!(text, "typed notes\n");
+    }
+
+    /// R56: the user's ⌘N is never refused while an extension's session prepares: it takes
+    /// the pane, and the extension's session still opens (in the open list, in no pane).
+    #[gpui_kit::test]
+    fn new_session_takes_over_an_extensions_preparing_pane(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let calls = r#"--call 'sessions/open {"agent": "slow", "prompt": "theirs"}'"#;
+        install(tmp.path(), &config, OPENER, calls, "");
+        let mut settings = fake_settings("");
+        // `fake`, after 2 s: the extension's session prepares that long.
+        let fake = settings.agents["fake"].command.clone();
+        let slow = format!("sleep 2; exec {fake}");
+        let command = format!("/bin/sh -c {}", wai_agent::quote(slow));
+        settings
+            .agents
+            .insert("slow".into(), AgentConfig { command });
+        let (workspace, cx) = workspace_at(&config, settings, cx);
+        let log = log_path(tmp.path(), "opener");
+
+        wait_until(cx, "the extension's session to prepare", |cx| {
+            workspace.read_with(
+                cx,
+                |w, _| matches!(&w.panes[0], Pane::Preparing { agent, .. } if agent == "slow"),
+            )
+        });
+        cx.simulate_keystrokes("secondary-n");
+        workspace.read_with(cx, |w, _| {
+            assert!(matches!(&w.panes[0], Pane::Preparing { agent, .. } if agent == "fake"))
+        });
+        let mine = pane_session(&workspace, cx);
+        assert_eq!(mine.read_with(cx, |s, _| s.agent.clone()), "fake");
+
+        let theirs = reply(&log, 1, cx)["result"].clone();
+        assert_eq!(theirs["agent"], "slow");
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(w.sessions.len(), 2, "the extension's session opens too");
+            assert_eq!(w.panes.len(), 1);
+            assert_eq!(w.panes[0].session(), Some(&mine), "in no pane");
+            let draft = |s: &Entity<ChatSession>| s.read(cx).draft(cx);
+            assert_eq!(draft(&w.sessions[1]), "theirs");
+        });
     }
 }
 

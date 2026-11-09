@@ -45,9 +45,11 @@ pub enum Pane {
     /// The start hint, and why the last start failed, if it did.
     Empty(Option<String>),
     /// Reserved while `new_session` runs; `ticket` tells this request's placeholder apart.
+    /// `by_extension`: an extension's `sessions/open`, which gives way to the user's own start.
     Preparing {
         agent: String,
         ticket: u64,
+        by_extension: bool,
     },
     Session(Entity<ChatSession>),
     /// Open files in tabs; one pane at most. Not kept between runs.
@@ -809,6 +811,10 @@ impl Workspace {
 
     /// Starts a session of `agent` in the session pane with `prompt` pre-filled, or sent with
     /// `send`. `reply` (an extension's `sessions/open`) gets `{agent, session}` or why not.
+    ///
+    /// R56: an extension's session never takes the keyboard: the user may be typing elsewhere
+    /// (its pane shows it all the same). And it never holds up the user: a start of theirs takes
+    /// over the pane where an extension's session prepares, which then opens in no pane.
     pub(crate) fn start_session(
         &mut self,
         agent: String,
@@ -823,11 +829,17 @@ impl Workspace {
                 reply.send(Err(why.into()));
             }
         };
+        let by_extension = reply.is_some();
         let ix = self.session_pane();
-        if matches!(self.panes[ix], Pane::Preparing { .. }) {
+        if let Pane::Preparing {
+            by_extension: theirs,
+            ..
+        } = self.panes[ix]
+            && (by_extension || !theirs)
+        {
             return refuse(reply, "A session is already starting there");
         }
-        if ix != self.focused_pane {
+        if ix != self.focused_pane && !by_extension {
             self.focus_pane(ix, window, cx);
         }
         let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
@@ -842,6 +854,7 @@ impl Workspace {
         self.panes[ix] = Pane::Preparing {
             agent: agent.clone(),
             ticket,
+            by_extension,
         };
         *self.starting.entry(agent.clone()).or_default() += 1;
         cx.notify();
@@ -909,7 +922,7 @@ impl Workspace {
                     this.panes[ix] = shown;
                     // Only the focused pane takes the caret: elsewhere it would pull focus away
                     // from the pane the user is in.
-                    if ix == this.focused_pane {
+                    if ix == this.focused_pane && !by_extension {
                         this.focus_pane(ix, window, cx);
                     }
                 }

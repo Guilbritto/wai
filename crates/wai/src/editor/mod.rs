@@ -291,6 +291,7 @@ mod tests {
         let busy = || Pane::Preparing {
             agent: "fake".into(),
             ticket: 0,
+            by_extension: false,
         };
         workspace.update(cx, |w, _| {
             w.panes = vec![busy()];
