@@ -292,10 +292,17 @@ wai looks up a bare program name such as `npx` itself.
 - The same rule applies to MCP servers and extension programs.
 - A command that is not found fails with `<command> is not on PATH`.
 
-**The app launched from Finder, the Dock or Launchpad** gets macOS's default `PATH`, `/usr/bin:/bin:/usr/sbin:/sbin`. It does not get your shell's. Neither `npx` nor `node` is in it. You have three options:
+**The app launched from Finder, the Dock or Launchpad** gets macOS's default `PATH`, `/usr/bin:/bin:/usr/sbin:/sbin`, which has neither `npx` nor `node`. So on macOS, when wai was not started from a terminal (no `TERM`), it first asks your login shell for its `PATH`:
+- It runs `$SHELL -i -l` once, or zsh if `SHELL` is not an absolute program, from the config folder. Your `.zprofile` and `.zshrc` apply as in a terminal.
+- It imports `PATH` only. The new `PATH` is the shell's absolute folders, then those of macOS's it lacks. Relative entries are dropped.
+- It logs `wai: PATH from login shell (<n> entries, <ms> ms)`. A slow `.zshrc` delays every such launch by that much.
+- If the shell gives no `PATH` within 3 seconds, wai stops it, keeps macOS's `PATH` and logs `wai: kept the launch PATH, none from <shell>: <reason>`.
 
-- start wai from a terminal (`open /Applications/wai.app`, or `wai` on your `PATH`), which passes the terminal's environment;
-- give the agent an absolute program and a `PATH` that contains `node`. For Node installed in `/usr/local/bin`:
+Started from a terminal (`open /Applications/wai.app`, or `wai` on your `PATH`), wai skips this and uses the terminal's environment.
+
+If an agent is still not found, for example because your shell gave no `PATH` in time:
+- start wai from a terminal;
+- or give the agent an absolute program and a `PATH` that contains `node`. For Node installed in `/usr/local/bin`:
 
   ```toml
   [agents.claude]

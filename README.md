@@ -63,9 +63,9 @@ To build the app bundle and DMG yourself, see [docs/building.md](docs/building.m
 
 - **Settings** live in `~/.config/wai/settings.toml` (`%APPDATA%\wai\settings.toml` on Windows). See the [user guide](docs/user-guide.md#settings).
 
-**Opened from Finder or the Dock, wai does not see your shell's `PATH`.** macOS gives it `/usr/bin:/bin:/usr/sbin:/sbin`, and wai looks up bare commands such as `npx` only on its own `PATH`. You have two options:
-- start wai from a terminal (`open /Applications/wai.app` passes the terminal's environment);
-- give the agent an absolute command in your settings, as in the [user guide](docs/user-guide.md#agents-and-path).
+**Opened from Finder, the Dock or Launchpad, wai takes `PATH` from your login shell.** macOS gives such apps only `/usr/bin:/bin:/usr/sbin:/sbin`, which has no `npx`. So at launch wai runs your shell once (`$SHELL -i -l`) and puts its `PATH` first.
+- Started from a terminal (`open /Applications/wai.app`, or `wai`), wai uses the terminal's `PATH` instead.
+- If the shell gives no `PATH` within 3 seconds, wai keeps macOS's. See the [user guide](docs/user-guide.md#agents-and-path) for that case.
 
 ## Known limitations
 

@@ -10,6 +10,8 @@ mod files;
 mod notify;
 mod palette;
 mod search_view;
+#[cfg(target_os = "macos")]
+mod shell_path;
 mod sidebar;
 mod terminal_view;
 mod update;
@@ -23,6 +25,9 @@ use anyhow::Context as _;
 use wai_settings::{AppState, Settings, config_dir, load_templates};
 
 fn main() -> anyhow::Result<()> {
+    // First: it may set PATH, which is sound only while no other thread exists.
+    #[cfg(target_os = "macos")]
+    shell_path::import();
     // `WAI_STATE_PATH=<file>` keeps a manual run away from the real state.
     let state_path = std::env::var_os("WAI_STATE_PATH").map_or_else(
         || Ok(config_dir().join("state.json")),

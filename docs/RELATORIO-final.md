@@ -150,6 +150,7 @@ Os números finais do `.app` ficam na seção abaixo.
 | R65 | Adiados: o DMG em si não é notarizado (o app dentro é); rodar de novo pode criar 2º rascunho; certificado Windows em hardware precisa de `sign-command` | Um passo de notarização a mais depois |
 | R66 | `wai-rotinas` pode limitar cada espera a 1 min, porque o relógio do Go para durante o sono do Mac | ~60 despertares/h numa extensão opcional |
 | R67 | `wai-rotinas` recusa todo script no Windows (não há checagem de ACL na stdlib) | Sem rotinas no Windows até existir essa checagem |
+| R68 | No macOS, aberto fora do terminal (sem `TERM`), o wai pega só o `PATH` do shell de login (`-i -l`, 3 s, uma vez, antes de qualquer thread) | O `.zshrc` atrasa toda abertura pelo Finder (~1,6 s nesta máquina) |
 
 ## Lacunas conhecidas (atuais)
 
@@ -163,11 +164,11 @@ Os números finais do `.app` ficam na seção abaixo.
 - **A notificação a partir do `.app` não foi testada de ponta a ponta.** Precisa de um turno real terminando com a janela em segundo plano.
 
 **Uso**
-- **Aberto pelo Finder, Dock ou Launchpad, o wai não acha o `npx`.**
-  - O macOS dá a esses apps o PATH `/usr/bin:/bin:/usr/sbin:/sbin`; confirmei com um job do launchd. O wai procura `npx` só no próprio PATH, então o agente padrão falha com `npx is not on PATH`. O mesmo vale para o MCP do `wai-navegador`.
-  - Funciona aberto pelo terminal (`open /Applications/wai.app` herda o ambiente).
-  - Contorno documentado: um comando absoluto com `PATH=` nas configurações (testei com o PATH do launchd).
-  - **É a 1ª experiência de quem instala pelo DMG.** Vale uma correção antes do lançamento, por exemplo acrescentar `/opt/homebrew/bin` e `/usr/local/bin` ao PATH quando o wai é aberto pelo launchd.
+- **Aberto pelo Finder, Dock ou Launchpad, o wai pega o PATH do shell de login (R68), e isso custa tempo de abertura.**
+  - O macOS dá a esses apps o PATH `/usr/bin:/bin:/usr/sbin:/sbin`, sem `npx` nem `node`. Sem `TERM`, o wai roda `$SHELL -i -l` uma vez, logo no início, e põe as pastas do shell na frente. Pelo terminal, continua com o PATH do terminal.
+  - Testei com um job do launchd: um agente `command = "npx"` achou o `npx` que um `.zprofile` punha no PATH.
+  - **Custo:** o tempo do shell entra em toda abertura pelo Finder. ~25 ms com HOME vazio; ~1,6 s com o `.zshrc` desta máquina (só `-l` leva ~20 ms). Passou de 3 s, o wai segue com o PATH do launchd e registra uma linha.
+  - Sem cache por enquanto. Se ficar lento, guardar o resultado na pasta de config e renovar para a próxima abertura.
 - **As configurações só são lidas ao abrir o wai.**
   - O `.wai/settings.toml` vale só para a pasta com que o wai foi aberto.
   - Ao trocar de pasta (⌘O), modelos e sugestões de extensão são relidos, mas tema e `default_agent` do projeto novo não.

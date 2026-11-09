@@ -8150,6 +8150,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "notify-rust",
+ "rustix",
  "serde",
  "serde_json",
  "similar",

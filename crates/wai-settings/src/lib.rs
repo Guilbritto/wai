@@ -333,7 +333,7 @@ pub fn resolve_on_path(
 }
 
 /// A file the user may run (on Windows: any file).
-fn executable(path: &Path) -> bool {
+pub fn executable(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
