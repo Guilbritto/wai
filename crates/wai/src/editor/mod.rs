@@ -4,7 +4,7 @@ mod file;
 mod pane;
 
 pub use file::{load, save};
-pub use pane::{EditorPane, Emptied, FileEditor};
+pub use pane::{EditorPane, Emptied, FileEditor, Saved};
 
 #[cfg(test)]
 mod tests {

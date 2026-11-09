@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use gpui_kit::*;
 use wai_agent::{
-    AgentCaps, AgentEvent, AgentHandle, AgentSpec, PermissionRequest, QuestionRequest,
+    AgentCaps, AgentEvent, AgentHandle, AgentSpec, McpServer, PermissionRequest, QuestionRequest,
     SessionEvent, StopReason,
 };
 use wai_settings::{AgentConfig, Settings};
@@ -59,9 +59,13 @@ struct Agent {
     _pump: Task<()>,
 }
 
-/// One agent process per configured name, spawned on first use.
+/// One agent process per configured name, spawned on first use: the settings' agents, then the
+/// enabled extensions' (`<ext-id>/<name>`).
 pub struct AgentRegistry {
     configs: BTreeMap<String, AgentConfig>,
+    extension: BTreeMap<String, AgentConfig>,
+    /// The enabled extensions' MCP servers: every new, loaded or forked session gets them.
+    mcp: Vec<McpServer>,
     agents: HashMap<String, Agent>,
 }
 
@@ -71,19 +75,57 @@ impl AgentRegistry {
     pub fn new(settings: &Settings) -> Self {
         Self {
             configs: settings.agents.clone(),
+            extension: BTreeMap::new(),
+            mcp: Vec::new(),
             agents: HashMap::new(),
         }
     }
 
+    pub fn knows(&self, name: &str) -> bool {
+        self.configs.contains_key(name) || self.extension.contains_key(name)
+    }
+
+    /// Every agent's name: the settings' first.
+    pub fn names(&self) -> Vec<String> {
+        let extension = self
+            .extension
+            .keys()
+            .filter(|n| !self.configs.contains_key(*n));
+        self.configs.keys().chain(extension).cloned().collect()
+    }
+
+    pub fn mcp_servers(&self) -> Vec<McpServer> {
+        self.mcp.clone()
+    }
+
+    /// What the enabled extensions contribute now. An extension agent that goes, or changes its
+    /// command, is shut down: its sessions see it exit, and it never starts again unless it comes
+    /// back.
+    pub fn set_extensions(&mut self, agents: BTreeMap<String, AgentConfig>, mcp: Vec<McpServer>) {
+        for (name, config) in &self.extension {
+            let gone = agents.get(name) != Some(config) && !self.configs.contains_key(name);
+            if let Some(agent) = self.agents.get(name).filter(|_| gone) {
+                // Closes its stop channel now; its `Exited` arrives through the pump.
+                drop(agent.handle.shutdown());
+            }
+        }
+        self.extension = agents;
+        self.mcp = mcp;
+    }
+
     /// The agent's handle. Spawns it (again, once it has exited) and starts its event pump.
-    /// `None` when no agent has that name in the settings.
+    /// `None` when no agent has that name (in the settings or an enabled extension).
     pub fn handle(&mut self, name: &str, cx: &mut Context<Self>) -> Option<AgentHandle> {
+        if !self.knows(name) {
+            return None;
+        }
         if let Some(agent) = self.agents.get(name)
             && !matches!(agent.status, AgentStatus::Failed(_))
         {
             return Some(agent.handle.clone());
         }
-        let command = self.configs.get(name)?.command.clone();
+        let config = self.configs.get(name).or_else(|| self.extension.get(name));
+        let command = config?.command.clone();
         let (handle, events) = AgentHandle::spawn(AgentSpec {
             name: name.into(),
             command,

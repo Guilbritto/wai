@@ -404,7 +404,10 @@ impl ChatSession {
     /// already be routed.
     pub fn load(&mut self, restore: bool, window: &mut Window, cx: &mut Context<Self>) {
         let agent = self.agent.clone();
-        let Ok(Some(handle)) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
+        let started = self
+            .registry
+            .update(cx, |r, cx| Some((r.handle(&agent, cx)?, r.mcp_servers())));
+        let Ok(Some((handle, mcp))) = started else {
             return;
         };
         self.handle = handle.clone();
@@ -417,7 +420,7 @@ impl ChatSession {
         self.update_model(cx, |m| m.state = TurnState::Working);
         let (id, cwd, registry) = (self.id.clone(), self.cwd.clone(), self.registry.clone());
         cx.spawn_in(window, async move |this, cx| {
-            let loaded = handle.load_session(id, cwd).await;
+            let loaded = handle.load_session(id, cwd, mcp).await;
             this.update_in(cx, |this, window, cx| {
                 let agent = this.agent.clone();
                 match loaded {

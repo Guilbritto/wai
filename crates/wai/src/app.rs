@@ -22,7 +22,8 @@ actions!(
         CancelTurn,
         Paste,
         CopySelection,
-        Save
+        Save,
+        OpenPalette
     ]
 );
 
@@ -50,7 +51,7 @@ fn bind_keys(cx: &mut App) {
     } else {
         ("ctrl-shift-v", "ctrl-shift-c")
     };
-    let keymap: [(&str, Box<dyn Action>, Option<&str>); 10] = [
+    let keymap: [(&str, Box<dyn Action>, Option<&str>); 11] = [
         ("secondary-q", Box::new(Quit), None),
         ("secondary-n", Box::new(NewSession), workspace),
         ("ctrl-`", Box::new(ToggleTerminal), workspace),
@@ -59,6 +60,7 @@ fn bind_keys(cx: &mut App) {
         ("secondary-s", Box::new(Save), workspace),
         ("secondary-alt-right", Box::new(FocusNextPane), workspace),
         ("secondary-o", Box::new(OpenFolder), workspace),
+        ("secondary-shift-p", Box::new(OpenPalette), workspace),
         // The prompt box lets Escape through (it has nothing to clear).
         ("escape", Box::new(CancelTurn), Some("ChatSession")),
         (paste, Box::new(Paste), Some("Terminal")),
@@ -115,9 +117,10 @@ pub fn run(
                     w.templates = templates;
                     w.start_agent(cx);
                     w.watch_project(window, cx);
+                    // Before `restore`: a saved session may be an extension agent's.
+                    w.start_extensions(cx);
                     w.restore(window, cx);
                     w.suggest_extensions(window, cx);
-                    w.start_extensions(cx);
                 });
                 for notice in notices {
                     window.push_notification(Notification::warning(notice).autohide(false), cx);
@@ -250,6 +253,7 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 /// for that folder (fase-3-consent.png).
 /// `WAI_SHOT_PANEL=1`: the first extension panel's tab, an enabled extension having rendered it
 /// (fase-3-panel.png).
+/// `WAI_SHOT_PALETTE=1`: the command palette open (fase-3-palette.png).
 #[cfg(feature = "screenshot")]
 fn screenshot(
     (window, workspace): (AnyWindowHandle, Entity<Workspace>),
@@ -314,6 +318,13 @@ fn screenshot(
                 })
                 .ok();
             executor.timer(Duration::from_secs(1)).await;
+        } else if std::env::var("WAI_SHOT_PALETTE").is_ok() {
+            window
+                .update(cx, |_, window, cx| {
+                    window.dispatch_action(Box::new(OpenPalette), cx)
+                })
+                .ok();
+            executor.timer(Duration::from_millis(500)).await;
         } else if std::env::var("WAI_SHOT_PANEL").is_ok() {
             workspace.update(cx, |w, cx| {
                 let first = w.ext_host.read(cx).panels().first();

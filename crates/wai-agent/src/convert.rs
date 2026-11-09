@@ -271,6 +271,20 @@ pub(crate) fn stop_reason(reason: acp::StopReason) -> StopReason {
     }
 }
 
+/// ACP stdio servers: every agent must support that transport.
+pub(crate) fn mcp_servers(servers: Vec<McpServer>) -> Vec<acp::McpServer> {
+    let stdio = |s: McpServer| {
+        let env = s.env.into_iter().map(|(k, v)| acp::EnvVariable::new(k, v));
+        acp::McpServerStdio::new(s.name, s.command)
+            .args(s.args)
+            .env(env.collect())
+    };
+    servers
+        .into_iter()
+        .map(|s| acp::McpServer::Stdio(stdio(s)))
+        .collect()
+}
+
 pub(crate) fn session_started(
     id: SessionId,
     modes: Option<acp::SessionModeState>,
@@ -326,6 +340,26 @@ pub(crate) fn content_block(block: PromptBlock) -> acp::ContentBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_servers_are_stdio_with_args_and_env() {
+        let server = McpServer {
+            name: "jira".into(),
+            command: "/opt/jira-mcp".into(),
+            args: vec!["--stdio".into(), "a b".into()],
+            env: vec![("MODE".into(), "test".into())],
+        };
+        let wire = serde_json::to_value(mcp_servers(vec![server])).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!([{
+                "name": "jira",
+                "command": "/opt/jira-mcp",
+                "args": ["--stdio", "a b"],
+                "env": [{"name": "MODE", "value": "test"}],
+            }])
+        );
+    }
 
     #[test]
     fn resource_becomes_file_uri_link() {

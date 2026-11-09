@@ -8148,6 +8148,7 @@ dependencies = [
  "notify-rust",
  "serde_json",
  "similar",
+ "smol",
  "tempfile",
  "wai-agent",
  "wai-ext",

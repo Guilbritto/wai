@@ -116,6 +116,7 @@ impl FileEditor {
             Ok(stamp) => {
                 self.stamp = stamp;
                 (self.dirty, self.disk_changed) = (false, false);
+                cx.emit(Saved);
                 cx.notify();
                 true
             }
@@ -308,6 +309,11 @@ impl EventEmitter<Emptied> for EditorPane {}
 pub struct CloseRequest;
 
 impl EventEmitter<CloseRequest> for FileEditor {}
+
+/// Its buffer was written to its file.
+pub struct Saved;
+
+impl EventEmitter<Saved> for FileEditor {}
 
 impl EditorPane {
     pub fn new() -> Self {

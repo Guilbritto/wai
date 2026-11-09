@@ -119,6 +119,7 @@ impl Workspace {
 
     pub(crate) fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
+        let templates = self.all_templates(cx);
         let panels = self.ext_host.read(cx).panels();
         let shown = panels
             .iter()
@@ -188,12 +189,12 @@ impl Workspace {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(folder_name(&self.project)),
                     )
-                    .when(!self.templates.is_empty(), |el| {
+                    .when(!templates.is_empty(), |el| {
                         let (workspace, names) = (
                             cx.entity().downgrade(),
-                            self.templates
-                                .iter()
-                                .map(|t| t.name.clone())
+                            // An extension's names too: one line each.
+                            (templates.iter())
+                                .map(|t| clamp(&t.name, crate::palette::TITLE_CHARS))
                                 .collect::<Vec<_>>(),
                         );
                         el.child(

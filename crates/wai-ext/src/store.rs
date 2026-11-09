@@ -22,6 +22,18 @@ pub struct Installed {
     pub granted: Vec<Permission>,
 }
 
+impl Installed {
+    /// A command the manifest names: a bare name is looked up on PATH, a relative path is inside
+    /// the extension's folder.
+    pub fn program(&self, command: &str) -> PathBuf {
+        if command.contains(['/', '\\']) {
+            self.dir.join(command)
+        } else {
+            PathBuf::from(command)
+        }
+    }
+}
+
 /// One entry of `extensions.json`.
 #[derive(Serialize, Deserialize)]
 struct Record {

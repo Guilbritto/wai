@@ -18,8 +18,10 @@
 //!   `reset`, they are "", "Team" and true.
 //! - `--oversized`: after `initialize`, send a 5 MB `notify` request titled `big`, then a `notify`
 //!   notification titled `after`.
-//! - `--call <method>` (repeatable): after `initialize`, call each method with params `{}`, with
-//!   ids from 1.
+//! - `--call <method>[ <params>]` (repeatable): after `initialize`, call each method with its JSON
+//!   params (default `{}`), with ids from 1.
+//! - `--log <path>`: report to that file instead, one JSON line `{"title", "body"}` per report
+//!   (for a host that rate-limits or denies `notify`).
 //! - `--exit`: after all of the above, exit 0.
 
 use std::io::{BufRead as _, Write as _};
@@ -35,6 +37,21 @@ fn send(msg: Value) {
 
 fn notify(title: &str, body: String) -> Value {
     json!({"jsonrpc": "2.0", "method": "notify", "params": {"title": title, "body": body}})
+}
+
+/// A report: a `notify` notification, or a line of the `--log` file.
+fn report(log: Option<&str>, title: &str, body: String) {
+    let Some(path) = log else {
+        return send(notify(title, body));
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    // One write per line, so a reader never sees half of one between two writes.
+    let line = format!("{}\n", json!({"title": title, "body": body}));
+    file.write_all(line.as_bytes()).unwrap();
 }
 
 /// One node of each type, an unknown one included.
@@ -93,6 +110,8 @@ fn main() {
         std::fs::write(path, sleep.unwrap().id().to_string()).unwrap();
     }
 
+    let log = value("--log");
+    let report = |title: &str, body: String| report(log.as_deref(), title, body);
     let mut reset = false;
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
@@ -112,7 +131,7 @@ fn main() {
                     "env_ext_dir": std::env::var("WAI_EXT_DIR").ok(),
                     "cwd": std::env::current_dir().ok(),
                 });
-                send(notify("initialize", init.to_string()));
+                report("initialize", init.to_string());
                 if let Some(n) = value("--flood") {
                     for n in 0..n.parse::<u64>().unwrap() {
                         send(render(json!({"type": "text", "text": n.to_string()})));
@@ -127,15 +146,19 @@ fn main() {
                         "params": {"title": "big", "body": big}}));
                     send(notify("after", "{}".into()));
                 }
-                for (ix, method) in values("--call").iter().enumerate() {
-                    send(json!({"jsonrpc": "2.0", "id": ix + 1, "method": method, "params": {}}));
+                for (ix, call) in values("--call").iter().enumerate() {
+                    let (method, params) = call.split_once(' ').unwrap_or((call, "{}"));
+                    let params: Value = serde_json::from_str(params).unwrap();
+                    send(
+                        json!({"jsonrpc": "2.0", "id": ix + 1, "method": method, "params": params}),
+                    );
                 }
                 if flag("--exit") {
                     std::process::exit(0);
                 }
             }
             Some(method) => {
-                send(notify(method, msg["params"].to_string()));
+                report(method, msg["params"].to_string());
                 if let Some(id) = msg.get("id") {
                     send(json!({"jsonrpc": "2.0", "id": id, "result": null}));
                 }
@@ -147,7 +170,7 @@ fn main() {
                     send(render(sample(&last, reset)));
                 }
             }
-            None => send(notify("reply", line)),
+            None => report("reply", line),
         }
     }
 }

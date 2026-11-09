@@ -294,12 +294,7 @@ impl Ext {
         if !installed.granted.contains(&Permission::Process) {
             return Err("it may not run its own programs".into());
         }
-        // A bare name is looked up on PATH; a relative path is inside the extension's folder.
-        let program = if spec.command.contains(['/', '\\']) {
-            installed.dir.join(&spec.command)
-        } else {
-            PathBuf::from(&spec.command)
-        };
+        let program = installed.program(&spec.command);
         let granted: Vec<String> = installed.granted.iter().map(ToString::to_string).collect();
         Ok(Ext {
             id: m.id.clone(),

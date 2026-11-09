@@ -8,20 +8,22 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, h_resizable, resizable_panel, v_flex, v_resizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use serde_json::json;
 use wai_agent::{
     AgentError, AgentHandle, BrokerError, QuestionAnswer, SessionEvent, SessionStarted,
     SessionSummary, StopReason,
 };
+use wai_ext::{CommandSpec, ExtEvent, ExtId, HostEvent, Reply};
 use wai_project::{FsChange, ProjectWatcher};
 use wai_settings::{AppState, OpenSession, Settings, Template, config_dir, load_templates};
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::agents_view::{AgentsView, ShowSession};
 use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, Quit, Save, ToggleTerminal};
-use crate::chat::{ChatEvent, ChatSession, signed_out};
-use crate::editor::{self, EditorPane, Emptied, FileEditor};
-use crate::ext_host::ExtHost;
-use crate::extensions_view::ExtensionsView;
+use crate::chat::{ChatEvent, ChatSession, TurnState, signed_out};
+use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved};
+use crate::ext_host::{ExtHost, SessionCall};
+use crate::extensions_view::{ExtensionsView, InstallPlugin};
 use crate::files::{FileTree, OpenFile};
 use crate::notify::{self, should_notify};
 use crate::search_view::{OpenMatch, SearchView};
@@ -172,15 +174,26 @@ impl Workspace {
         window.set_window_title(&title(&project));
         let project = canonical(&project);
         let ext_host = cx.new(|_| ExtHost::new(project.clone()));
-        // Its panels are sidebar tabs: a shown one that goes leaves the sessions shown.
+        // Its panels are sidebar tabs: a shown one that goes leaves the sessions shown. Its agents
+        // and MCP servers follow the enabled extensions.
         let panels = cx.observe(&ext_host, |this: &mut Self, host, cx| {
             if let SidebarTab::Panel(shown) = this.sidebar_tab
                 && !(host.read(cx).panels().iter()).any(|p| p.view.entity_id() == shown)
             {
                 this.sidebar_tab = SidebarTab::Sessions;
             }
+            this.sync_contributions(cx);
             cx.notify();
         });
+        let calls = cx.subscribe_in(
+            &ext_host,
+            window,
+            |this, _, call: &SessionCall, window, cx| {
+                if let Some(call) = call.take() {
+                    this.session_call(call, window, cx);
+                }
+            },
+        );
         let files = cx.new(|cx| FileTree::new(project.clone(), global_ignores, cx));
         let open_file = cx.subscribe_in(&files, window, |this, _, OpenFile(path), window, cx| {
             this.open_file(path.clone(), None, window, cx)
@@ -228,7 +241,15 @@ impl Workspace {
             early: HashMap::new(),
             state_path,
             focus,
-            _subscriptions: vec![routing, quit, open_file, open_match, open_session, panels],
+            _subscriptions: vec![
+                routing,
+                quit,
+                open_file,
+                open_match,
+                open_session,
+                panels,
+                calls,
+            ],
         }
     }
 
@@ -397,6 +418,11 @@ impl Workspace {
                 session,
                 reason,
             } => {
+                self.ext_host.read(cx).broadcast(HostEvent::TurnEnded {
+                    agent: agent.clone(),
+                    session: session.clone(),
+                    reason: stop_reason(reason),
+                });
                 if let Some(s) = self.session(agent, session, cx) {
                     s.update(cx, |s, cx| s.handle_turn_ended(reason, cx));
                 }
@@ -491,6 +517,14 @@ impl Workspace {
                 ChatEvent::OpenOutput { tool, text } => {
                     let session = session.read(cx).id.clone();
                     return this.open_output(&session, tool, text.clone(), window, cx);
+                }
+                ChatEvent::StateChanged => {
+                    let s = session.read(cx);
+                    this.ext_host.read(cx).broadcast(HostEvent::SessionState {
+                        agent: s.agent.clone(),
+                        session: s.id.clone(),
+                        state: state_name(s.status()).into(),
+                    });
                 }
                 _ => {}
             }
@@ -611,9 +645,10 @@ impl Workspace {
         let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
             return;
         };
+        let mcp = self.registry.read(cx).mcp_servers();
         let title = title.map(|t| format!("{t} (fork)"));
         cx.spawn_in(window, async move |this, cx| {
-            let forked = handle.fork_session(id, cwd.clone()).await;
+            let forked = handle.fork_session(id, cwd.clone(), mcp).await;
             this.update_in(cx, |this, window, cx| match forked {
                 Ok(started) => {
                     let Some(session) = this.loading_session(agent, started.id, cwd, window, cx)
@@ -666,7 +701,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let agent = self.settings.default_agent.clone();
-        self.start_session(agent, None, window, cx)
+        self.start_session(agent, None, false, None, window, cx)
+    }
+
+    /// The user's and the project's templates, then the enabled extensions'.
+    pub(crate) fn all_templates(&self, cx: &App) -> Vec<Template> {
+        let extensions = self.ext_host.read(cx).templates().cloned();
+        self.templates.iter().cloned().chain(extensions).collect()
     }
 
     /// `new_session` for template `ix`: its agent (the default one if it names none), its prompt
@@ -677,14 +718,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(template) = self.templates.get(ix).cloned() else {
+        let Some(template) = self.all_templates(cx).get(ix).cloned() else {
             return;
         };
         let agent = template
             .agent
             .clone()
             .unwrap_or_else(|| self.settings.default_agent.clone());
-        if !self.settings.agents.contains_key(&agent) {
+        if !self.registry.read(cx).knows(&agent) {
             let pane = self.session_pane();
             if matches!(self.panes[pane], Pane::Preparing { .. }) {
                 return;
@@ -695,27 +736,107 @@ impl Workspace {
             )));
             return cx.notify();
         }
-        self.start_session(agent, Some(template.prompt), window, cx)
+        self.start_session(agent, Some(template.prompt), false, None, window, cx)
     }
 
-    fn start_session(
+    /// A palette command: a prompt-only one starts a session with its prompt pre-filled, the
+    /// others go to the extension's process as `command/run`.
+    pub(crate) fn run_ext_command(
         &mut self,
-        agent: String,
-        prefill: Option<String>,
+        ext: &ExtId,
+        command: CommandSpec,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        match command.prompt {
+            Some(prompt) => {
+                let agent = self.settings.default_agent.clone();
+                self.start_session(agent, Some(prompt), false, None, window, cx)
+            }
+            None => self.ext_host.read(cx).run_command(ext, &command.id),
+        }
+    }
+
+    /// The enabled extensions' agents and MCP servers, to the registry.
+    fn sync_contributions(&self, cx: &mut Context<Self>) {
+        let host = self.ext_host.read(cx);
+        let (agents, mcp) = (host.agents(), host.mcp_servers());
+        self.registry
+            .update(cx, |r, _| r.set_extensions(agents, mcp));
+    }
+
+    /// R51: an extension's session request, already checked against its permissions.
+    fn session_call(&mut self, call: ExtEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match call {
+            ExtEvent::ListSessions { reply } => {
+                let sessions = self.sessions.iter().map(|session| {
+                    let s = session.read(cx);
+                    json!({
+                        "agent": s.agent,
+                        "session": s.id,
+                        "title": s.model.title,
+                        "state": state_name(s.status()),
+                    })
+                });
+                reply.send(Ok(sessions.collect()));
+            }
+            ExtEvent::OpenSession {
+                agent,
+                prompt,
+                send,
+                reply,
+            } => {
+                let agent = agent.unwrap_or_else(|| self.settings.default_agent.clone());
+                if !self.registry.read(cx).knows(&agent) {
+                    return reply.send(Err(format!("No agent named {agent}")));
+                }
+                self.start_session(agent, prompt, send, Some(reply), window, cx);
+            }
+            ExtEvent::Prompt {
+                agent,
+                session,
+                text,
+            } => {
+                let sent = (self.session(&agent, &session, cx))
+                    .is_some_and(|s| s.update(cx, |s, cx| s.send_text(&text, cx)));
+                if !sent {
+                    eprintln!("wai: an extension's prompt for {agent} {session} was dropped");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Starts a session of `agent` in the session pane with `prompt` pre-filled, or sent with
+    /// `send`. `reply` (an extension's `sessions/open`) gets `{agent, session}` or why not.
+    pub(crate) fn start_session(
+        &mut self,
+        agent: String,
+        prompt: Option<String>,
+        send: bool,
+        reply: Option<Reply>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let refuse = |reply: Option<Reply>, why: &str| {
+            if let Some(reply) = reply {
+                reply.send(Err(why.into()));
+            }
+        };
         let ix = self.session_pane();
         if matches!(self.panes[ix], Pane::Preparing { .. }) {
-            return;
+            return refuse(reply, "A session is already starting there");
         }
         if ix != self.focused_pane {
             self.focus_pane(ix, window, cx);
         }
         let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
-            self.panes[ix] = Pane::Empty(Some(format!("No agent named {agent} in the settings.")));
+            let error = format!("No agent named {agent}");
+            refuse(reply, &error);
+            self.panes[ix] = Pane::Empty(Some(format!("{error} in the settings or extensions.")));
             return cx.notify();
         };
+        let mcp = self.registry.read(cx).mcp_servers();
         let ticket = self.next_ticket;
         self.next_ticket += 1;
         self.panes[ix] = Pane::Preparing {
@@ -727,7 +848,7 @@ impl Workspace {
         let cwd = self.project.clone();
         let registry = self.registry.downgrade();
         cx.spawn_in(window, async move |this, cx| {
-            let started = handle.new_session(cwd.clone()).await;
+            let started = handle.new_session(cwd.clone(), mcp).await;
             this.update_in(cx, |this, window, cx| {
                 let early = this.landed(&agent, started.as_ref().ok().map(|s| s.id.as_str()));
                 // Replaced meanwhile (a history row shown there), the placeholder is gone: the
@@ -738,29 +859,51 @@ impl Workspace {
                     .iter()
                     .position(|p| matches!(p, Pane::Preparing { ticket: t, .. } if *t == ticket));
                 let shown = match started {
-                    Ok(_) if cancelled => return,
+                    Ok(_) if cancelled => return refuse(reply, "The session was closed"),
                     Ok(started) => {
                         // A session that starts proves the agent works (signed in again, say).
                         this.registry.update(cx, |r, cx| r.mark_ready(&agent, cx));
+                        let id = started.id.clone();
                         let session = cx.new(|cx| {
-                            ChatSession::new(agent, started, cwd, handle, registry, window, cx)
+                            ChatSession::new(
+                                agent.clone(),
+                                started,
+                                cwd,
+                                handle,
+                                registry,
+                                window,
+                                cx,
+                            )
                         });
-                        if let Some(text) = prefill {
-                            session.update(cx, |s, cx| s.prefill(&text, window, cx));
-                        }
                         session
                             .update(cx, |s, cx| early.iter().for_each(|e| s.handle_event(e, cx)));
+                        // Routed and followed before a sent prompt changes its state.
                         this.add_session(session.clone(), window, cx);
+                        if let Some(text) = prompt {
+                            session.update(cx, |s, cx| {
+                                if !(send && s.send_text(&text, cx)) {
+                                    s.prefill(&text, window, cx)
+                                }
+                            });
+                        }
+                        if let Some(reply) = reply {
+                            reply.send(Ok(json!({"agent": agent, "session": id})));
+                        }
                         this.refresh_history(cx);
                         Pane::Session(session)
                     }
                     // The empty pane shows the sign-in message.
                     Err(AgentError::AuthRequired) => {
+                        refuse(reply, &signed_out(&agent));
                         this.registry
                             .update(cx, |r, cx| r.set_status(&agent, AgentStatus::SignedOut, cx));
                         Pane::Empty(None)
                     }
-                    Err(e) => Pane::Empty(Some(format!("Could not start a {agent} session: {e}"))),
+                    Err(e) => {
+                        let error = format!("Could not start a {agent} session: {e}");
+                        refuse(reply, &error);
+                        Pane::Empty(Some(error))
+                    }
                 };
                 if let Some(ix) = pane {
                     this.panes[ix] = shown;
@@ -780,7 +923,12 @@ impl Workspace {
 
     /// Shows the terminal, created on the first toggle in the project folder (a shell that exited
     /// starts again), and focuses it. Hiding it hands the focus back to the focused pane.
-    fn toggle_terminal(&mut self, _: &ToggleTerminal, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_terminal(
+        &mut self,
+        _: &ToggleTerminal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.terminal_visible = !self.terminal_visible;
         self.save_state(cx);
         if !self.terminal_visible {
@@ -797,6 +945,25 @@ impl Workspace {
         };
         terminal.update(cx, |t, cx| t.activate(window, cx));
         cx.notify();
+    }
+
+    /// Shows the terminal and types `text` at its prompt without Enter: the user reads it and
+    /// presses Enter (an extension's suggested Claude Code plugin).
+    pub(crate) fn type_in_terminal(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.terminal_visible {
+            self.toggle_terminal(&ToggleTerminal, window, cx);
+        }
+        if let Some(terminal) = self.terminal.clone() {
+            terminal.update(cx, |t, cx| {
+                t.activate(window, cx);
+                t.type_text(text, cx);
+            });
+        }
     }
 
     /// Drops the focused pane's session from the panes and the open list (the agent keeps it in
@@ -1009,6 +1176,13 @@ impl Workspace {
                     let started = std::time::Instant::now();
                     let tab =
                         cx.new(|cx| FileEditor::new(path.clone(), loaded, scratch, window, cx));
+                    cx.subscribe(&tab, |this, tab, _: &Saved, cx| {
+                        let path = tab.read(cx).path.clone();
+                        this.ext_host
+                            .read(cx)
+                            .broadcast(HostEvent::FileSaved { path });
+                    })
+                    .detach();
                     let pane = this.editor_pane(window, cx);
                     pane.update(cx, |p, cx| p.add(tab, window, cx));
                     this.reveal(&path, line, window, cx);
@@ -1128,17 +1302,27 @@ impl Workspace {
         }
         let (dir, host) = (self.user_dir.clone(), self.ext_host.clone());
         let view = cx.new(|cx| ExtensionsView::new(&dir, host, window, cx));
+        cx.subscribe_in(
+            &view,
+            window,
+            |this, _, InstallPlugin(command), window, cx| {
+                this.type_in_terminal(command, window, cx)
+            },
+        )
+        .detach();
         self.extensions = Some(view.clone());
         view
     }
 
-    /// Starts the enabled extensions' processes: once the window is open, like the agent.
+    /// Starts the enabled extensions' processes and takes their agents and MCP servers: once the
+    /// window is open, like the agent, and before the last run's sessions load.
     pub fn start_extensions(&mut self, cx: &mut Context<Self>) {
         let list = match &self.extensions {
             Some(view) => view.read(cx).store().list(),
             None => wai_ext::ExtStore::open(&self.user_dir).list(),
         };
         self.ext_host.update(cx, |host, cx| host.sync(&list, cx));
+        self.sync_contributions(cx);
     }
 
     /// Shows the Extensions view in the sidebar.
@@ -1184,7 +1368,12 @@ impl Workspace {
         }
     }
 
-    fn open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_folder(
+        &mut self,
+        _: &OpenFolder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -1314,6 +1503,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::focus_next_pane))
             .on_action(cx.listener(Self::open_folder))
+            .on_action(cx.listener(Self::open_palette))
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
@@ -1347,6 +1537,27 @@ impl Render for Workspace {
 
 fn fork_failure(error: &AgentError) -> String {
     format!("Could not fork session: {error}")
+}
+
+/// A session's state as extensions see it.
+fn state_name(state: &TurnState) -> &'static str {
+    match state {
+        TurnState::Idle => "idle",
+        TurnState::Working => "working",
+        TurnState::NeedsYou => "needs_you",
+        TurnState::Error(_) => "error",
+    }
+}
+
+/// ACP's names: `end_turn`, `cancelled`, `max_tokens`, `refusal`, or the agent's own.
+fn stop_reason(reason: &StopReason) -> String {
+    match reason {
+        StopReason::EndTurn => "end_turn".into(),
+        StopReason::Cancelled => "cancelled".into(),
+        StopReason::MaxTokens => "max_tokens".into(),
+        StopReason::Refusal => "refusal".into(),
+        StopReason::Other(other) => other.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -1966,7 +2177,9 @@ pub(crate) mod tests {
         let mut sessions = Vec::new();
         for agent in ["a", "b"] {
             cx.update(|window, cx| {
-                workspace.update(cx, |w, cx| w.start_session(agent.into(), None, window, cx))
+                workspace.update(cx, |w, cx| {
+                    w.start_session(agent.into(), None, false, None, window, cx)
+                })
             });
             let find = |cx: &mut VisualTestContext| {
                 workspace.read_with(cx, |w, cx| {

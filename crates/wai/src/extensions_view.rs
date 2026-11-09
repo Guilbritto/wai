@@ -37,6 +37,23 @@ pub fn permission_text(permission: &Permission) -> String {
     }
 }
 
+/// What "Install in terminal" types for a Claude Code plugin an extension suggests: `None` for
+/// a name that could do more than name a plugin (`[A-Za-z0-9._@/-]+`, no leading `-`, at most
+/// 214 characters like an npm package: the PTY write is on the main thread).
+pub fn plugin_install(name: &str) -> Option<String> {
+    let ok = |c: char| c.is_ascii_alphanumeric() || "._@/-".contains(c);
+    let valid = (1..=214).contains(&name.len()) && !name.starts_with('-') && name.chars().all(ok);
+    valid.then(|| format!("claude plugin install {name}"))
+}
+
+/// Type this into the terminal, without Enter.
+pub struct InstallPlugin(pub String);
+
+impl EventEmitter<InstallPlugin> for ExtensionsView {}
+
+/// Suggested plugins listed per extension; a manifest may list more.
+const PLUGINS_SHOWN: usize = 20;
+
 fn permissions_text(permissions: &[Permission]) -> Vec<String> {
     if permissions.is_empty() {
         return vec!["No permissions".into()];
@@ -291,6 +308,33 @@ impl ExtensionsView {
             Some(ExtStatus::Crashed(tail)) => Some(format!("Crashed: {tail}")),
             _ => None,
         };
+        // Never installed silently: typed into the terminal, and the user presses Enter.
+        let plugins = (ext.manifest.contributes.claude_plugins.iter())
+            .filter(|_| ext.enabled)
+            .take(PLUGINS_SHOWN)
+            .enumerate()
+            .map(|(p, name)| {
+                let id =
+                    ElementId::Name(format!("ext-plugin:{}:{p}", ext.manifest.id.as_str()).into());
+                let row = h_flex().gap_2().text_xs().child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(format!("Claude Code plugin {}", clamp(name, NAME_CHARS))),
+                );
+                match plugin_install(name) {
+                    Some(command) => row.child(
+                        Button::new(id)
+                            .xsmall()
+                            .label("Install in terminal")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(InstallPlugin(command.clone()))
+                            })),
+                    ),
+                    None => row.child(div().text_color(theme.danger).child("Invalid name")),
+                }
+            });
         v_flex()
             .gap_1()
             .p_2()
@@ -325,6 +369,7 @@ impl ExtensionsView {
                 let text = clamp(&text, DESCRIPTION_CHARS);
                 div().text_xs().text_color(theme.danger).child(text)
             }))
+            .children(plugins)
             .child(
                 h_flex()
                     .justify_between()
@@ -407,7 +452,7 @@ pub(crate) mod tests {
 
     use wai_ext::panel::clamp;
 
-    use super::{ExtensionsView, LIMITATION};
+    use super::{ExtensionsView, LIMITATION, plugin_install};
     use crate::ext_host::ExtStatus;
     use crate::workspace::Workspace;
     use crate::workspace::tests::{open, wait_until};
@@ -787,5 +832,106 @@ pub(crate) mod tests {
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| w.set_project("/nonexistent".into(), window, cx))
         });
+    }
+
+    /// The typed command names a plugin and nothing else: no spaces, control characters, shell
+    /// syntax or option.
+    #[test]
+    fn plugin_names_are_validated() {
+        for name in [
+            "beehive-waycarbon",
+            "@scope/plugin",
+            "plugin@market",
+            "a.b_c-1",
+        ] {
+            let typed = plugin_install(name);
+            assert_eq!(
+                typed.as_deref(),
+                Some(format!("claude plugin install {name}").as_str())
+            );
+        }
+        let bad = [
+            "",
+            "-rf",
+            "--help",
+            "a b",
+            "a;b",
+            "a\nb",
+            "a\rb",
+            "a\tb",
+            "a$(id)",
+            "a`id`",
+            "a|b",
+            "a&b",
+            "a>b",
+            "a'b",
+            "a\"b",
+            "a\\b",
+            "plügin",
+            "a\u{7f}b",
+            "a\u{1b}[2J",
+        ];
+        for name in bad {
+            assert_eq!(plugin_install(name), None, "{name:?}");
+        }
+        assert!(plugin_install(&"a".repeat(214)).is_some());
+        assert_eq!(plugin_install(&"a".repeat(215)), None);
+    }
+
+    /// Never installed silently: "Install in terminal" shows the terminal and types the command
+    /// without Enter, so it waits at the prompt for the user.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn plugin_install_types_without_enter(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the shell is a real process
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = "id = \"sample\"\nname = \"Sample\"\nversion = \"1.0.0\"\n\
+            [contributes]\nclaude_plugins = [\"sample-plugin\", \"bad name\"]\n";
+        let src = sample_with(&tmp.path().join("src"), manifest);
+        let config = tmp.path().join("config");
+        let mut store = ExtStore::open(&config);
+        let staged = store.stage(&Source::Folder(src)).unwrap();
+        store.commit(staged, vec![]).unwrap();
+        let (workspace, cx) = workspace(&config, cx);
+        // Even if Enter came, this shell finds no `claude` to run.
+        cx.simulate_keystrokes("ctrl-`");
+        cx.simulate_input("PATH=/nonexistent");
+        cx.simulate_keystrokes("enter ctrl-`");
+        assert!(!workspace.read_with(cx, |w, _| w.terminal_visible));
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.show_extensions(window, cx);
+            })
+        });
+        assert!(
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window
+                    .try_find(ElementId::Name("ext-plugin:sample:1".into()))
+                    .is_none()
+            }),
+            "no button for an invalid name"
+        );
+
+        click(ElementId::Name("ext-plugin:sample:0".into()), cx);
+        assert!(workspace.read_with(cx, |w, _| w.terminal_visible));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().unwrap());
+        let typed = "claude plugin install sample-plugin";
+        let at_prompt = |cx: &mut VisualTestContext| {
+            terminal.read_with(cx, |t, _| {
+                let Some((col, row)) = t.snapshot.cursor else {
+                    return false;
+                };
+                let line: String = (t.snapshot.rows.get(row as usize).into_iter().flatten())
+                    .map(|run| run.text.as_str())
+                    .collect();
+                // The cursor sits right after the command, on its line: no Enter went.
+                line.trim_end().ends_with(typed) && line.trim_end().len() == col as usize
+            })
+        };
+        wait_until(cx, "the typed command", at_prompt);
+        std::thread::sleep(Duration::from_millis(300));
+        cx.run_until_parked();
+        assert!(at_prompt(cx), "still waiting at the prompt");
     }
 }

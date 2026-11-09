@@ -36,11 +36,13 @@
 //! - `--sessions-cwd <path>`: the cwd of those sessions; default `/tmp`.
 //! - `--pid-file <path>`: write the process id there at start.
 //! - `--cwd-file <path>`: write the process working directory there at start.
+//! - `--echo-mcp`: each turn answers with the MCP servers its session got at `session/new`,
+//!   `session/load` or `session/fork`: `mcp:<name>=<command>,…` (`mcp:` when none).
 //!
 //! `session/load` replays `previous prompt` and `previous answer`; for an id starting with
 //! `missing` it fails with the ACP session-not-found error instead.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -78,6 +80,7 @@ struct Opts {
     sessions_cwd: PathBuf,
     pid_file: Option<PathBuf>,
     cwd_file: Option<PathBuf>,
+    echo_mcp: bool,
 }
 
 fn parse_args() -> Opts {
@@ -101,6 +104,7 @@ fn parse_args() -> Opts {
         sessions_cwd: "/tmp".into(),
         pid_file: None,
         cwd_file: None,
+        echo_mcp: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -142,6 +146,7 @@ fn parse_args() -> Opts {
             "--sessions-cwd" => opts.sessions_cwd = value().into(),
             "--pid-file" => opts.pid_file = Some(value().into()),
             "--cwd-file" => opts.cwd_file = Some(value().into()),
+            "--echo-mcp" => opts.echo_mcp = true,
             other => panic!("unknown flag {other}"),
         }
     }
@@ -154,9 +159,24 @@ struct Fake {
     cancelled: Mutex<HashSet<String>>,
     /// The client advertised `elicitation.form` at initialize.
     forms: AtomicBool,
+    /// Per session: the MCP servers it got, as `--echo-mcp` reports them.
+    mcp: Mutex<HashMap<String, String>>,
 }
 
 impl Fake {
+    /// `--echo-mcp`: what session `session` got.
+    fn record_mcp(&self, session: &acp::SessionId, servers: &[acp::McpServer]) {
+        let names: Vec<String> = servers
+            .iter()
+            .map(|s| match s {
+                acp::McpServer::Stdio(s) => format!("{}={}", s.name, s.command.display()),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        let mut mcp = self.mcp.lock().expect("mcp poisoned");
+        mcp.insert(session.to_string(), names.join(","));
+    }
+
     fn is_cancelled(&self, session: &acp::SessionId) -> bool {
         self.cancelled
             .lock()
@@ -205,7 +225,10 @@ impl Fake {
                 return Ok(reason);
             }
         }
-        let reply = if self.opts.ask_permission {
+        let reply = if self.opts.echo_mcp {
+            let mcp = self.mcp.lock().expect("mcp poisoned");
+            format!("mcp:{}", mcp.get(&*session.0).map_or("", String::as_str))
+        } else if self.opts.ask_permission {
             format!("chose:{}", self.ask_permission(cx, session).await?)
         } else if self.opts.ask_question {
             format!("answered:{}", self.ask_question(cx, session).await?)
@@ -455,6 +478,7 @@ fn main() -> Result<(), Error> {
         next_session: AtomicU64::new(1),
         cancelled: Mutex::default(),
         forms: AtomicBool::new(false),
+        mcp: Mutex::default(),
     });
     smol::block_on(serve(fake))
 }
@@ -495,34 +519,42 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
         .on_receive_request(
             {
                 let fake = fake.clone();
-                async move |_request: acp::NewSessionRequest, responder, _cx| {
+                async move |request: acp::NewSessionRequest, responder, _cx| {
                     if fake.opts.require_auth {
                         return responder.respond_with_error(Error::auth_required());
                     }
                     let id = format!("fake-{}", fake.next_session.fetch_add(1, Ordering::Relaxed));
+                    fake.record_mcp(&id.clone().into(), &request.mcp_servers);
                     responder.respond(acp::NewSessionResponse::new(id).modes(modes()))
                 }
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async |request: acp::LoadSessionRequest, responder, cx: ConnectionTo<Client>| {
-                let session = &request.session_id;
-                if session.0.starts_with("missing") {
-                    return responder
-                        .respond_with_error(acp::Error::session_not_found(session.clone()).into());
+            {
+                let fake = fake.clone();
+                async move |request: acp::LoadSessionRequest,
+                            responder,
+                            cx: ConnectionTo<Client>| {
+                    let session = &request.session_id;
+                    if session.0.starts_with("missing") {
+                        return responder.respond_with_error(
+                            acp::Error::session_not_found(session.clone()).into(),
+                        );
+                    }
+                    fake.record_mcp(session, &request.mcp_servers);
+                    send(
+                        &cx,
+                        session,
+                        acp::SessionUpdate::UserMessageChunk(chunk("previous prompt")),
+                    )?;
+                    send(
+                        &cx,
+                        session,
+                        acp::SessionUpdate::AgentMessageChunk(chunk("previous answer")),
+                    )?;
+                    responder.respond(acp::LoadSessionResponse::new().modes(modes()))
                 }
-                send(
-                    &cx,
-                    session,
-                    acp::SessionUpdate::UserMessageChunk(chunk("previous prompt")),
-                )?;
-                send(
-                    &cx,
-                    session,
-                    acp::SessionUpdate::AgentMessageChunk(chunk("previous answer")),
-                )?;
-                responder.respond(acp::LoadSessionResponse::new().modes(modes()))
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -539,6 +571,7 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                         );
                     }
                     let id = format!("fork-{}", fake.next_session.fetch_add(1, Ordering::Relaxed));
+                    fake.record_mcp(&id.clone().into(), &request.mcp_servers);
                     responder.respond(acp::ForkSessionResponse::new(id).modes(modes()))
                 }
             },

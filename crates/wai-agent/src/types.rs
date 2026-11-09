@@ -10,6 +10,15 @@ pub struct AgentSpec {
     pub command: String,
 }
 
+/// An MCP server the agent starts for a session, over stdio.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpServer {
+    pub name: String,
+    pub command: PathBuf,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionStarted {
     pub id: SessionId,

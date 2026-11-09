@@ -228,6 +228,58 @@ fn ungranted_call_denied() {
     });
 }
 
+/// The fake's reports in its `--log` file, once `done` holds for them.
+fn logged(log: &Path, mut done: impl FnMut(&[Value]) -> bool) -> Vec<Value> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        // Whole lines only: the fake may be writing the last one.
+        let lines: Vec<Value> = (text.split_inclusive('\n').filter(|l| l.ends_with('\n')))
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        if done(&lines) {
+            return lines;
+        }
+        assert!(Instant::now() < deadline, "timed out; logged: {lines:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `notify` needs its permission like the session methods (`ungranted_call_denied`): denied, it
+/// never reaches wai. The fake reports to a file, since its `notify` reports are denied too.
+#[test]
+fn notify_denied_without_permission() {
+    let tmp = tempfile::tempdir().unwrap();
+    let log = tmp.path().join("log");
+    let ext = installed(
+        tmp.path(),
+        &[
+            "--log",
+            log.to_str().unwrap(),
+            "--call",
+            r#"notify {"title": "hi", "body": "there"}"#,
+        ],
+        vec![Permission::Process],
+    );
+    let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+    let lines = logged(&log, |lines| lines.iter().any(|l| l["title"] == "reply"));
+    let reply: Value = lines
+        .iter()
+        .find(|l| l["title"] == "reply")
+        .map(|l| serde_json::from_str(l["body"].as_str().unwrap()).unwrap())
+        .unwrap();
+    assert_eq!(reply["id"], 1);
+    assert_eq!(
+        reply["error"],
+        json!({"code": -32001, "message": "Permission denied: notify"})
+    );
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        events.iter().all(|e| matches!(e, ExtEvent::Ready { .. })),
+        "a denied notify reached wai: {events:?}"
+    );
+}
+
 fn text(text: &str) -> panel::Node {
     panel::Node::Text {
         text: text.into(),
