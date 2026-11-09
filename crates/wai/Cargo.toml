@@ -48,6 +48,7 @@ screenshot = ["demo", "gpui-kit/test-support"]
 
 # `cargo packager --release` (docs/building.md). No `formats`: the platform default is app + dmg
 # on macOS and nsis on Windows. Version: the workspace's.
+# When signing, release.yml appends [package.metadata.packager.macos] and .windows to this file.
 [package.metadata.packager]
 product-name = "wai"
 # Placeholder bundle id; this is the one place to change it.

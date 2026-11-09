@@ -11,18 +11,26 @@ env:
 
 # Signing follows cargo-packager 0.11.8 (pinned below): it signs only when the config names a
 # signing identity (macOS) or certificate thumbprint (Windows), so without secrets nothing is added
-# and the packages come out unsigned. Never pass `-v` to it: debug logs print the command lines of
-# `security import` and `notarytool`, passwords included.
+# and the packages come out unsigned. When a command fails, the packager logs its full command line
+# at error level whatever the verbosity, including `security import -P <certificate password>` and
+# `notarytool --password <app password>`. GitHub masks only the exact stored value and the line is
+# Rust Debug-escaped, so a password containing `"` or `\` is printed unmasked (docs/building.md).
+# No rust-cache: a tag run restores nothing useful, evicts CI's caches, and would restore a cached
+# cargo-packager into the step that holds the secrets.
 jobs:
   macos:
     runs-on: macos-latest
+    # `notarytool --wait` has no timeout of its own.
+    timeout-minutes: 60
     env:
       SIGN: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
     steps:
       - uses: actions/checkout@v4
+      # `release` needs this job, so a mismatched tag stops the whole run.
+      - name: Check the tag matches the version
+        run: grep -qxF "version = \"${GITHUB_REF_NAME#v}\"" Cargo.toml
       # The toolchain, its components and targets come from rust-toolchain.toml.
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-packager --version 0.11.8 --locked
       # The packager imports the certificate into its own temporary keychain, where this name
       # matches the only identity ("Developer ID Application: <name> (<team>)").
@@ -58,12 +66,13 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    # Cold release build of ~900 crates (no cache) on the slowest runner.
+    timeout-minutes: 90
     env:
       SIGN: ${{ secrets.WINDOWS_CERTIFICATE != '' && secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-packager --version 0.11.8 --locked
       # Built before the certificate is in the store; the packager's own build is then a no-op.
       - run: cargo build --release -p wai

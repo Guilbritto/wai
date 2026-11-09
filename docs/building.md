@@ -90,6 +90,45 @@ cargo packager --release
 It writes `target\release\wai_<version>_x64-setup.exe` and downloads NSIS on first use. The
 installer uses `assets/icon/icon.ico`; `wai.exe` itself has no embedded icon yet.
 
+## Release signing secrets
+
+Pushing a tag `v<version>` runs `.github/workflows/release.yml`. The tag must equal the workspace
+version, else the run stops. The workflow packages both platforms and creates a **draft** release
+with `SHA256SUMS.txt`. Each signing step runs only when its secrets exist; without them, the packages
+are unsigned. The repository secrets are:
+
+- **`APPLE_CERTIFICATE`:** a *Developer ID Application* `.p12`, base64 (`base64 -i cert.p12`). If
+  codesign reports a certificate chain error, re-export the `.p12` with its chain.
+- **`APPLE_CERTIFICATE_PASSWORD`:** the `.p12` password. It must not contain `"` or `\`. When a
+  command fails, cargo-packager logs the whole command line, password included. GitHub masks only the
+  exact secret value, and that line is escaped, so such a password would appear in the log.
+- **`APPLE_ID` and `APPLE_TEAM_ID`:** the notarization account and team.
+- **`APPLE_APP_PASSWORD`:** an app-specific password for that Apple ID, not the account password.
+- **`WINDOWS_CERTIFICATE`:** a `.pfx` with its private key, base64.
+- **`WINDOWS_CERTIFICATE_PASSWORD`:** the `.pfx` password.
+
+macOS signs with both certificate secrets. It also notarizes only when `APPLE_ID`, `APPLE_TEAM_ID` and
+`APPLE_APP_PASSWORD` are all set.
+
+Windows code-signing certificates issued since June 2023 keep their key on hardware and cannot be
+exported as a `.pfx`. For those, use a cloud signer instead:
+
+1. Set `windows = { sign-command = "<tool> … %1" }` in `[package.metadata.packager]`.
+2. Remove the workflow's certificate import step.
+
+After the first signed release, check the downloaded DMG and the app inside it:
+
+```sh
+spctl -a -t open --context context:primary-signature -v wai_<version>_aarch64.dmg
+xcrun stapler validate wai_<version>_aarch64.dmg
+spctl -a -t exec -vv /Volumes/<volume>/wai.app       # expect: accepted, Notarized Developer ID
+xcrun stapler validate /Volumes/<volume>/wai.app
+```
+
+The workflow notarizes and staples the app, not the DMG. So the two DMG lines show a signed DMG
+without a ticket until the DMG itself is notarized too (`notarytool submit --wait` and
+`stapler staple` on it). The two app lines must pass.
+
 ## Icon
 
 `crates/wai/assets/icon/icon.svg` is the source. After editing it, regenerate `icon.png` and
