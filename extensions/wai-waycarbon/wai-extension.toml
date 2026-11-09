@@ -1,0 +1,33 @@
+id = "wai-waycarbon"
+name = "WayCarbon"
+version = "0.1.0"
+description = "WayCarbon conventions, session templates and a Jira \"My cards\" panel"
+permissions = ["process", "panels", "sessions:control"]
+
+[process]
+command = "bin/wai-waycarbon"
+
+[contributes]
+claude_plugins = ["beehive-waycarbon"]
+
+[[contributes.panels]]
+id = "cards"
+title = "My cards"
+
+[[contributes.templates]]
+name = "WayCarbon front"
+prompt = """Work in waycarbon-ecosystem-front (TypeScript, React).
+Conventions: commits use feat:/fix:/refactor: without a scope and end with `Refs: EC-XXXX`. Branch from development as feat/EC-XXXX-short-description. The PR title ends with the EC key.
+Task: """
+
+[[contributes.templates]]
+name = "WayCarbon BFF"
+prompt = """Work in waycarbon-ecosystem-bff (TypeScript, Node).
+Conventions: commits use feat:/fix:/refactor: without a scope and end with `Refs: EC-XXXX`. Branch from development as feat/EC-XXXX-short-description. The PR title ends with the EC key.
+Task: """
+
+[[contributes.templates]]
+name = "WayCarbon Go service"
+prompt = """Work in a WayCarbon Go service. Write idiomatic Go and keep gofmt, go vet and go test clean.
+Conventions: commits use feat:/fix:/refactor: without a scope and end with `Refs: EC-XXXX`. Branch from development as feat/EC-XXXX-short-description. The PR title ends with the EC key.
+Task: """

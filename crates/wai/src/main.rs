@@ -12,6 +12,8 @@ mod palette;
 mod search_view;
 mod sidebar;
 mod terminal_view;
+#[cfg(all(test, unix))]
+mod waycarbon;
 mod workspace;
 
 use std::path::PathBuf;

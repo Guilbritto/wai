@@ -33,7 +33,7 @@ pub struct PanelAction {
 
 pub struct ExtPanel {
     /// `None` until the extension renders. Parsed once per render, off the main thread.
-    tree: Option<Result<Rc<Node>, TooLarge>>,
+    pub(crate) tree: Option<Result<Rc<Node>, TooLarge>>,
     /// What was typed and the placeholder shown, per input id. Kept across renders while the id
     /// stays an input.
     inputs: HashMap<String, (Entity<InputState>, Arc<str>)>,
