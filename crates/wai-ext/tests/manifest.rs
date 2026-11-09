@@ -69,9 +69,9 @@ fn manifest_rejects_bad_ids_and_paths() {
 
 #[test]
 fn agent_and_mcp_paths_checked() {
-    let a = "id=\"a\"\nname=\"n\"\nversion=\"1\"\n[[contributes.agents]]\nname=\"x\"\ncommand=\"/bin/sh\"\n";
+    let a = "id=\"a\"\nname=\"n\"\nversion=\"1\"\npermissions=[\"process\"]\n[[contributes.agents]]\nname=\"x\"\ncommand=\"/bin/sh\"\n";
     assert!(matches!(parse(a), Err(ManifestError::EscapingPath(_))));
-    let m = "id=\"a\"\nname=\"n\"\nversion=\"1\"\n[[contributes.mcp_servers]]\nname=\"x\"\ncommand=\"../m\"\n";
+    let m = "id=\"a\"\nname=\"n\"\nversion=\"1\"\npermissions=[\"process\"]\n[[contributes.mcp_servers]]\nname=\"x\"\ncommand=\"../m\"\n";
     assert!(matches!(parse(m), Err(ManifestError::EscapingPath(_))));
 }
 
@@ -103,4 +103,45 @@ fn unknown_fields_and_permissions_rejected() {
     assert!(matches!(parse(t), Err(ManifestError::Parse(_))));
     let p = "id=\"a\"\nname=\"n\"\nversion=\"1\"\npermissions=[\"root\"]\n";
     assert!(matches!(parse(p), Err(ManifestError::Unknown(_))));
+}
+
+#[test]
+fn agents_and_mcp_require_process_permission() {
+    let a =
+        "id=\"a\"\nname=\"n\"\nversion=\"1\"\n[[contributes.agents]]\nname=\"x\"\ncommand=\"go\"\n";
+    let m = "id=\"a\"\nname=\"n\"\nversion=\"1\"\n[[contributes.mcp_servers]]\nname=\"x\"\ncommand=\"go\"\n";
+    for t in [a, m] {
+        assert!(matches!(
+            parse(t),
+            Err(ManifestError::MissingPermission(Permission::Process))
+        ));
+        let ok = t.replace("[[", "permissions=[\"process\"]\n[[");
+        assert!(parse(&ok).is_ok());
+    }
+}
+
+#[test]
+fn template_typos_rejected() {
+    let t =
+        "id=\"a\"\nname=\"n\"\nversion=\"1\"\n[[contributes.templates]]\nname=\"t\"\nagnet=\"x\"\n";
+    assert!(matches!(parse(t), Err(ManifestError::Parse(_))));
+}
+
+#[test]
+fn fs_permission_edges_nul_and_nested_unknown() {
+    let h = "id=\"a\"\nname=\"n\"\nversion=\"1\"\n";
+    for p in ["fs:", "fs:/etc", "fs:../x"] {
+        let r = parse(&format!("{h}permissions=[\"{p}\"]\n"));
+        assert!(
+            matches!(&r, Err(ManifestError::Unknown(m)) if !m.contains("program")),
+            "{p}"
+        );
+    }
+    assert!(parse(&format!("{h}permissions=[\"fs:docs\"]\n")).is_ok());
+    assert!(parse(&with("ok", "no\\u0000de", "\"process\"")).is_err());
+    assert!(parse(&format!("{h}permissions=[\"fs:a\\u0000b\"]\n")).is_err());
+    let p = format!("{h}permissions=[\"process\"]\n[process]\ncommand=\"go\"\nbogus=1\n");
+    assert!(matches!(parse(&p), Err(ManifestError::Parse(_))));
+    let c = format!("{h}[[contributes.commands]]\nid=\"c\"\ntitle=\"C\"\nprompt=\"p\"\nbogus=1\n");
+    assert!(matches!(parse(&c), Err(ManifestError::Parse(_))));
 }

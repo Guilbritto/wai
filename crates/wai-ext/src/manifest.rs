@@ -149,7 +149,7 @@ struct RawManifest {
 #[serde(deny_unknown_fields)]
 struct RawContributes {
     #[serde(default)]
-    templates: Vec<Template>,
+    templates: Vec<RawTemplate>,
     #[serde(default)]
     commands: Vec<CommandSpec>,
     #[serde(default)]
@@ -162,6 +162,16 @@ struct RawContributes {
     panels: Vec<PanelSpec>,
     #[serde(default)]
     themes: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTemplate {
+    name: String,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    prompt: String,
 }
 
 #[derive(Deserialize)]
@@ -185,7 +195,11 @@ fn parse_permission(s: &str) -> Result<Permission, ManifestError> {
         "network" => Permission::Network,
         _ => match s.strip_prefix("fs:") {
             Some(p) => {
-                check_relative(p)?;
+                if !relative_inside(p) {
+                    return Err(ManifestError::Unknown(format!(
+                        "fs permission path {p:?} must be a relative path inside the extension"
+                    )));
+                }
                 Permission::Fs(PathBuf::from(p))
             }
             None => return Err(ManifestError::Unknown(format!("unknown permission {s:?}"))),
@@ -193,32 +207,33 @@ fn parse_permission(s: &str) -> Result<Permission, ManifestError> {
     })
 }
 
-/// Lexical check: no root/prefix, and `..` never climbs above the starting dir.
+/// Lexical check: no root/prefix/NUL, and `..` never climbs above the starting dir.
 /// Symlink escapes are the installer's job (the dir does not exist yet at parse time).
-fn check_relative(p: &str) -> Result<(), ManifestError> {
-    let bad = || ManifestError::EscapingPath(p.to_string());
+fn relative_inside(p: &str) -> bool {
+    if p.is_empty() || p.contains('\0') || (p.contains('\\') && !cfg!(windows)) {
+        return false;
+    }
     let mut depth = 0usize;
     for c in Path::new(p).components() {
         match c {
             Component::Normal(_) => depth += 1,
             Component::CurDir => {}
-            Component::ParentDir => depth = depth.checked_sub(1).ok_or_else(bad)?,
-            Component::RootDir | Component::Prefix(_) => return Err(bad()),
+            Component::ParentDir => match depth.checked_sub(1) {
+                Some(d) => depth = d,
+                None => return false,
+            },
+            Component::RootDir | Component::Prefix(_) => return false,
         }
     }
-    if p.is_empty() || p.contains('\\') && !cfg!(windows) {
-        return Err(bad());
-    }
-    Ok(())
+    true
 }
 
 /// A bare program name (no separators) or a relative path that stays inside the extension dir.
 fn check_command(cmd: &str) -> Result<(), ManifestError> {
-    check_relative(cmd)?;
-    if Path::new(cmd)
+    let only_dots = Path::new(cmd)
         .components()
-        .all(|c| matches!(c, Component::CurDir))
-    {
+        .all(|c| matches!(c, Component::CurDir));
+    if !relative_inside(cmd) || only_dots {
         return Err(ManifestError::EscapingPath(cmd.to_string()));
     }
     Ok(())
@@ -258,6 +273,9 @@ pub fn parse_manifest(text: &str, _ext_dir: &Path) -> Result<Manifest, ManifestE
             )));
         }
     }
+    if !c.agents.is_empty() || !c.mcp_servers.is_empty() {
+        need(Permission::Process)?;
+    }
     for a in &c.agents {
         check_command(&a.command)?;
     }
@@ -273,7 +291,15 @@ pub fn parse_manifest(text: &str, _ext_dir: &Path) -> Result<Manifest, ManifestE
         process: raw.process,
         permissions,
         contributes: Contributes {
-            templates: c.templates,
+            templates: c
+                .templates
+                .into_iter()
+                .map(|t| Template {
+                    name: t.name,
+                    agent: t.agent,
+                    prompt: t.prompt,
+                })
+                .collect(),
             commands: c.commands,
             agents: c.agents,
             mcp_servers: c
