@@ -1,0 +1,112 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Signing follows cargo-packager 0.11.8 (pinned below): it signs only when the config names a
+# signing identity (macOS) or certificate thumbprint (Windows), so without secrets nothing is added
+# and the packages come out unsigned. Never pass `-v` to it: debug logs print the command lines of
+# `security import` and `notarytool`, passwords included.
+jobs:
+  macos:
+    runs-on: macos-latest
+    env:
+      SIGN: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      # The toolchain, its components and targets come from rust-toolchain.toml.
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-packager --version 0.11.8 --locked
+      # The packager imports the certificate into its own temporary keychain, where this name
+      # matches the only identity ("Developer ID Application: <name> (<team>)").
+      - name: Enable signing
+        if: env.SIGN == 'true'
+        run: printf '\n[package.metadata.packager.macos]\nsigning-identity = "Developer ID Application"\n' >> crates/wai/Cargo.toml
+      # Built before any secret is in the environment; the packager's own build is then a no-op.
+      - run: cargo build --release -p wai
+      # GitHub sets CI=true, which skips create-dmg's Finder step. When signing, the packager signs
+      # the app, notarizes and staples it if the three notarization secrets exist, then signs the DMG.
+      - name: Package
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          NOTARY_APPLE_ID: ${{ secrets.APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          # Set (even empty), these would make the packager attempt notarization.
+          if [ -n "$NOTARY_APPLE_ID" ] && [ -n "$NOTARY_TEAM_ID" ] && [ -n "$NOTARY_PASSWORD" ]; then
+            export APPLE_ID="$NOTARY_APPLE_ID" APPLE_TEAM_ID="$NOTARY_TEAM_ID" APPLE_PASSWORD="$NOTARY_PASSWORD"
+          fi
+          cargo packager --release
+      # The packager deletes its keychain only when signing succeeds.
+      - name: Remove signing keychain
+        if: always() && env.SIGN == 'true'
+        run: security delete-keychain cargo-packager.keychain || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: target/release/*.dmg
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    env:
+      SIGN: ${{ secrets.WINDOWS_CERTIFICATE != '' && secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-packager --version 0.11.8 --locked
+      # Built before the certificate is in the store; the packager's own build is then a no-op.
+      - run: cargo build --release -p wai
+      # The packager signs wai.exe, the uninstaller and the installer with signtool by thumbprint.
+      - name: Import signing certificate
+        if: env.SIGN == 'true'
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'certificate.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password |
+            Where-Object HasPrivateKey | Select-Object -First 1
+          if (-not $cert) { throw 'WINDOWS_CERTIFICATE holds no certificate with a private key' }
+          Add-Content crates/wai/Cargo.toml "`n[package.metadata.packager.windows]`ncertificate-thumbprint = `"$($cert.Thumbprint)`"`ntimestamp-url = `"http://timestamp.digicert.com`"`ntsp = true"
+      - run: cargo packager --release
+      - name: Remove signing certificate
+        if: always()
+        run: Remove-Item -Force -ErrorAction Ignore (Join-Path $env:RUNNER_TEMP 'certificate.pfx')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: target/release/*-setup.exe
+          if-no-files-found: error
+
+  release:
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.dmg *.exe > SHA256SUMS.txt
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --draft --generate-notes dist/*
