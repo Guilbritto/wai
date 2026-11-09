@@ -16,6 +16,7 @@
 //!   notification titled `after`.
 //! - `--call <method>` (repeatable): after `initialize`, call each method with params `{}`, with
 //!   ids from 1.
+//! - `--exit`: after all of the above, exit 0.
 
 use std::io::{BufRead as _, Write as _};
 
@@ -84,6 +85,9 @@ fn main() {
                 }
                 for (ix, method) in values("--call").iter().enumerate() {
                     send(json!({"jsonrpc": "2.0", "id": ix + 1, "method": method, "params": {}}));
+                }
+                if flag("--exit") {
+                    std::process::exit(0);
                 }
             }
             Some(method) => {

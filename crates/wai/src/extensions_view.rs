@@ -603,9 +603,9 @@ mod tests {
         found.expect("run `cargo build -p wai-ext --bin wai-fake-ext` first")
     }
 
-    /// An extension `sample` whose process is `wai-fake-ext --pid-file <pid_file>`.
+    /// An extension `sample` whose process is `wai-fake-ext --pid-file <pid_file> <flags>`.
     #[cfg(unix)]
-    fn running_sample(dir: &Path, pid_file: &Path) -> PathBuf {
+    fn running_sample(dir: &Path, pid_file: &Path, flags: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
         let manifest = "id = \"sample\"\nname = \"Sample\"\nversion = \"1.0.0\"\n\
             permissions = [\"process\"]\n[process]\ncommand = \"bin/run\"\n";
@@ -613,7 +613,7 @@ mod tests {
         let run = src.join("bin/run");
         std::fs::create_dir_all(src.join("bin")).unwrap();
         let script = format!(
-            "#!/bin/sh\nexec '{}' --pid-file '{}'\n",
+            "#!/bin/sh\nexec '{}' --pid-file '{}' {flags}\n",
             fake_ext().display(),
             pid_file.display()
         );
@@ -658,7 +658,7 @@ mod tests {
         cx.executor().allow_parking(); // the extension is a real process
         let tmp = tempfile::tempdir().unwrap();
         let pid_file = tmp.path().join("ext.pid");
-        let src = running_sample(&tmp.path().join("src"), &pid_file);
+        let src = running_sample(&tmp.path().join("src"), &pid_file, "");
         let (workspace, cx) = workspace(&tmp.path().join("config"), cx);
         let view =
             cx.update(|window, cx| workspace.update(cx, |w, cx| w.show_extensions(window, cx)));
@@ -690,7 +690,7 @@ mod tests {
         cx.executor().allow_parking(); // the extension is a real process
         let tmp = tempfile::tempdir().unwrap();
         let (config, pid_file) = (tmp.path().join("config"), tmp.path().join("ext.pid"));
-        let src = running_sample(&tmp.path().join("src"), &pid_file);
+        let src = running_sample(&tmp.path().join("src"), &pid_file, "");
         let mut store = ExtStore::open(&config);
         let staged = store.stage(&Source::Folder(src)).unwrap();
         store.commit(staged, vec![Permission::Process]).unwrap();
@@ -701,6 +701,40 @@ mod tests {
         // What the platform's quit runs: the quit hooks, then the windows close.
         cx.cx.update(|app| app.shutdown());
         wait_gone(&pid);
+    }
+
+    /// The constraint's "at most 3 restarts per session of wai, then Crashed": a project switch
+    /// restarts the running extensions but leaves a crashed one crashed, with its stderr tail.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn crashed_extension_stays_crashed_across_project_switch(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the extension is a real process
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, pid_file) = (tmp.path().join("config"), tmp.path().join("ext.pid"));
+        let src = running_sample(&tmp.path().join("src"), &pid_file, "--crash");
+        let mut store = ExtStore::open(&config);
+        let staged = store.stage(&Source::Folder(src)).unwrap();
+        store.commit(staged, vec![Permission::Process]).unwrap();
+        let (workspace, cx) = workspace(&config, cx);
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        let id = ExtId::new("sample").unwrap();
+        let status = |cx: &mut VisualTestContext| host.read_with(cx, |h, _| h.status(&id).cloned());
+
+        workspace.update(cx, |w, cx| w.start_extensions(cx));
+        wait_until(
+            cx,
+            "Crashed",
+            |cx| matches!(status(cx), Some(ExtStatus::Crashed(tail)) if tail.contains("fake ext crashed")),
+        );
+        std::fs::remove_file(&pid_file).unwrap();
+
+        let elsewhere = tmp.path().to_path_buf();
+        host.update(cx, |h, cx| h.set_project(elsewhere, cx));
+        assert!(matches!(status(cx), Some(ExtStatus::Crashed(_))));
+        std::thread::sleep(Duration::from_millis(300));
+        cx.run_until_parked();
+        assert!(matches!(status(cx), Some(ExtStatus::Crashed(_))));
+        assert!(!pid_file.exists(), "a crashed extension started again");
     }
 
     #[test]

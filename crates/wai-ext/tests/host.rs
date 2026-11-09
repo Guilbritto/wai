@@ -263,6 +263,32 @@ fn flood_is_coalesced() {
     });
 }
 
+/// A tree still waiting for its render slot when the process ends is rendered, not lost.
+#[test]
+fn last_render_survives_exit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ext = installed(
+        tmp.path(),
+        &["--flood", "50", "--exit"],
+        vec![Permission::Process, Permission::Panels],
+    );
+    run(Duration::from_secs(10), async {
+        let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        let mut last_trees = Vec::new();
+        let mut tree = None;
+        while let Ok(event) = rx.recv().await {
+            match event {
+                ExtEvent::Render { tree: t, .. } => tree = Some(t),
+                ExtEvent::Ready { .. } => last_trees.extend(tree.take()),
+                _ => {}
+            }
+        }
+        last_trees.extend(tree);
+        // Each of the 4 runs (the first and 3 restarts) ends on its last tree.
+        assert_eq!(last_trees, vec![json!({"n": 49}); 4]);
+    });
+}
+
 /// A message above 4 MB is dropped with an error (its id unknown: null); the next one is read.
 #[test]
 fn oversized_message_rejected() {

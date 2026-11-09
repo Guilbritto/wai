@@ -62,15 +62,22 @@ impl ExtHost {
         self.running.clear();
     }
 
-    /// `initialize` told them the project: they start again in the new one.
+    /// `initialize` told them the project: the live ones start again in the new one. A failed or
+    /// crashed one stays so (its 3 restarts are spent until the user re-enables it).
     pub fn set_project(&mut self, project: PathBuf, cx: &mut Context<Self>) {
         if project == self.project {
             return;
         }
         self.project = project;
-        let running: Vec<_> = self.running.drain().map(|(_, r)| r.installed).collect();
-        for installed in running {
-            self.start(installed, cx);
+        let live = |r: &Running| matches!(r.status, ExtStatus::Starting | ExtStatus::Ready);
+        let restart: Vec<ExtId> = (self.running.iter())
+            .filter(|(_, r)| live(r))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in restart {
+            if let Some(old) = self.running.remove(&id) {
+                self.start(old.installed, cx);
+            }
         }
         cx.notify();
     }

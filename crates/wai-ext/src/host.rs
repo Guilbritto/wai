@@ -538,6 +538,16 @@ impl Renders {
         self.last = Some(now);
         self.pending.pop_front()
     }
+
+    /// Renders what still waits, each in its slot: the process's last tree is never lost.
+    async fn flush(&mut self, emit: &impl Fn(ExtEvent)) {
+        while let Some(due) = self.next_due() {
+            smol::Timer::at(due).await;
+            if let Some((panel, tree)) = self.take_due(Instant::now()) {
+                emit(ExtEvent::Render { panel, tree });
+            }
+        }
+    }
 }
 
 enum End {
@@ -570,7 +580,18 @@ async fn supervise(
             Ok(None) => return,
             Err(error) => return emit(ExtEvent::Failed { id, error }),
         };
-        let end = session(&ext, &pipes, generation, &commands_tx, &commands, &emit).await;
+        let mut renders = Renders::default();
+        let end = session(
+            &ext,
+            &pipes,
+            generation,
+            &mut renders,
+            &commands_tx,
+            &commands,
+            &emit,
+        );
+        let end = end.await;
+        renders.flush(&emit).await;
         let child = lock(&shared).child.take();
         if let Some(child) = child {
             kill(child);
@@ -604,6 +625,7 @@ async fn session(
     ext: &Ext,
     pipes: &Pipes,
     generation: u64,
+    renders: &mut Renders,
     commands_tx: &Sender<Command>,
     commands: &Receiver<Command>,
     emit: &impl Fn(ExtEvent),
@@ -627,7 +649,6 @@ async fn session(
     let init_deadline = Instant::now() + INITIALIZE_TIMEOUT;
     let mut ready = false;
     let mut next_id = INIT_ID + 1;
-    let mut renders = Renders::default();
     write(rpc::call(Some(INIT_ID), "initialize", ext.init.clone()));
     loop {
         let now = Instant::now();
