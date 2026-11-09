@@ -29,7 +29,7 @@ type Fetched = anyhow::Result<(u16, Vec<u8>)>;
 /// The latest release, when it is newer than this wai.
 #[derive(Debug, PartialEq)]
 pub struct Release {
-    /// Its tag: a semver version (`v` allowed), ASCII only.
+    /// Its tag: a semver version (`v` allowed), so ASCII `[0-9A-Za-z.+-]` only (see `version`).
     pub tag: String,
     /// `https://github.com/<repo>/releases/…`.
     pub page: String,
@@ -56,7 +56,7 @@ pub fn check_on_launch(settings: UpdateSettings, window: AnyWindowHandle, cx: &m
         let release = match found.await {
             Ok(Some(release)) => release,
             Ok(None) => return,
-            Err(e) => return eprintln!("wai: update check failed: {e:#}"),
+            Err(e) => return eprintln!("wai: update check failed: {}", logged(&e)),
         };
         let notice = Notification::info(release.text()).action(move |_, _, cx| {
             let (page, notice) = (release.page.clone(), cx.entity());
@@ -140,11 +140,14 @@ fn parse_release(body: &[u8], repo: &str) -> anyhow::Result<Release> {
 /// pre-release), then the pre-release's dot-separated parts (numbers below words).
 type Version<'a> = ([u64; 3], bool, Vec<(bool, u64, &'a str)>);
 
-/// `tag` as a `Version`; `v` and build metadata (`+…`) are allowed and ignored. `None` for
-/// anything else.
+/// `tag` as a `Version`; `v` and build metadata (`+…`) are allowed, the metadata ignored. `None`
+/// for anything else, so a tag that parses is ASCII `[0-9A-Za-z.+-]` only.
 fn version(tag: &str) -> Option<Version<'_>> {
     let tag = tag.strip_prefix('v').unwrap_or(tag);
-    let tag = tag.split_once('+').map_or(tag, |(version, _)| version);
+    let (tag, build) = match tag.split_once('+') {
+        Some((tag, build)) => (tag, Some(build)),
+        None => (tag, None),
+    };
     let (core, pre) = match tag.split_once('-') {
         Some((core, pre)) => (core, Some(pre)),
         None => (tag, None),
@@ -158,12 +161,17 @@ fn version(tag: &str) -> Option<Version<'_>> {
     if parts.next().is_some() {
         return None;
     }
-    let ids: Vec<&str> = pre.map_or(Vec::new(), |pre| pre.split('.').collect());
-    let id = |c: char| c.is_ascii_alphanumeric() || c == '-';
-    if ids.iter().any(|i| i.is_empty() || !i.chars().all(id)) {
+    // Pre-release and build identifiers: dot-separated, each non-empty `[0-9A-Za-z-]`.
+    let id = |i: &str| !i.is_empty() && i.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if ![pre, build]
+        .into_iter()
+        .flatten()
+        .all(|ids| ids.split('.').all(id))
+    {
         return None;
     }
-    let key = ids.into_iter().map(|i| match number(i) {
+    let ids = pre.into_iter().flat_map(|pre| pre.split('.'));
+    let key = ids.map(|i| match number(i) {
         Some(n) => (false, n, ""),
         None => (true, 0, i),
     });
@@ -183,6 +191,14 @@ fn newer(current: &str, latest: &str) -> bool {
     latest > current
 }
 
+/// Characters of a failure the log shows.
+const MAX_LOGGED: usize = 200;
+
+/// What a failed check logs: the error with its causes, clamped (serde quotes what it got).
+fn logged(error: &anyhow::Error) -> String {
+    clamp(&format!("{error:#}"), MAX_LOGGED)
+}
+
 /// `text` cut to `max` characters, `…` marking the cut.
 fn clamp(text: &str, max: usize) -> String {
     match text.char_indices().nth(max) {
@@ -192,6 +208,8 @@ fn clamp(text: &str, max: usize) -> String {
 }
 
 /// GET `url` over HTTPS: its status and at most `MAX_BODY` bytes, within `TIMEOUT` in all.
+// ponytail: blocks one GPUI background thread for up to 5 s, once per launch. If launch work ever
+// queues behind it, run it on its own `std::thread` and send the result back through a channel.
 fn fetch(url: &str) -> Fetched {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -204,6 +222,14 @@ fn fetch(url: &str) -> Fetched {
 }
 
 async fn get(url: &str) -> Fetched {
+    // ponytail: the native roots (keychain, schannel) load synchronously, so the 5 s timer cannot
+    // cut that short. If it ever stalls, load them in `spawn_blocking` inside the timer.
+    // ponytail: the crypto provider is the one rustls' features pick (ring, the only one built).
+    // Should anything also enable aws-lc-rs, this panics (caught and logged); then make it explicit
+    // with `with_provider_and_native_roots(rustls::crypto::ring::default_provider())` (rustls as a
+    // direct dependency).
+    // ponytail: no `HTTPS_PROXY`: behind a proxy the check logs a connect error. Upgrade:
+    // hyper-util's `client-proxy` (`Tunnel`) built from the environment.
     let https = hyper_rustls::HttpsConnectorBuilder::new()
         .with_native_roots()?
         .https_only()
@@ -215,6 +241,8 @@ async fn get(url: &str) -> Fetched {
         .header(USER_AGENT, concat!("wai/", env!("CARGO_PKG_VERSION")))
         .header(ACCEPT, "application/vnd.github+json")
         .body(String::new())?;
+    // ponytail: redirects are not followed, so a renamed repository logs `HTTP 301`. Upgrade:
+    // follow one `Location` on https://api.github.com, or have the user update `updates.repo`.
     let response = client.request(request).await?;
     let status = response.status().as_u16();
     let body = Limited::new(response.into_body(), MAX_BODY).collect().await;
@@ -319,6 +347,12 @@ mod tests {
             ("0.1.0", "99999999999999999999999.0.0", false),
             ("0.1.0", "vv1.0.0", false),
             ("0.1.0", "1.0.0-\u{202e}gpj", false),
+            // Build metadata is checked like a pre-release: the whole tag can be shown.
+            ("0.1.0", "1.0.0+\u{202e}x", false),
+            ("0.1.0", "1.0.0+a\nb", false),
+            ("0.1.0", "1.0.0+", false),
+            ("0.1.0", "1.0.0+a..b", false),
+            ("0.1.0", "1.0.0+a+b", false),
             ("garbage", "1.0.0", false),
         ] {
             assert_eq!(newer(current, latest), want, "{current} → {latest}");
@@ -354,13 +388,28 @@ mod tests {
             body("not a version", page),
             body(&format!("v9.0.0-{}", "\u{202e}".repeat(10)), page),
             body(&format!("{}.0.0", "9".repeat(10 * 1024)), page),
+            body("v9.0.0+\u{202e}x", page),
+            serde_json::to_vec(&"x".repeat(10 * 1024)).unwrap(),
         ] {
             let failed = check(&settings, "0.1.0", answer(200, malformed.clone()));
             let shown = String::from_utf8_lossy(&malformed);
             assert!(failed.is_err(), "{shown}");
-            let logged = failed.unwrap_err().to_string();
-            assert!(logged.len() <= 200, "the logged error is clamped: {logged}");
+            // What is logged: the whole chain (`{:#}`), clamped.
+            let error = failed.unwrap_err();
+            let (chain, log) = (format!("{error:#}"), logged(&error));
+            assert!(chain.starts_with(log.trim_end_matches('…')), "{log}");
+            assert!(
+                log.chars().count() <= MAX_LOGGED + 1,
+                "the log is clamped: {log}"
+            );
         }
+        // The 10 KB JSON string is in serde's error: the clamp is what keeps it out of the log.
+        let string = check(
+            &settings,
+            "0.1.0",
+            answer(200, serde_json::to_vec(&"x".repeat(10 * 1024)).unwrap()),
+        );
+        assert!(format!("{:#}", string.unwrap_err()).len() > 10 * 1024);
 
         // A 10 KB name is never shown; a 10 KB pre-release tag is clamped.
         let mut huge = serde_json::from_slice::<serde_json::Value>(&body("v9.0.0", page)).unwrap();

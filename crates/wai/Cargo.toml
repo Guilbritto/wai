@@ -32,17 +32,17 @@ serde_json.workspace = true
 smol.workspace = true
 similar.workspace = true
 # The update check's HTTPS GET (update.rs). GPUI ships no HTTP client; these are the versions
-# Cargo.lock already holds (gpui-kit-assets' reqwest on wasm), with rustls on ring.
-http-body-util = "=0.1.5"
-hyper = "=1.12.0"
-hyper-rustls = { version = "=0.27.10", default-features = false, features = [
+# Cargo.lock already holds (gpui-kit-assets' reqwest on wasm), with rustls on ring (no aws-lc-rs).
+http-body-util = "0.1.5"
+hyper = "1.12.0"
+hyper-rustls = { version = "0.27.10", default-features = false, features = [
     "http1",
     "native-tokio",
     "ring",
     "tls12",
 ] }
-hyper-util = { version = "=0.1.21", features = ["client-legacy", "http1", "tokio"] }
-tokio = { version = "=1.54.1", features = ["rt", "time"] }
+hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "tokio"] }
+tokio = { version = "1.54.1", features = ["rt", "time"] }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
