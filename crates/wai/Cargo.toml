@@ -45,3 +45,16 @@ demo = []
 # WAI_SHOT=docs/screens/fase-1-shell.png cargo run -p wai --features screenshot -- <folder>
 # With WAI_SHOT_PROMPT too, the capture waits for that turn's permission card (fase-1-chat.png).
 screenshot = ["demo", "gpui-kit/test-support"]
+
+# `cargo packager --release` (docs/building.md). No `formats`: the platform default is app + dmg
+# on macOS and nsis on Windows. Version: the workspace's.
+[package.metadata.packager]
+product-name = "wai"
+# Placeholder bundle id; this is the one place to change it.
+identifier = "app.wai.ide"
+# Only the app: the fake agent and extension are test binaries of other crates.
+binaries = [{ path = "wai", main = true }]
+before-packaging-command = "cargo build --release -p wai"
+# cargo-packager builds the .icns from the png; NSIS needs the .ico (assets/icon/generate.sh).
+icons = ["assets/icon/icon.png"]
+nsis = { installer-icon = "assets/icon/icon.ico" }

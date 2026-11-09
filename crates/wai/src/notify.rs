@@ -74,18 +74,41 @@ pub fn notify(title: &str, body: &str) {
     show(title.to_owned(), body.to_owned());
 }
 
+/// The app id notifications go out under: the bundle's own `CFBundleIdentifier` when wai runs
+/// from its app bundle, else Terminal's (a bare dev binary has no identity of its own).
+#[cfg(any(target_os = "macos", test))]
+fn notification_identity(info_plist: Option<&str>) -> &str {
+    // ponytail: string scan of the XML plist cargo-packager writes; a binary plist falls back
+    // to Terminal.
+    info_plist
+        .and_then(|plist| plist.split_once("<key>CFBundleIdentifier</key>"))
+        .and_then(|(_, rest)| rest.trim_start().strip_prefix("<string>"))
+        .and_then(|rest| rest.split_once("</string>"))
+        .map_or("com.apple.Terminal", |(id, _)| id)
+}
+
+/// `<bundle>/Contents/Info.plist` when this binary is `<bundle>/Contents/MacOS/wai`.
+#[cfg(all(target_os = "macos", not(test)))]
+fn bundle_info_plist() -> Option<String> {
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    std::fs::read_to_string(exe.parent()?.parent()?.join("Info.plist")).ok()
+}
+
 /// Off the UI thread: on macOS, delivery waits up to 2 s for confirmation.
 #[cfg(not(test))]
 fn show(title: String, body: String) {
     std::thread::spawn(move || {
-        // Unset, the first notification looks an app id up through AppleScript, which blocks.
-        // ponytail: an unbundled binary borrows Terminal's identity; the app bundle (Phase 4)
-        // brings its own.
+        // mac-notification-sys always overrides the main bundle's id. Left unset, its first
+        // notification looks one up through AppleScript (which blocks) and falls back to
+        // Finder's. So the bundle sets its own id, unchanged; a bare binary borrows Terminal's.
         #[cfg(target_os = "macos")]
         {
             static APPLICATION: std::sync::Once = std::sync::Once::new();
             APPLICATION.call_once(|| {
-                if let Err(e) = notify_rust::set_application("com.apple.Terminal") {
+                let plist = bundle_info_plist();
+                if let Err(e) =
+                    notify_rust::set_application(notification_identity(plist.as_deref()))
+                {
                     eprintln!("wai: notification identity not set: {e}");
                 }
             });
@@ -104,8 +127,21 @@ fn show(title: String, body: String) {
 mod tests {
     use wai_agent::{PermissionRequest, StopReason};
 
-    use super::{NotifyKind, message, should_notify};
+    use super::{NotifyKind, message, notification_identity, should_notify};
     use crate::chat::{ChatEvent, ChatItem, ChatModel, TurnState};
+
+    #[test]
+    fn bundled_identity_skips_terminal_borrowing() {
+        // As cargo-packager writes it.
+        let plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\n\
+            \t<key>CFBundleExecutable</key>\n\t<string>wai</string>\n\
+            \t<key>CFBundleIdentifier</key>\n\t<string>app.wai.ide</string>\n</dict>\n</plist>";
+        assert_eq!(notification_identity(Some(plist)), "app.wai.ide");
+        // A bare binary (no Info.plist next to it), or a plist without an id.
+        assert_eq!(notification_identity(None), "com.apple.Terminal");
+        let no_id = "<plist><dict><key>CFBundleName</key><string>wai</string></dict></plist>";
+        assert_eq!(notification_identity(Some(no_id)), "com.apple.Terminal");
+    }
 
     #[test]
     fn notification_policy() {
