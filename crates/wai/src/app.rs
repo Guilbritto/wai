@@ -112,6 +112,7 @@ pub fn run(
     let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
     app.run(move |cx| {
         init(&settings, cx);
+        let updates = settings.updates.clone();
         // Quit is the workspace's: it asks about unsaved edits first.
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -149,6 +150,7 @@ pub fn run(
                 }
             })
             .expect("window just opened");
+        crate::update::check_on_launch(updates, opened.0, cx);
         cx.activate(true);
 
         #[cfg(feature = "demo")]

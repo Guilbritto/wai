@@ -12,6 +12,7 @@ mod palette;
 mod search_view;
 mod sidebar;
 mod terminal_view;
+mod update;
 #[cfg(all(test, unix))]
 mod waycarbon;
 mod workspace;
