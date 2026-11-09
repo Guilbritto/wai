@@ -3,6 +3,7 @@ mod agents_view;
 mod app;
 mod chat;
 mod editor;
+mod extensions_view;
 mod files;
 mod notify;
 mod search_view;
@@ -29,6 +30,8 @@ fn main() -> anyhow::Result<()> {
     let (templates, template_notices) = load_templates(&config_dir(), Some(&project));
     // R21: the last run's tool outputs.
     std::fs::remove_dir_all(config_dir().join("scratch")).ok();
+    // Stages a closed run never committed or dropped.
+    std::fs::remove_dir_all(wai_ext::staging_dir(&config_dir())).ok();
     let notices: Vec<String> = notices.into_iter().chain(template_notices).collect();
     for notice in &notices {
         eprintln!("wai: {notice}");

@@ -20,6 +20,7 @@ use crate::agents_view::{AgentsView, ShowSession};
 use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, Quit, Save, ToggleTerminal};
 use crate::chat::{ChatEvent, ChatSession, signed_out};
 use crate::editor::{self, EditorPane, Emptied, FileEditor};
+use crate::extensions_view::ExtensionsView;
 use crate::files::{FileTree, OpenFile};
 use crate::notify::{self, should_notify};
 use crate::search_view::{OpenMatch, SearchView};
@@ -93,6 +94,9 @@ pub struct Workspace {
     pub files: Entity<FileTree>,
     pub search: Entity<SearchView>,
     pub(crate) agents: Entity<AgentsView>,
+    /// Created on first use (the sidebar's Extensions button, a project's suggestion): it reads
+    /// `user_dir`'s extensions.
+    pub(crate) extensions: Option<Entity<ExtensionsView>>,
     /// The project's one watcher and the task that hands its changes out; `None` when the
     /// project cannot be watched.
     watch: Option<(ProjectWatcher, Task<()>)>,
@@ -200,6 +204,7 @@ impl Workspace {
             sidebar_tab: SidebarTab::default(),
             files,
             search,
+            extensions: None,
             watch: None,
             next_ticket: 0,
             cancelled: HashSet::new(),
@@ -1089,8 +1094,66 @@ impl Workspace {
         for notice in notices {
             window.push_notification(Notification::warning(notice).autohide(false), cx);
         }
+        self.suggest_extensions(window, cx);
         self.save_state(cx);
         cx.notify();
+    }
+
+    pub(crate) fn extensions(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ExtensionsView> {
+        if let Some(view) = &self.extensions {
+            return view.clone();
+        }
+        let dir = self.user_dir.clone();
+        let view = cx.new(|cx| ExtensionsView::new(&dir, window, cx));
+        self.extensions = Some(view.clone());
+        view
+    }
+
+    /// Shows the Extensions view in the sidebar.
+    pub(crate) fn show_extensions(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ExtensionsView> {
+        self.sidebar_tab = SidebarTab::Extensions;
+        cx.notify();
+        self.extensions(window, cx)
+    }
+
+    /// R15: the project's `.wai/extensions.toml` only suggests. Each extension not installed yet
+    /// gets a notice whose Review stages it and asks for consent.
+    pub(crate) fn suggest_extensions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (suggestions, notices) = wai_ext::load_suggestions(&self.project);
+        for notice in notices {
+            window.push_notification(Notification::warning(notice).autohide(false), cx);
+        }
+        if suggestions.is_empty() {
+            return;
+        }
+        let view = self.extensions(window, cx);
+        let installed = view.read(cx).store().list();
+        let new = suggestions
+            .into_iter()
+            .filter(|s| !installed.iter().any(|i| i.manifest.id == s.id));
+        for (ix, suggestion) in new.enumerate() {
+            let view = view.clone();
+            let text = format!("This project suggests extension {}", suggestion.id.as_str());
+            let notice = Notification::info(text).action(move |_, _, cx| {
+                let (view, suggestion, notice) = (view.clone(), suggestion.clone(), cx.entity());
+                Button::new(("suggest-review", ix))
+                    .label("Review")
+                    .on_click(move |_, window, cx| {
+                        notice.update(cx, |n, cx| n.dismiss(window, cx));
+                        let (source, id) = (suggestion.source.clone(), suggestion.id.clone());
+                        view.update(cx, |v, cx| v.review(source, Some(id), window, cx));
+                    })
+            });
+            window.push_notification(notice, cx);
+        }
     }
 
     fn open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {

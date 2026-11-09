@@ -82,7 +82,7 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 /// A config file's text; `None` when it does not exist. R41: a repository can ship a huge file,
 /// a FIFO or a link to /dev/zero as `.wai/…`: only a regular file is opened, and at most 1 MB
 /// of it is read.
-fn read_config(path: &Path) -> std::io::Result<Option<String>> {
+pub fn read_config(path: &Path) -> std::io::Result<Option<String>> {
     use std::io::{Error, ErrorKind, Read as _};
     match std::fs::metadata(path) {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),

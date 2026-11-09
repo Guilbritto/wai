@@ -185,7 +185,7 @@ struct RawMcp {
     env: BTreeMap<String, String>,
 }
 
-fn parse_permission(s: &str) -> Result<Permission, ManifestError> {
+pub(crate) fn parse_permission(s: &str) -> Result<Permission, ManifestError> {
     Ok(match s {
         "process" => Permission::Process,
         "sessions:read" => Permission::SessionsRead,
@@ -209,7 +209,7 @@ fn parse_permission(s: &str) -> Result<Permission, ManifestError> {
 
 /// Lexical check: no root/prefix/NUL, and `..` never climbs above the starting dir.
 /// Symlink escapes are the installer's job (the dir does not exist yet at parse time).
-fn relative_inside(p: &str) -> bool {
+pub(crate) fn relative_inside(p: &str) -> bool {
     if p.is_empty() || p.contains('\0') || (p.contains('\\') && !cfg!(windows)) {
         return false;
     }

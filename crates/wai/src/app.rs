@@ -116,6 +116,7 @@ pub fn run(
                     w.start_agent(cx);
                     w.watch_project(window, cx);
                     w.restore(window, cx);
+                    w.suggest_extensions(window, cx);
                 });
                 for notice in notices {
                     window.push_notification(Notification::warning(notice).autohide(false), cx);
@@ -244,6 +245,8 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 /// `WAI_SHOT_TEMPLATES=1`: the open template menu (fase-2-templates.png).
 /// `WAI_SHOT_SCROLLBACK=<command>`: the terminal scrolled back with a selection
 /// (fase-2-terminal.png).
+/// `WAI_SHOT_CONSENT=<absolute extension folder>`: the Extensions view with the consent dialog
+/// for that folder (fase-3-consent.png).
 #[cfg(feature = "screenshot")]
 fn screenshot(
     (window, workspace): (AnyWindowHandle, Entity<Workspace>),
@@ -297,6 +300,17 @@ fn screenshot(
                 })
                 .ok();
             executor.timer(Duration::from_millis(500)).await;
+        } else if let Ok(dir) = std::env::var("WAI_SHOT_CONSENT") {
+            window
+                .update(cx, |_, window, cx| {
+                    workspace.update(cx, |w, cx| {
+                        let view = w.show_extensions(window, cx);
+                        let source = wai_ext::Source::Folder(dir.into());
+                        view.update(cx, |v, cx| v.review(source, None, window, cx));
+                    })
+                })
+                .ok();
+            executor.timer(Duration::from_secs(1)).await;
         } else if let Ok(dir) = std::env::var("WAI_SHOT_FILES") {
             workspace.update(cx, |w, cx| {
                 w.sidebar_tab = crate::sidebar::SidebarTab::Files;

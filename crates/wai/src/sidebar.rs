@@ -27,6 +27,8 @@ pub enum SidebarTab {
     Files,
     Search,
     Agents,
+    /// Opened from the header's Extensions button; it has no tab.
+    Extensions,
 }
 
 /// Each tab with its element id and label.
@@ -119,6 +121,10 @@ impl Workspace {
                 .size_full()
                 .child(self.agents.clone())
                 .into_any_element(),
+            SidebarTab::Extensions => div()
+                .size_full()
+                .children(self.extensions.clone())
+                .into_any_element(),
         };
         let tabs = TABS.map(|(tab, id, label)| {
             Button::new(id)
@@ -187,6 +193,17 @@ impl Workspace {
                             ),
                         )
                     })
+                    .child(
+                        Button::new("sidebar-extensions")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::LayoutDashboard)
+                            .tooltip("Extensions")
+                            .selected(self.sidebar_tab == SidebarTab::Extensions)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_extensions(window, cx);
+                            })),
+                    )
                     .child(
                         Button::new("sidebar-new")
                             .ghost()
