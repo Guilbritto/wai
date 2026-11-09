@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use async_channel::Receiver;
 use wai_agent::{
-    AgentCaps, AgentEvent, AgentHandle, AgentSpec, ChoiceKind, PromptBlock, SessionEvent,
-    StopReason, ToolContent,
+    AgentCaps, AgentEvent, AgentHandle, AgentSpec, ChoiceKind, FieldKind, PromptBlock,
+    QuestionAnswer, SessionEvent, StopReason, ToolContent,
 };
 
 const COMMAND: &str = "npx -y @agentclientprotocol/claude-agent-acp@0.101.0";
@@ -192,6 +192,101 @@ fn write_a_file_then_resume() {
         let sessions = agent.list_sessions().await.expect("list_sessions");
         println!("list_sessions: {} sessions", sessions.len());
         assert!(sessions.iter().any(|s| s.id == session.id));
+
+        agent.shutdown().await;
+        std::fs::remove_dir_all(&dir).ok();
+    });
+}
+
+#[test]
+#[ignore = "needs network, npx and a Claude Code login"]
+fn answer_a_question() {
+    run(async {
+        let dir: PathBuf =
+            std::env::temp_dir().join(format!("wai-real-claude-q-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+
+        let (agent, rx) = spawn();
+        ready(&rx).await;
+        let session = agent.new_session(dir.clone()).await.expect("new_session");
+
+        let prompt = "Use the AskUserQuestion tool to ask me to pick red or blue, then reply with only the color I picked.";
+        let t = Instant::now();
+        agent.prompt(session.id.clone(), vec![PromptBlock::Text(prompt.into())]);
+
+        let (mut text, mut chosen, mut asked) = (String::new(), None::<String>, false);
+        let reason = loop {
+            match rx.recv().await.expect("event channel closed") {
+                AgentEvent::Update { event, .. } => match event {
+                    SessionEvent::AgentText(s) => text.push_str(&s),
+                    SessionEvent::ToolCall(call) => {
+                        println!("tool call: {} ({})", call.title, call.kind)
+                    }
+                    _ => {}
+                },
+                AgentEvent::QuestionAsked(question) => {
+                    asked = true;
+                    println!(
+                        "question after {:?}: {:?}, fields: {:?}",
+                        t.elapsed(),
+                        question.message,
+                        question.fields
+                    );
+                    let mut values = serde_json::Map::new();
+                    for field in &question.fields {
+                        match &field.kind {
+                            FieldKind::SingleChoice(choices) => {
+                                let first = choices.first().expect("a choice");
+                                chosen.get_or_insert(first.label.clone());
+                                values.insert(field.key.clone(), first.value.clone().into());
+                            }
+                            FieldKind::MultiChoice(choices) => {
+                                let first = choices.first().expect("a choice");
+                                values.insert(field.key.clone(), vec![first.value.clone()].into());
+                            }
+                            FieldKind::Text => {
+                                values.insert(field.key.clone(), "ok".into());
+                            }
+                            FieldKind::Boolean => {
+                                values.insert(field.key.clone(), true.into());
+                            }
+                            FieldKind::Number => {
+                                values.insert(field.key.clone(), 1.into());
+                            }
+                        }
+                    }
+                    agent
+                        .answer_question(question.id, QuestionAnswer::Accept(values))
+                        .unwrap();
+                }
+                AgentEvent::PermissionRequested(request) => {
+                    println!("permission requested: {}", request.id);
+                    let allow = request
+                        .options
+                        .iter()
+                        .find(|o| o.kind == ChoiceKind::AllowOnce)
+                        .map(|o| o.id.clone());
+                    agent.answer_permission(request.id, allow).unwrap();
+                }
+                AgentEvent::TurnEnded { reason, .. } => break reason,
+                AgentEvent::AuthRequired { .. } => panic!("not signed in to Claude Code"),
+                AgentEvent::Exited { error } => panic!("agent exited mid-turn: {error:?}"),
+                _ => {}
+            }
+        };
+        println!(
+            "turn: {:?}; question asked: {asked}; chose {chosen:?}; reply: {text:?}",
+            t.elapsed()
+        );
+        assert_eq!(reason, StopReason::EndTurn);
+        // The model may answer without asking; then there is nothing to check.
+        if let Some(label) = chosen {
+            assert!(
+                text.to_lowercase().contains(&label.to_lowercase()),
+                "reply {text:?} does not name {label:?}"
+            );
+        }
 
         agent.shutdown().await;
         std::fs::remove_dir_all(&dir).ok();
