@@ -12,7 +12,7 @@ use wai_agent::{
     StopReason,
 };
 use wai_project::{FsChange, ProjectWatcher};
-use wai_settings::{AppState, OpenSession, Settings, Template};
+use wai_settings::{AppState, OpenSession, Settings, Template, config_dir, load_templates};
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::agents_view::{AgentsView, ShowSession};
@@ -71,6 +71,8 @@ pub struct Workspace {
     pub settings: Settings,
     /// The "New from template" menu's entries; empty hides the menu.
     pub templates: Vec<Template>,
+    /// Where the user's `templates.toml` lives; re-read on a project switch.
+    pub user_dir: PathBuf,
     pub registry: Entity<AgentRegistry>,
     /// Every open session, shown in a pane or not, in the order they opened.
     pub sessions: Vec<Entity<ChatSession>>,
@@ -170,6 +172,7 @@ impl Workspace {
             project,
             settings,
             templates: Vec::new(),
+            user_dir: config_dir(),
             registry,
             agents,
             sessions: Vec::new(),
@@ -969,6 +972,11 @@ impl Workspace {
             .update(cx, |search, cx| search.set_root(root.clone(), cx));
         self.files.update(cx, |files, cx| files.set_root(root, cx));
         self.watch_project(window, cx);
+        let (templates, notices) = load_templates(&self.user_dir, Some(&self.project));
+        self.templates = templates;
+        for notice in notices {
+            window.push_notification(Notification::warning(notice).autohide(false), cx);
+        }
         self.save_state(cx);
         cx.notify();
     }
@@ -1180,6 +1188,10 @@ pub(crate) mod tests {
                 })
             })
             .expect("open window");
+        // set_project re-reads the user's templates: never the developer's.
+        workspace.update(cx, |w, _| {
+            w.user_dir = std::env::temp_dir().join("wai-no-config")
+        });
         let window = cx.update(|cx| cx.windows()[0]);
         let cx = Box::leak(Box::new(VisualTestContext::from_window(window, cx)));
         (workspace, cx)
@@ -1319,6 +1331,50 @@ pub(crate) mod tests {
             ));
             assert!(w.sessions.is_empty());
         });
+    }
+
+    #[gpui_kit::test]
+    fn templates_reload_on_project_switch(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let (a, b, c) = (tmp_project("a"), tmp_project("b"), tmp_project("c"));
+        let toml = |p: &PathBuf, body: &str| {
+            std::fs::create_dir_all(p.join(".wai")).unwrap();
+            std::fs::write(p.join(".wai/templates.toml"), body).unwrap();
+        };
+        toml(&a, "[[template]]\nname = \"alpha\"\n");
+        toml(
+            &b,
+            "[[template]]\nname = \"beta\"\n[[template]]\nname = \"gamma\"\n",
+        );
+        toml(&c, "[[template]]\nprompt = 3\n");
+        let names = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, _| {
+                w.templates
+                    .iter()
+                    .map(|t| t.name.clone())
+                    .collect::<Vec<_>>()
+            })
+        };
+        let switch = |p: &PathBuf, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                workspace.update(cx, |w, cx| w.set_project(p.clone(), window, cx))
+            })
+        };
+        switch(&a, cx);
+        assert_eq!(names(cx), ["alpha"]);
+        switch(&b, cx);
+        assert_eq!(names(cx), ["beta", "gamma"]);
+        switch(&c, cx);
+        assert!(names(cx).is_empty(), "the malformed file adds nothing");
+        for p in [a, b, c] {
+            std::fs::remove_dir_all(p).ok();
+        }
+    }
+
+    fn tmp_project(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("wai-tpl-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
     }
 
     #[gpui_kit::test]

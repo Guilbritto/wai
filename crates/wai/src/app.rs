@@ -238,6 +238,7 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 /// `WAI_SHOT_AGENTS=1` (with `WAI_SHOT_PROMPT`): the Agents tab (fase-2-agents.png).
 /// `WAI_SHOT_FILES=<dir>`: the Files tab with `<dir>` (relative to the project) expanded, and
 /// no terminal (fase-2-files.png).
+/// `WAI_SHOT_TEMPLATES=1`: the open template menu (fase-2-templates.png).
 #[cfg(feature = "screenshot")]
 fn screenshot(
     (window, workspace): (AnyWindowHandle, Entity<Workspace>),
@@ -282,6 +283,15 @@ fn screenshot(
                 });
                 executor.timer(Duration::from_millis(500)).await;
             }
+        } else if std::env::var("WAI_SHOT_TEMPLATES").is_ok() {
+            // `WAI_SHOT_TEMPLATES=1`: the "New from template" menu open (fase-2-templates.png).
+            window
+                .update(cx, |_, window, cx| {
+                    window.draw(cx).clear(cx);
+                    gpui_kit::test::TestWindowExt::click(window, "sidebar-templates", cx)
+                })
+                .ok();
+            executor.timer(Duration::from_millis(500)).await;
         } else if let Ok(dir) = std::env::var("WAI_SHOT_FILES") {
             workspace.update(cx, |w, cx| {
                 w.sidebar_tab = crate::sidebar::SidebarTab::Files;
