@@ -28,8 +28,10 @@ use crate::notify;
 
 /// Events applied per wake of an extension's pump: a flooding one cannot hold the UI thread.
 const MAX_BATCH: usize = 256;
-/// At most one notification per 2 s per extension; the excess is dropped.
-const NOTIFY_GAP: Duration = Duration::from_secs(2);
+/// At most one notification, and one `sessions/open`, per 2 s per extension: the excess
+/// notifications are dropped, the excess opens refused.
+const CALL_GAP: Duration = Duration::from_secs(2);
+const TOO_MANY_OPENS: &str = "Too many sessions opened; try again later";
 
 /// An extension's `sessions/open`, `sessions/prompt` or `sessions/list`, for the workspace to
 /// carry out (and answer through the event's `Reply`).
@@ -75,6 +77,8 @@ struct Running {
     handle: ExtHandle,
     /// When its last notification showed.
     notified: Option<Instant>,
+    /// When it last opened a session.
+    opened: Option<Instant>,
     _pump: Task<()>,
 }
 
@@ -212,7 +216,10 @@ impl ExtHost {
             (i.manifest.contributes.agents.iter()).map(move |a| {
                 let name = format!("{}/{}", i.manifest.id.as_str(), a.name);
                 // The JSON form takes the path as it is: no shell quoting to get wrong.
-                let command = serde_json::json!({"command": i.program(&a.command)}).to_string();
+                let program = i.program(&a.command);
+                // Lossy: `json!` on a path that is not UTF-8 would panic.
+                let command = serde_json::json!({"command": program.to_string_lossy()});
+                let command = command.to_string();
                 (name, AgentConfig { command })
             })
         });
@@ -231,7 +238,7 @@ impl ExtHost {
         servers.collect()
     }
 
-    /// An OS notification, at most one per `NOTIFY_GAP` per extension.
+    /// An OS notification, at most one per `CALL_GAP` per extension.
     fn notify(&mut self, id: &ExtId, title: &str, body: &str) {
         let Some(running) = self.running.get_mut(id) else {
             return;
@@ -241,6 +248,11 @@ impl ExtHost {
             return eprintln!("wai: {} notifies too often; dropped {title:?}", id.as_str());
         }
         notify::notify(&clamp(title, 100), &clamp(body, 300));
+    }
+
+    /// Whether extension `id` may open a session now, at most once per `CALL_GAP`.
+    fn may_open(&mut self, id: &ExtId) -> bool {
+        (self.running.get_mut(id)).is_some_and(|r| allow(&mut r.opened, Instant::now()))
     }
 
     fn panel(&self, ext: ExtId, spec: &PanelSpec, cx: &mut Context<Self>) -> Panel {
@@ -289,6 +301,7 @@ impl ExtHost {
             status: ExtStatus::Starting,
             handle,
             notified: None,
+            opened: None,
             _pump: pump,
         };
         self.running.insert(id, running);
@@ -307,6 +320,9 @@ impl ExtHost {
                 return;
             }
             ExtEvent::Notify { title, body } => return self.notify(id, &title, &body),
+            ExtEvent::OpenSession { reply, .. } if !self.may_open(id) => {
+                return reply.send(Err(TOO_MANY_OPENS.into()));
+            }
             event @ (ExtEvent::OpenSession { .. }
             | ExtEvent::Prompt { .. }
             | ExtEvent::ListSessions { .. }) => {
@@ -323,9 +339,10 @@ impl ExtHost {
     }
 }
 
-/// Whether a notification at `now` may show; it then counts as the last one.
+/// Whether a call (a notification, a session opened) at `now` may go; it then counts as the last
+/// one.
 fn allow(last: &mut Option<Instant>, now: Instant) -> bool {
-    if last.is_some_and(|last| now < last + NOTIFY_GAP) {
+    if last.is_some_and(|last| now < last + CALL_GAP) {
         return false;
     }
     *last = Some(now);
@@ -599,7 +616,7 @@ pub(crate) mod tests {
     }
 
     /// R51 `sessions/open`: `send: false` pre-fills like a template and answers the session; an
-    /// unknown agent is an error.
+    /// unknown agent is an error (asked by a second extension: one opens once per 2 s).
     #[gpui_kit::test]
     fn sessions_open_prefills(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
@@ -607,8 +624,16 @@ pub(crate) mod tests {
         let manifest = "id = \"opener\"\nname = \"Opener\"\nversion = \"1.0.0\"\n\
             permissions = [\"process\", \"sessions:control\"]\n\
             [process]\ncommand = \"bin/run\"\n";
-        let calls = r#"--call 'sessions/open {"prompt": "draft me", "send": false}' --call 'sessions/open {"agent": "ghost"}'"#;
+        let calls = r#"--call 'sessions/open {"prompt": "draft me", "send": false}'"#;
         install(tmp.path(), &config, manifest, calls, "");
+        let ghost = r#"--call 'sessions/open {"agent": "ghost"}'"#;
+        install(
+            tmp.path(),
+            &config,
+            &manifest.replace("opener", "ghost"),
+            ghost,
+            "",
+        );
         let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
         let log = log_path(tmp.path(), "opener");
 
@@ -619,7 +644,7 @@ pub(crate) mod tests {
             reply(&log, 1, cx)["result"],
             json!({"agent": "fake", "session": "fake-1"})
         );
-        let ghost = reply(&log, 2, cx);
+        let ghost = reply(&log_path(tmp.path(), "ghost"), 1, cx);
         assert_eq!(ghost["error"]["message"], "No agent named ghost");
     }
 
@@ -860,6 +885,31 @@ pub(crate) mod tests {
         assert_eq!(text, "typed notes\n");
     }
 
+    /// R56: at most one `sessions/open` per 2 s per extension; the excess is answered with an
+    /// error and opens nothing.
+    #[gpui_kit::test]
+    fn sessions_open_is_rate_limited(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let calls =
+            r#"--call 'sessions/open {"prompt": "one"}' --call 'sessions/open {"prompt": "two"}'"#;
+        install(tmp.path(), &config, OPENER, calls, "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        let log = log_path(tmp.path(), "opener");
+
+        let refused = reply(&log, 2, cx);
+        assert_eq!(
+            refused["error"]["message"],
+            "Too many sessions opened; try again later"
+        );
+        assert_eq!(
+            reply(&log, 1, cx)["result"],
+            json!({"agent": "fake", "session": "fake-1"})
+        );
+        cx.run_until_parked();
+        assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 1);
+    }
+
     /// R56: the user's ⌘N is never refused while an extension's session prepares: it takes
     /// the pane, and the extension's session still opens (in the open list, in no pane).
     #[gpui_kit::test]
@@ -908,15 +958,41 @@ pub(crate) mod tests {
 mod limits {
     use std::time::{Duration, Instant};
 
-    use super::{MAX_BATCH, NOTIFY_GAP, allow, batch};
+    use super::{CALL_GAP, MAX_BATCH, allow, batch};
 
     #[test]
     fn notifications_wait_two_seconds() {
         let (mut last, now) = (None, Instant::now());
         assert!(allow(&mut last, now));
         assert!(!allow(&mut last, now + Duration::from_millis(1_999)));
-        assert!(allow(&mut last, now + NOTIFY_GAP));
-        assert!(!allow(&mut last, now + NOTIFY_GAP + Duration::from_secs(1)));
+        assert!(allow(&mut last, now + CALL_GAP));
+        assert!(!allow(&mut last, now + CALL_GAP + Duration::from_secs(1)));
+    }
+
+    /// R56: an extension folder whose path is not UTF-8 never panics: its agents' commands
+    /// carry the path lossily.
+    #[cfg(unix)]
+    #[test]
+    fn agent_commands_take_any_folder() {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::path::Path;
+
+        use wai_ext::{Installed, Permission, parse_manifest};
+
+        let dir = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/ext-\xff"));
+        let manifest = "id = \"odd\"\nname = \"Odd\"\nversion = \"1.0.0\"\n\
+            permissions = [\"process\"]\n\
+            [[contributes.agents]]\nname = \"echo\"\ncommand = \"bin/agent\"\n";
+        let mut host = super::ExtHost::new(dir.into());
+        host.enabled = vec![Installed {
+            manifest: parse_manifest(manifest, dir).unwrap(),
+            dir: dir.into(),
+            enabled: true,
+            granted: vec![Permission::Process],
+        }];
+        let command = &host.agents()["odd/echo"].command;
+        let command: serde_json::Value = serde_json::from_str(command).unwrap();
+        assert_eq!(command["command"], "/tmp/ext-\u{fffd}/bin/agent");
     }
 
     /// R51: one wake applies at most 256 events; the rest wait for the next.

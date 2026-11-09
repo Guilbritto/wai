@@ -223,8 +223,9 @@ pub fn check_git_source(url: &str, rev: Option<&str>) -> Result<(), InstallError
 
 /// `git clone --depth 1 [--branch <rev>] -- <url> <dest>`: after `--` the URL is never an
 /// option. R18: it runs from `cwd` (the staging folder), never from a repository. No prompt can
-/// wait on a terminal, only https and ssh are spoken, LFS filters do not run, and the system
-/// gitconfig is not read.
+/// wait on a terminal (ssh's host-key and passphrase questions included: `BatchMode` fails
+/// instead), only https and ssh are spoken, LFS filters do not run, and the system gitconfig is
+/// not read.
 pub fn git_clone_command(url: &str, rev: Option<&str>, dest: &Path, cwd: &Path) -> Command {
     let mut args: Vec<OsString> = vec!["clone".into(), "--depth".into(), "1".into()];
     if let Some(rev) = rev {
@@ -239,6 +240,7 @@ pub fn git_clone_command(url: &str, rev: Option<&str>, dest: &Path, cwd: &Path) 
         .env("GIT_LFS_SKIP_SMUDGE", "1")
         .env("GIT_ALLOW_PROTOCOL", "https:ssh")
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
         .stdin(Stdio::null());
     command
 }

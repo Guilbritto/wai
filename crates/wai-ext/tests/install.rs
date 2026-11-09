@@ -327,6 +327,8 @@ fn git_clone_command_is_fixed() {
             ("GIT_LFS_SKIP_SMUDGE", "1"),
             ("GIT_ALLOW_PROTOCOL", "https:ssh"),
             ("GIT_CONFIG_NOSYSTEM", "1"),
+            // R56: ssh never asks for a host key or a passphrase on /dev/tty.
+            ("GIT_SSH_COMMAND", "ssh -o BatchMode=yes"),
         ] {
             assert!(
                 envs.contains(&(key.as_ref(), Some(value.as_ref()))),
