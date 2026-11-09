@@ -24,6 +24,7 @@ pub enum OpenMode {
 pub enum OpenError {
     Binary,
     TooLarge { bytes: u64 },
+    NotUtf8,
     Io(String),
 }
 
@@ -32,6 +33,7 @@ impl fmt::Display for OpenError {
         match self {
             OpenError::Binary => f.write_str("Binary file"),
             OpenError::TooLarge { .. } => f.write_str("Too large to open in wai"),
+            OpenError::NotUtf8 => f.write_str("Not a UTF-8 text file"),
             OpenError::Io(e) => f.write_str(e),
         }
     }
@@ -82,7 +84,7 @@ pub fn load(path: &Path) -> Result<Loaded, OpenError> {
     let stamp = stamp(path);
     // ponytail: text that is not UTF-8 does not open (the error says so); a lossy read-only
     // view would be the upgrade.
-    let text = fs::read_to_string(path)?;
+    let text = String::from_utf8(fs::read(path)?).map_err(|_| OpenError::NotUtf8)?;
     Ok(Loaded { mode, text, stamp })
 }
 

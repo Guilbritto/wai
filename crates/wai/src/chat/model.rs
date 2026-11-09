@@ -7,6 +7,8 @@ use wai_agent::{
 };
 
 pub const TOOL_OUTPUT_MAX_LINES: usize = 2000;
+/// "Show all" stops here; the whole output opens in the editor instead.
+pub const TOOL_OUTPUT_EXPANDED_LINES: usize = 20_000;
 
 pub const UNSUPPORTED_QUESTION: &str =
     "The agent asked a question wai can't display yet; it was declined.";
@@ -92,12 +94,14 @@ pub struct ToolItem {
 }
 
 impl ToolItem {
-    /// Output truncated to `TOOL_OUTPUT_MAX_LINES` unless expanded, plus the hidden line count.
+    /// Output truncated to `TOOL_OUTPUT_MAX_LINES` (`TOOL_OUTPUT_EXPANDED_LINES` once expanded),
+    /// plus the hidden line count.
     pub fn visible_text(&self) -> (&str, Option<usize>) {
-        if self.expanded {
-            return (&self.text, None);
-        }
-        match self.text.match_indices('\n').nth(TOOL_OUTPUT_MAX_LINES - 1) {
+        let max = match self.expanded {
+            true => TOOL_OUTPUT_EXPANDED_LINES,
+            false => TOOL_OUTPUT_MAX_LINES,
+        };
+        match self.text.match_indices('\n').nth(max - 1) {
             Some((i, _)) => {
                 let hidden = self.text[i + 1..].lines().count();
                 if hidden == 0 {
@@ -624,6 +628,25 @@ mod tests {
         let (v, hidden) = item.visible_text();
         assert_eq!(v.lines().count(), 5000);
         assert_eq!(hidden, None);
+    }
+
+    /// "Show all" stops at 20,000 lines: the rest opens in the editor.
+    #[test]
+    fn expanded_output_stops_at_20000_lines() {
+        let item = ToolItem {
+            id: "t".into(),
+            title: String::new(),
+            kind: String::new(),
+            status: ToolStatus::Completed,
+            text: "x\n".repeat(25_000),
+            diffs: vec![],
+            locations: vec![],
+            first_sight: vec![],
+            expanded: true,
+        };
+        let (v, hidden) = item.visible_text();
+        assert_eq!(v.lines().count(), 20_000);
+        assert_eq!(hidden, Some(5_000));
     }
 
     fn perm() -> PermissionRequest {

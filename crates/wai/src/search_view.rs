@@ -38,6 +38,8 @@ pub struct SearchView {
     rows: Vec<Row>,
     total: usize,
     searching: bool,
+    /// The query is not a valid regular expression.
+    invalid: bool,
     /// The index in `rows` of the file header the last match went under.
     header: usize,
     /// Dropping the handle stops the worker.
@@ -73,6 +75,7 @@ impl SearchView {
             rows: Vec::new(),
             total: 0,
             searching: false,
+            invalid: false,
             header: 0,
             handle: None,
             drain: None,
@@ -110,6 +113,7 @@ impl SearchView {
         self.header = 0;
         let pattern = self.input.read(cx).value().to_string();
         self.searching = !pattern.is_empty();
+        self.invalid = false;
         cx.notify();
         if !self.searching {
             return;
@@ -119,7 +123,10 @@ impl SearchView {
             regex: self.regex,
             case_sensitive: self.case_sensitive,
         };
-        let (handle, batches) = search_in(&self.root, query, self.global_ignores);
+        let Some((handle, batches)) = search_in(&self.root, query, self.global_ignores) else {
+            (self.searching, self.invalid) = (false, true);
+            return;
+        };
         self.handle = Some(handle);
         self.drain = Some(cx.spawn(async move |this, cx| {
             // Bursts coalesce: one update, one redraw.
@@ -222,12 +229,25 @@ impl SearchView {
             Some("Searching…".into())
         } else if self.input.read(cx).value().is_empty() {
             None
+        } else if self.invalid {
+            Some("Invalid regular expression".into())
         } else if self.total == 0 {
             Some("No results".into())
         } else {
-            Some(format!("{} matches in {files} files", self.total))
+            Some(summary(self.total, files))
         }
     }
+}
+
+/// `1 match in 1 file`, `5 matches in 3 files`.
+fn summary(matches: usize, files: usize) -> String {
+    let plural =
+        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    format!(
+        "{} in {}",
+        plural(matches, "match", "matches"),
+        plural(files, "file", "files")
+    )
 }
 
 fn display(path: &Path) -> String {
@@ -306,9 +326,17 @@ mod tests {
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
     use wai_settings::Settings;
 
+    use super::summary;
     use crate::sidebar::canonical;
     use crate::workspace::tests::{open, wait_until};
     use crate::workspace::{Pane, Workspace};
+
+    #[test]
+    fn status_counts_in_singular_and_plural() {
+        assert_eq!(summary(1, 1), "1 match in 1 file");
+        assert_eq!(summary(2, 1), "2 matches in 1 file");
+        assert_eq!(summary(5, 3), "5 matches in 3 files");
+    }
 
     fn click(id: impl Into<gpui_kit::ElementId>, cx: &mut VisualTestContext) {
         let id = id.into();
@@ -356,5 +384,31 @@ mod tests {
         });
         assert_eq!(path, root.join("a.txt"));
         assert_eq!(line, 2); // 0-based
+    }
+
+    /// A pattern that is not a regular expression says so, not "No results".
+    #[gpui_kit::test]
+    fn invalid_regex_says_so(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the search runs on a real thread
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonical(dir.path());
+        fs::write(root.join("a.txt"), "(x\n").unwrap();
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.set_project(root.clone(), window, cx))
+        });
+        cx.run_until_parked();
+
+        click("tab-search", cx);
+        click("search-regex", cx);
+        cx.update(|window, cx| window.input("(", cx));
+
+        // The typing debounce, then the search.
+        wait_until(cx, "the search to end", |cx| {
+            let search = workspace.read_with(cx, |w, _| w.search.clone());
+            search.read_with(cx, |s, _| s.pending.is_none() && !s.searching)
+        });
+        let status = workspace.read_with(cx, |w, cx| w.search.read(cx).status(cx));
+        assert_eq!(status.as_deref(), Some("Invalid regular expression"));
     }
 }

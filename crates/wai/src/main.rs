@@ -27,6 +27,8 @@ fn main() -> anyhow::Result<()> {
     wai_agent::enter_neutral_dir(&config_dir()).context("cannot enter the config dir")?;
     let (settings, notices) = Settings::load(&config_dir(), Some(&project))?;
     let (templates, template_notices) = load_templates(&config_dir(), Some(&project));
+    // R21: the last run's tool outputs.
+    std::fs::remove_dir_all(config_dir().join("scratch")).ok();
     let notices: Vec<String> = notices.into_iter().chain(template_notices).collect();
     for notice in &notices {
         eprintln!("wai: {notice}");

@@ -40,6 +40,11 @@ pub enum ChatEvent {
     },
     /// Revert rewrote (or deleted) this file: open tabs of it catch up.
     Reverted(PathBuf),
+    /// R21: a tool call's whole output, to open read-only in the editor.
+    OpenOutput {
+        tool: String,
+        text: String,
+    },
 }
 
 /// A message's markdown and how many bytes of it the view already handed over.
@@ -783,13 +788,26 @@ mod tests {
         })
     }
 
-    fn revert(ix: usize, file: usize, cx: &mut VisualTestContext) {
+    /// Revert, confirmed in a dialog whose text says what happens: `revert-delete`,
+    /// `revert-whole` (the whole file goes back) or `revert-snippet` (only the edit's lines do).
+    fn revert(ix: usize, file: usize, says: &'static str, cx: &mut VisualTestContext) {
         click_edits(Some(ix), ("edit-revert", file), cx);
         assert!(
             cx.update(|window, cx| window.has_active_dialog(cx)),
             "no confirmation"
         );
+        cx.update(|window, cx| window.render_frame(cx));
+        assert!(
+            cx.debug_bounds(says).is_some(),
+            "the dialog does not say {says}"
+        );
         click_edits(None, "revert-confirm", cx);
+    }
+
+    /// R38: a Revert that would refuse says why at once, without asking first.
+    fn refused(ix: usize, file: usize, cx: &mut VisualTestContext) {
+        click_edits(Some(ix), ("edit-revert", file), cx);
+        assert!(!cx.update(|window, cx| window.has_active_dialog(cx)));
     }
 
     /// A finished turn lists the files it edited, each with Open and Revert; Revert asks first,
@@ -847,10 +865,10 @@ mod tests {
         );
 
         // Newest step first; the open tab follows.
-        revert(ix, 0, cx);
+        revert(ix, 0, "revert-whole", cx);
         assert_eq!(fs::read_to_string(&a).unwrap(), format!("x\n{edited}"));
         assert_eq!(text(cx), format!("x\n{edited}"));
-        revert(ix, 0, cx);
+        revert(ix, 0, "revert-whole", cx);
         assert_eq!(fs::read_to_string(&a).unwrap(), "x\n");
         cx.update(|window, cx| {
             window.render_frame(cx);
@@ -861,7 +879,7 @@ mod tests {
 
         // A file changed since the edit stays as it is, and the row says why.
         fs::write(&b, "mine\n").unwrap();
-        revert(ix, 1, cx);
+        refused(ix, 1, cx);
         assert_eq!(fs::read_to_string(&b).unwrap(), "mine\n");
         assert_eq!(
             failed(&session, ix, 1, cx).as_deref(),
@@ -870,7 +888,7 @@ mod tests {
 
         // A file the edit created is deleted.
         fs::write(&b, edited).unwrap();
-        revert(ix, 1, cx);
+        revert(ix, 1, "revert-delete", cx);
         assert!(!b.exists());
     }
 
@@ -915,7 +933,7 @@ mod tests {
         // Only the hunk goes back: a change elsewhere in the file stays.
         let mine = edited.replace("fn f1() {}", "fn f1() { mine() }");
         fs::write(&lib, &mine).unwrap();
-        revert(ix, 0, cx);
+        revert(ix, 0, "revert-snippet", cx);
         assert_eq!(
             fs::read_to_string(&lib).unwrap(),
             original.replace("fn f1() {}", "fn f1() { mine() }")
@@ -923,7 +941,7 @@ mod tests {
         assert_eq!(failed(&session, ix, 0, cx), None);
 
         // R34: the Write had no old text and keep.txt was there before it: it stays.
-        revert(ix, 1, cx);
+        refused(ix, 1, cx);
         assert_eq!(
             fs::read_to_string(&keep).unwrap(),
             "written by the fake agent\n"
@@ -983,6 +1001,68 @@ mod tests {
         assert_eq!(workspace.read_with(cx, |w, _| w.focused_pane), 0);
         assert_eq!(typed(&left, cx), "typed");
         assert_eq!(typed(&right, cx), "");
+    }
+
+    /// Clicking blank space in the pane that already is the focused one gives its prompt the
+    /// caret back when the focus went elsewhere (the terminal here).
+    #[gpui_kit::test]
+    fn click_in_focused_pane_refocuses_its_prompt(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent and the shell are real processes
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        cx.simulate_keystrokes("ctrl-`");
+        assert_eq!(workspace.read_with(cx, |w, _| w.focused_pane), 0);
+
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("pane-0").expect("pane 0 drawn");
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        cx.simulate_input("typed");
+
+        assert_eq!(typed(&session, cx), "typed");
+    }
+
+    /// R21: past 20,000 lines, "Open full output in editor" writes the whole output to
+    /// `<config dir>/scratch/<session>-<tool>.txt` and opens it read-only.
+    #[gpui_kit::test]
+    fn full_output_opens_read_only_in_editor(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let config = tempfile::tempdir().unwrap();
+        // 25,000 lines of `x`.
+        let (workspace, cx) = open(cx, fake_settings("--flood 50000"));
+        workspace.update(cx, |w, _| w.user_dir = config.path().to_path_buf());
+        let session = start_session(&workspace, cx);
+        send("go", cx);
+        wait_until(cx, "the reply", |cx| {
+            state(&session, cx) == TurnState::Idle && last_agent_text(&session, cx).is_some()
+        });
+        let ix = session.read_with(cx, |s, _| {
+            s.model
+                .items
+                .iter()
+                .position(|i| matches!(i, ChatItem::Tool(_)))
+        });
+        let ix = ix.expect("the flood's tool call");
+
+        click_edits(None, ("show-all", ix), cx);
+        click_edits(None, ("open-output", ix), cx);
+
+        wait_until(cx, "the output's tab", |cx| {
+            workspace.read_with(cx, |w, _| {
+                w.panes.iter().any(|p| matches!(p, Pane::Editor(_)))
+            })
+        });
+        let tab = workspace.read_with(cx, |w, cx| {
+            w.panes.iter().find_map(|pane| match pane {
+                Pane::Editor(pane) => pane.read(cx).tabs.first().cloned(),
+                _ => None,
+            })
+        });
+        let path = canonical(config.path()).join("scratch/fake-1-flood.txt");
+        tab.expect("a tab").read_with(cx, |t, cx| {
+            assert_eq!(t.path, path);
+            assert!(t.read_only);
+            assert_eq!(t.editor.read(cx).text().len(), 50_000);
+        });
     }
 
     /// R12: ⌘W on a session waiting for a permission closes it and its pane, and the agent's

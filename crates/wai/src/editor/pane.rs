@@ -19,8 +19,10 @@ pub struct FileEditor {
     pub path: PathBuf,
     /// Edited since it was read or saved.
     pub dirty: bool,
-    /// Over 20 MB: shown, never edited or saved.
+    /// Over 20 MB, or `scratch`: shown, never edited or saved.
     pub read_only: bool,
+    /// A tool call's output (R21).
+    pub scratch: bool,
     /// The file changed on disk while this buffer could not take the change (edited, or
     /// read-only); the banner asks what to do.
     pub disk_changed: bool,
@@ -31,8 +33,14 @@ pub struct FileEditor {
 }
 
 impl FileEditor {
-    pub fn new(path: PathBuf, loaded: Loaded, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let read_only = loaded.mode == OpenMode::ReadOnlyLarge;
+    pub fn new(
+        path: PathBuf,
+        loaded: Loaded,
+        scratch: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let read_only = scratch || loaded.mode == OpenMode::ReadOnlyLarge;
         let language = language(&path, read_only);
         let editor = cx.new(|cx| {
             let mut state = EditorState::new(window, cx)
@@ -51,6 +59,7 @@ impl FileEditor {
             path,
             dirty: false,
             read_only,
+            scratch,
             disk_changed: false,
             editor,
             stamp: loaded.stamp,
@@ -139,7 +148,7 @@ impl FileEditor {
         match loaded {
             Ok(_) if self.dirty && !force => self.disk_changed = true,
             Ok(loaded) => {
-                let read_only = loaded.mode == OpenMode::ReadOnlyLarge;
+                let read_only = self.scratch || loaded.mode == OpenMode::ReadOnlyLarge;
                 self.stamp = loaded.stamp;
                 (self.dirty, self.disk_changed) = (false, false);
                 self.editor.update(cx, |s, cx| {
@@ -191,13 +200,17 @@ fn banner(cx: &App) -> Div {
 impl Render for FileEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let keep = if self.dirty { "Keep mine" } else { "Dismiss" };
+        let why = match self.scratch {
+            true => "Read-only: a tool call's full output.",
+            false => "Read-only: files over 20 MB open read-only in wai.",
+        };
         v_flex()
             .size_full()
             .when(self.read_only, |el| {
                 el.child(
                     banner(cx)
                         .debug_selector(|| "read-only-banner".into())
-                        .child("Read-only: files over 20 MB open read-only in wai."),
+                        .child(why),
                 )
             })
             .when(self.disk_changed, |el| {

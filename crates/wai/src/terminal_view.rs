@@ -7,12 +7,15 @@ use wai_terminal::{
     key_to_bytes, paste_bytes,
 };
 
-use crate::app::Paste;
+use crate::app::{CopySelection, Paste};
 
 const EXITED: &str = "[process exited] Click to restart.";
 
 /// The bottom panel: a shell in the project folder, painted from the model's grid snapshots.
-/// It redraws only when the shell writes (`Wakeup`) or the panel changes size.
+/// It redraws only when the shell writes (`Wakeup`), the panel changes size, or the user scrolls
+/// (10,000 lines of history) or selects with the mouse.
+// ponytail: the wheel scrolls wai's history only; in the alternate screen (less, vim) it does
+// nothing, where alacritty sends arrow keys. A drag that leaves the panel stops extending.
 pub struct TerminalView {
     shell: Option<String>,
     /// Where the next shell starts: the project folder.
@@ -24,6 +27,11 @@ pub struct TerminalView {
     /// Why no shell runs: it exited or could not start.
     notice: Option<String>,
     focus: FocusHandle,
+    /// Where the grid was painted and one cell's size: they map the mouse to cells.
+    grid: Bounds<Pixels>,
+    cell: Size<Pixels>,
+    /// Wheel movement not yet a whole line (trackpads scroll in pixels).
+    wheel: Pixels,
     _events: Option<Task<()>>,
 }
 
@@ -37,6 +45,9 @@ impl TerminalView {
             size: GridSize { cols: 80, rows: 24 },
             notice: None,
             focus: cx.focus_handle(),
+            grid: Bounds::default(),
+            cell: Size::default(),
+            wheel: px(0.),
             _events: None,
         }
     }
@@ -93,7 +104,11 @@ impl TerminalView {
     }
 
     /// Fits the grid to the panel. Runs on every layout, so it only works on a real change.
-    fn fit(&mut self, size: GridSize, cx: &mut Context<Self>) {
+    fn fit(&mut self, grid: Bounds<Pixels>, cell: Size<Pixels>, cx: &mut Context<Self>) {
+        (self.grid, self.cell) = (grid, cell);
+        let cols = (grid.size.width / cell.width).floor().max(2.) as u16;
+        let rows = (grid.size.height / cell.height).floor().max(1.) as u16;
+        let size = GridSize { cols, rows };
         if size == self.size {
             return;
         }
@@ -117,7 +132,7 @@ impl TerminalView {
         if let Some(bytes) =
             key_to_bytes(&keystroke.key, key_char, mods.control, mods.alt, app_cursor)
         {
-            model.write(&bytes);
+            self.write(&bytes, cx);
             cx.stop_propagation();
         }
     }
@@ -125,7 +140,70 @@ impl TerminalView {
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         let text = cx.read_from_clipboard().and_then(|item| item.text());
         if let (Some(model), Some(text)) = (&self.model, text) {
-            model.write(&paste_bytes(&text, model.bracketed_paste()));
+            let bytes = paste_bytes(&text, model.bracketed_paste());
+            self.write(&bytes, cx);
+        }
+    }
+
+    /// Sends input to the shell; the view goes back to the bottom, where it shows.
+    fn write(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        model.write(bytes);
+        if self.snapshot.display_offset > 0 {
+            model.scroll(-(self.snapshot.display_offset as i32));
+            self.refresh(false, cx);
+        }
+    }
+
+    /// The wheel scrolls through the history, a line per line height moved.
+    fn on_scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        self.wheel += event.delta.pixel_delta(self.cell.height).y;
+        let lines = (self.wheel / self.cell.height).trunc();
+        if lines != 0. {
+            self.wheel -= self.cell.height * lines;
+            model.scroll(lines as i32);
+            self.refresh(false, cx);
+        }
+    }
+
+    /// Starts (`start`) or extends the selection to the cell under `at`.
+    fn select(&mut self, at: Point<Pixels>, start: bool, cx: &mut Context<Self>) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        let at = at - self.grid.origin;
+        let x = (at.x / self.cell.width).max(0.);
+        let col = (x as u16).min(self.size.cols - 1);
+        let row = ((at.y / self.cell.height).max(0.) as u16).min(self.size.rows - 1);
+        let right = x - col as f32 >= 0.5;
+        if start {
+            model.select(col, row, right);
+        } else {
+            model.select_to(col, row, right);
+        }
+        self.refresh(false, cx);
+    }
+
+    /// Scrolls `lines` up into the history and selects visible row `row` (screenshots).
+    #[cfg(feature = "screenshot")]
+    pub fn show_history(&mut self, lines: i32, row: u16, cx: &mut Context<Self>) {
+        if let Some(model) = &self.model {
+            model.scroll(lines);
+            model.select(0, row, false);
+            model.select_to(self.size.cols - 1, row, true);
+        }
+        self.refresh(false, cx);
+    }
+
+    /// ⌘C (ctrl-shift-c elsewhere): the selection to the clipboard.
+    fn copy(&mut self, _: &CopySelection, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.model.as_ref().and_then(TerminalModel::selected_text) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
 }
@@ -211,12 +289,9 @@ impl Render for TerminalView {
                 .child(text)
         });
         let view = cx.entity();
+        let cell = size(cell_width, line_height);
         let fit = canvas(
-            move |bounds, _, cx| {
-                let cols = (bounds.size.width / cell_width).floor().max(2.) as u16;
-                let rows = (bounds.size.height / line_height).floor().max(1.) as u16;
-                view.update(cx, |t, cx| t.fit(GridSize { cols, rows }, cx));
-            },
+            move |bounds, _, cx| view.update(cx, |t, cx| t.fit(bounds, cell, cx)),
             |_, _, _, _| {},
         )
         .absolute()
@@ -227,10 +302,20 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key_down))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(Self::copy))
+            .on_scroll(cx.listener(Self::on_scroll))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|t, _, window, cx| t.activate(window, cx)),
+                cx.listener(|t, event: &MouseDownEvent, window, cx| {
+                    t.activate(window, cx);
+                    t.select(event.position, true, cx);
+                }),
             )
+            .on_mouse_move(cx.listener(|t, event: &MouseMoveEvent, _, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    t.select(event.position, false, cx);
+                }
+            }))
             .size_full()
             .p_2()
             .bg(bg)
@@ -254,11 +339,91 @@ impl Render for TerminalView {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use gpui_kit::{ClipboardItem, TestAppContext};
+    use gpui_kit::test::TestEventExt as _;
+    use gpui_kit::{
+        ClipboardItem, Entity, MouseButton, ScrollDelta, ScrollEvent, TestAppContext,
+        VisualTestContext, point,
+    };
     use wai_settings::Settings;
 
-    use super::EXITED;
+    use super::{EXITED, TerminalView};
     use crate::workspace::tests::{open, wait_until};
+
+    /// The visible row holding `text`, and where in it.
+    fn find(
+        terminal: &Entity<TerminalView>,
+        text: &str,
+        cx: &mut VisualTestContext,
+    ) -> Option<(usize, usize)> {
+        terminal.read_with(cx, |t, _| {
+            t.snapshot.rows.iter().enumerate().find_map(|(row, runs)| {
+                let line: String = runs.iter().map(|run| run.text.as_str()).collect();
+                line.find(text).map(|col| (row, col))
+            })
+        })
+    }
+
+    #[gpui_kit::test]
+    fn wheel_scrolls_back_through_history(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the shell is a real process
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        cx.simulate_input("seq 1 200");
+        cx.simulate_keystrokes("enter");
+        // Not "200": the typed command shows it at once.
+        wait_until(cx, "the output", |cx| find(&terminal, "199", cx).is_some());
+
+        let bounds = cx.debug_bounds("terminal").expect("terminal drawn");
+        cx.simulate_event(ScrollEvent {
+            position: bounds.center(),
+            delta: ScrollDelta::Lines(point(0., 3.)),
+            ..Default::default()
+        });
+        assert_eq!(terminal.read_with(cx, |t, _| t.snapshot.display_offset), 3);
+
+        // Typing goes back to the bottom.
+        cx.simulate_input("x");
+        assert_eq!(terminal.read_with(cx, |t, _| t.snapshot.display_offset), 0);
+    }
+
+    #[gpui_kit::test]
+    fn drag_selects_and_copy_takes_the_selection(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the shell is a real process
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        cx.simulate_input("printf wai-%s sel");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "the output", |cx| {
+            find(&terminal, "wai-sel", cx).is_some()
+        });
+        let (row, col) = find(&terminal, "wai-sel", cx).unwrap();
+
+        // From the left half of `w` to the right half of `l`.
+        let (grid, cell) = terminal.read_with(cx, |t, _| (t.grid, t.cell));
+        let at = |col: f32| {
+            point(
+                grid.origin.x + cell.width * col,
+                grid.origin.y + cell.height * (row as f32 + 0.5),
+            )
+        };
+        let (from, to) = (at(col as f32 + 0.2), at(col as f32 + 6.8));
+        cx.update(|window, cx| {
+            window.pointer_down(from, MouseButton::Left, cx);
+            window.pointer_move(to, Some(MouseButton::Left), cx);
+            window.pointer_up(to, MouseButton::Left, cx);
+        });
+        let copy = if cfg!(target_os = "macos") {
+            "cmd-c"
+        } else {
+            "ctrl-shift-c"
+        };
+        cx.simulate_keystrokes(copy);
+
+        let copied = cx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(copied.as_deref(), Some("wai-sel"));
+    }
 
     #[gpui_kit::test]
     fn terminal_view_shows_shell_output(cx: &mut TestAppContext) {

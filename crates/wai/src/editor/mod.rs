@@ -99,6 +99,18 @@ mod tests {
         });
     }
 
+    /// Text in another encoding (Latin-1 here) says what it is, not the raw io error.
+    #[test]
+    fn non_utf8_file_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("latin1.txt");
+        fs::write(&path, b"caf\xe9\n").unwrap();
+
+        let error = super::load(&path).err().expect("refused");
+
+        assert_eq!(error.to_string(), "Not a UTF-8 text file");
+    }
+
     #[gpui_kit::test]
     fn large_file_read_only(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();

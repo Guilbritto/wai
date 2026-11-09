@@ -38,14 +38,15 @@ pub fn key_to_bytes(
     Some(out)
 }
 
-/// The bytes a paste of `text` writes to the shell: raw, or between bracketed-paste markers when
-/// the shell turned that mode on, without ESC so the text cannot close the bracket itself.
+/// The bytes a paste of `text` writes to the shell: with CRLF line ends as one CR (one Enter), or
+/// between bracketed-paste markers when the shell turned that mode on, without ESC (the text
+/// cannot close the bracket itself) nor ^C (it cannot interrupt).
 pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     if !bracketed {
-        return text.as_bytes().to_vec();
+        return text.replace("\r\n", "\r").into_bytes();
     }
     let mut out = b"\x1b[200~".to_vec();
-    out.extend(text.bytes().filter(|&b| b != 0x1b));
+    out.extend(text.bytes().filter(|&b| b != 0x1b && b != 0x03));
     out.extend_from_slice(b"\x1b[201~");
     out
 }
@@ -63,6 +64,13 @@ mod tests {
             paste_bytes("a\x1b[201~rm", true),
             b"\x1b[200~a[201~rm\x1b[201~"
         );
+    }
+
+    /// A pasted ^C cannot interrupt what runs; unbracketed, a CRLF line end is one Enter.
+    #[test]
+    fn paste_strips_ctrl_c_when_bracketed_and_crlf_otherwise() {
+        assert_eq!(paste_bytes("a\x03b", true), b"\x1b[200~ab\x1b[201~");
+        assert_eq!(paste_bytes("ls\r\necho\r\n", false), b"ls\recho\r");
     }
 
     #[test]

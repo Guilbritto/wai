@@ -8,7 +8,10 @@
 //!   the whole file equals `new_text`, or else `new_text` (a hunk or snippet, as claude-agent-acp
 //!   sends them) occurs exactly once, on whole lines, and only that occurrence goes back.
 //! - Deleting a file needs proof that the edit created it (R34): wai saw it absent before the
-//!   tool call ran, and the file still equals the non-empty `new_text`.
+//!   tool call ran, and the file still equals the non-empty `new_text`. A symlink is never
+//!   deleted (R38).
+//! - Revert decides what it would do (`plan`) before it asks (R38): a refusal shows at once,
+//!   the question names the outcome, and a yes does exactly that or nothing.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -139,26 +142,53 @@ impl fmt::Display for RevertError {
     }
 }
 
-/// Undoes one edit by the rules above: the new text goes through an atomic write that keeps the
-/// file's permissions and symlinks; a deletion removes it. `created`: wai saw the file absent
-/// before the edit ran.
-pub fn revert(diff: &FileDiff, created: bool) -> Result<(), RevertError> {
+/// What undoing an edit does to its file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Undo {
+    /// The edit created the file: it goes.
+    Delete,
+    /// The whole file goes back to this.
+    Whole(String),
+    /// Only the edit's lines go back: the file becomes this.
+    Snippet(String),
+}
+
+/// What undoing one edit would do now, by the rules above, writing nothing. `created`: wai saw
+/// the file absent before the edit ran.
+pub fn plan(diff: &FileDiff, created: bool) -> Result<Undo, RevertError> {
     let io = |e: io::Error| RevertError::Io(e.to_string());
     let now = match fs::read(&diff.path) {
         Ok(now) => String::from_utf8(now).map_err(|_| RevertError::Changed)?,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(RevertError::Missing),
         Err(e) => return Err(io(e)),
     };
+    let undo = undo(&now, diff, created)?;
+    // R38: a link where the edit created a file is not that file; its target may be anything.
+    let link = || fs::symlink_metadata(&diff.path).map(|m| m.file_type().is_symlink());
+    if undo == Undo::Delete && link().map_err(io)? {
+        return Err(RevertError::Changed);
+    }
+    Ok(undo)
+}
+
+/// Undoes one edit as Revert said it would (`asked`, a `plan` from when it asked): the new text
+/// goes through an atomic write that keeps the file's permissions and symlinks; a deletion
+/// removes it. A file changed since, so that the plan differs now, is refused.
+pub fn revert(diff: &FileDiff, created: bool, asked: &Undo) -> Result<(), RevertError> {
+    let io = |e: io::Error| RevertError::Io(e.to_string());
     // ponytail: a write landing between this read and the write below is lost; a lock or a
     // compare-and-rename would close that gap.
-    match undo(&now, diff, created)? {
-        Some(text) => editor::save(&diff.path, &text).map(drop).map_err(io),
-        None => fs::remove_file(&diff.path).map_err(io),
+    match plan(diff, created)? {
+        undo if undo != *asked => Err(RevertError::Changed),
+        Undo::Delete => fs::remove_file(&diff.path).map_err(io),
+        Undo::Whole(text) | Undo::Snippet(text) => {
+            editor::save(&diff.path, &text).map(drop).map_err(io)
+        }
     }
 }
 
-/// What a file holding `now` becomes once `diff` is undone; `None` deletes it.
-fn undo(now: &str, diff: &FileDiff, created: bool) -> Result<Option<String>, RevertError> {
+/// What a file holding `now` becomes once `diff` is undone.
+fn undo(now: &str, diff: &FileDiff, created: bool) -> Result<Undo, RevertError> {
     let new = diff.new_text.as_str();
     let old = match (&diff.old_text, created) {
         (Some(old), _) => old.as_str(),
@@ -166,14 +196,14 @@ fn undo(now: &str, diff: &FileDiff, created: bool) -> Result<Option<String>, Rev
         // tell what it held, so nothing goes back, not even a snippet.
         (None, false) => return Err(RevertError::Existed),
         (None, true) if now == new && new.is_empty() => return Err(RevertError::Existed),
-        (None, true) if now == new => return Ok(None),
+        (None, true) if now == new => return Ok(Undo::Delete),
         (None, true) => "",
     };
     if now == new {
-        return Ok(Some(old.to_string()));
+        return Ok(Undo::Whole(old.to_string()));
     }
     let at = only_on_lines(now, new).ok_or(RevertError::Changed)?;
-    Ok(Some(format!(
+    Ok(Undo::Snippet(format!(
         "{}{old}{}",
         &now[..at],
         &now[at + new.len()..]
@@ -306,8 +336,8 @@ impl ChatSession {
     }
 
     /// The step Revert undoes next for file `file` of the block at row `ix` (`next_step`), its
-    /// path resolved against the session's folder and canonicalized, and whether wai saw the
-    /// edit create the file.
+    /// path resolved against the session's folder with its folder canonicalized (a symlink
+    /// stays one, R38), and whether wai saw the edit create the file.
     fn next_revert(&self, ix: usize, file: usize) -> Result<(FileDiff, bool), RevertError> {
         let Some(ChatItem::Edits { turn, files }) = self.model.items.get(ix) else {
             return Err(RevertError::Changed);
@@ -316,7 +346,11 @@ impl ChatSession {
         let (tool, k) = next_step(&self.model.turn_steps(*turn), file)?;
         let diff = &tool.diffs[k];
         let created = tool.first_sight.contains(&(diff.path.clone(), false));
-        let path = canonical(&self.cwd.join(&diff.path));
+        let path = self.cwd.join(&diff.path);
+        let path = match (path.parent(), path.file_name()) {
+            (Some(dir), Some(name)) => canonical(dir).join(name),
+            _ => path,
+        };
         Ok((
             FileDiff {
                 path,
@@ -337,7 +371,8 @@ impl ChatSession {
         }
     }
 
-    /// Revert asks first: no write without a yes.
+    /// Revert asks first: no write without a yes. R38: a Revert that would refuse says why at
+    /// once instead, and the question says what a yes does.
     fn confirm_revert(
         &mut self,
         ix: usize,
@@ -345,8 +380,10 @@ impl ChatSession {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (diff, created) = match self.next_revert(ix, file) {
-            Ok(next) => next,
+        let planned = self.next_revert(ix, file);
+        let planned = planned.and_then(|(diff, created)| Ok((plan(&diff, created)?, diff)));
+        let (undo, diff) = match planned {
+            Ok(planned) => planned,
             Err(e) => {
                 self.reverted(ix, file, &Err(e));
                 self.sync_rows(Some(ix), cx);
@@ -359,13 +396,25 @@ impl ChatSession {
             false => diff.path.to_string_lossy(),
         };
         let title = format!("Revert {name}?");
-        let body = match (&diff.old_text, created) {
-            (None, true) => "This edit created the file: reverting it deletes the file.",
-            _ => "The file goes back to how it was before this edit.",
+        let (says, body) = match undo {
+            Undo::Delete => (
+                "revert-delete",
+                "This edit created the file: reverting it deletes the file.",
+            ),
+            Undo::Whole(_) => (
+                "revert-whole",
+                "The file goes back to how it was before this edit.",
+            ),
+            Undo::Snippet(_) => (
+                "revert-snippet",
+                "The lines this edit changed go back to how they were; the rest of the file \
+                 stays as it is.",
+            ),
         };
         let this = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
-            let this = this.clone();
+            let (this, undo) = (this.clone(), undo.clone());
+            let body = div().debug_selector(move || says.into()).child(body);
             dialog.title(title.clone()).child(body).footer(
                 DialogFooter::new()
                     .child(
@@ -379,7 +428,7 @@ impl ChatSession {
                             .label("Revert")
                             .on_click(move |_, window, cx| {
                                 window.close_dialog(cx);
-                                this.update(cx, |this, cx| this.revert_file(ix, file, cx))
+                                this.update(cx, |this, cx| this.revert_file(ix, file, &undo, cx))
                                     .ok();
                             }),
                     ),
@@ -387,7 +436,7 @@ impl ChatSession {
         });
     }
 
-    fn revert_file(&mut self, ix: usize, file: usize, cx: &mut Context<Self>) {
+    fn revert_file(&mut self, ix: usize, file: usize, asked: &Undo, cx: &mut Context<Self>) {
         // R35: a turn started while the dialog was open.
         if matches!(self.model.state, TurnState::Working | TurnState::NeedsYou) {
             return;
@@ -395,8 +444,8 @@ impl ChatSession {
         // ponytail: reads and writes on the main thread, like ⌘S: one file the agent already
         // sent. Move it to the background executor if large files show.
         let result = self.next_revert(ix, file).and_then(|(diff, created)| {
-            revert(&diff, created)?;
-            Ok(diff.path)
+            revert(&diff, created, asked)?;
+            Ok(canonical(&diff.path))
         });
         self.reverted(ix, file, &result.as_ref().map(drop).map_err(Clone::clone));
         if let Ok(path) = result {
@@ -415,10 +464,15 @@ mod tests {
     use wai_agent::{FileDiff, Location, ToolStatus};
 
     use super::{
-        CHANGED, DiffLine, EXISTED, MAX_DIFF_LINES, RevertError, bounded_diff, first_changed_line,
-        next_step, open_line, revert, undo,
+        CHANGED, DiffLine, EXISTED, MAX_DIFF_LINES, RevertError, Undo, bounded_diff,
+        first_changed_line, next_step, open_line, plan, undo,
     };
     use crate::chat::model::{EditedFile, ToolItem};
+
+    /// Revert as confirmed right after it asked.
+    fn revert(diff: &FileDiff, created: bool) -> Result<(), RevertError> {
+        super::revert(diff, created, &plan(diff, created)?)
+    }
 
     fn diff(path: &std::path::Path, old: Option<&str>, new: &str) -> FileDiff {
         FileDiff {
@@ -461,6 +515,43 @@ mod tests {
 
         assert!(!path.exists());
         assert_eq!(revert(&created, true), Err(RevertError::Missing));
+    }
+
+    /// R38: a yes does what the question said, or nothing: here the file changed while the
+    /// dialog was open, so that the whole file would go back instead of the edit's lines.
+    #[test]
+    fn revert_refuses_when_the_plan_changed_since_it_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        fs::write(&path, "a\nnew\nb\n").unwrap();
+        let edit = diff(&path, Some("old\n"), "new\n");
+        let asked = plan(&edit, false).unwrap();
+        assert_eq!(asked, Undo::Snippet("a\nold\nb\n".into()));
+
+        fs::write(&path, "new\n").unwrap();
+
+        assert_eq!(
+            super::revert(&edit, false, &asked),
+            Err(RevertError::Changed)
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
+    }
+
+    /// R38: a created file replaced by a symlink is never deleted, nor what the link points to.
+    #[cfg(unix)]
+    #[test]
+    fn revert_never_deletes_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let (target, link) = (dir.path().join("target.txt"), dir.path().join("new.md"));
+        fs::write(&target, "hi\n").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert_eq!(
+            revert(&diff(&link, None, "hi\n"), true),
+            Err(RevertError::Changed)
+        );
+        assert!(fs::symlink_metadata(&link).is_ok(), "the link stays");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "hi\n");
     }
 
     /// R34: a diff without old text over a file wai saw before the edit (a Write over it) never
@@ -512,7 +603,10 @@ mod tests {
 
     fn undo_snippet(now: &str, old: Option<&str>, new: &str) -> Result<String, RevertError> {
         let diff = diff(std::path::Path::new("/p/a"), old, new);
-        undo(now, &diff, true).map(|text| text.expect("a rewrite, not a deletion"))
+        undo(now, &diff, true).map(|undo| match undo {
+            Undo::Whole(text) | Undo::Snippet(text) => text,
+            Undo::Delete => panic!("a rewrite, not a deletion"),
+        })
     }
 
     /// R32: claude-agent-acp reports an Edit as hunks (context and changed lines, no trailing

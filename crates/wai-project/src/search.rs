@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use grep_regex::RegexMatcherBuilder;
+use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::sinks::Lossy;
 use grep_searcher::{BinaryDetection, SearcherBuilder};
 use ignore::WalkBuilder;
@@ -41,45 +41,43 @@ impl Drop for SearchHandle {
     }
 }
 
+/// A search's handle and its batches.
+pub type Search = (SearchHandle, async_channel::Receiver<Vec<Match>>);
+
 /// Searches the files under `root` that `.gitignore` leaves in, on a new thread. One batch per
 /// file with matches arrives on the channel, which closes when the search ends: all files seen,
-/// `MAX_MATCHES` found, the handle dropped or the receiver gone. An empty or invalid pattern
-/// finds nothing.
-pub fn search(root: &Path, q: SearchQuery) -> (SearchHandle, async_channel::Receiver<Vec<Match>>) {
+/// `MAX_MATCHES` found, the handle dropped or the receiver gone. An empty pattern finds nothing;
+/// `None` means the pattern is not a valid regular expression.
+pub fn search(root: &Path, q: SearchQuery) -> Option<Search> {
     search_in(root, q, true)
 }
 
 /// `search`, with `global_ignores` choosing whether git's global excludes file applies (read
 /// from `~/.gitconfig`: tests pass `false`).
-pub fn search_in(
-    root: &Path,
-    q: SearchQuery,
-    global_ignores: bool,
-) -> (SearchHandle, async_channel::Receiver<Vec<Match>>) {
+pub fn search_in(root: &Path, q: SearchQuery, global_ignores: bool) -> Option<Search> {
+    // ponytail: compiled on the caller's (UI) thread to say "invalid" at once; the regex
+    // crate's size limits bound a pathological pattern.
+    let matcher = RegexMatcherBuilder::new()
+        .case_insensitive(!q.case_sensitive)
+        .fixed_strings(!q.regex)
+        .build(&q.pattern)
+        .ok()?;
     let cancel = Arc::new(AtomicBool::new(false));
     let (tx, rx) = async_channel::bounded(QUEUED_BATCHES);
     let (root, flag) = (root.to_path_buf(), cancel.clone());
-    std::thread::spawn(move || run(&root, &q, global_ignores, &flag, &tx));
-    (SearchHandle(cancel), rx)
+    if !q.pattern.is_empty() {
+        std::thread::spawn(move || run(&root, &matcher, global_ignores, &flag, &tx));
+    }
+    Some((SearchHandle(cancel), rx))
 }
 
 fn run(
     root: &Path,
-    q: &SearchQuery,
+    matcher: &RegexMatcher,
     global_ignores: bool,
     cancel: &AtomicBool,
     tx: &async_channel::Sender<Vec<Match>>,
 ) {
-    let matcher = RegexMatcherBuilder::new()
-        .case_insensitive(!q.case_sensitive)
-        .fixed_strings(!q.regex)
-        .build(&q.pattern);
-    let Ok(matcher) = matcher
-        .map_err(|_| ())
-        .and_then(|m| (!q.pattern.is_empty()).then_some(m).ok_or(()))
-    else {
-        return;
-    };
     let mut searcher = SearcherBuilder::new()
         .line_number(true)
         .binary_detection(BinaryDetection::quit(0))
@@ -110,7 +108,7 @@ fn run(
             Ok(total + batch.len() < MAX_MATCHES && !cancel.load(Ordering::Relaxed))
         });
         // An unreadable file is left out, as the tree leaves out an unreadable entry.
-        let _ = searcher.search_path(&matcher, entry.path(), sink);
+        let _ = searcher.search_path(matcher, entry.path(), sink);
         if batch.is_empty() {
             continue;
         }
@@ -136,7 +134,7 @@ mod tests {
     }
 
     fn collect(root: &Path, q: SearchQuery) -> Vec<Match> {
-        let (_handle, rx) = search_in(root, q, false);
+        let (_handle, rx) = search_in(root, q, false).expect("a valid pattern");
         let mut all = Vec::new();
         while let Ok(batch) = rx.recv_blocking() {
             all.extend(batch);
@@ -192,7 +190,7 @@ mod tests {
         let found = collect(root, query("hit"));
         assert_eq!(found.len(), MAX_MATCHES);
 
-        let (handle, rx) = search_in(root, query("hit"), false);
+        let (handle, rx) = search_in(root, query("hit"), false).unwrap();
         let first = rx.recv_blocking().unwrap();
         drop(handle);
         let mut total = first.len();

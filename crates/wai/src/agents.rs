@@ -113,7 +113,7 @@ impl AgentRegistry {
         Some(handle)
     }
 
-    /// Kills every agent (at quit); resolves once they are all gone.
+    /// Signals every agent to stop, at once (at quit); resolves once they are all gone.
     pub fn shutdown_all(&self) -> impl Future<Output = ()> + use<> {
         let stopped: Vec<_> = self.agents.values().map(|a| a.handle.shutdown()).collect();
         async move {

@@ -21,6 +21,7 @@ actions!(
         OpenFolder,
         CancelTurn,
         Paste,
+        CopySelection,
         Save
     ]
 );
@@ -42,13 +43,14 @@ pub fn init(settings: &Settings, cx: &mut App) {
 
 fn bind_keys(cx: &mut App) {
     let workspace = Some("Workspace");
-    // ctrl-v reaches the shell as a literal ^V, so other platforms paste with ctrl-shift-v.
-    let paste = if cfg!(target_os = "macos") {
-        "cmd-v"
+    // ctrl-v (ctrl-c) reaches the shell as a literal ^V (^C), so other platforms paste (copy)
+    // with ctrl-shift-v (ctrl-shift-c).
+    let (paste, copy) = if cfg!(target_os = "macos") {
+        ("cmd-v", "cmd-c")
     } else {
-        "ctrl-shift-v"
+        ("ctrl-shift-v", "ctrl-shift-c")
     };
-    let keymap: [(&str, Box<dyn Action>, Option<&str>); 9] = [
+    let keymap: [(&str, Box<dyn Action>, Option<&str>); 10] = [
         ("secondary-q", Box::new(Quit), None),
         ("secondary-n", Box::new(NewSession), workspace),
         ("ctrl-`", Box::new(ToggleTerminal), workspace),
@@ -60,6 +62,7 @@ fn bind_keys(cx: &mut App) {
         // The prompt box lets Escape through (it has nothing to clear).
         ("escape", Box::new(CancelTurn), Some("ChatSession")),
         (paste, Box::new(Paste), Some("Terminal")),
+        (copy, Box::new(CopySelection), Some("Terminal")),
     ];
     // `KeyBinding::new` rejects `secondary-`; `load` resolves it for the host OS.
     let bindings: Vec<_> = keymap
@@ -239,6 +242,8 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 /// `WAI_SHOT_FILES=<dir>`: the Files tab with `<dir>` (relative to the project) expanded, and
 /// no terminal (fase-2-files.png).
 /// `WAI_SHOT_TEMPLATES=1`: the open template menu (fase-2-templates.png).
+/// `WAI_SHOT_SCROLLBACK=<command>`: the terminal scrolled back with a selection
+/// (fase-2-terminal.png).
 #[cfg(feature = "screenshot")]
 fn screenshot(
     (window, workspace): (AnyWindowHandle, Entity<Workspace>),
@@ -299,6 +304,16 @@ fn screenshot(
                 w.files.update(cx, |files, cx| files.toggle(dir, cx));
             });
             executor.timer(Duration::from_millis(500)).await;
+        } else if let Ok(command) = std::env::var("WAI_SHOT_SCROLLBACK") {
+            // `WAI_SHOT_SCROLLBACK=<command>`: its output scrolled back 20 lines, one row
+            // selected (fase-2-terminal.png).
+            run_in_terminal(window, &command, cx).await;
+            executor.timer(Duration::from_millis(500)).await;
+            workspace.update(cx, |w, cx| {
+                if let Some(terminal) = &w.terminal {
+                    terminal.update(cx, |t, cx| t.show_history(20, 3, cx));
+                }
+            });
         } else {
             run_in_terminal(window, "echo wai", cx).await;
         }

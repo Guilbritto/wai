@@ -12,7 +12,7 @@ use gpui_kit::*;
 use wai_agent::{PermissionChoice, ToolStatus};
 
 use super::model::{ChatItem, NoticeKind, ToolItem, TurnState, UsageInfo};
-use super::view::ChatSession;
+use super::view::{ChatEvent, ChatSession};
 use super::{permission, question};
 
 /// `43k`, `1M`, `1.5M`.
@@ -207,17 +207,30 @@ impl ChatSession {
                 )
             })
             .children(hidden.map(|n| {
-                Button::new(("show-all", ix))
-                    .ghost()
-                    .small()
-                    .label(format!("Show all ({n} more lines)"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(ChatItem::Tool(tool)) = this.model.items.get_mut(ix) {
-                            tool.expanded = true;
-                        }
-                        this.sync_rows(Some(ix), cx);
-                        cx.notify();
-                    }))
+                match tool.expanded {
+                    false => Button::new(("show-all", ix))
+                        .ghost()
+                        .small()
+                        .label(format!("Show all ({n} more lines)"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(ChatItem::Tool(tool)) = this.model.items.get_mut(ix) {
+                                tool.expanded = true;
+                            }
+                            this.sync_rows(Some(ix), cx);
+                            cx.notify();
+                        })),
+                    // R21: past what "Show all" draws, the whole output opens in the editor.
+                    true => Button::new(("open-output", ix))
+                        .ghost()
+                        .small()
+                        .label("Open full output in editor")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(ChatItem::Tool(tool)) = this.model.items.get(ix) {
+                                let (tool, text) = (tool.id.clone(), tool.text.clone());
+                                cx.emit(ChatEvent::OpenOutput { tool, text });
+                            }
+                        })),
+                }
             }))
             .children(
                 self.diffs

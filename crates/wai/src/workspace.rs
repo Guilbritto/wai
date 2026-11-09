@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gpui_kit::component::WindowExt as _;
@@ -8,8 +9,8 @@ use gpui_kit::component::{ActiveTheme as _, h_resizable, resizable_panel, v_flex
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::{
-    AgentError, AgentHandle, BrokerError, QuestionAnswer, SessionStarted, SessionSummary,
-    StopReason,
+    AgentError, AgentHandle, BrokerError, QuestionAnswer, SessionEvent, SessionStarted,
+    SessionSummary, StopReason,
 };
 use wai_project::{FsChange, ProjectWatcher};
 use wai_settings::{AppState, OpenSession, Settings, Template, config_dir, load_templates};
@@ -28,6 +29,8 @@ use crate::terminal_view::TerminalView;
 const SIDEBAR_WIDTH: f32 = 260.;
 const TERMINAL_HEIGHT: f32 = 260.;
 pub const MAX_PANES: usize = 4;
+/// Events kept per session id that is not open yet (see `Workspace::early`).
+const EARLY_EVENTS: usize = 1_000;
 const START_HINT: &str = if cfg!(target_os = "macos") {
     "Start a session (⌘N)"
 } else {
@@ -71,7 +74,8 @@ pub struct Workspace {
     pub settings: Settings,
     /// The "New from template" menu's entries; empty hides the menu.
     pub templates: Vec<Template>,
-    /// Where the user's `templates.toml` lives; re-read on a project switch.
+    /// The config dir: the user's `templates.toml` (re-read on a project switch) and `scratch/`,
+    /// where tool outputs open from (R21; cleared at launch).
     pub user_dir: PathBuf,
     pub registry: Entity<AgentRegistry>,
     /// Every open session, shown in a pane or not, in the order they opened.
@@ -93,6 +97,14 @@ pub struct Workspace {
     /// project cannot be watched.
     watch: Option<(ProjectWatcher, Task<()>)>,
     next_ticket: u64,
+    /// Tickets whose "Preparing…" pane ⌘W closed: their session never opens.
+    cancelled: HashSet<u64>,
+    /// `new_session` calls in flight, per agent.
+    starting: HashMap<String, usize>,
+    /// Events for session ids not open yet, per agent: an agent may describe a session (title,
+    /// usage, commands) before `new_session` returns. Kept, `EARLY_EVENTS` per id, only while a
+    /// session of that agent is starting.
+    early: HashMap<(String, String), Vec<SessionEvent>>,
     /// Where the open sessions, the project and the terminal's visibility are kept between runs;
     /// `None` keeps nothing (tests).
     state_path: Option<PathBuf>,
@@ -111,13 +123,15 @@ impl Workspace {
     ) -> Self {
         let registry = cx.new(|_| AgentRegistry::new(&settings));
         let routing = cx.subscribe(&registry, |this, _, event, cx| this.route(event, cx));
-        // The process ends ~200 ms after the quit hooks: nothing it started may outlive it.
+        // The process ends ~200 ms after the quit hooks: nothing it started may outlive it. The
+        // agents are signalled first: stopping a shell that ignores SIGHUP blocks for 200 ms.
         let quit = cx.on_app_quit(|this, cx| {
+            let agents = this.registry.read(cx).shutdown_all();
             this.save_state(cx);
             if let Some(terminal) = &this.terminal {
                 terminal.update(cx, |t, _| t.stop());
             }
-            this.registry.read(cx).shutdown_all()
+            agents
         });
         // R28: quitting or closing the window asks about unsaved edits first. Deferred: a key
         // dispatch holds the window until it ends.
@@ -188,6 +202,9 @@ impl Workspace {
             search,
             watch: None,
             next_ticket: 0,
+            cancelled: HashSet::new(),
+            starting: HashMap::new(),
+            early: HashMap::new(),
             state_path,
             focus,
             _subscriptions: vec![routing, quit, open_file, open_match, open_session],
@@ -328,11 +345,18 @@ impl Workspace {
                 agent,
                 session,
                 event,
-            } => {
-                if let Some(s) = self.session(agent, session, cx) {
-                    s.update(cx, |s, cx| s.handle_event(event, cx));
+            } => match self.session(agent, session, cx) {
+                Some(s) => s.update(cx, |s, cx| s.handle_event(event, cx)),
+                None if self.starting.get(agent).is_some_and(|n| *n > 0) => {
+                    let early = (self.early)
+                        .entry((agent.clone(), session.clone()))
+                        .or_default();
+                    if early.len() < EARLY_EVENTS {
+                        early.push(event.clone());
+                    }
                 }
-            }
+                None => {}
+            },
             RegistryEvent::Permission { agent, request } => {
                 match self.session(agent, &request.session, cx) {
                     Some(s) => s.update(cx, |s, cx| s.handle_permission(request.clone(), cx)),
@@ -437,6 +461,10 @@ impl Workspace {
                 ChatEvent::Reverted(path) => {
                     let changed = [FsChange::Changed(vec![path.clone()])];
                     return this.disk_changed(&changed, window, cx);
+                }
+                ChatEvent::OpenOutput { tool, text } => {
+                    let session = session.read(cx).id.clone();
+                    return this.open_output(&session, tool, text.clone(), window, cx);
                 }
                 _ => {}
             }
@@ -668,18 +696,23 @@ impl Workspace {
             agent: agent.clone(),
             ticket,
         };
+        *self.starting.entry(agent.clone()).or_default() += 1;
         cx.notify();
         let cwd = self.project.clone();
         let registry = self.registry.downgrade();
         cx.spawn_in(window, async move |this, cx| {
             let started = handle.new_session(cwd.clone()).await;
             this.update_in(cx, |this, window, cx| {
-                // Closed or replaced meanwhile, the placeholder is gone: the session still opens.
+                let early = this.landed(&agent, started.as_ref().ok().map(|s| s.id.as_str()));
+                // Replaced meanwhile (a history row shown there), the placeholder is gone: the
+                // session still opens. Closed (⌘W), it does not.
+                let cancelled = this.cancelled.remove(&ticket);
                 let pane = this
                     .panes
                     .iter()
                     .position(|p| matches!(p, Pane::Preparing { ticket: t, .. } if *t == ticket));
                 let shown = match started {
+                    Ok(_) if cancelled => return,
                     Ok(started) => {
                         // A session that starts proves the agent works (signed in again, say).
                         this.registry.update(cx, |r, cx| r.mark_ready(&agent, cx));
@@ -689,6 +722,8 @@ impl Workspace {
                         if let Some(text) = prefill {
                             session.update(cx, |s, cx| s.prefill(&text, window, cx));
                         }
+                        session
+                            .update(cx, |s, cx| early.iter().for_each(|e| s.handle_event(e, cx)));
                         this.add_session(session.clone(), window, cx);
                         this.refresh_history(cx);
                         Pane::Session(session)
@@ -739,8 +774,9 @@ impl Workspace {
     }
 
     /// Drops the focused pane's session from the panes and the open list (the agent keeps it in
-    /// its history). With more than one pane, the pane goes too. R20: in an editor pane it
-    /// closes the active tab instead (the pane goes with the last one).
+    /// its history). With more than one pane, the pane goes too. A "Preparing…" pane's session
+    /// never opens. R20: in an editor pane it closes the active tab instead (the pane goes with
+    /// the last one).
     fn close_session(&mut self, _: &CloseSession, window: &mut Window, cx: &mut Context<Self>) {
         let ix = self.focused_pane;
         match &self.panes[ix] {
@@ -750,9 +786,24 @@ impl Workspace {
                 self.sessions.retain(|s| s != session);
                 self.sync_agents(cx);
             }
-            _ => {}
+            Pane::Preparing { ticket, .. } => {
+                self.cancelled.insert(*ticket);
+            }
+            Pane::Empty(_) => {}
         }
         self.drop_pane(ix, window, cx);
+    }
+
+    /// A `new_session` of `agent` returned (`id`: the session it started): the events that came
+    /// for that session before. None are kept once no session of the agent is starting.
+    fn landed(&mut self, agent: &str, id: Option<&str>) -> Vec<SessionEvent> {
+        let early = id.and_then(|id| self.early.remove(&(agent.into(), id.into())));
+        let starting = self.starting.entry(agent.into()).or_default();
+        *starting = starting.saturating_sub(1);
+        if *starting == 0 {
+            self.early.retain(|(a, _), _| a != agent);
+        }
+        early.unwrap_or_default()
     }
 
     /// Removes pane `ix` (empties it when it is the only one) and focuses its neighbour.
@@ -852,6 +903,55 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open(path, line, false, window, cx)
+    }
+
+    /// R21: writes a tool call's output to `<config dir>/scratch/<session>-<tool>.txt`, off the
+    /// main thread, and opens it read-only. The ids come from the agent: only their letters,
+    /// digits, `-` and `_` name the file, so it stays in `scratch/`.
+    fn open_output(
+        &mut self,
+        session: &str,
+        tool: &str,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let safe = |id: &str| -> String {
+            let ok = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+            id.chars().map(|c| if ok(c) { c } else { '_' }).collect()
+        };
+        let dir = self.user_dir.join("scratch");
+        let path = dir.join(format!("{}-{}.txt", safe(session), safe(tool)));
+        cx.spawn_in(window, async move |this, cx| {
+            let target = path.clone();
+            let written = cx
+                .background_spawn(async move {
+                    std::fs::create_dir_all(&dir)?;
+                    std::fs::write(&target, text)
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| match written {
+                Ok(()) => this.open(path, None, true, window, cx),
+                Err(e) => {
+                    let notice = format!("Could not write {}: {e}", path.display());
+                    window.push_notification(Notification::error(notice), cx)
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `open_file`; a `scratch` file (a tool's output) is read-only whatever its size.
+    fn open(
+        &mut self,
+        path: PathBuf,
+        line: Option<u32>,
+        scratch: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // One tab per file, named as the watcher reports it (`/private/var`, not `/var`).
         let path = canonical(&path);
         if self.reveal(&path, line, window, cx) {
@@ -875,7 +975,8 @@ impl Workspace {
                 if !this.reveal(&path, line, window, cx) {
                     #[cfg(feature = "demo")]
                     let started = std::time::Instant::now();
-                    let tab = cx.new(|cx| FileEditor::new(path.clone(), loaded, window, cx));
+                    let tab =
+                        cx.new(|cx| FileEditor::new(path.clone(), loaded, scratch, window, cx));
                     let pane = this.editor_pane(window, cx);
                     pane.update(cx, |p, cx| p.add(tab, window, cx));
                     this.reveal(&path, line, window, cx);
@@ -1070,13 +1171,16 @@ impl Render for Workspace {
                         })
                     })
                     // Clicking into a pane focuses it, caret included, whatever the click lands
-                    // on. Deferred past the click: the workspace root takes the focus otherwise.
-                    .capture_any_mouse_down(cx.listener(move |this, _, window, cx| {
-                        if this.focused_pane != ix {
-                            cx.defer_in(window, move |this, window, cx| {
+                    // on; in the focused pane, a click on nothing focusable (the workspace root
+                    // took the focus) gives the caret back too. Deferred past the click, which
+                    // may also close a pane.
+                    .capture_any_mouse_down(cx.listener(move |_, _, window, cx| {
+                        cx.defer_in(window, move |this, window, cx| {
+                            let away = this.focused_pane != ix || this.focus.is_focused(window);
+                            if ix < this.panes.len() && away {
                                 this.focus_pane(ix, window, cx)
-                            });
-                        }
+                            }
+                        });
                     }))
                     .child(match pane {
                         Pane::Session(session) => session.clone().into_any_element(),
@@ -1151,11 +1255,11 @@ pub(crate) mod tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
-    use wai_agent::{AgentError, PromptBlock, SessionSummary};
+    use wai_agent::{AgentError, PromptBlock, SessionEvent, SessionSummary};
     use wai_settings::{AgentConfig, AppState, OpenSession, Settings};
 
     use super::{Pane, Workspace};
-    use crate::agents::AgentStatus;
+    use crate::agents::{AgentStatus, RegistryEvent};
     use crate::app;
     use crate::chat::{ChatItem, NoticeKind, TurnState};
     use crate::notify;
@@ -1275,6 +1379,60 @@ pub(crate) mod tests {
         });
         workspace.read_with(cx, |w, _| {
             assert_eq!(w.sessions.len(), 1);
+            assert_eq!(w.panes[0].session(), w.sessions.first());
+        });
+    }
+
+    /// An agent may describe a session (title, usage, commands) before `new_session` returns:
+    /// those events wait for the session, up to 1,000 of them.
+    #[gpui_kit::test]
+    fn events_before_the_session_lands_are_replayed(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let registry = workspace.read_with(cx, |w, _| w.registry.clone());
+
+        cx.simulate_keystrokes("secondary-n");
+        let preparing = |w: &Workspace, _: &_| matches!(w.panes[0], Pane::Preparing { .. });
+        assert!(workspace.read_with(cx, preparing));
+        registry.update(cx, |_, cx| {
+            for i in 0..=1_000 {
+                cx.emit(RegistryEvent::Session {
+                    agent: "fake".into(),
+                    session: "fake-1".into(),
+                    event: SessionEvent::Title(format!("title {i}")),
+                });
+            }
+        });
+
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
+        });
+        let title = workspace.read_with(cx, |w, cx| {
+            w.panes[0].session().unwrap().read(cx).model.title.clone()
+        });
+        // The 1,001st event was dropped.
+        assert_eq!(title.as_deref(), Some("title 999"));
+    }
+
+    /// ⌘W on a "Preparing…" pane cancels the session: it never opens, even once it lands.
+    #[gpui_kit::test]
+    fn close_while_preparing_cancels_the_session(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+
+        cx.simulate_keystrokes("secondary-n secondary-w");
+        workspace.read_with(cx, |w, _| {
+            assert!(matches!(w.panes[..], [Pane::Empty(None)]))
+        });
+        cx.simulate_keystrokes("secondary-n");
+        wait_until(cx, "both sessions to land", |cx| {
+            workspace.read_with(cx, |w, _| {
+                w.starting.get("fake") == Some(&0) && w.panes[0].session().is_some()
+            })
+        });
+
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.sessions.len(), 1, "only the second session opens");
             assert_eq!(w.panes[0].session(), w.sessions.first());
         });
     }
@@ -1644,6 +1802,63 @@ pub(crate) mod tests {
             assert!(Instant::now() < deadline, "agent {pid} still alive");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// The quit hooks have ~200 ms before the process ends: the agents are signalled first,
+    /// so a shell slow to die (this one ignores SIGHUP, which costs portable-pty 200 ms) cannot
+    /// hold their kill back.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn quit_signals_agents_before_the_terminal(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent and the shell are real processes
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("agent.pid");
+        let flag = format!("--pid-file '{}'", pid_file.display());
+        let (workspace, cx) = open(cx, fake_settings(&flag));
+        let registry = workspace.read_with(cx, |w, _| w.registry.clone());
+        workspace.update(cx, |w, cx| w.start_agent(cx));
+        wait_until(cx, "Ready", |cx| {
+            registry.read_with(cx, |r, _| {
+                matches!(r.status("fake"), Some(AgentStatus::Ready(_)))
+            })
+        });
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        cx.simulate_keystrokes("ctrl-`");
+        cx.simulate_input("trap '' HUP; printf wai-%s trapped");
+        cx.simulate_keystrokes("enter");
+        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().unwrap());
+        wait_until(cx, "the trap", |cx| {
+            terminal.read_with(cx, |t, _| {
+                t.snapshot.rows.iter().any(|row| {
+                    let text: String = row.iter().map(|run| run.text.as_str()).collect();
+                    text.contains("wai-trapped")
+                })
+            })
+        });
+
+        let started = Instant::now();
+        let dead = std::thread::spawn(move || {
+            while std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+            {
+                assert!(
+                    started.elapsed() < Duration::from_secs(2),
+                    "agent still alive"
+                );
+            }
+            started.elapsed()
+        });
+        cx.cx.update(|app| app.shutdown());
+
+        let dead = dead.join().unwrap();
+        assert!(
+            dead < Duration::from_millis(150),
+            "the agent died {dead:?} into quit"
+        );
     }
 
     /// What `app::run` does once the window is open, but the watcher.
