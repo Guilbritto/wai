@@ -593,7 +593,7 @@ mod tests {
                 cx.debug_bounds("reload").is_none()
             }
         });
-        click("close", cx);
+        click("close-deleted", cx);
         assert!(paths(&pane, cx).is_empty());
     }
 

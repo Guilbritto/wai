@@ -103,10 +103,7 @@ impl FileEditor {
         // The stamp catches what no watcher reports (a file outside the project).
         if self.disk_changed || file::stamp(&self.path) != self.stamp {
             self.disk_changed = true;
-            let notice = format!(
-                "Changed on disk: {} — Reload or Keep mine before saving",
-                self.name()
-            );
+            let notice = file::changed_notice(&self.name(), self.dirty);
             window.push_notification(Notification::warning(notice), cx);
             cx.notify();
             return false;
@@ -114,7 +111,8 @@ impl FileEditor {
         // ponytail: written on the main thread; at most 20 MB, so tens of ms at worst. Move it to
         // the background executor (with an edit counter for `dirty`) if it ever shows.
         let text = self.editor.read(cx).text().to_string();
-        match file::save(&self.path, &text) {
+        let target = self.real.as_deref().unwrap_or(&self.path);
+        match file::save_resolved(target, &text) {
             Ok(stamp) => {
                 self.stamp = stamp;
                 (self.dirty, self.disk_changed) = (false, false);
@@ -261,7 +259,7 @@ impl Render for FileEditor {
                         })
                         .when(gone, |el| {
                             el.child(
-                                Button::new("close")
+                                Button::new("close-deleted")
                                     .xsmall()
                                     .label("Close")
                                     .on_click(cx.listener(|_, _, _, cx| cx.emit(CloseRequest))),
@@ -326,7 +324,9 @@ impl EditorPane {
 
     pub fn add(&mut self, tab: Entity<FileEditor>, window: &mut Window, cx: &mut Context<Self>) {
         let closing = cx.subscribe_in(&tab, window, |this, tab, _: &CloseRequest, window, cx| {
-            this.remove(tab, window, cx)
+            if let Some(ix) = this.tabs.iter().position(|t| t == tab) {
+                this.close(ix, window, cx)
+            }
         });
         self._subs.push(closing);
         self.tabs.push(tab);
@@ -405,6 +405,7 @@ impl EditorPane {
             return;
         };
         self.tabs.remove(ix);
+        drop(self._subs.remove(ix));
         if self.tabs.is_empty() {
             return cx.emit(Emptied);
         }

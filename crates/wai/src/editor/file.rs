@@ -72,6 +72,16 @@ pub fn stamp(path: &Path) -> Option<Stamp> {
     Some((meta.modified().ok()?, meta.len()))
 }
 
+/// The notice for a Save refused over a change on disk; a clean tab has no Keep mine.
+pub fn changed_notice(name: &str, dirty: bool) -> String {
+    let ask = if dirty {
+        "Reload or Keep mine"
+    } else {
+        "Reload"
+    };
+    format!("Changed on disk: {name} — {ask} before saving")
+}
+
 pub struct Loaded {
     pub mode: OpenMode,
     pub text: String,
@@ -101,7 +111,15 @@ pub fn load(path: &Path) -> Result<Loaded, OpenError> {
 /// old file or the new one, never half of one. The file keeps its permissions, and a symlink
 /// keeps pointing to it. Returns the new stamp.
 pub fn save(path: &Path, text: &str) -> io::Result<Option<Stamp>> {
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    save_resolved(
+        &fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
+        text,
+    )
+}
+
+/// `save` to a path already resolved (a tab's real path at load): nothing is resolved again
+/// between the caller's check and the write.
+pub fn save_resolved(target: &Path, text: &str) -> io::Result<Option<Stamp>> {
     let name = target.file_name().ok_or(io::ErrorKind::InvalidInput)?;
     let tmp = target.with_file_name(format!(".{}.wai-save", name.to_string_lossy()));
     let written = (|| {
@@ -112,7 +130,7 @@ pub fn save(path: &Path, text: &str) -> io::Result<Option<Stamp>> {
         fs::remove_file(&tmp).ok();
         // The target's mode before any content: a private file is never readable by others,
         // not even as a temp file (one left by a crash included).
-        let permissions = fs::metadata(&target).ok().map(|meta| meta.permissions());
+        let permissions = fs::metadata(target).ok().map(|meta| meta.permissions());
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -126,13 +144,13 @@ pub fn save(path: &Path, text: &str) -> io::Result<Option<Stamp>> {
         }
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
-        fs::rename(&tmp, &target)
+        fs::rename(&tmp, target)
     })();
     if written.is_err() {
         fs::remove_file(&tmp).ok();
     }
     written?;
-    Ok(stamp(path))
+    Ok(stamp(target))
 }
 
 #[cfg(all(test, unix))]
@@ -180,5 +198,16 @@ mod tests {
             .file_type()
             .is_symlink();
         assert!(!link, "the target is a file, not the planted link");
+    }
+
+    #[test]
+    fn refusal_notice_depends_on_the_tab() {
+        let dirty = super::changed_notice("a.rs", true);
+        assert_eq!(
+            dirty,
+            "Changed on disk: a.rs — Reload or Keep mine before saving"
+        );
+        let clean = super::changed_notice("a.rs", false);
+        assert_eq!(clean, "Changed on disk: a.rs — Reload before saving");
     }
 }
