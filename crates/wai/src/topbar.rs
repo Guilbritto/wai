@@ -90,9 +90,11 @@ impl Workspace {
             .min_w_0()
             .child(Icon::new(IconName::Folder).xsmall())
             .child(div().min_w_0().truncate().child(folder_name(&self.project)));
+        // Clipped: in a very narrow window the brand and status give way, not the actions.
         let left = h_flex()
             .flex_1()
             .min_w_0()
+            .overflow_hidden()
             .gap_2()
             .child(brand)
             .child(project)
@@ -134,6 +136,7 @@ impl Workspace {
             .tooltip("New session")
             .on_click(cx.listener(|this, _, window, cx| this.new_session(&NewSession, window, cx)));
         let right = h_flex()
+            .debug_selector(|| "topbar-actions".into())
             .flex_none()
             .gap_1()
             .children(self.templates_menu(cx))

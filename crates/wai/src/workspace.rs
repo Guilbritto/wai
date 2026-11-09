@@ -2205,27 +2205,34 @@ pub(crate) mod tests {
     }
 
     /// At 900 px, with a 60-character project name and 4 panes, the project name gives way and
-    /// every action stays inside the window.
+    /// every action stays inside the window, clear of the status.
     #[gpui_kit::test]
     fn top_bar_fits_narrow_window(cx: &mut TestAppContext) {
         let (workspace, cx) = open(cx, Settings::default());
-        cx.simulate_resize(size(px(900.), px(700.)));
         workspace.update(cx, |w, cx| {
             // Only its name shows: no folder, no watcher.
             w.project = std::env::temp_dir().join("x".repeat(60));
             w.panes = (0..4).map(|_| Pane::Empty(None)).collect();
             cx.notify();
         });
-        cx.run_until_parked();
+        let chip_width = |window, cx: &mut VisualTestContext| {
+            cx.simulate_resize(window);
+            cx.run_until_parked();
+            let chip = cx.debug_bounds("topbar-project").expect("project drawn");
+            chip.size.width
+        };
+        let wide = chip_width(size(px(1400.), px(900.)), cx);
+        let narrow = chip_width(size(px(900.), px(700.)), cx);
 
+        assert!(
+            narrow < wide,
+            "the name truncates: {narrow:?} at 900 px, {wide:?} at 1400 px"
+        );
         let new = cx.debug_bounds("sidebar-new").expect("new session drawn");
         assert!(new.right() <= px(900.), "{new:?}");
-        let project_chip = cx.debug_bounds("topbar-project").expect("project drawn");
         let status = cx.debug_bounds("topbar-status").expect("status drawn");
-        assert!(
-            project_chip.right() < status.left(),
-            "{project_chip:?} {status:?}"
-        );
+        let actions = cx.debug_bounds("topbar-actions").expect("actions drawn");
+        assert!(status.right() < actions.left(), "{status:?} {actions:?}");
     }
 
     #[gpui_kit::test]
