@@ -1,11 +1,10 @@
-//! The sidebar: the project, then tabs: its open sessions with their status and the agent's
-//! history, its files, search, the agents, then each running extension's panels.
+//! The sidebar: tabs for the open sessions with their status and the agent's history, the
+//! project's files, search, the agents, then each running extension's panels.
 
 use std::ops::Range;
 
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -15,9 +14,8 @@ use wai_ext::panel::clamp;
 pub use wai_settings::canonical;
 
 use crate::agents::AgentStatus;
-use crate::app::NewSession;
 use crate::chat::{ChatSession, TurnState};
-use crate::workspace::{MAX_PANES, Workspace, folder_name};
+use crate::workspace::{MAX_PANES, Workspace};
 
 pub(crate) const ROW_HEIGHT: f32 = 28.;
 
@@ -28,7 +26,7 @@ pub enum SidebarTab {
     Files,
     Search,
     Agents,
-    /// Opened from the header's Extensions button; it has no tab.
+    /// Opened from the top bar's Extensions button; it has no tab.
     Extensions,
     /// An extension's panel, by its view. When the panel goes, the sessions show again.
     Panel(EntityId),
@@ -114,7 +112,6 @@ impl Workspace {
 
     pub(crate) fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
-        let templates = self.all_templates(cx);
         let panels = self.ext_host.read(cx).panels();
         let shown = panels
             .iter()
@@ -165,79 +162,9 @@ impl Workspace {
                     }))
             });
         v_flex()
-            .debug_selector(|| "sidebar".into())
             .size_full()
-            .pb_2()
-            .bg(theme.sidebar)
+            .py_2()
             .text_color(theme.sidebar_foreground)
-            .child(
-                h_flex()
-                    .px_3()
-                    .pt_3()
-                    .pb_2()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(folder_name(&self.project)),
-                    )
-                    .when(!templates.is_empty(), |el| {
-                        let (workspace, names) = (
-                            cx.entity().downgrade(),
-                            // An extension's names too: one line each.
-                            (templates.iter())
-                                .map(|t| clamp(&t.name, crate::palette::TITLE_CHARS))
-                                .collect::<Vec<_>>(),
-                        );
-                        el.child(
-                            div().debug_selector(|| "sidebar-templates".into()).child(
-                                Button::new("sidebar-templates")
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::ChevronDown)
-                                    .tooltip("New from template")
-                                    .dropdown_menu(move |menu, _, _| {
-                                        names.iter().enumerate().fold(menu, |menu, (ix, name)| {
-                                            let workspace = workspace.clone();
-                                            menu.item(PopupMenuItem::new(name.clone()).on_click(
-                                                move |_, window, cx| {
-                                                    workspace
-                                                        .update(cx, |w, cx| {
-                                                            w.start_template(ix, window, cx)
-                                                        })
-                                                        .ok();
-                                                },
-                                            ))
-                                        })
-                                    }),
-                            ),
-                        )
-                    })
-                    .child(
-                        Button::new("sidebar-extensions")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::LayoutDashboard)
-                            .tooltip("Extensions")
-                            .selected(self.sidebar_tab == SidebarTab::Extensions)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.show_extensions(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("sidebar-new")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Plus)
-                            .tooltip("New session")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.new_session(&NewSession, window, cx)
-                            })),
-                    ),
-            )
             .child(h_flex().px_2().gap_1().flex_wrap().children(tabs))
             .child(v_flex().flex_1().min_h_0().child(content))
     }

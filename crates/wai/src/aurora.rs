@@ -7,9 +7,16 @@
 )]
 
 use std::borrow::Cow;
+use std::rc::Rc;
 
-use gpui_kit::component::{Theme, ThemeRegistry};
-use gpui_kit::{App, Hsla, hsla, rgb};
+use gpui_kit::base::{ResizeHandleRenderer, ResizeHandleState};
+use gpui_kit::component::{ActiveTheme as _, Theme, ThemeRegistry, h_flex};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{
+    AnyElement, App, Axis, Bounds, BoxShadow, Corners, Div, FontWeight, Hsla, InteractiveElement,
+    IntoElement, ParentElement, Styled, canvas, div, hsla, linear_color_stop, linear_gradient,
+    point, px, rgb, size,
+};
 
 /// Nunito Bold (OFL 1.1, `assets/fonts/OFL.txt`), for the brand and titles.
 pub(crate) const DISPLAY_FONT: &str = "Nunito";
@@ -109,6 +116,141 @@ pub(crate) fn card_fill() -> Hsla {
     Hsla::from(rgb(0x080b1c)).alpha(0.84)
 }
 
+/// The static aurora behind the cards, dark only: the Central's `.aurora` base gradient and its
+/// three blobs, each a circle painted only by a blurred shadow, centred where `.aurora-1..3` put
+/// their 64 vmax circles.
+pub(crate) fn backdrop(cx: &App) -> Option<AnyElement> {
+    if !cx.theme().is_dark() {
+        return None;
+    }
+    let blobs = canvas(
+        |_, _, _| {},
+        |bounds, _, window, _| {
+            let (w, h) = (bounds.size.width, bounds.size.height);
+            let vmax = w.max(h) / 100.;
+            // Center, colour. A 28 vmax disc blurred by 7 vmax peaks near the colour's alpha and
+            // fades out around 23 vmax, like the Central's radial gradients.
+            let blobs = [
+                (point(vmax * 14., vmax * 2.), boreal().alpha(0.30)),
+                (point(w - vmax * 10., vmax * 8.), lilas().alpha(0.34)),
+                (point(vmax * 44., h + vmax * 10.), magenta().alpha(0.20)),
+            ];
+            for (center, color) in blobs {
+                let disc =
+                    Bounds::centered_at(bounds.origin + center, size(vmax * 28., vmax * 28.));
+                let shadow = BoxShadow::new(px(0.), px(0.), color).blur_radius(vmax * 7.);
+                window.paint_drop_shadows(disc, Corners::all(vmax * 14.), &[shadow]);
+            }
+        },
+    )
+    .size_full();
+    let base = linear_gradient(
+        180.,
+        linear_color_stop(rgb(0x060816), 0.),
+        linear_color_stop(rgb(0x0a0e24), 1.),
+    );
+    let backdrop = div()
+        .debug_selector(|| "aurora-backdrop".into())
+        .absolute()
+        .inset_0()
+        .overflow_hidden()
+        .bg(base)
+        .child(blobs);
+    Some(backdrop.into_any_element())
+}
+
+/// A floating card (`.painel-cartao`): dark glass with a violet glow; `focused` (the focused
+/// pane of a split) gets a violet border and a stronger glow. Light mode: a plain bordered panel.
+pub(crate) fn card(focused: bool, cx: &App) -> Div {
+    let theme = cx.theme();
+    if !theme.is_dark() {
+        let border = if focused { theme.ring } else { theme.border };
+        return div()
+            .bg(theme.background)
+            .border_1()
+            .border_color(border)
+            .rounded(px(12.))
+            .overflow_hidden();
+    }
+    let (border, glow) = if focused {
+        (lilas().alpha(0.5), lilas().alpha(0.8))
+    } else {
+        (borda(), lilas().alpha(0.45))
+    };
+    div()
+        .bg(card_fill())
+        .border_1()
+        .border_color(border)
+        .rounded(px(16.))
+        // The Central's `0 40 80 -40 black .95` and `0 0 60 -30 lilas .45`. GPUI's blur radius is
+        // the Gaussian's sigma, half the CSS one. CSS stacks the first shadow on top and GPUI
+        // paints them in order, so the black one goes last: under the 84% fill it hides the
+        // glow, which would tint the whole card violet.
+        .shadow(vec![
+            BoxShadow::new(px(0.), px(0.), glow)
+                .blur_radius(px(30.))
+                .spread_radius(px(-30.)),
+            BoxShadow::new(px(0.), px(40.), hsla(0., 0., 0., 0.95))
+                .blur_radius(px(40.))
+                .spread_radius(px(-40.)),
+        ])
+        .overflow_hidden()
+}
+
+/// A card's header strip (`.painel-barra`).
+pub(crate) fn card_bar(cx: &App) -> Div {
+    let theme = cx.theme();
+    let bar = h_flex().flex_shrink_0().border_b_1();
+    if !theme.is_dark() {
+        return bar.border_color(theme.border);
+    }
+    bar.bg(linear_gradient(
+        180.,
+        linear_color_stop(white(0.05), 0.),
+        linear_color_stop(white(0.015), 1.),
+    ))
+    .border_color(white(0.06))
+}
+
+/// A chip (`.chip`): fully rounded, glass.
+pub(crate) fn pill(cx: &App) -> Div {
+    let theme = cx.theme();
+    let (fill, border, text) = if theme.is_dark() {
+        (vidro(), borda(), tinta_2())
+    } else {
+        (theme.secondary, theme.border, theme.secondary_foreground)
+    };
+    h_flex()
+        .h(px(26.))
+        .px(px(10.))
+        .gap(px(6.))
+        .rounded_full()
+        .bg(fill)
+        .border_1()
+        .border_color(border)
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(text)
+}
+
+/// Resize handles draw nothing at rest (the gap between cards is the divider) and a
+/// `drag_border` line while hovered or dragged. gpui-component's own renderer paints a
+/// `theme.border` hairline at rest.
+pub(crate) fn handle() -> ResizeHandleRenderer {
+    Rc::new(|handle, _, cx| {
+        let line = div()
+            .flex_none()
+            .when(handle.state() != ResizeHandleState::Idle, |el| {
+                el.bg(cx.theme().drag_border)
+            });
+        let line = match handle.axis() {
+            Axis::Horizontal => line.w(px(1.)).h_full(),
+            Axis::Vertical => line.h(px(1.)).w_full(),
+        };
+        Some(line.into_any_element())
+    })
+}
+
 /// `c` as 0xRRGGBBAA, each channel rounded to a byte: a color parsed from the theme file and the
 /// same one built here may differ in the last float bits.
 #[cfg(test)]
@@ -122,7 +264,6 @@ pub(crate) fn hex(c: Hsla) -> u32 {
 #[cfg(test)]
 mod tests {
     use gpui_kit::TestAppContext;
-    use gpui_kit::component::ActiveTheme as _;
     use wai_settings::{Settings, ThemeChoice};
 
     use super::*;

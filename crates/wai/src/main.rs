@@ -15,6 +15,7 @@ mod search_view;
 mod shell_path;
 mod sidebar;
 mod terminal_view;
+mod topbar;
 mod update;
 #[cfg(all(test, unix))]
 mod waycarbon;

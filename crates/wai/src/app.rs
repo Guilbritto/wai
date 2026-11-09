@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use gpui_kit::component::input::CursorBlink;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{Theme, ThemeMode, WindowExt as _};
+use gpui_kit::component::{Theme, ThemeMode, TitleBar, WindowExt as _};
 use gpui_kit::*;
 use wai_settings::{Settings, Template, ThemeChoice};
 
@@ -122,13 +122,20 @@ pub fn run(
         })
         .detach();
 
+        // macOS: the top bar is the title bar (transparent, traffic lights inline). It moves and
+        // zooms the window itself, so AppKit must not as well (`app_owns_titlebar_drag`).
+        let base = if cfg!(target_os = "macos") {
+            TitleBar::window_options()
+        } else {
+            WindowOptions::default()
+        };
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
                 size(px(1400.), px(900.)),
                 cx,
             ))),
-            ..Default::default()
+            ..base
         };
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
             cx.new(|cx| Workspace::new(project, settings, Some(state_path), true, window, cx))

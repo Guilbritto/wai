@@ -6,7 +6,6 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, h_resizable, resizable_panel, v_flex, v_resizable};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::json;
 use wai_agent::{
@@ -16,10 +15,12 @@ use wai_agent::{
 use wai_ext::{CommandSpec, ExtEvent, ExtId, HostEvent, Reply};
 use wai_project::{FsChange, ProjectWatcher};
 use wai_settings::{AppState, OpenSession, Settings, Template, config_dir, load_templates, shown};
+use wai_terminal::DEFAULT_BG;
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::agents_view::{AgentsView, ShowSession};
 use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, Quit, Save, ToggleTerminal};
+use crate::aurora;
 use crate::chat::{ChatEvent, ChatSession, TurnState, signed_out};
 use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved, recovery};
 use crate::ext_host::{ExtHost, SessionCall};
@@ -28,7 +29,7 @@ use crate::files::{FileTree, OpenFile};
 use crate::notify::{self, should_notify};
 use crate::search_view::{OpenMatch, SearchView};
 use crate::sidebar::{SidebarTab, canonical};
-use crate::terminal_view::TerminalView;
+use crate::terminal_view::{self, TerminalView};
 
 const SIDEBAR_WIDTH: f32 = 260.;
 const TERMINAL_HEIGHT: f32 = 260.;
@@ -74,7 +75,8 @@ pub(crate) enum Leave {
     Open(PathBuf),
 }
 
-/// The window's root view: sidebar | chat panes over the terminal panel.
+/// The window's root view: the top bar over sidebar | chat panes over the terminal panel, each a
+/// card on the aurora.
 pub struct Workspace {
     /// Canonical, so history cwds compare with it (R3).
     pub project: PathBuf,
@@ -1576,56 +1578,64 @@ fn title(project: &Path) -> String {
     format!("wai — {}", folder_name(project))
 }
 
+/// A resizable panel's content on `card`, inset 4 px: the cards sit 8 px apart.
+fn on_card(card: Div, content: impl IntoElement) -> Div {
+    div()
+        .size_full()
+        .p_1()
+        .child(card.size_full().child(content))
+}
+
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let top_bar = self.render_top_bar(cx);
         let sidebar = self.render_sidebar(cx);
         let theme = cx.theme();
         let split = self.panes.len() > 1;
         let panes = self.panes.iter().enumerate().map(|(ix, pane)| {
             let focused = split && ix == self.focused_pane;
-            resizable_panel().child(
-                v_flex()
-                    .debug_selector(move || format!("pane-{ix}"))
-                    .size_full()
-                    .when(split, |el| {
-                        el.border_t_2().border_color(if focused {
-                            theme.blue
-                        } else {
-                            transparent_black()
-                        })
-                    })
-                    // Clicking into a pane focuses it, caret included, whatever the click lands
-                    // on; in the focused pane, a click on nothing focusable (the workspace root
-                    // took the focus) gives the caret back too. Deferred past the click, which
-                    // may also close a pane.
-                    .capture_any_mouse_down(cx.listener(move |_, _, window, cx| {
-                        cx.defer_in(window, move |this, window, cx| {
-                            let away = this.focused_pane != ix || this.focus.is_focused(window);
-                            if ix < this.panes.len() && away {
-                                this.focus_pane(ix, window, cx)
-                            }
-                        });
-                    }))
-                    .child(match pane {
-                        Pane::Session(session) => session.clone().into_any_element(),
-                        Pane::Editor(pane) => pane.clone().into_any_element(),
-                        Pane::Preparing { agent, .. } => v_flex()
-                            .size_full()
-                            .items_center()
-                            .justify_center()
-                            .text_color(theme.muted_foreground)
-                            .child(format!("Preparing {agent}…"))
-                            .into_any_element(),
-                        Pane::Empty(error) => {
-                            self.empty_pane(ix, error.as_ref(), cx).into_any_element()
+            let content = v_flex()
+                .debug_selector(move || format!("pane-{ix}"))
+                .size_full()
+                // Clicking into a pane focuses it, caret included, whatever the click lands
+                // on; in the focused pane, a click on nothing focusable (the workspace root
+                // took the focus) gives the caret back too. Deferred past the click, which
+                // may also close a pane.
+                .capture_any_mouse_down(cx.listener(move |_, _, window, cx| {
+                    cx.defer_in(window, move |this, window, cx| {
+                        let away = this.focused_pane != ix || this.focus.is_focused(window);
+                        if ix < this.panes.len() && away {
+                            this.focus_pane(ix, window, cx)
                         }
-                    }),
-            )
+                    });
+                }))
+                .child(match pane {
+                    Pane::Session(session) => session.clone().into_any_element(),
+                    Pane::Editor(pane) => pane.clone().into_any_element(),
+                    Pane::Preparing { agent, .. } => v_flex()
+                        .size_full()
+                        .items_center()
+                        .justify_center()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("Preparing {agent}…"))
+                        .into_any_element(),
+                    Pane::Empty(error) => {
+                        self.empty_pane(ix, error.as_ref(), cx).into_any_element()
+                    }
+                });
+            resizable_panel().child(on_card(aurora::card(focused, cx), content))
         });
-        let terminal = div()
-            .debug_selector(|| "terminal".into())
-            .size_full()
-            .children(self.terminal.clone());
+        let sidebar = on_card(aurora::card(false, cx), sidebar).debug_selector(|| "sidebar".into());
+        // The terminal paints its own square background: 5 px in, on a card of its colour, it
+        // leaves the card's corners round.
+        let terminal_card = aurora::card(false, cx)
+            .bg(terminal_view::color(DEFAULT_BG))
+            .p(px(5.));
+        let terminal = on_card(
+            terminal_card,
+            div().size_full().children(self.terminal.clone()),
+        )
+        .debug_selector(|| "terminal".into());
 
         div()
             .key_context("Workspace")
@@ -1637,33 +1647,46 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::focus_next_pane))
             .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::open_palette))
+            .relative()
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .children(aurora::backdrop(cx))
             .child(
-                h_resizable("workspace")
-                    .child(
-                        resizable_panel()
-                            .size(px(SIDEBAR_WIDTH))
-                            .fixed()
-                            .child(sidebar),
-                    )
-                    .child(
-                        resizable_panel().child(
-                            v_resizable("center")
-                                .child(resizable_panel().child(
-                                    // Keyed by count: each split starts with equal widths.
-                                    h_resizable(("panes", self.panes.len())).children(panes),
-                                ))
-                                .child(
-                                    resizable_panel()
-                                        .size(px(TERMINAL_HEIGHT))
-                                        .fixed()
-                                        .visible(self.terminal_visible)
-                                        .child(terminal),
+                v_flex().size_full().child(top_bar).child(
+                    div().flex_1().min_h_0().p_1().child(
+                        h_resizable("workspace")
+                            .with_handle_appearance(aurora::handle())
+                            .child(
+                                resizable_panel()
+                                    .size(px(SIDEBAR_WIDTH))
+                                    .fixed()
+                                    .child(sidebar),
+                            )
+                            .child(
+                                resizable_panel().child(
+                                    v_resizable("center")
+                                        .with_handle_appearance(aurora::handle())
+                                        .child(
+                                            resizable_panel().child(
+                                                // Keyed by count: each split starts with equal
+                                                // widths.
+                                                h_resizable(("panes", self.panes.len()))
+                                                    .with_handle_appearance(aurora::handle())
+                                                    .children(panes),
+                                            ),
+                                        )
+                                        .child(
+                                            resizable_panel()
+                                                .size(px(TERMINAL_HEIGHT))
+                                                .fixed()
+                                                .visible(self.terminal_visible)
+                                                .child(terminal),
+                                        ),
                                 ),
-                        ),
+                            ),
                     ),
+                ),
             )
     }
 }
@@ -1702,7 +1725,7 @@ pub(crate) mod tests {
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
     use wai_agent::{AgentError, PromptBlock, SessionEvent, SessionSummary};
-    use wai_settings::{AgentConfig, AppState, OpenSession, Settings};
+    use wai_settings::{AgentConfig, AppState, OpenSession, Settings, ThemeChoice};
 
     use super::{Pane, Workspace};
     use crate::agents::{AgentStatus, RegistryEvent};
@@ -2164,6 +2187,45 @@ pub(crate) mod tests {
                 "window {window:?}"
             );
         }
+    }
+
+    #[gpui_kit::test]
+    fn light_mode_has_no_backdrop(light: &mut TestAppContext, dark: &mut TestAppContext) {
+        let settings = Settings {
+            theme: ThemeChoice::Light,
+            ..Default::default()
+        };
+        let (_, light) = open(light, settings);
+        light.run_until_parked();
+        assert!(light.debug_bounds("aurora-backdrop").is_none());
+
+        let (_, dark) = open(dark, Settings::default());
+        dark.run_until_parked();
+        assert!(dark.debug_bounds("aurora-backdrop").is_some());
+    }
+
+    /// At 900 px, with a 60-character project name and 4 panes, the project name gives way and
+    /// every action stays inside the window.
+    #[gpui_kit::test]
+    fn top_bar_fits_narrow_window(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_resize(size(px(900.), px(700.)));
+        workspace.update(cx, |w, cx| {
+            // Only its name shows: no folder, no watcher.
+            w.project = std::env::temp_dir().join("x".repeat(60));
+            w.panes = (0..4).map(|_| Pane::Empty(None)).collect();
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let new = cx.debug_bounds("sidebar-new").expect("new session drawn");
+        assert!(new.right() <= px(900.), "{new:?}");
+        let project_chip = cx.debug_bounds("topbar-project").expect("project drawn");
+        let status = cx.debug_bounds("topbar-status").expect("status drawn");
+        assert!(
+            project_chip.right() < status.left(),
+            "{project_chip:?} {status:?}"
+        );
     }
 
     #[gpui_kit::test]
