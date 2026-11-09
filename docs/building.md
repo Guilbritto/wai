@@ -55,7 +55,7 @@ Packaging uses [cargo-packager](https://github.com/crabnebula-dev/cargo-packager
 bundle id (`app.wai.ide`, a placeholder). Only the `wai` binary is packaged.
 
 ```sh
-cargo install cargo-packager --locked
+cargo install cargo-packager --version 0.11.8 --locked
 ```
 
 ### macOS: app and DMG
@@ -83,7 +83,7 @@ plutil -extract CFBundleShortVersionString raw target/release/wai.app/Contents/I
 ### Windows: NSIS installer (CI only)
 
 ```powershell
-cargo install cargo-packager --locked
+cargo install cargo-packager --version 0.11.8 --locked
 cargo packager --release
 ```
 

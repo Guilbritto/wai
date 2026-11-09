@@ -209,7 +209,7 @@ A tree is JSON nodes:
 - **Agents** become `<id>/<name>`. The user can pick them from the palette or name them in templates.
   - `command` is one program, with no arguments. A wrapper script is the usual way to pass arguments.
   - The agent starts from the config folder, like any agent.
-- **MCP servers** are passed to every session wai starts, loads or forks, for every agent. The agent starts them over stdio, with your `args` and `env`.
+- **MCP servers** are passed to every session wai starts, loads or forks, for every agent. The agent starts them over stdio in the project folder, with your `args` and `env`.
 - **Claude plugins** are listed under the extension in the Extensions view with **Install in terminal**.
   - That types `claude plugin install <name>` into wai's terminal **without pressing Enter**, so the user confirms.
   - A name outside `[A-Za-z0-9._@/-]`, longer than 214 characters, or starting with `-` shows `Invalid name`.
@@ -222,7 +222,7 @@ Agents and MCP servers come only from enabled extensions that were granted `proc
 **What wai enforces:**
 - **Consent:** nothing installs or runs without the user's consent, and a project can only suggest an extension.
 - **Permission checks:** every call in both directions is checked against the granted permissions.
-- **Neutral start:** processes start from the config folder, and bare names come only from absolute `PATH` folders. A repository cannot plant a program that wai runs.
+- **Neutral start:** wai starts agents and extension processes from the config folder, and bare names come only from absolute `PATH` folders, so a repository cannot plant a program that wai itself starts. MCP servers are started by the agent, in the project folder (see below).
 - **Hardened installs:**
   - git runs with a fixed argument list and no shell;
   - only https and ssh are allowed, and ssh runs in batch mode (no prompts);
@@ -236,6 +236,8 @@ Agents and MCP servers come only from enabled extensions that were granted `proc
 - **Your rights:** the extension's process runs as you. It can read and write any file you can, use the network, read the environment it inherits, and start any program.
 - **`network` and `fs:`** are declarations only.
 - **Contributed agents and MCP servers** run with the same rights, inside every agent session.
+- **MCP servers run in the project folder:** the agent starts them there, so a launcher that reads its current folder picks up what the repository put in it. npx, for one, reads the project's `.npmrc` and runs a matching package from its `node_modules`. An npx-based server should pass `--prefix=/` before the package, as wai-navegador does: `args = ["--prefix=/", "-y", "<package>@<version>"]`.
+- **The project's Claude settings:** claude-agent-acp itself already loads the project's own Claude settings (`.claude/`), as Claude Code does in a terminal. wai neither adds to nor limits what they can do.
 - **Windows:** a child that the extension starts in its first instant, before it joins the job object, can outlive it.
 
 Real isolation (a sandbox) is planned for after a public catalogue exists.

@@ -287,7 +287,12 @@ echo "logout noise""#;
     #[test]
     fn a_hanging_login_shell_is_killed_at_the_deadline() {
         let dir = tempfile::tempdir().unwrap();
-        let shell = fake_shell(dir.path(), "echo started\nsleep 30");
+        let shell = fake_shell(
+            dir.path(),
+            "[ \"$1\" = warm ] && exit 0\necho started\nsleep 30",
+        );
+        // The first exec of a new file can wait seconds under load: warm it outside the clock.
+        assert!(Command::new(&shell).arg("warm").status().unwrap().success());
         let start = Instant::now();
         let found = login_path(
             &shell,
@@ -299,8 +304,12 @@ echo "logout noise""#;
             found.as_ref().is_err_and(|e| e.contains("no answer")),
             "{found:?}"
         );
+        // Generous for a busy runner, yet far below the shell's 30 s: only the kill ends it early.
         let elapsed = start.elapsed();
-        assert!(Duration::from_millis(300) <= elapsed && elapsed < Duration::from_secs(2));
+        assert!(
+            Duration::from_millis(300) <= elapsed && elapsed < Duration::from_secs(10),
+            "{elapsed:?}"
+        );
     }
 
     #[test]

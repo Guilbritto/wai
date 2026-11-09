@@ -652,7 +652,7 @@ pub(crate) mod tests {
         };
         assert_eq!(server.command, Path::new("npx"));
         assert!(
-            server.args[1].starts_with("@playwright/mcp@"),
+            server.args[2].starts_with("@playwright/mcp@"),
             "{servers:?}"
         );
 

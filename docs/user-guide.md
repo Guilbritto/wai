@@ -137,7 +137,7 @@ wai keeps a backup of every tab with unsaved edits:
 - about a second after you stop typing;
 - again on every quit macOS reports, including Quit from the Dock, logout and shutdown.
 
-**Where backups go:** each one is `<config>/recovery/<n>.json`. Its file is private to you (mode 0600), in a private folder (0700). The original file is never touched.
+**Where backups go:** each one is `<config>/recovery/<n>.json`. On macOS and Linux its file is private to you (mode 0600), in a private folder (0700); on Windows the folder inherits the permissions of `%APPDATA%`. The original file is never touched.
 
 **On the next launch** each backup reopens as an unsaved tab with the banner **Recovered unsaved changes**.
 - **When the file changed on disk meanwhile:** the tab also shows **Changed on disk**, and Save waits for **Reload** or **Keep mine**.

@@ -6,10 +6,12 @@ Gives your agents a browser. This extension has no code: its manifest contribute
 [[contributes.mcp_servers]]
 name = "playwright"
 command = "npx"
-args = ["-y", "@playwright/mcp@0.0.84"]
+args = ["--prefix=/", "-y", "@playwright/mcp@0.0.84"]
 ```
 
 The version is pinned, so an update is a deliberate edit of `wai-extension.toml` (check the latest with `npm view @playwright/mcp version`).
+
+The agent starts the server in the project folder, so `--prefix=/` keeps npx from reading that folder's `.npmrc` and from running a `node_modules/@playwright/mcp` a repository planted there.
 
 ## Install
 

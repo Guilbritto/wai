@@ -15,6 +15,7 @@ use hyper::header::{ACCEPT, USER_AGENT};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use serde::Deserialize;
+use wai_ext::panel::cut;
 use wai_settings::UpdateSettings;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -39,7 +40,7 @@ impl Release {
     /// `wai <version> is available`, the version clamped.
     pub fn text(&self) -> String {
         let version = self.tag.strip_prefix('v').unwrap_or(&self.tag);
-        format!("wai {} is available", clamp(version, MAX_SHOWN))
+        format!("wai {} is available", cut(version, MAX_SHOWN))
     }
 }
 
@@ -119,7 +120,7 @@ fn parse_release(body: &[u8], repo: &str) -> anyhow::Result<Release> {
     ensure!(
         version(&tag).is_some(),
         "not a version: {:?}",
-        clamp(&tag, MAX_SHOWN)
+        cut(&tag, MAX_SHOWN)
     );
     let releases = format!("https://github.com/{repo}/releases");
     let own = |url: &&String| {
@@ -196,15 +197,7 @@ const MAX_LOGGED: usize = 200;
 
 /// What a failed check logs: the error with its causes, clamped (serde quotes what it got).
 fn logged(error: &anyhow::Error) -> String {
-    clamp(&format!("{error:#}"), MAX_LOGGED)
-}
-
-/// `text` cut to `max` characters, `…` marking the cut.
-fn clamp(text: &str, max: usize) -> String {
-    match text.char_indices().nth(max) {
-        Some((end, _)) => format!("{}…", &text[..end]),
-        None => text.to_string(),
-    }
+    cut(&format!("{error:#}"), MAX_LOGGED)
 }
 
 /// GET `url` over HTTPS: its status and at most `MAX_BODY` bytes, within `TIMEOUT` in all.

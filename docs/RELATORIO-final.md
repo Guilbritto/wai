@@ -1,6 +1,6 @@
 # wai — Relatório final (Fases 0 a 4)
 
-> 2026-11-09 · branch `feat/fase-4-release` · 273 testes automáticos em Rust + 13 em Go passando antes da revisão final (+ 2 opt-in com o Claude real)
+> 2026-11-09 · branch `feat/fase-4-release` · 283 testes automáticos em Rust + 15 em Go (8 em `wai-rotinas`, 7 em `wai-waycarbon`) passando depois da revisão final (+ 2 opt-in com o Claude real)
 
 O wai é uma IDE nativa (Rust + GPUI), IA primeiro, para macOS e Windows.
 - Conversa com agentes pelo ACP. O Claude Code entra pelo `claude-agent-acp`, com o login que você já tem.
@@ -86,7 +86,7 @@ Build release, neste Mac.
 | Testes automáticos | — | — | — | 71 | 159 | 250 |
 
 **Fase 4 até a revisão final:**
-- 273 testes em Rust e 13 em Go;
+- 283 testes em Rust e 15 em Go (8 em `wai-rotinas`, 7 em `wai-waycarbon`);
 - `wai.app` de 44 MB e DMG de ~14 MB, depois que a checagem de atualização trouxe a pilha HTTPS;
 - janela visível ~0,54 s depois de abrir o `.app` (medição da 4.1).
 

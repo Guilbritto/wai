@@ -167,13 +167,17 @@ fn first_party_manifests_validate() {
         (mcp.name.as_str(), mcp.command.as_str()),
         ("playwright", "npx")
     );
-    let [yes, package] = mcp.args.as_slice() else {
+    // `--prefix=/`: npx ignores the project folder's `.npmrc` and `node_modules`.
+    let [prefix, yes, package] = mcp.args.as_slice() else {
         panic!("{:?}", mcp.args)
     };
     let version = package.strip_prefix("@playwright/mcp@").unwrap_or_default();
     let exact =
         version.split('.').count() == 3 && version.split('.').all(|n| n.parse::<u32>().is_ok());
-    assert!(yes == "-y" && exact, "pinned: {package}");
+    assert!(
+        prefix == "--prefix=/" && yes == "-y" && exact,
+        "pinned: {package}"
+    );
 
     // wai-rotinas: its own process, a panel and notifications.
     let rotinas = read("wai-rotinas");

@@ -31,6 +31,11 @@ const STDERR_LINES: usize = 20;
 /// Messages waiting for an extension that does not read its stdin; more are dropped.
 const OUTGOING: usize = 256;
 const INIT_ID: u64 = 0;
+/// On macOS std creates a child's pipes and marks them close-on-exec in two steps, so a child
+/// forked meanwhile by another thread inherits them and holds a crashed sibling's stdout open.
+// ponytail: serializes extension spawns only; one process-wide lock shared by agent, terminal
+// and extension spawns is deferred past v0.1.0 (R70).
+static SPAWN: Mutex<()> = Mutex::new(());
 
 #[derive(Debug)]
 pub enum ExtEvent {
@@ -398,10 +403,12 @@ impl Ext {
             .stderr(Stdio::piped());
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let spawned = {
+            let _spawn = SPAWN.lock().unwrap_or_else(PoisonError::into_inner);
+            command.spawn()
+        };
         let mut process = Process::new(
-            command
-                .spawn()
-                .map_err(|e| format!("cannot start {}: {e}", self.program.display()))?,
+            spawned.map_err(|e| format!("cannot start {}: {e}", self.program.display()))?,
         );
         let child = &mut process.child;
         let (stdin, stdout, stderr) =

@@ -8,4 +8,4 @@ permissions = ["process", "network"]
 [[contributes.mcp_servers]]
 name = "playwright"
 command = "npx"
-args = ["-y", "@playwright/mcp@0.0.84"]
+args = ["--prefix=/", "-y", "@playwright/mcp@0.0.84"]
