@@ -6,11 +6,24 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
+
+// TestMain lets a test run this binary as the extension itself (TestStdinEOFKillsRunningScript).
+func TestMain(m *testing.M) {
+	if os.Getenv("WAI_ROTINAS_RUN_MAIN") == "1" {
+		main()
+		return
+	}
+	os.Exit(m.Run())
+}
 
 // script writes an executable sh script dir/name.
 func script(t *testing.T, dir, name, body string) string {
@@ -30,6 +43,14 @@ func chmod(t *testing.T, p string, mode os.FileMode) {
 	}
 }
 
+func mkdir(t *testing.T, p string) string {
+	t.Helper()
+	if err := os.Mkdir(p, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 func config(t *testing.T, dir, text string) {
 	t.Helper()
 	p := filepath.Join(dir, configFile)
@@ -37,6 +58,24 @@ func config(t *testing.T, dir, text string) {
 		t.Fatal(err)
 	}
 	chmod(t, p, 0o600)
+}
+
+// routine is one [[routine]] table.
+func routine(name, script, schedule string) string {
+	return "[[routine]]\nname = \"" + name + "\"\nscript = \"" + script + "\"\n" + schedule + "\n"
+}
+
+// seed records a run of each named routine a moment ago, so none of them is due.
+func seed(t *testing.T, dir string, names ...string) {
+	t.Helper()
+	state := map[string]any{}
+	for _, n := range names {
+		state[n] = map[string]any{"last_run": time.Now()}
+	}
+	b, _ := json.Marshal(state)
+	if err := os.WriteFile(filepath.Join(dir, stateFile), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func resolved(t *testing.T, p string) string {
@@ -48,8 +87,9 @@ func resolved(t *testing.T, p string) string {
 	return r
 }
 
-// rotinas_refuses_unsafe_scripts (Review Focus 3): a relative path, a file or folder group or
-// others can write, and a symlink to such are refused with a message naming the culprit.
+// rotinas_refuses_unsafe_scripts (Review Focus 3): a relative path, a file or any folder above it
+// that group or others can write, and a symlink to such or through such are refused with a
+// message naming the culprit.
 func TestRotinasRefusesUnsafeScripts(t *testing.T) {
 	dir := t.TempDir()
 	safe := script(t, dir, "safe.sh", "echo ok\n")
@@ -72,16 +112,19 @@ func TestRotinasRefusesUnsafeScripts(t *testing.T) {
 	if err := os.Symlink(world, toWorld); err != nil {
 		t.Fatal(err)
 	}
-	open := filepath.Join(dir, "open")
-	if err := os.Mkdir(open, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	open := mkdir(t, filepath.Join(dir, "open"))
 	inOpen := script(t, open, "x.sh", "echo x\n")
-	chmod(t, open, 0o777)
-	sticky := filepath.Join(dir, "sticky")
-	if err := os.Mkdir(sticky, 0o700); err != nil {
+	// A symlink to a safe script, but in a folder anyone can write: it can be swapped.
+	linkInOpen := filepath.Join(open, "link.sh")
+	if err := os.Symlink(safe, linkInOpen); err != nil {
 		t.Fatal(err)
 	}
+	chmod(t, open, 0o777)
+	// The writable folder is two levels up.
+	above := mkdir(t, filepath.Join(dir, "above"))
+	deep := script(t, mkdir(t, filepath.Join(above, "sub")), "x.sh", "echo x\n")
+	chmod(t, above, 0o777)
+	sticky := mkdir(t, filepath.Join(dir, "sticky"))
 	inSticky := script(t, sticky, "x.sh", "echo x\n")
 	chmod(t, sticky, 0o777|os.ModeSticky)
 	if _, err := trusted(inSticky); err != nil {
@@ -95,6 +138,8 @@ func TestRotinasRefusesUnsafeScripts(t *testing.T) {
 		{group, resolved(t, group) + " is writable by group or others"},
 		{toWorld, resolved(t, world) + " is writable by group or others"},
 		{inOpen, "its folder " + resolved(t, open) + " is writable by group or others"},
+		{linkInOpen, "its folder " + open + " is writable by group or others"},
+		{deep, "its folder " + resolved(t, above) + " is writable by group or others"},
 		{filepath.Join(dir, "missing.sh"), "does not exist"},
 		{dir, "is not a regular file"},
 	}
@@ -105,23 +150,27 @@ func TestRotinasRefusesUnsafeScripts(t *testing.T) {
 		}
 	}
 
-	// The allow-list itself must be safe too.
+	// The allow-list itself must be safe too, and small.
 	config(t, dir, "")
 	chmod(t, filepath.Join(dir, configFile), 0o666)
 	if _, err := readConfig(filepath.Join(dir, configFile)); err == nil || !strings.Contains(err.Error(), "writable by group or others") {
 		t.Errorf("a world-writable rotinas.toml: %v", err)
 	}
+	config(t, dir, "# "+strings.Repeat("x", 1<<20)+"\n")
+	if _, err := readConfig(filepath.Join(dir, configFile)); err == nil || !strings.Contains(err.Error(), "larger than 1 MB") {
+		t.Errorf("a 1 MB rotinas.toml: %v", err)
+	}
 
-	// Run now on an unsafe entry runs nothing and says why.
+	// An unsafe entry runs nothing and says why, as soon as it is loaded.
 	marker := filepath.Join(dir, "ran")
 	bad := script(t, dir, "bad.sh", "touch '"+marker+"'\n")
 	chmod(t, bad, 0o777)
-	config(t, dir, "[[routine]]\nname = \"bad\"\nscript = \""+bad+"\"\nevery = \"1h\"\n")
+	config(t, dir, routine("bad", bad, `every = "1h"`))
 	r := start(t, dir)
 	r.initialize(t)
-	_, tree := r.runNow(t, "bad")
-	if badge(tree, "bad") != "Refused" || !strings.Contains(textOf(tree), "refusing script "+bad) {
-		t.Errorf("want Refused with the reason, got %v", tree)
+	tree := r.until(t, "bad", "Refused")
+	if !strings.Contains(textOf(tree), "refusing script "+bad) {
+		t.Errorf("want the reason, got %v", tree)
 	}
 	if _, err := os.Stat(marker); err == nil {
 		t.Error("an unsafe script ran")
@@ -129,7 +178,7 @@ func TestRotinasRefusesUnsafeScripts(t *testing.T) {
 }
 
 // schedules_next_run: `every` counts from the last run, `at` is the next such local time; a run
-// missed while wai was closed happens at once.
+// missed while wai was closed, or never run yet, happens at once.
 func TestSchedulesNextRun(t *testing.T) {
 	at := func(d, h, m int) time.Time { return time.Date(2026, 11, d, h, m, 0, 0, time.Local) }
 	hourly := Routine{Name: "h", Every: time.Hour}
@@ -151,13 +200,52 @@ func TestSchedulesNextRun(t *testing.T) {
 		}
 	}
 
-	rs, err := parseConfig(`# my routines
-[[routine]]
+	// Daylight saving time: a time that does not exist runs once that day; one that happens
+	// twice runs once.
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := time.Local
+	time.Local = ny
+	t.Cleanup(func() { time.Local = local })
+	spring := Routine{Name: "s", At: 2*60 + 30}
+	first := spring.next(time.Date(2026, 3, 7, 12, 0, 0, 0, ny))
+	if y, m, d := first.Date(); y != 2026 || m != 3 || d != 8 {
+		t.Errorf("spring forward: got %v", first)
+	}
+	if again := spring.next(first); !again.Equal(time.Date(2026, 3, 9, 2, 30, 0, 0, ny)) {
+		t.Errorf("after the spring-forward run: got %v", again)
+	}
+	fall := Routine{Name: "f", At: 1*60 + 30}
+	first = fall.next(time.Date(2026, 10, 31, 12, 0, 0, 0, ny))
+	if y, m, d := first.Date(); y != 2026 || m != 11 || d != 1 || first.Hour() != 1 || first.Minute() != 30 {
+		t.Errorf("fall back: got %v", first)
+	}
+	if again := fall.next(first); !again.Equal(time.Date(2026, 11, 2, 1, 30, 0, 0, ny)) {
+		t.Errorf("01:30 happens twice on Nov 1 but runs once: got %v", again)
+	}
+	time.Local = local
+
+	// R66: due times are wall-clock (a monotonic clock stops while the computer sleeps), and the
+	// scheduler never sleeps more than a minute before looking at the clock again.
+	s := newServer(io.Discard, t.TempDir())
+	s.routines = []Routine{{Name: "daily", Every: 24 * time.Hour}}
+	s.state["daily"] = record{LastRun: time.Now()}
+	if due := s.due(s.routines[0]); strings.Contains(due.String(), "m=") {
+		t.Errorf("a due time with a monotonic reading: %v", due)
+	}
+	if r, wait := s.pick(time.Now()); r != nil || wait <= 0 || wait > time.Minute {
+		t.Errorf("want a wait of at most a minute, got %v, %v", r, wait)
+	}
+
+	rs, err := parseConfig("\uFEFF" + `# my routines
+[[routine]]   # the first
 name = "Inbox"   # a comment
 script = "/usr/local/bin/inbox.sh"
 every = "15m"
 
-[[routine]]
+[[ routine ]]
 name = 'Daily'
 script = 'C:\scripts\daily.cmd'
 at = "07:05"
@@ -178,6 +266,7 @@ at = "07:05"
 		head + "every = 5\n":        "line 4",
 		head + "colour = \"red\"\n": "unknown key",
 		"[routines]\n":              "line 1",
+		"[[routine]] x\n":           "line 1",
 		"name = \"a\"\n":            "outside a [[routine]]",
 		head + "every = \"1h\"\n" + head + "at = \"09:00\"\n": "used twice",
 		"[[routine]]\nscript = \"/a\"\nevery = \"1h\"\n":      "needs a name",
@@ -188,26 +277,30 @@ at = "07:05"
 		}
 	}
 
-	// The scheduler: a routine missed while wai was closed runs at start, without Run now; one not
-	// due yet does not.
+	// The scheduler: a routine missed while wai was closed runs at start without Run now, and so
+	// does one never run (even every 24 h, after a restart); one that ran a moment ago does not.
 	dir := t.TempDir()
-	due := filepath.Join(dir, "due-ran")
-	later := filepath.Join(dir, "later-ran")
-	config(t, dir, "[[routine]]\nname = \"due\"\nscript = \""+script(t, dir, "due.sh", "touch '"+due+"'\n")+
-		"\"\nevery = \"1h\"\n[[routine]]\nname = \"later\"\nscript = \""+
-		script(t, dir, "later.sh", "touch '"+later+"'\n")+"\"\nevery = \"1h\"\n")
-	last, _ := json.Marshal(map[string]any{"due": map[string]any{"last_run": time.Now().Add(-2 * time.Hour)}})
-	if err := os.WriteFile(filepath.Join(dir, stateFile), last, 0o600); err != nil {
+	marker := func(name string) string { return filepath.Join(dir, name+"-ran") }
+	sh := func(name string) string { return script(t, dir, name+".sh", "touch '"+marker(name)+"'\n") }
+	config(t, dir, routine("due", sh("due"), `every = "1h"`)+routine("fresh", sh("fresh"), `every = "24h"`)+
+		routine("later", sh("later"), `every = "1h"`))
+	state, _ := json.Marshal(map[string]any{
+		"due":   map[string]any{"last_run": time.Now().Add(-2 * time.Hour)},
+		"later": map[string]any{"last_run": time.Now()},
+	})
+	if err := os.WriteFile(filepath.Join(dir, stateFile), state, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	r := start(t, dir)
 	r.initialize(t)
-	for badge(r.render(t), "due") != "OK" {
+	for tree := r.render(t); badge(tree, "due") != "OK" || badge(tree, "fresh") != "OK"; tree = r.render(t) {
 	}
-	if _, err := os.Stat(due); err != nil {
-		t.Error("the missed routine did not run")
+	for _, name := range []string{"due", "fresh"} {
+		if _, err := os.Stat(marker(name)); err != nil {
+			t.Errorf("%s did not run", name)
+		}
 	}
-	if _, err := os.Stat(later); err == nil {
+	if _, err := os.Stat(marker("later")); err == nil {
 		t.Error("a routine that is not due ran")
 	}
 }
@@ -219,14 +312,20 @@ func TestOutputCapAndTimeout(t *testing.T) {
 		t.Fatalf("limits: %v, %d", runTimeout, maxOutput)
 	}
 	dir := t.TempDir()
-	if s := newServer(io.Discard, dir); s.timeout != runTimeout {
-		t.Errorf("the server's timeout: %v", s.timeout)
+	if s := newServer(io.Discard, dir); s.timeout != runTimeout || s.notifyGap != 2*time.Second {
+		t.Errorf("the server's timeout %v and notify gap %v", s.timeout, s.notifyGap)
 	}
 	ctx := context.Background()
 	big := script(t, dir, "big.sh", "yes 0123456789 | head -c 3000000\necho done >&2\n")
 	o := runScript(ctx, big, time.Minute)
 	if o.status != "OK" || len(o.output) != maxOutput || !o.truncated {
 		t.Errorf("big: status %q, %d bytes, truncated %v", o.status, len(o.output), o.truncated)
+	}
+	// One 1 MB line: the notification stays short and says the output was cut.
+	line := script(t, dir, "line.sh", "head -c 3000000 /dev/zero | tr '\\0' x\n")
+	o = runScript(ctx, line, time.Minute)
+	if s := summary(o); utf8.RuneCountInString(s) > 350 || !strings.HasSuffix(s, "(output cut at 1 MB)") {
+		t.Errorf("summary of %d runes: %.80q…", utf8.RuneCountInString(s), s)
 	}
 
 	// `sleep` outlives the killed sh and holds the pipe: the run still ends about 2 s later.
@@ -247,46 +346,113 @@ func TestOutputCapAndTimeout(t *testing.T) {
 	}
 }
 
-// notifies_only_on_change: the first run notifies, the same output again does not, a new one
-// does; what the last run printed survives a restart.
+// notifies_only_on_change: the first run notifies, the same result again does not, a new output
+// or a new outcome does; the last result survives a restart.
 func TestNotifiesOnlyOnChange(t *testing.T) {
 	dir := t.TempDir()
-	news := filepath.Join(dir, "news.txt")
-	write := func(s string) {
-		if err := os.WriteFile(news, []byte(s), 0o600); err != nil {
+	news, fail := filepath.Join(dir, "news.txt"), filepath.Join(dir, "fail")
+	write := func(p, s string) {
+		if err := os.WriteFile(p, []byte(s), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	write("first\n")
-	config(t, dir, "[[routine]]\nname = \"news\"\nscript = \""+script(t, dir, "news.sh", "cat '"+news+"'\n")+"\"\nat = \"03:00\"\n")
+	write(news, "first\n")
+	sh := script(t, dir, "news.sh", "cat '"+news+"'\n[ -f '"+fail+"' ] && exit 1\nexit 0\n")
+	config(t, dir, routine("news", sh, `at = "03:00"`))
 	r := start(t, dir)
 	r.initialize(t)
-	check := func(r *rpc, want ...string) {
-		t.Helper()
-		got, tree := r.runNow(t, "news")
-		if badge(tree, "news") != "OK" {
-			t.Errorf("status: %v", tree)
-		}
-		var bodies []string
-		for _, n := range got {
+	bodies := func(notes []map[string]any) string {
+		var b []string
+		for _, n := range notes {
 			if n["title"] != "news" {
 				t.Errorf("title: %v", n)
 			}
-			bodies = append(bodies, n["body"].(string))
+			b = append(b, n["body"].(string))
 		}
-		if strings.Join(bodies, "|") != strings.Join(want, "|") {
-			t.Errorf("notified %q, want %q", bodies, want)
+		return strings.Join(b, "|")
+	}
+	// Never run: it runs once it is loaded.
+	r.until(t, "news", "OK")
+	if got := bodies(r.notified); got != "first" {
+		t.Errorf("first run notified %q", got)
+	}
+	check := func(r *rpc, status, want string) {
+		t.Helper()
+		got, tree := r.runNow(t, "news")
+		if badge(tree, "news") != status {
+			t.Errorf("status: %v", tree)
+		}
+		if b := bodies(got); b != want {
+			t.Errorf("notified %q, want %q", b, want)
 		}
 	}
-	check(r, "first")
-	check(r)
-	write("second\n")
-	check(r, "second")
-	check(r)
+	check(r, "OK", "")
+	write(news, "second\n")
+	check(r, "OK", "second")
+	check(r, "OK", "")
+	write(fail, "")
+	check(r, "Failed", "Failed: exit status 1")
+	check(r, "Failed", "")
 
 	r2 := start(t, dir)
 	r2.initialize(t)
-	check(r2)
+	check(r2, "Failed", "")
+}
+
+// wai drops a notification within 2 s of the last: runs that end close together space theirs.
+func TestNotificationsAreSpaced(t *testing.T) {
+	dir := t.TempDir()
+	config(t, dir, routine("a", script(t, dir, "a.sh", "echo a\n"), `every = "1h"`)+
+		routine("b", script(t, dir, "b.sh", "echo b\n"), `every = "1h"`))
+	const gap = 400 * time.Millisecond
+	r := start(t, dir, func(s *server) { s.notifyGap = gap })
+	r.initialize(t)
+	var when []time.Time
+	for len(when) < 2 {
+		r.render(t)
+		for range r.notified {
+			when = append(when, time.Now())
+		}
+		r.notified = nil
+	}
+	if d := when[1].Sub(when[0]); d < gap-50*time.Millisecond {
+		t.Errorf("two notifications %v apart, want at least %v", d, gap)
+	}
+}
+
+// Closing stdin (wai stopping the extension) kills a running script before the process exits.
+func TestStdinEOFKillsRunningScript(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "pid")
+	config(t, dir, routine("long", script(t, dir, "long.sh", "echo $$ > '"+pidFile+"'\nexec sleep 30\n"), `every = "1h"`))
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(), "WAI_ROTINAS_RUN_MAIN=1")
+	cmd.Dir = dir
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	io.WriteString(stdin, `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}`+"\n")
+	var pid int
+	for deadline := time.Now().Add(10 * time.Second); pid == 0; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the routine never started")
+		}
+		b, _ := os.ReadFile(pidFile)
+		pid, _ = strconv.Atoi(strings.TrimSpace(string(b)))
+	}
+	proc, _ := os.FindProcess(pid)
+	t.Cleanup(func() { proc.Kill() })
+	stdin.Close()
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("the extension: %v", err)
+	}
+	if err := proc.Signal(syscall.Signal(0)); err == nil {
+		t.Error("the script outlived the extension")
+	}
 }
 
 // At most one run at a time: Run now on a second routine waits for the first to finish.
@@ -294,14 +460,13 @@ func TestOneRunAtATime(t *testing.T) {
 	dir := t.TempDir()
 	release, marker := filepath.Join(dir, "release"), filepath.Join(dir, "b-ran")
 	t.Cleanup(func() { os.WriteFile(release, nil, 0o600) })
-	config(t, dir, "[[routine]]\nname = \"a\"\nscript = \""+
-		script(t, dir, "a.sh", "while [ ! -f '"+release+"' ]; do sleep 0.05; done\n")+"\"\nevery = \"1h\"\n"+
-		"[[routine]]\nname = \"b\"\nscript = \""+script(t, dir, "b.sh", "touch '"+marker+"'\n")+"\"\nevery = \"1h\"\n")
+	config(t, dir, routine("a", script(t, dir, "a.sh", "while [ ! -f '"+release+"' ]; do sleep 0.05; done\n"), `every = "1h"`)+
+		routine("b", script(t, dir, "b.sh", "touch '"+marker+"'\n"), `every = "1h"`))
+	seed(t, dir, "a", "b")
 	r := start(t, dir)
 	r.initialize(t)
 	r.action(t, "run:a")
-	for badge(r.render(t), "a") != "Running" {
-	}
+	r.until(t, "a", "Running")
 	r.action(t, "run:b")
 	tree := r.render(t)
 	if badge(tree, "a") != "Running" || badge(tree, "b") != "Queued" {
@@ -312,8 +477,7 @@ func TestOneRunAtATime(t *testing.T) {
 		t.Fatal("b ran while a was running")
 	}
 	os.WriteFile(release, nil, 0o600)
-	for badge(r.render(t), "b") != "OK" {
-	}
+	r.until(t, "b", "OK")
 	if _, err := os.Stat(marker); err != nil {
 		t.Error("b never ran")
 	}
@@ -328,10 +492,11 @@ func TestConfigProblemAndReload(t *testing.T) {
 	if txt := textOf(r.last); !strings.Contains(txt, "line 3") {
 		t.Fatalf("want the line of the problem, got %q", txt)
 	}
-	config(t, dir, "[[routine]]\nname = \"a\"\nscript = \"/a\"\nevery = \"1h\"\n")
+	missing := filepath.Join(dir, "missing.sh")
+	config(t, dir, routine("a", missing, `every = "1h"`))
 	r.action(t, "reload")
-	if tree := r.render(t); badge(tree, "a") != "Never run" {
-		t.Errorf("after reload: %v", tree)
+	if txt := textOf(r.until(t, "a", "Refused")); !strings.Contains(txt, "does not exist") {
+		t.Errorf("after reload: %q", txt)
 	}
 	os.Remove(filepath.Join(dir, configFile))
 	r.action(t, "reload")
@@ -348,13 +513,19 @@ type rpc struct {
 	notified []map[string]any
 }
 
-func start(t *testing.T, dir string) *rpc {
+// start runs a server on `dir`; notifications are not spaced unless an option says so.
+func start(t *testing.T, dir string, opts ...func(*server)) *rpc {
 	t.Helper()
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
+	s := newServer(outW, dir)
+	s.notifyGap = 0
+	for _, o := range opts {
+		o(s)
+	}
 	done := make(chan struct{})
 	go func() {
-		serve(newServer(outW, dir), inR)
+		serve(s, inR)
 		outW.Close()
 		close(done)
 	}()
@@ -387,6 +558,7 @@ func (r *rpc) initialize(t *testing.T) {
 	if m := r.recv(); m["id"] != float64(0) || m["result"] == nil {
 		t.Fatalf("initialize reply: %v", m)
 	}
+	r.notified = nil
 	r.render(t)
 }
 
@@ -407,6 +579,16 @@ func (r *rpc) render(t *testing.T) map[string]any {
 			return r.last
 		default:
 			t.Fatalf("unexpected %v", m)
+		}
+	}
+}
+
+// until reads renders until routine `name` shows `status`.
+func (r *rpc) until(t *testing.T, name, status string) map[string]any {
+	t.Helper()
+	for {
+		if tree := r.render(t); badge(tree, name) == status {
+			return tree
 		}
 	}
 }

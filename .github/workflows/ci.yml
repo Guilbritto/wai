@@ -24,7 +24,8 @@ jobs:
         with:
           go-version-file: extensions/wai-waycarbon/go.mod
           cache: false
-      # Only the ignored real-Claude smoke test needs Node (npx); CI does not run it.
+      # Windows: Node (npx) for the ignored real-Claude smoke test, which CI does not run. macOS
+      # runners ship Node; the wai-navegador test looks npx up on PATH there (it never runs it).
       - uses: actions/setup-node@v4
         if: runner.os == 'Windows'
         with:

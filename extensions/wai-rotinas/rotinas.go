@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -18,6 +19,7 @@ import (
 const (
 	runTimeout = 60 * time.Minute
 	maxOutput  = 1 << 20
+	maxConfig  = 1 << 20
 	minEvery   = time.Minute
 	// Both live in wai's config dir, which wai starts extensions from (R18).
 	configFile = "rotinas.toml"
@@ -32,8 +34,10 @@ type Routine struct {
 	At     int
 }
 
-// next is the first run after `after` (the last run, or when the routine was loaded).
+// next is the first run after the last one. Wall-clock (R66): a monotonic reading stops while
+// the computer sleeps.
 func (r Routine) next(after time.Time) time.Time {
+	after = after.Round(0)
 	if r.Every > 0 {
 		return after.Add(r.Every)
 	}
@@ -54,9 +58,17 @@ func readConfig(path string) ([]Routine, error) {
 	if _, err := trusted(path); err != nil {
 		return nil, fmt.Errorf("refusing %s: %w", path, err)
 	}
-	text, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
+	}
+	defer f.Close()
+	text, err := io.ReadAll(io.LimitReader(f, maxConfig+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(text) > maxConfig {
+		return nil, fmt.Errorf("refusing %s: it is larger than 1 MB", path)
 	}
 	routines, err := parseConfig(string(text))
 	if err != nil {
@@ -74,17 +86,20 @@ func parseConfig(text string) ([]Routine, error) {
 		keys map[string]string
 	}
 	var tables []raw
-	for i, line := range strings.Split(text, "\n") {
+	for i, line := range strings.Split(strings.TrimPrefix(text, "\uFEFF"), "\n") {
 		n := i + 1
 		line = strings.TrimSpace(line)
 		switch {
 		case line == "" || strings.HasPrefix(line, "#"):
 			continue
-		case line == "[[routine]]":
+		case strings.HasPrefix(line, "["):
+			h, _, _ := strings.Cut(line, "#")
+			h = strings.TrimSpace(h)
+			if !strings.HasPrefix(h, "[[") || !strings.HasSuffix(h, "]]") || strings.TrimSpace(h[2:len(h)-2]) != "routine" {
+				return nil, fmt.Errorf("line %d: only [[routine]] tables are allowed", n)
+			}
 			tables = append(tables, raw{n, map[string]string{}})
 			continue
-		case strings.HasPrefix(line, "["):
-			return nil, fmt.Errorf("line %d: only [[routine]] tables are allowed", n)
 		}
 		key, value, ok := strings.Cut(line, "=")
 		key = strings.TrimSpace(key)
@@ -177,10 +192,10 @@ func parseString(s string) (string, error) {
 }
 
 // trusted is Review Focus 3: the file a path names, through any symlinks, when only the user (or
-// root) can change it: an absolute path to a regular file owned by them that neither group nor
-// others can write, in a folder they cannot write either (unless sticky, like /tmp).
-// ponytail: only the target's own folder is checked, not every folder above it nor the
-// symlink's; sshd-style walk up to / if that matters.
+// root) can change it, like ssh's StrictModes: an absolute path to a regular file owned by them
+// that neither group nor others can write, and every folder up to / above it and above the path
+// as written (where a symlink could be swapped) owned by them and not writable by group or others
+// either (unless sticky, like /tmp). A group-writable /Applications (root:admin 0775) is refused.
 func trusted(path string) (string, error) {
 	if !filepath.IsAbs(path) {
 		return "", errors.New("the path must be absolute")
@@ -195,8 +210,15 @@ func trusted(path string) (string, error) {
 	if err := safe(real, false); err != nil {
 		return "", err
 	}
-	if err := safe(filepath.Dir(real), true); err != nil {
-		return "", fmt.Errorf("its folder %w", err)
+	for _, p := range []string{real, path} {
+		for d := filepath.Dir(p); ; d = filepath.Dir(d) {
+			if err := safe(d, true); err != nil {
+				return "", fmt.Errorf("its folder %w", err)
+			}
+			if d == filepath.Dir(d) {
+				break
+			}
+		}
 	}
 	return real, nil
 }

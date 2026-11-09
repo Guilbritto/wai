@@ -18,6 +18,10 @@ import (
 	"time"
 )
 
+// maxNap is R66: the scheduler looks at the wall clock at least once a minute. Go's timers pause
+// while the computer sleeps, so a run due meanwhile starts at most a minute after it wakes.
+const maxNap = time.Minute
+
 const panelID = "rotinas"
 
 type message struct {
@@ -34,14 +38,17 @@ type server struct {
 
 	dir     string        // wai's config dir: rotinas.toml and the state file
 	timeout time.Duration // per run
-	ctx     context.Context
-	stop    context.CancelFunc // kills a running script
-	wake    chan struct{}      // the scheduler looks again
+	// notifyGap: wai drops an extension's notification within 2 s of its last.
+	notifyGap time.Duration
+	notified  time.Time // the last notification; the scheduler's own
+	ctx       context.Context
+	stop      context.CancelFunc // kills a running script
+	wake      chan struct{}      // the scheduler looks again
+	scheduler sync.WaitGroup     // serve waits for it, so a running script is killed and reaped
 
 	mu       sync.Mutex // guards the rest
 	routines []Routine
-	problem  string    // why rotinas.toml was not read
-	loaded   time.Time // never-run routines count from here
+	problem  string // why rotinas.toml was not read
 	state    map[string]record
 	running  string
 	queued   map[string]bool // Run now
@@ -50,7 +57,7 @@ type server struct {
 func newServer(out io.Writer, dir string) *server {
 	ctx, stop := context.WithCancel(context.Background())
 	return &server{
-		out: out, dir: dir, timeout: runTimeout, ctx: ctx, stop: stop,
+		out: out, dir: dir, timeout: runTimeout, notifyGap: 2 * time.Second, ctx: ctx, stop: stop,
 		wake:  make(chan struct{}, 1),
 		state: loadState(filepath.Join(dir, stateFile)), queued: map[string]bool{},
 	}
@@ -74,7 +81,7 @@ func (s *server) load() {
 	routines, err := readConfig(filepath.Join(s.dir, configFile))
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.routines, s.problem, s.loaded = routines, "", time.Now()
+	s.routines, s.problem, s.queued = routines, "", map[string]bool{}
 	if err != nil {
 		s.problem = err.Error()
 	}
@@ -114,7 +121,11 @@ func (s *server) tree() node {
 			if !ran {
 				status = "Never run"
 			}
-			detail = append(detail, "Next: "+s.due(r).Local().Format("Jan 2 15:04"))
+			next := "now"
+			if due := s.due(r); due.After(time.Now()) {
+				next = due.Local().Format("Jan 2 15:04")
+			}
+			detail = append(detail, "Next: "+next)
 		}
 		kids = append(kids, node{"type": "row", "children": []node{
 			{"type": "text", "text": r.Name},
@@ -130,16 +141,19 @@ func (s *server) tree() node {
 	return node{"type": "column", "children": append(kids, reload)}
 }
 
-// due is when r runs next; in the past when it was missed.
+// due is when r runs next, wall-clock; in the past when it was missed. A routine never run is due
+// at once: it runs when added, which also shows at once whether its script is refused.
 func (s *server) due(r Routine) time.Time {
 	if rec, ok := s.state[r.Name]; ok {
 		return r.next(rec.LastRun)
 	}
-	return r.next(s.loaded)
+	return time.Time{}
 }
 
-// pick takes the routine to run now (Run now first), or says how long to sleep: < 0 is until woken.
+// pick takes the routine to run now (Run now first), or says how long to sleep, at most maxNap:
+// < 0 is until woken (nothing to schedule).
 func (s *server) pick(now time.Time) (*Routine, time.Duration) {
+	now = now.Round(0)
 	for i, r := range s.routines {
 		if s.queued[r.Name] {
 			return &s.routines[i], 0
@@ -158,25 +172,26 @@ func (s *server) pick(now time.Time) (*Routine, time.Duration) {
 	case !at.After(now):
 		return first, 0
 	}
-	return nil, at.Sub(now)
+	return nil, min(at.Sub(now), maxNap)
 }
 
-// schedule runs one routine at a time. R59: between runs it sleeps until the next one is due, or
-// until woken (Run now, Reload, any message from wai).
-// ponytail: a computer's sleep pauses the timer, so a run due during it starts late; any message
-// from wai (a saved file, a click) looks again.
+// schedule runs one routine at a time. R59/R66: between runs it sleeps until the next one is due
+// but at most maxNap, or until woken (Run now, Reload, any message from wai).
+// ponytail: one wakeup a minute while routines exist; a host "system woke" event would avoid it.
 func (s *server) schedule() {
 	for s.ctx.Err() == nil {
 		s.mu.Lock()
-		r, wait := s.pick(time.Now())
+		r, wait := s.pick(time.Now().Round(0))
+		var job Routine
 		if r != nil {
-			delete(s.queued, r.Name)
-			s.running = r.Name
+			job = *r
+			delete(s.queued, job.Name)
+			s.running = job.Name
 		}
 		s.mu.Unlock()
 		if r != nil {
 			s.render()
-			s.run(*r)
+			s.run(job)
 			continue
 		}
 		var timer *time.Timer
@@ -197,7 +212,7 @@ func (s *server) schedule() {
 }
 
 func (s *server) run(r Routine) {
-	start := time.Now()
+	start := time.Now().Round(0)
 	var o outcome
 	if real, err := trusted(r.Script); err != nil {
 		o.status = fmt.Sprintf("Refused: refusing script %s: %v", r.Script, err)
@@ -218,22 +233,34 @@ func (s *server) run(r Routine) {
 	}
 	s.mu.Unlock()
 	if !seen || prev.Hash != hash {
+		// ponytail: waits on the scheduler, so a run due meanwhile starts up to notifyGap late.
+		time.Sleep(time.Until(s.notified.Add(s.notifyGap)))
+		s.notified = time.Now()
 		s.write(node{"jsonrpc": "2.0", "method": "notify", "params": node{"title": r.Name, "body": summary(o)}})
 	}
 	s.render()
 }
 
-// summary is the notification's body: what went wrong, or the output's first line.
+// summary is the notification's body: what went wrong, or the output's first line, in at most
+// 300 characters (wai shows 300 and drops a message above 4 MB).
 func summary(o outcome) string {
-	if o.status != "OK" {
-		return o.status
-	}
-	for _, line := range strings.Split(string(o.output), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			return line
+	s := o.status
+	if s == "OK" {
+		s = "Finished with no output"
+		for _, line := range strings.Split(string(o.output), "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				s = line
+				break
+			}
 		}
 	}
-	return "Finished with no output"
+	if r := []rune(s); len(r) > 300 {
+		s = string(r[:300]) + "…"
+	}
+	if o.truncated {
+		s += " (output cut at 1 MB)"
+	}
+	return s
 }
 
 func (s *server) handle(m message) {
@@ -242,7 +269,11 @@ func (s *server) handle(m message) {
 		s.write(node{"jsonrpc": "2.0", "id": m.ID, "result": node{"panels": []string{}}})
 		s.load()
 		s.render()
-		go s.schedule()
+		s.scheduler.Add(1)
+		go func() {
+			defer s.scheduler.Done()
+			s.schedule()
+		}()
 	case "panel/action":
 		var p struct {
 			Action string `json:"action_id"`
@@ -270,8 +301,10 @@ func (s *server) handle(m message) {
 	}
 }
 
-// serve reads until EOF, then kills a running script. Responses to our own calls are ignored.
+// serve reads until EOF, then kills a running script and waits for it, so main never exits
+// before the kill. Responses to our own calls are ignored.
 func serve(s *server, in io.Reader) {
+	defer s.scheduler.Wait()
 	defer s.stop()
 	r := bufio.NewReaderSize(in, 1<<20)
 	for {
