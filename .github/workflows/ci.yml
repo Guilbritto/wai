@@ -4,6 +4,9 @@ on:
     branches: [main, development]
   pull_request:
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   check:
     strategy:
@@ -13,13 +16,30 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # The toolchain, its components and targets come from rust-toolchain.toml.
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      # wai-waycarbon's own tests, and its end-to-end test in wai (unix only).
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: extensions/wai-waycarbon/go.mod
+          cache: false
+      # Only the ignored real-Claude smoke test needs Node (npx); CI does not run it.
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Windows'
+        with:
+          node-version: 22
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The UI and agent tests start it.
+      - run: cargo build -p wai-agent --bin wai-fake-agent
       - run: cargo test --workspace
+      - run: go vet ./...
+        working-directory: extensions/wai-waycarbon
+      # Its tests put a sh-script `jira` on a `:`-joined PATH: unix only.
+      - run: go test ./...
+        if: runner.os != 'Windows'
+        working-directory: extensions/wai-waycarbon
 
   licenses:
     runs-on: ubuntu-latest

@@ -22,7 +22,8 @@ actions!(
         CancelTurn,
         Paste,
         CopySelection,
-        Save
+        Save,
+        OpenPalette
     ]
 );
 
@@ -50,7 +51,7 @@ fn bind_keys(cx: &mut App) {
     } else {
         ("ctrl-shift-v", "ctrl-shift-c")
     };
-    let keymap: [(&str, Box<dyn Action>, Option<&str>); 10] = [
+    let mut keymap: Vec<(&str, Box<dyn Action>, Option<&str>)> = vec![
         ("secondary-q", Box::new(Quit), None),
         ("secondary-n", Box::new(NewSession), workspace),
         ("ctrl-`", Box::new(ToggleTerminal), workspace),
@@ -59,11 +60,16 @@ fn bind_keys(cx: &mut App) {
         ("secondary-s", Box::new(Save), workspace),
         ("secondary-alt-right", Box::new(FocusNextPane), workspace),
         ("secondary-o", Box::new(OpenFolder), workspace),
+        ("secondary-shift-p", Box::new(OpenPalette), workspace),
         // The prompt box lets Escape through (it has nothing to clear).
         ("escape", Box::new(CancelTurn), Some("ChatSession")),
         (paste, Box::new(Paste), Some("Terminal")),
         (copy, Box::new(CopySelection), Some("Terminal")),
     ];
+    if cfg!(not(target_os = "macos")) {
+        let terminal = terminal_ctrl_keymap().into_iter();
+        keymap.extend(terminal.map(|(keys, action)| (keys, action, Some("Terminal"))));
+    }
     // `KeyBinding::new` rejects `secondary-`; `load` resolves it for the host OS.
     let bindings: Vec<_> = keymap
         .into_iter()
@@ -73,6 +79,24 @@ fn bind_keys(cx: &mut App) {
         })
         .collect();
     cx.bind_keys(bindings);
+}
+
+/// Off macOS (Windows, and Linux alike), in the Terminal context: `NoAction` hides the app's
+/// ctrl-c/v/n/w/o/q (`secondary-` is ctrl there), so they reach the shell, and the app's actions
+/// move to ctrl-shift.
+fn terminal_ctrl_keymap() -> [(&'static str, Box<dyn Action>); 10] {
+    [
+        ("ctrl-c", Box::new(NoAction)),
+        ("ctrl-v", Box::new(NoAction)),
+        ("ctrl-n", Box::new(NoAction)),
+        ("ctrl-w", Box::new(NoAction)),
+        ("ctrl-o", Box::new(NoAction)),
+        ("ctrl-q", Box::new(NoAction)),
+        ("ctrl-shift-n", Box::new(NewSession)),
+        ("ctrl-shift-w", Box::new(CloseSession)),
+        ("ctrl-shift-o", Box::new(OpenFolder)),
+        ("ctrl-shift-q", Box::new(Quit)),
+    ]
 }
 
 /// `notices`: what the settings left out, shown once in the window.
@@ -115,7 +139,10 @@ pub fn run(
                     w.templates = templates;
                     w.start_agent(cx);
                     w.watch_project(window, cx);
+                    // Before `restore`: a saved session may be an extension agent's.
+                    w.start_extensions(cx);
                     w.restore(window, cx);
+                    w.suggest_extensions(window, cx);
                 });
                 for notice in notices {
                     window.push_notification(Notification::warning(notice).autohide(false), cx);
@@ -134,6 +161,21 @@ pub fn run(
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(Duration::from_secs(2)).await;
                 run_in_terminal(window, &command, cx).await;
+            })
+            .detach();
+        }
+        #[cfg(feature = "demo")]
+        if std::env::var("WAI_SHOT_PANEL").is_ok() && cfg!(not(feature = "screenshot")) {
+            let workspace = opened.1.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                workspace.update(cx, |w, cx| {
+                    let first = w.ext_host.read(cx).panels().first();
+                    if let Some(panel) = first.map(|p| p.view.entity_id()) {
+                        w.sidebar_tab = crate::sidebar::SidebarTab::Panel(panel);
+                        cx.notify();
+                    }
+                });
             })
             .detach();
         }
@@ -244,6 +286,11 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 /// `WAI_SHOT_TEMPLATES=1`: the open template menu (fase-2-templates.png).
 /// `WAI_SHOT_SCROLLBACK=<command>`: the terminal scrolled back with a selection
 /// (fase-2-terminal.png).
+/// `WAI_SHOT_CONSENT=<absolute extension folder>`: the Extensions view with the consent dialog
+/// for that folder (fase-3-consent.png).
+/// `WAI_SHOT_PANEL=1`: the first extension panel's tab, an enabled extension having rendered it
+/// (fase-3-panel.png).
+/// `WAI_SHOT_PALETTE=1`: the command palette open (fase-3-palette.png).
 #[cfg(feature = "screenshot")]
 fn screenshot(
     (window, workspace): (AnyWindowHandle, Entity<Workspace>),
@@ -297,6 +344,33 @@ fn screenshot(
                 })
                 .ok();
             executor.timer(Duration::from_millis(500)).await;
+        } else if let Ok(dir) = std::env::var("WAI_SHOT_CONSENT") {
+            window
+                .update(cx, |_, window, cx| {
+                    workspace.update(cx, |w, cx| {
+                        let view = w.show_extensions(window, cx);
+                        let source = wai_ext::Source::Folder(dir.into());
+                        view.update(cx, |v, cx| v.review(source, None, window, cx));
+                    })
+                })
+                .ok();
+            executor.timer(Duration::from_secs(1)).await;
+        } else if std::env::var("WAI_SHOT_PALETTE").is_ok() {
+            window
+                .update(cx, |_, window, cx| {
+                    window.dispatch_action(Box::new(OpenPalette), cx)
+                })
+                .ok();
+            executor.timer(Duration::from_millis(500)).await;
+        } else if std::env::var("WAI_SHOT_PANEL").is_ok() {
+            workspace.update(cx, |w, cx| {
+                let first = w.ext_host.read(cx).panels().first();
+                if let Some(panel) = first.map(|p| p.view.entity_id()) {
+                    w.sidebar_tab = crate::sidebar::SidebarTab::Panel(panel);
+                    cx.notify();
+                }
+            });
+            executor.timer(Duration::from_millis(500)).await;
         } else if let Ok(dir) = std::env::var("WAI_SHOT_FILES") {
             workspace.update(cx, |w, cx| {
                 w.sidebar_tab = crate::sidebar::SidebarTab::Files;
@@ -333,4 +407,31 @@ fn screenshot(
         cx.update(|cx| cx.quit());
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    /// Off macOS, terminal focused: the shell gets ctrl-c/v/n/w/o/q, the app's actions move to
+    /// ctrl-shift (copy and paste are ctrl-shift-c/v off macOS already).
+    #[test]
+    fn windows_terminal_keymap_table() {
+        let table: Vec<(&str, &str)> = super::terminal_ctrl_keymap()
+            .iter()
+            .map(|(keys, action)| (*keys, action.name()))
+            .collect();
+        let shell = "zed::NoAction";
+        let expected = [
+            ("ctrl-c", shell),
+            ("ctrl-v", shell),
+            ("ctrl-n", shell),
+            ("ctrl-w", shell),
+            ("ctrl-o", shell),
+            ("ctrl-q", shell),
+            ("ctrl-shift-n", "wai::NewSession"),
+            ("ctrl-shift-w", "wai::CloseSession"),
+            ("ctrl-shift-o", "wai::OpenFolder"),
+            ("ctrl-shift-q", "wai::Quit"),
+        ];
+        assert_eq!(table, expected);
+    }
 }

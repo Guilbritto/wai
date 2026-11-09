@@ -82,7 +82,7 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 /// A config file's text; `None` when it does not exist. R41: a repository can ship a huge file,
 /// a FIFO or a link to /dev/zero as `.wai/…`: only a regular file is opened, and at most 1 MB
 /// of it is read.
-fn read_config(path: &Path) -> std::io::Result<Option<String>> {
+pub fn read_config(path: &Path) -> std::io::Result<Option<String>> {
     use std::io::{Error, ErrorKind, Read as _};
     match std::fs::metadata(path) {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
@@ -241,6 +241,87 @@ pub fn config_dir() -> PathBuf {
             .unwrap_or_default()
             .join(".config")
             .join("wai")
+    }
+}
+
+/// R3: `/tmp` and `/private/tmp` are one folder; a path that does not exist stays as given. On
+/// Windows without the `\\?\` prefix (dunce), which keeps it only where dropping it would name
+/// another file: what wai compares, shows, sends to agents and uses as a terminal cwd.
+pub fn canonical(path: &Path) -> PathBuf {
+    try_canonical(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// `canonical`, or why the path does not resolve.
+pub fn try_canonical(path: &Path) -> std::io::Result<PathBuf> {
+    dunce::canonicalize(path)
+}
+
+/// A path as wai shows it: never with Windows' verbatim prefix (`\\?\C:\x` shows as `C:\x`,
+/// `\\?\UNC\host\share` as `\\host\share`), even where `canonical` has to keep it.
+pub fn shown(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_string(),
+        _ => text.into_owned(),
+    }
+}
+
+/// The program to start for `command`. A bare name is looked up on PATH here, never left to the
+/// OS: Windows searches a process's current dir first, and a unix PATH may name it (an empty
+/// entry, `.`); agents and MCP servers run in the project. On Windows with PATHEXT (`npx` is
+/// `npx.cmd`). `None` when PATH has no such program. A path stays as given.
+pub fn find_program(command: &Path) -> Option<PathBuf> {
+    if command.file_name() != Some(command.as_os_str()) {
+        return Some(command.to_path_buf());
+    }
+    let path = std::env::var_os("PATH")?;
+    let pathext = match cfg!(windows) {
+        true => std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into()),
+        false => String::new(),
+    };
+    resolve_on_path(command.as_os_str(), &path, &pathext)
+}
+
+/// The first program `name` names in `path`'s absolute dirs (a relative entry would be the
+/// current dir's). With a `pathext`, the Windows way: a file with each extension, and as given
+/// only when it has one. Without (unix): as given, an executable file.
+pub fn resolve_on_path(
+    name: &std::ffi::OsStr,
+    path: &std::ffi::OsStr,
+    pathext: &str,
+) -> Option<PathBuf> {
+    let exts: Vec<_> = pathext.split(';').filter(|e| !e.is_empty()).collect();
+    let with_ext = exts.iter().map(|ext| {
+        let mut name = name.to_os_string();
+        name.push(ext);
+        name
+    });
+    let as_given = exts.is_empty() || Path::new(name).extension().is_some();
+    let as_given = as_given.then(|| name.to_os_string());
+    let names: Vec<_> = as_given.into_iter().chain(with_ext).collect();
+    let program = |candidate: &PathBuf| match exts.is_empty() {
+        true => executable(candidate),
+        false => candidate.is_file(),
+    };
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .find(program)
+}
+
+/// A file the user may run (on Windows: any file).
+fn executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        (path.metadata()).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
     }
 }
 
@@ -500,6 +581,105 @@ mod tests {
         assert!(notices[0].ends_with(": not a regular file"), "{notices:?}");
         let (_, notices) = load_templates(u.path(), Some(p.path()));
         assert!(notices[0].ends_with(": not a regular file"), "{notices:?}");
+    }
+
+    /// What `std::fs::canonicalize` returns on Windows never shows; wai's own canonical form
+    /// never carries the prefix (checked for real on Windows CI).
+    #[test]
+    fn simplified_paths_never_show_verbatim_prefix() {
+        for (raw, shows) in [
+            (r"\\?\C:\Users\me\proj", r"C:\Users\me\proj"),
+            (r"\\?\C:\", r"C:\"),
+            (r"\\?\UNC\server\share\proj", r"\\server\share\proj"),
+            (r"C:\Users\me\proj", r"C:\Users\me\proj"),
+            (r"\\server\share", r"\\server\share"),
+            ("/Users/me/proj", "/Users/me/proj"),
+        ] {
+            assert_eq!(shown(Path::new(raw)), shows);
+        }
+        let tmp = canonical(&std::env::temp_dir());
+        assert!(!tmp.to_string_lossy().starts_with(r"\\?\"), "{tmp:?}");
+        let missing = Path::new("no-such-wai-dir");
+        assert_eq!(
+            canonical(missing),
+            missing,
+            "a path that does not resolve stays"
+        );
+    }
+
+    /// Windows finds a bare name in the current dir first, and agents and MCP servers run in the
+    /// project: wai resolves the name on PATH itself, PATHEXT included (`npx` is `npx.cmd`).
+    #[test]
+    fn bare_commands_resolve_on_path_never_relative() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        for (dir, name) in [(&a, "npx"), (&b, "npx.cmd"), (&b, "node.exe")] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(name), "").unwrap();
+        }
+        let path = std::env::join_paths([&a, &b]).unwrap();
+        let find = |name: &str| resolve_on_path(name.as_ref(), &path, ".com;.exe;.bat;.cmd");
+        // npm's extensionless `npx` is a sh script, not a Windows program.
+        assert_eq!(find("npx"), Some(b.join("npx.cmd")));
+        assert_eq!(find("node"), Some(b.join("node.exe")));
+        assert_eq!(find("node.exe"), Some(b.join("node.exe")));
+        assert_eq!(find("jira"), None);
+        // A relative PATH entry is never searched: `.` (the crate dir under `cargo test`) holds
+        // Cargo.toml.
+        let crate_dir = env!("CARGO_MANIFEST_DIR");
+        assert!(resolve_on_path("Cargo".as_ref(), crate_dir.as_ref(), ".toml").is_some());
+        assert_eq!(
+            resolve_on_path("Cargo".as_ref(), ".".as_ref(), ".toml"),
+            None
+        );
+        // Paths stay as given.
+        assert_eq!(find_program(Path::new("bin/run")), Some("bin/run".into()));
+    }
+
+    /// R56: on unix too wai looks a bare name up itself, in PATH's absolute entries only: an
+    /// empty entry, `.` or any relative one is the current dir (the project, for agents and MCP
+    /// servers). Only an executable file counts.
+    #[cfg(unix)]
+    #[test]
+    fn bare_commands_resolve_on_absolute_path_entries_on_unix() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = |name: &str| tmp.path().join(name);
+        let tool = |dir: &Path, mode: u32| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("tool"), "").unwrap();
+            let mode = std::fs::Permissions::from_mode(mode);
+            std::fs::set_permissions(dir.join("tool"), mode).unwrap();
+        };
+        tool(&dir("relative"), 0o755);
+        tool(&dir("plain"), 0o644);
+        tool(&dir("exe"), 0o755);
+        std::fs::create_dir_all(dir("folder").join("tool")).unwrap();
+        // `relative` as a relative entry: up from the current dir to `/`, then down to it.
+        let up = "../".repeat(std::env::current_dir().unwrap().components().count());
+        let relative = Path::new(&up).join(dir("relative").strip_prefix("/").unwrap());
+        assert!(
+            relative.join("tool").is_file(),
+            "a relative entry with the program"
+        );
+        let entries = [
+            Path::new(""),
+            Path::new("."),
+            &relative,
+            &dir("plain"),
+            &dir("folder"),
+            &dir("exe"),
+        ];
+        let path = std::env::join_paths(entries).unwrap();
+        assert!(path.to_string_lossy().starts_with(":.:"), "{path:?}");
+
+        let find = |name: &str| resolve_on_path(name.as_ref(), &path, "");
+        assert_eq!(find("tool"), Some(dir("exe").join("tool")));
+        assert_eq!(find("missing"), None);
+        // `find_program` takes that way off Windows: `sh` is found on the test's PATH.
+        let sh = find_program(Path::new("sh")).expect("sh on PATH");
+        assert!(sh.is_absolute() && sh.ends_with("sh"), "{sh:?}");
     }
 
     #[test]

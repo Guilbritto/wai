@@ -26,6 +26,8 @@ notify-rust = "4"
 url = "2"
 ignore = "0.4"
 notify = "8"
+# Windows paths without the `\\?\` prefix where it is not needed.
+dunce = "1"
 
 [profile.dev]
 debug = "limited"

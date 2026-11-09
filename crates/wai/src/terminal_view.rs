@@ -145,6 +145,12 @@ impl TerminalView {
         }
     }
 
+    /// Types `text` at the shell's prompt as the keyboard would, without adding Enter: the user
+    /// reads it and confirms.
+    pub fn type_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.write(text.as_bytes(), cx);
+    }
+
     /// Sends input to the shell; the view goes back to the bottom, where it shows.
     fn write(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         let Some(model) = &self.model else {

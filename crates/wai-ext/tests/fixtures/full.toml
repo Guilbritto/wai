@@ -1,0 +1,40 @@
+id = "go-tools"
+name = "Go Tools"
+version = "0.1.0"
+description = "Go helpers"
+permissions = ["process", "sessions:read", "sessions:control", "notify", "panels", "network", "fs:docs"]
+
+[process]
+command = "bin/host"
+args = ["--stdio"]
+
+[contributes]
+claude_plugins = ["plug-a"]
+themes = ["themes/dark.json"]
+
+[[contributes.templates]]
+name = "Review"
+prompt = "Review this"
+
+[[contributes.commands]]
+id = "run"
+title = "Run"
+
+[[contributes.commands]]
+id = "hello"
+title = "Hello"
+prompt = "say hello"
+
+[[contributes.agents]]
+name = "gopher"
+command = "bin/agent"
+
+[[contributes.mcp_servers]]
+name = "docs"
+command = "node"
+args = ["server.js"]
+env = { TOKEN = "x" }
+
+[[contributes.panels]]
+id = "main"
+title = "Main"

@@ -51,7 +51,7 @@ fn write_a_file_then_resume() {
         let dir: PathBuf =
             std::env::temp_dir().join(format!("wai-real-claude-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let dir = dir.canonicalize().unwrap();
+        let dir = wai_settings::canonical(&dir);
         let t0 = Instant::now();
 
         let (agent, rx) = spawn();
@@ -59,7 +59,10 @@ fn write_a_file_then_resume() {
         println!("spawn -> ready: {:?}", t0.elapsed());
 
         let t = Instant::now();
-        let session = agent.new_session(dir.clone()).await.expect("new_session");
+        let session = agent
+            .new_session(dir.clone(), vec![])
+            .await
+            .expect("new_session");
         println!("new_session: {:?} (id {})", t.elapsed(), session.id);
         agent
             .set_mode(session.id.clone(), "default".into())
@@ -130,7 +133,7 @@ fn write_a_file_then_resume() {
         let caps = ready(&rx).await;
         let t = Instant::now();
         agent
-            .load_session(session.id.clone(), dir.clone())
+            .load_session(session.id.clone(), dir.clone(), vec![])
             .await
             .expect("load_session");
         let mut replayed = false;
@@ -159,13 +162,13 @@ fn write_a_file_then_resume() {
         if caps.fork {
             let t = Instant::now();
             let forked = agent
-                .fork_session(session.id.clone(), dir.clone())
+                .fork_session(session.id.clone(), dir.clone(), vec![])
                 .await
                 .expect("fork_session");
             assert_ne!(forked.id, session.id);
             // claude-agent-acp answers a fork without replaying it: loading the copy does.
             agent
-                .load_session(forked.id.clone(), dir.clone())
+                .load_session(forked.id.clone(), dir.clone(), vec![])
                 .await
                 .expect("load_session of the fork");
             let mut replayed = false;
@@ -205,11 +208,14 @@ fn answer_a_question() {
         let dir: PathBuf =
             std::env::temp_dir().join(format!("wai-real-claude-q-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let dir = dir.canonicalize().unwrap();
+        let dir = wai_settings::canonical(&dir);
 
         let (agent, rx) = spawn();
         ready(&rx).await;
-        let session = agent.new_session(dir.clone()).await.expect("new_session");
+        let session = agent
+            .new_session(dir.clone(), vec![])
+            .await
+            .expect("new_session");
 
         let prompt = "Use the AskUserQuestion tool to ask me to pick red or blue, then reply with only the color I picked.";
         let t = Instant::now();

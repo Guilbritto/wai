@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::{ConnectionTo, Responder, schema as acp};
 use agent_client_protocol::{
-    AcpAgent, Agent, Client, Error, ErrorCode, JsonRpcRequest, is_connection_terminated,
-    is_incoming_transport_closed,
+    AcpAgent, AcpAgentConfig, Agent, Client, Error, ErrorCode, JsonRpcRequest,
+    is_connection_terminated, is_incoming_transport_closed,
 };
 use async_channel::{Receiver, Sender};
 
@@ -23,16 +23,19 @@ type Page = (Vec<SessionSummary>, Option<String>);
 enum Command {
     NewSession {
         cwd: PathBuf,
+        mcp: Vec<McpServer>,
         reply: Reply<SessionStarted>,
     },
     LoadSession {
         id: SessionId,
         cwd: PathBuf,
+        mcp: Vec<McpServer>,
         reply: Reply<SessionStarted>,
     },
     ForkSession {
         id: SessionId,
         cwd: PathBuf,
+        mcp: Vec<McpServer>,
         reply: Reply<SessionStarted>,
     },
     ListSessions {
@@ -92,8 +95,13 @@ impl AgentHandle {
         (handle, event_rx)
     }
 
-    pub async fn new_session(&self, cwd: PathBuf) -> Result<SessionStarted, AgentError> {
-        self.request(|reply| Command::NewSession { cwd, reply })
+    /// `mcp`: the MCP servers the agent starts for the session (each of these calls takes them).
+    pub async fn new_session(
+        &self,
+        cwd: PathBuf,
+        mcp: Vec<McpServer>,
+    ) -> Result<SessionStarted, AgentError> {
+        self.request(|reply| Command::NewSession { cwd, mcp, reply })
             .await
     }
 
@@ -101,9 +109,15 @@ impl AgentHandle {
         &self,
         id: SessionId,
         cwd: PathBuf,
+        mcp: Vec<McpServer>,
     ) -> Result<SessionStarted, AgentError> {
-        self.request(|reply| Command::LoadSession { id, cwd, reply })
-            .await
+        self.request(|reply| Command::LoadSession {
+            id,
+            cwd,
+            mcp,
+            reply,
+        })
+        .await
     }
 
     /// Copies session `id` into a new one (the agent must advertise `AgentCaps::fork`). The
@@ -112,9 +126,15 @@ impl AgentHandle {
         &self,
         id: SessionId,
         cwd: PathBuf,
+        mcp: Vec<McpServer>,
     ) -> Result<SessionStarted, AgentError> {
-        self.request(|reply| Command::ForkSession { id, cwd, reply })
-            .await
+        self.request(|reply| Command::ForkSession {
+            id,
+            cwd,
+            mcp,
+            reply,
+        })
+        .await
     }
 
     /// Lists every session the agent knows, following `next_cursor` to the end.
@@ -408,7 +428,19 @@ async fn connect(
     commands: &Receiver<Command>,
     broker: &Arc<Broker>,
 ) -> Result<bool, Error> {
-    let agent = AcpAgent::from_str(&spec.command)?;
+    // ponytail: the SDK spawns and kills the agent; on Windows it kills only that process (no
+    // job object), so what an `npx` agent started outlives it until its stdin closes.
+    let config = AcpAgent::from_str(&spec.command)?.into_config();
+    let program = config.command();
+    let Some(found) = wai_settings::find_program(program) else {
+        let missing = format!("{} is not on PATH", program.display());
+        return Err(Error::into_internal_error(std::io::Error::other(missing)));
+    };
+    let agent = AcpAgent::new(
+        AcpAgentConfig::new(found)
+            .args(config.arguments().iter().cloned())
+            .envs(config.environment().clone()),
+    );
     let updates = broker.clone();
     let permissions = broker.clone();
     let questions = broker.clone();
@@ -497,22 +529,35 @@ async fn actor_loop(
             None => return Ok(false),
         };
         match command {
-            Command::NewSession { cwd, reply } => {
-                request(&cx, broker, acp::NewSessionRequest::new(cwd), reply, |r| {
-                    convert::session_started(r.session_id.to_string(), r.modes)
-                })?
-            }
-            Command::LoadSession { id, cwd, reply } => request(
+            Command::NewSession { cwd, mcp, reply } => request(
                 &cx,
                 broker,
-                acp::LoadSessionRequest::new(id.clone(), cwd),
+                acp::NewSessionRequest::new(cwd).mcp_servers(convert::mcp_servers(mcp)),
+                reply,
+                |r| convert::session_started(r.session_id.to_string(), r.modes),
+            )?,
+            Command::LoadSession {
+                id,
+                cwd,
+                mcp,
+                reply,
+            } => request(
+                &cx,
+                broker,
+                acp::LoadSessionRequest::new(id.clone(), cwd)
+                    .mcp_servers(convert::mcp_servers(mcp)),
                 reply,
                 |r| convert::session_started(id, r.modes),
             )?,
-            Command::ForkSession { id, cwd, reply } => request(
+            Command::ForkSession {
+                id,
+                cwd,
+                mcp,
+                reply,
+            } => request(
                 &cx,
                 broker,
-                acp::ForkSessionRequest::new(id, cwd),
+                acp::ForkSessionRequest::new(id, cwd).mcp_servers(convert::mcp_servers(mcp)),
                 reply,
                 |r| convert::session_started(r.session_id.to_string(), r.modes),
             )?,

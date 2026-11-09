@@ -20,6 +20,7 @@ gpui-kit = { workspace = true, features = [
     "tree-sitter-yaml",
 ] }
 wai-agent = { path = "../wai-agent" }
+wai-ext = { path = "../wai-ext" }
 wai-project = { path = "../wai-project" }
 wai-settings = { path = "../wai-settings" }
 wai-terminal = { path = "../wai-terminal" }
@@ -27,6 +28,7 @@ anyhow.workspace = true
 base64.workspace = true
 notify-rust.workspace = true
 serde_json.workspace = true
+smol.workspace = true
 similar.workspace = true
 
 [dev-dependencies]

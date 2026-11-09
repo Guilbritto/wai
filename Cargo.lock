@@ -8148,8 +8148,10 @@ dependencies = [
  "notify-rust",
  "serde_json",
  "similar",
+ "smol",
  "tempfile",
  "wai-agent",
+ "wai-ext",
  "wai-project",
  "wai-settings",
  "wai-terminal",
@@ -8167,6 +8169,24 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "url",
+ "wai-settings",
+]
+
+[[package]]
+name = "wai-ext"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "dunce",
+ "rustix",
+ "serde",
+ "serde_json",
+ "smol",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml 0.9.12+spec-1.1.0",
+ "wai-settings",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8187,6 +8207,7 @@ name = "wai-settings"
 version = "0.1.0"
 dependencies = [
  "dirs 6.0.0",
+ "dunce",
  "serde",
  "serde_json",
  "tempfile",
@@ -8201,6 +8222,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "async-channel",
+ "dunce",
  "portable-pty",
  "tempfile",
 ]

@@ -162,7 +162,8 @@ impl TerminalModel {
             .or_else(|| std::env::var("SHELL").ok())
             .unwrap_or_else(default_shell);
         let mut cmd = CommandBuilder::new(shell);
-        cmd.cwd(cwd);
+        // cmd.exe refuses a `\\?\` cwd ("UNC paths are not supported").
+        cmd.cwd(dunce::simplified(cwd));
         cmd.env("TERM", "xterm-256color");
         let child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
@@ -345,6 +346,8 @@ impl TerminalModel {
     }
 }
 
+/// Kills the shell; closing the PTY (ConPTY on Windows) then ends the console programs it ran.
+/// No job object on Windows, on purpose: an app the user started from the shell keeps running.
 impl Drop for TerminalModel {
     fn drop(&mut self) {
         if let Ok(mut c) = self.child.lock() {

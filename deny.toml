@@ -4,3 +4,7 @@ allow = [
   "ISC", "Zlib", "Unicode-3.0", "Unicode-DFS-2016", "MPL-2.0", "CC0-1.0", "BSL-1.0", "0BSD",
 ]
 confidence-threshold = 0.9
+
+# The workspace crates are `publish = false` and have no licence yet (the owner's choice).
+[licenses.private]
+ignore = true

@@ -1,8 +1,7 @@
 //! The sidebar: the project, then tabs: its open sessions with their status and the agent's
-//! history, its files, search, and the agents.
+//! history, its files, search, the agents, then each running extension's panels.
 
 use std::ops::Range;
-use std::path::{Path, PathBuf};
 
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -12,6 +11,8 @@ use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_fl
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::SessionSummary;
+use wai_ext::panel::clamp;
+pub use wai_settings::canonical;
 
 use crate::agents::AgentStatus;
 use crate::app::NewSession;
@@ -27,7 +28,14 @@ pub enum SidebarTab {
     Files,
     Search,
     Agents,
+    /// Opened from the header's Extensions button; it has no tab.
+    Extensions,
+    /// An extension's panel, by its view. When the panel goes, the sessions show again.
+    Panel(EntityId),
 }
+
+/// A panel's tab title, one line: the manifest's words.
+const PANEL_TITLE_CHARS: usize = 24;
 
 /// Each tab with its element id and label.
 const TABS: [(SidebarTab, &str, &str); 4] = [
@@ -45,11 +53,6 @@ pub(crate) fn status_color(state: &TurnState, theme: &gpui_kit::component::Theme
         TurnState::Idle => theme.muted_foreground,
         TurnState::Error(_) => theme.danger,
     }
-}
-
-/// R3: `/tmp` and `/private/tmp` are one folder; a path that does not exist stays as given.
-pub fn canonical(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 impl Workspace {
@@ -111,7 +114,16 @@ impl Workspace {
 
     pub(crate) fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
+        let templates = self.all_templates(cx);
+        let panels = self.ext_host.read(cx).panels();
+        let shown = panels
+            .iter()
+            .find(|p| self.sidebar_tab == SidebarTab::Panel(p.view.entity_id()));
         let content = match self.sidebar_tab {
+            SidebarTab::Panel(_) => div()
+                .size_full()
+                .children(shown.map(|p| p.view.clone()))
+                .into_any_element(),
             SidebarTab::Sessions => self.render_sessions(cx).into_any_element(),
             SidebarTab::Files => self.files.clone().into_any_element(),
             SidebarTab::Search => self.search.clone().into_any_element(),
@@ -119,22 +131,39 @@ impl Workspace {
                 .size_full()
                 .child(self.agents.clone())
                 .into_any_element(),
+            SidebarTab::Extensions => div()
+                .size_full()
+                .children(self.extensions.clone())
+                .into_any_element(),
         };
-        let tabs = TABS.map(|(tab, id, label)| {
-            Button::new(id)
-                .ghost()
-                .xsmall()
-                .label(label)
-                .selected(self.sidebar_tab == tab)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.sidebar_tab = tab;
-                    if tab == SidebarTab::Search {
-                        let focus = this.search.read(cx).query_focus(cx);
-                        window.focus(&focus, cx);
-                    }
-                    cx.notify();
-                }))
+        let built_in = TABS.map(|(tab, id, label)| (tab, ElementId::from(id), label.into()));
+        let extension = panels.iter().enumerate().map(|(ix, p)| {
+            let title = clamp(&p.title, PANEL_TITLE_CHARS);
+            let tab = SidebarTab::Panel(p.view.entity_id());
+            (
+                tab,
+                ElementId::from(("tab-panel", ix)),
+                SharedString::from(title),
+            )
         });
+        let tabs = built_in
+            .into_iter()
+            .chain(extension)
+            .map(|(tab, id, label)| {
+                Button::new(id)
+                    .ghost()
+                    .xsmall()
+                    .label(label)
+                    .selected(self.sidebar_tab == tab)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.sidebar_tab = tab;
+                        if tab == SidebarTab::Search {
+                            let focus = this.search.read(cx).query_focus(cx);
+                            window.focus(&focus, cx);
+                        }
+                        cx.notify();
+                    }))
+            });
         v_flex()
             .debug_selector(|| "sidebar".into())
             .size_full()
@@ -155,12 +184,12 @@ impl Workspace {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(folder_name(&self.project)),
                     )
-                    .when(!self.templates.is_empty(), |el| {
+                    .when(!templates.is_empty(), |el| {
                         let (workspace, names) = (
                             cx.entity().downgrade(),
-                            self.templates
-                                .iter()
-                                .map(|t| t.name.clone())
+                            // An extension's names too: one line each.
+                            (templates.iter())
+                                .map(|t| clamp(&t.name, crate::palette::TITLE_CHARS))
                                 .collect::<Vec<_>>(),
                         );
                         el.child(
@@ -188,6 +217,17 @@ impl Workspace {
                         )
                     })
                     .child(
+                        Button::new("sidebar-extensions")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::LayoutDashboard)
+                            .tooltip("Extensions")
+                            .selected(self.sidebar_tab == SidebarTab::Extensions)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_extensions(window, cx);
+                            })),
+                    )
+                    .child(
                         Button::new("sidebar-new")
                             .ghost()
                             .xsmall()
@@ -198,7 +238,7 @@ impl Workspace {
                             })),
                     ),
             )
-            .child(h_flex().px_2().gap_1().children(tabs))
+            .child(h_flex().px_2().gap_1().flex_wrap().children(tabs))
             .child(v_flex().flex_1().min_h_0().child(content))
     }
 

@@ -3,11 +3,17 @@ mod agents_view;
 mod app;
 mod chat;
 mod editor;
+mod ext_host;
+mod ext_panel;
+mod extensions_view;
 mod files;
 mod notify;
+mod palette;
 mod search_view;
 mod sidebar;
 mod terminal_view;
+#[cfg(all(test, unix))]
+mod waycarbon;
 mod workspace;
 
 use std::path::PathBuf;
@@ -29,6 +35,8 @@ fn main() -> anyhow::Result<()> {
     let (templates, template_notices) = load_templates(&config_dir(), Some(&project));
     // R21: the last run's tool outputs.
     std::fs::remove_dir_all(config_dir().join("scratch")).ok();
+    // Stages a closed run never committed or dropped.
+    std::fs::remove_dir_all(wai_ext::staging_dir(&config_dir())).ok();
     let notices: Vec<String> = notices.into_iter().chain(template_notices).collect();
     for notice in &notices {
         eprintln!("wai: {notice}");
@@ -43,10 +51,10 @@ fn resolve_project(arg: Option<PathBuf>, last: Option<PathBuf>) -> anyhow::Resul
         (Some(path), _) | (None, Some(path)) => path,
         (None, None) => std::env::current_dir()?,
     };
-    let project = path
-        .canonicalize()
-        .with_context(|| format!("cannot open {}", path.display()))?;
-    anyhow::ensure!(project.is_dir(), "{} is not a folder", project.display());
+    let shown = wai_settings::shown;
+    let project = wai_settings::try_canonical(&path)
+        .with_context(|| format!("cannot open {}", shown(&path)))?;
+    anyhow::ensure!(project.is_dir(), "{} is not a folder", shown(&project));
     Ok(project)
 }
 
@@ -56,8 +64,8 @@ mod tests {
 
     #[test]
     fn project_comes_from_arg_then_last_then_cwd() {
-        let tmp = std::env::temp_dir().canonicalize().unwrap();
-        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let tmp = wai_settings::canonical(&std::env::temp_dir());
+        let cwd = wai_settings::canonical(&std::env::current_dir().unwrap());
         let missing = PathBuf::from("/nonexistent-wai-project");
 
         assert_eq!(resolve_project(Some(tmp.clone()), None).unwrap(), tmp);

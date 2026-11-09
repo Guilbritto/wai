@@ -271,6 +271,28 @@ pub(crate) fn stop_reason(reason: acp::StopReason) -> StopReason {
     }
 }
 
+/// ACP stdio servers: every agent must support that transport. A bare command is resolved on
+/// PATH first: the agent starts the server in the project, where Windows would look first. One
+/// that is not on PATH is left out.
+pub(crate) fn mcp_servers(servers: Vec<McpServer>) -> Vec<acp::McpServer> {
+    let stdio = |s: McpServer| {
+        let Some(command) = wai_settings::find_program(&s.command) else {
+            eprintln!(
+                "wai: MCP server {}: {} is not on PATH",
+                s.name,
+                s.command.display()
+            );
+            return None;
+        };
+        let env = s.env.into_iter().map(|(k, v)| acp::EnvVariable::new(k, v));
+        let server = acp::McpServerStdio::new(s.name, command)
+            .args(s.args)
+            .env(env.collect());
+        Some(acp::McpServer::Stdio(server))
+    };
+    servers.into_iter().filter_map(stdio).collect()
+}
+
 pub(crate) fn session_started(
     id: SessionId,
     modes: Option<acp::SessionModeState>,
@@ -326,6 +348,26 @@ pub(crate) fn content_block(block: PromptBlock) -> acp::ContentBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_servers_are_stdio_with_args_and_env() {
+        let server = McpServer {
+            name: "jira".into(),
+            command: "/opt/jira-mcp".into(),
+            args: vec!["--stdio".into(), "a b".into()],
+            env: vec![("MODE".into(), "test".into())],
+        };
+        let wire = serde_json::to_value(mcp_servers(vec![server])).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!([{
+                "name": "jira",
+                "command": "/opt/jira-mcp",
+                "args": ["--stdio", "a b"],
+                "env": [{"name": "MODE", "value": "test"}],
+            }])
+        );
+    }
 
     #[test]
     fn resource_becomes_file_uri_link() {

@@ -4,7 +4,7 @@
 use std::fmt;
 use std::fs;
 use std::io::{self, Read as _, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// Above this a file opens read-only: `set_value` blocks the main thread ~350 ms per 100 MB.
@@ -72,11 +72,26 @@ pub fn stamp(path: &Path) -> Option<Stamp> {
     Some((meta.modified().ok()?, meta.len()))
 }
 
+/// The notice for a Save refused over a change on disk; a clean tab has no Keep mine.
+pub fn changed_notice(name: &str, dirty: bool) -> String {
+    let ask = if dirty {
+        "Reload or Keep mine"
+    } else {
+        "Reload"
+    };
+    format!("Changed on disk: {name} — {ask} before saving")
+}
+
 pub struct Loaded {
     pub mode: OpenMode,
     pub text: String,
     /// Taken before the read: a change during it shows as a newer stamp later.
     pub stamp: Option<Stamp>,
+    /// The file's resolved real path, when it resolves: Save refuses once the path resolves
+    /// elsewhere (a link swapped in).
+    pub real: Option<PathBuf>,
+    /// Its first line end is `\r\n`: `text` holds `\n`, and Save writes `\r\n` back.
+    pub crlf: bool,
 }
 
 pub fn load(path: &Path) -> Result<Loaded, OpenError> {
@@ -85,14 +100,40 @@ pub fn load(path: &Path) -> Result<Loaded, OpenError> {
     // ponytail: text that is not UTF-8 does not open (the error says so); a lossy read-only
     // view would be the upgrade.
     let text = String::from_utf8(fs::read(path)?).map_err(|_| OpenError::NotUtf8)?;
-    Ok(Loaded { mode, text, stamp })
+    let crlf = text.find('\n').is_some_and(|i| text[..i].ends_with('\r'));
+    let text = if crlf {
+        text.replace("\r\n", "\n")
+    } else {
+        text
+    };
+    let real = wai_settings::try_canonical(path).ok();
+    Ok(Loaded {
+        mode,
+        text,
+        stamp,
+        real,
+        crlf,
+    })
 }
 
 /// Writes `text` to a temp file beside `path`, then renames it over `path`: a crash leaves the
 /// old file or the new one, never half of one. The file keeps its permissions, and a symlink
 /// keeps pointing to it. Returns the new stamp.
 pub fn save(path: &Path, text: &str) -> io::Result<Option<Stamp>> {
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    save_resolved(&wai_settings::canonical(path), text)
+}
+
+/// A buffer's text with every line end the file's (`crlf`: its first line end at load). A paste
+/// can hold `\r\n` (a Windows clipboard) in any file; it never mixes them in, nor makes
+/// `\r\r\n`. ponytail: a mixed file comes out all one way, its first line's.
+pub fn line_ends(text: &str, crlf: bool) -> String {
+    let lf = text.replace("\r\n", "\n");
+    if crlf { lf.replace('\n', "\r\n") } else { lf }
+}
+
+/// `save` to a path already resolved (a tab's real path at load): nothing is resolved again
+/// between the caller's check and the write.
+pub fn save_resolved(target: &Path, text: &str) -> io::Result<Option<Stamp>> {
     let name = target.file_name().ok_or(io::ErrorKind::InvalidInput)?;
     let tmp = target.with_file_name(format!(".{}.wai-save", name.to_string_lossy()));
     let written = (|| {
@@ -103,7 +144,7 @@ pub fn save(path: &Path, text: &str) -> io::Result<Option<Stamp>> {
         fs::remove_file(&tmp).ok();
         // The target's mode before any content: a private file is never readable by others,
         // not even as a temp file (one left by a crash included).
-        let permissions = fs::metadata(&target).ok().map(|meta| meta.permissions());
+        let permissions = fs::metadata(target).ok().map(|meta| meta.permissions());
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -117,13 +158,13 @@ pub fn save(path: &Path, text: &str) -> io::Result<Option<Stamp>> {
         }
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
-        fs::rename(&tmp, &target)
+        fs::rename(&tmp, target)
     })();
     if written.is_err() {
         fs::remove_file(&tmp).ok();
     }
     written?;
-    Ok(stamp(path))
+    Ok(stamp(target))
 }
 
 #[cfg(all(test, unix))]
@@ -171,5 +212,16 @@ mod tests {
             .file_type()
             .is_symlink();
         assert!(!link, "the target is a file, not the planted link");
+    }
+
+    #[test]
+    fn refusal_notice_depends_on_the_tab() {
+        let dirty = super::changed_notice("a.rs", true);
+        assert_eq!(
+            dirty,
+            "Changed on disk: a.rs — Reload or Keep mine before saving"
+        );
+        let clean = super::changed_notice("a.rs", false);
+        assert_eq!(clean, "Changed on disk: a.rs — Reload before saving");
     }
 }

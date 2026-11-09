@@ -27,7 +27,7 @@ impl Attachment {
     /// png/jpeg/gif/webp up to 5 MB become images; anything else a resource link.
     pub fn new(path: &Path) -> Self {
         let name = path.file_name().map_or_else(
-            || path.display().to_string(),
+            || wai_settings::shown(path),
             |n| n.to_string_lossy().into_owned(),
         );
         let block = image(path).unwrap_or_else(|| PromptBlock::Resource {
@@ -79,10 +79,25 @@ impl ChatSession {
                 .to_string();
         }
         blocks.extend(self.attachments.drain(..).map(|a| a.block));
-        self.handle.prompt(self.id.clone(), blocks);
         self.input
             .update(cx, |input, cx| input.set_value("", window, cx));
-        let ix = self.update_model(cx, |m| m.push_user(&shown));
+        self.submit(blocks, &shown, cx);
+    }
+
+    /// Sends `text` as a prompt, leaving the prompt box alone (an extension's `sessions/prompt`).
+    /// `false` when the session is not idle.
+    pub fn send_text(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        let text = text.trim();
+        if self.model.state != TurnState::Idle || text.is_empty() {
+            return false;
+        }
+        self.submit(vec![PromptBlock::Text(text.into())], text, cx);
+        true
+    }
+
+    fn submit(&mut self, blocks: Vec<PromptBlock>, shown: &str, cx: &mut Context<Self>) {
+        self.handle.prompt(self.id.clone(), blocks);
+        let ix = self.update_model(cx, |m| m.push_user(shown));
         self.sync_rows(Some(ix), cx);
         cx.notify();
     }

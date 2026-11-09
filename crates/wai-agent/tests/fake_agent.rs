@@ -5,8 +5,8 @@ use std::time::Duration;
 use async_channel::Receiver;
 use wai_agent::{
     AgentCaps, AgentError, AgentEvent, AgentHandle, AgentSpec, BrokerError, Choice, ChoiceKind,
-    FieldKind, PermissionRequest, PromptBlock, QuestionAnswer, QuestionRequest, SessionEvent,
-    StopReason, ToolContent,
+    FieldKind, McpServer, PermissionRequest, PromptBlock, QuestionAnswer, QuestionRequest,
+    SessionEvent, StopReason, ToolContent, quote,
 };
 
 fn run(test: impl Future<Output = ()>) {
@@ -19,7 +19,7 @@ fn run(test: impl Future<Output = ()>) {
 fn spawn(args: &[&str]) -> (AgentHandle, Receiver<AgentEvent>) {
     let command = std::iter::once(env!("CARGO_BIN_EXE_wai-fake-agent"))
         .chain(args.iter().copied())
-        .map(|a| format!("'{a}'"))
+        .map(quote)
         .collect::<Vec<_>>()
         .join(" ");
     AgentHandle::spawn(AgentSpec {
@@ -111,7 +111,7 @@ fn streams_agent_text_and_ends_turn() {
             }
             other => unreachable!("{other:?}"),
         }
-        let session = agent.new_session(cwd()).await.unwrap();
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
         assert_eq!(session.current_mode.as_deref(), Some("default"));
         assert_eq!(session.modes.len(), 2);
 
@@ -133,7 +133,7 @@ fn permission_request_roundtrip() {
     run(async {
         let (agent, rx) = spawn(&["--ask-permission"]);
         ready(&rx).await;
-        let session = agent.new_session(cwd()).await.unwrap();
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
         agent.prompt(session.id.clone(), hello());
 
         let request = permission(&rx).await;
@@ -165,7 +165,7 @@ fn late_permission_answer_is_stale() {
     run(async {
         let (agent, rx) = spawn(&["--ask-permission"]);
         ready(&rx).await;
-        let session = agent.new_session(cwd()).await.unwrap();
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
         agent.prompt(session.id.clone(), hello());
         let request = permission(&rx).await;
 
@@ -195,7 +195,7 @@ fn question_roundtrip() {
     run(async {
         let (agent, rx) = spawn(&["--ask-question"]);
         ready(&rx).await;
-        let session = agent.new_session(cwd()).await.unwrap();
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
         agent.prompt(session.id.clone(), hello());
 
         let q = question(&rx).await;
@@ -251,7 +251,7 @@ fn late_question_answer_is_stale() {
     run(async {
         let (agent, rx) = spawn(&["--ask-question"]);
         ready(&rx).await;
-        let session = agent.new_session(cwd()).await.unwrap();
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
         agent.prompt(session.id.clone(), hello());
         let q = question(&rx).await;
 
@@ -278,7 +278,7 @@ fn withdrawn_question_resolves_on_its_own() {
     run(async {
         let (agent, rx) = spawn(&["--ask-question", "--withdraw-question"]);
         ready(&rx).await;
-        let session = agent.new_session(cwd()).await.unwrap();
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
         agent.prompt(session.id.clone(), hello());
         let withdrawn = question(&rx).await;
 
@@ -315,7 +315,7 @@ fn cancel_ends_turn_with_cancelled() {
         let reply = vec!["word"; 200].join(" ");
         let (agent, rx) = spawn(&["--reply", &reply, "--chunk-delay-ms", "20"]);
         ready(&rx).await;
-        let session = agent.new_session(cwd()).await.unwrap();
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
         agent.prompt(session.id.clone(), hello());
 
         until(&rx, |e| {
@@ -345,7 +345,7 @@ fn crash_mid_stream_reports_exit_with_stderr() {
     run(async {
         let (agent, rx) = spawn(&["--reply", "a b c d e", "--crash-after", "2"]);
         ready(&rx).await;
-        let session = agent.new_session(cwd()).await.unwrap();
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
         agent.prompt(session.id, hello());
 
         let events = until(&rx, |e| matches!(e, AgentEvent::Exited { .. })).await;
@@ -355,7 +355,10 @@ fn crash_mid_stream_reports_exit_with_stderr() {
             }
             other => panic!("expected an exit error, got {other:?}"),
         }
-        assert_eq!(agent.new_session(cwd()).await, Err(AgentError::Exited));
+        assert_eq!(
+            agent.new_session(cwd(), vec![]).await,
+            Err(AgentError::Exited)
+        );
     });
 }
 
@@ -365,7 +368,7 @@ fn require_auth_emits_auth_required() {
         let (agent, rx) = spawn(&["--require-auth"]);
         ready(&rx).await;
         assert_eq!(
-            agent.new_session(cwd()).await,
+            agent.new_session(cwd(), vec![]).await,
             Err(AgentError::AuthRequired)
         );
         until(&rx, |e| {
@@ -382,7 +385,7 @@ fn prompt_auth_required_emits_auth_required() {
     run(async {
         let (agent, rx) = spawn(&["--require-auth-on-prompt"]);
         ready(&rx).await;
-        let session = agent.new_session(cwd()).await.unwrap();
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
         agent.prompt(session.id.clone(), hello());
 
         let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
@@ -407,7 +410,7 @@ fn flood_tool_output_arrives_intact() {
     run(async {
         let (agent, rx) = spawn(&["--flood", "5000000"]);
         ready(&rx).await;
-        let session = agent.new_session(cwd()).await.unwrap();
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
         agent.prompt(session.id, hello());
 
         let events = until(&rx, |e| {
@@ -451,7 +454,10 @@ fn load_session_replays_history() {
     run(async {
         let (agent, rx) = spawn(&[]);
         ready(&rx).await;
-        let started = agent.load_session("abc".into(), cwd()).await.unwrap();
+        let started = agent
+            .load_session("abc".into(), cwd(), vec![])
+            .await
+            .unwrap();
         assert_eq!(started.id, "abc");
 
         let replay: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -477,12 +483,18 @@ fn fork_replays_source_history() {
     run(async {
         let (agent, rx) = spawn(&[]);
         ready(&rx).await;
-        let forked = agent.fork_session("abc".into(), cwd()).await.unwrap();
+        let forked = agent
+            .fork_session("abc".into(), cwd(), vec![])
+            .await
+            .unwrap();
         assert_ne!(forked.id, "abc");
         assert_eq!(forked.modes.len(), 2);
 
         // The fork holds the source's conversation: loading it replays it under the new id.
-        agent.load_session(forked.id.clone(), cwd()).await.unwrap();
+        agent
+            .load_session(forked.id.clone(), cwd(), vec![])
+            .await
+            .unwrap();
         let replay: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert_eq!(
             replay,
@@ -498,11 +510,52 @@ fn fork_replays_source_history() {
             ]
         );
 
-        let missing = agent.fork_session("missing".into(), cwd()).await;
+        let missing = agent.fork_session("missing".into(), cwd(), vec![]).await;
         assert!(
             matches!(missing, Err(AgentError::Protocol(_))),
             "{missing:?}"
         );
+    });
+}
+
+/// R46: the MCP servers given to `new_session`, `load_session` and `fork_session` reach the
+/// agent (`--echo-mcp` answers each turn with the session's servers).
+#[test]
+fn mcp_servers_reach_the_agent() {
+    run(async {
+        let (agent, rx) = spawn(&["--echo-mcp"]);
+        ready(&rx).await;
+        let server = |name: &str| McpServer {
+            name: name.into(),
+            command: format!("/opt/{name}-mcp").into(),
+            args: vec!["--stdio".into()],
+            env: vec![("MODE".into(), "test".into())],
+        };
+        let turn = |session: String| {
+            agent.prompt(session, hello());
+            let rx = rx.clone();
+            async move {
+                let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+                agent_text(&events)
+            }
+        };
+
+        let both = vec![server("jira"), server("docs")];
+        let session = agent.new_session(cwd(), both).await.unwrap();
+        assert_eq!(
+            turn(session.id).await,
+            "mcp:jira=/opt/jira-mcp,docs=/opt/docs-mcp"
+        );
+
+        agent
+            .load_session("abc".into(), cwd(), vec![server("jira")])
+            .await
+            .unwrap();
+        while rx.try_recv().is_ok() {} // the replay
+        assert_eq!(turn("abc".into()).await, "mcp:jira=/opt/jira-mcp");
+
+        let forked = agent.fork_session("abc".into(), cwd(), vec![]).await;
+        assert_eq!(turn(forked.unwrap().id).await, "mcp:");
     });
 }
 

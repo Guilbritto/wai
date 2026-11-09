@@ -404,7 +404,10 @@ impl ChatSession {
     /// already be routed.
     pub fn load(&mut self, restore: bool, window: &mut Window, cx: &mut Context<Self>) {
         let agent = self.agent.clone();
-        let Ok(Some(handle)) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
+        let started = self
+            .registry
+            .update(cx, |r, cx| Some((r.handle(&agent, cx)?, r.mcp_servers())));
+        let Ok(Some((handle, mcp))) = started else {
             return;
         };
         self.handle = handle.clone();
@@ -417,7 +420,7 @@ impl ChatSession {
         self.update_model(cx, |m| m.state = TurnState::Working);
         let (id, cwd, registry) = (self.id.clone(), self.cwd.clone(), self.registry.clone());
         cx.spawn_in(window, async move |this, cx| {
-            let loaded = handle.load_session(id, cwd).await;
+            let loaded = handle.load_session(id, cwd, mcp).await;
             this.update_in(cx, |this, window, cx| {
                 let agent = this.agent.clone();
                 match loaded {
@@ -819,11 +822,8 @@ mod tests {
         let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
         fs::write(&a, "x\n").unwrap();
         // The fake agent edits a, creates b, then edits a again.
-        let flags = format!(
-            "--edit '{0}' --edit '{1}' --edit '{0}'",
-            a.display(),
-            b.display()
-        );
+        let (qa, qb) = (wai_agent::quote(&a), wai_agent::quote(&b));
+        let flags = format!("--edit {qa} --edit {qb} --edit {qa}");
         let (workspace, cx) = open(cx, fake_settings(&flags));
         let session = start_session(&workspace, cx);
         let edited = "edited by the fake agent\n";
@@ -904,9 +904,9 @@ mod tests {
         fs::write(&lib, &original).unwrap();
         fs::write(&keep, "mine\n").unwrap();
         let flags = format!(
-            "--edit-hunk '{}' --write '{}'",
-            lib.display(),
-            keep.display()
+            "--edit-hunk {} --write {}",
+            wai_agent::quote(&lib),
+            wai_agent::quote(&keep)
         );
         let (workspace, cx) = open(cx, fake_settings(&flags));
         let session = start_session(&workspace, cx);
@@ -1072,8 +1072,8 @@ mod tests {
         cx.executor().allow_parking(); // the fake agent is a real process
         let cwd = std::env::temp_dir();
         let flags = format!(
-            "--ask-permission --sessions 1 --sessions-cwd '{}'",
-            cwd.display()
+            "--ask-permission --sessions 1 --sessions-cwd {}",
+            wai_agent::quote(&cwd)
         );
         let (workspace, cx) = open(cx, fake_settings(&flags));
         let rows = load_history(&workspace, 1, cx);

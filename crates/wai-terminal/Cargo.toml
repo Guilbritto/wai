@@ -9,6 +9,7 @@ alacritty_terminal.workspace = true
 portable-pty.workspace = true
 async-channel.workspace = true
 anyhow.workspace = true
+dunce.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

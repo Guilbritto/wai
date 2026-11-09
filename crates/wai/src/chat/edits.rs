@@ -291,7 +291,7 @@ impl ChatSession {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .child(name.display().to_string()),
+                                .child(wai_settings::shown(name)),
                         )
                         .when(steps > 1, |el| {
                             el.child(
@@ -392,8 +392,13 @@ impl ChatSession {
         };
         // A file outside the session's folder shows in full: no doubt about which one.
         let name = match diff.path.starts_with(canonical(&self.cwd)) {
-            true => diff.path.file_name().unwrap_or_default().to_string_lossy(),
-            false => diff.path.to_string_lossy(),
+            true => diff
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .display()
+                .to_string(),
+            false => wai_settings::shown(&diff.path),
         };
         let title = format!("Revert {name}?");
         let (says, body) = match undo {
