@@ -147,13 +147,14 @@ impl ExtPanel {
     }
 
     /// The node and whether it grows to fill the panel's height: a `fill` list whose parents
-    /// are all columns, and those columns. `in_column`: the parent is a column or the panel.
-    /// `n` numbers the lists, markdown and progress bars for their element ids. Recursion is
-    /// bounded: a tree is at most `MAX_DEPTH` deep.
+    /// are all columns, and those columns. `in_column`: every parent is a column (or the panel);
+    /// `in_row`: the parent is a row. `n` numbers the lists, markdown and progress bars for
+    /// their element ids. Recursion is bounded: a tree is at most `MAX_DEPTH` deep.
     fn node(
         &mut self,
         node: &Node,
         in_column: bool,
+        in_row: bool,
         n: &mut usize,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -163,16 +164,21 @@ impl ExtPanel {
         let element = match node {
             Node::Column(children) | Node::Row(children) => {
                 let column = matches!(node, Node::Column(_));
+                // R56: below a row nothing fills, not even in a column: a row never grows.
+                let filling = in_column && column;
                 let mut fills = false;
                 let children: Vec<_> = (children.iter())
                     .map(|child| {
-                        let (element, grows) = self.node(child, column, n, window, cx);
+                        let (element, grows) = self.node(child, filling, !column, n, window, cx);
                         fills |= grows;
                         element
                     })
                     .collect();
                 let element = match column {
-                    true => v_flex().gap_2().when(fills, |el| el.flex_1().min_h_0()),
+                    // In a row, a column takes the width left: a list has none of its own.
+                    true => (v_flex().gap_2())
+                        .when(fills, |el| el.flex_1().min_h_0())
+                        .when(in_row, |el| el.flex_1()),
                     false => h_flex().gap_2().flex_wrap(),
                 };
                 return (element.children(children).into_any_element(), fills);
@@ -376,7 +382,7 @@ impl Render for ExtPanel {
         let (body, fills) = match self.tree.clone() {
             None => (status("Waiting for the extension…", "panel-waiting"), false),
             Some(Err(TooLarge)) => (status("Panel too large", "panel-too-large"), false),
-            Some(Ok(tree)) => self.node(&tree, true, &mut 0, window, cx),
+            Some(Ok(tree)) => self.node(&tree, true, false, &mut 0, window, cx),
         };
         // A filling list scrolls itself; anything else scrolls with the panel.
         v_flex()
@@ -395,7 +401,8 @@ mod tests {
 
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
-        AppContext as _, ElementId, Entity, SharedString, TestAppContext, VisualTestContext,
+        AppContext as _, ElementId, Entity, ScrollDelta, ScrollEvent, SharedString, TestAppContext,
+        VisualTestContext, point, px,
     };
     use serde_json::{Value, json};
     use wai_ext::panel::{self, Node};
@@ -567,6 +574,47 @@ mod tests {
         let row = json!({"type": "row", "children": [list(true)]});
         show(&panel, tree(row, "Second"), cx);
         assert!(!shown(("panel-item", 30usize), cx));
+    }
+
+    /// R56: nor below a row, even in a column: such a list keeps its own height (it does not
+    /// collapse) and the panel still scrolls.
+    #[gpui_kit::test]
+    fn fill_below_a_row_keeps_the_panel_scrolling(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        let items: Vec<_> = (0..200)
+            .map(|n| json!({"id": n.to_string(), "title": "t"}))
+            .collect();
+        let lines: Vec<_> = (0..80)
+            .map(|n| json!({"type": "text", "text": format!("line {n}")}))
+            .collect();
+        let list = json!({"type": "list", "fill": true, "items": items});
+        let column = json!({"type": "column", "children": [list]});
+        show(
+            &panel,
+            json!({"type": "column", "children": [
+                {"type": "row", "children": [column]},
+                {"type": "column", "children": lines},
+                {"type": "button", "id": "after", "label": "After"},
+            ]}),
+            cx,
+        );
+        assert!(shown(("panel-item", 0usize), cx), "the list's rows show");
+        assert!(!shown(("panel-item", 30usize), cx), "at its own height");
+
+        let top = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| window.find(name("panel-button:after")).bounds().top())
+        };
+        let before = top(cx);
+        // Over the lines below the list: the list scrolls itself.
+        let position =
+            cx.update(|window, _| point(px(20.), window.viewport_size().height - px(20.)));
+        cx.simulate_event(ScrollEvent {
+            position,
+            delta: ScrollDelta::Lines(point(0., -20.)),
+            ..Default::default()
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        assert!(top(cx) < before, "the panel scrolls");
     }
 
     #[cfg(unix)]
