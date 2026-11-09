@@ -115,6 +115,34 @@ impl ToolItem {
     }
 }
 
+/// The "Show all" button's label for `hidden` lines past the first 2,000. R41: it never promises
+/// more than expanding shows (up to 20,000 lines in all).
+pub fn show_label(hidden: usize) -> String {
+    let shown = TOOL_OUTPUT_EXPANDED_LINES - TOOL_OUTPUT_MAX_LINES;
+    if hidden <= shown {
+        format!("Show all ({hidden} more lines)")
+    } else {
+        format!(
+            "Show more ({} of {} more lines)",
+            grouped(shown),
+            grouped(hidden)
+        )
+    }
+}
+
+/// `1234567` as `1,234,567`.
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageInfo {
     pub used: u64,
@@ -647,6 +675,22 @@ mod tests {
         let (v, hidden) = item.visible_text();
         assert_eq!(v.lines().count(), 20_000);
         assert_eq!(hidden, Some(5_000));
+    }
+
+    /// R41: the button never promises more than it shows: past 18,000 hidden lines it says
+    /// how many of them it adds.
+    #[test]
+    fn show_label_promises_what_it_shows() {
+        assert_eq!(show_label(3_000), "Show all (3000 more lines)");
+        assert_eq!(show_label(18_000), "Show all (18000 more lines)");
+        assert_eq!(
+            show_label(48_000),
+            "Show more (18,000 of 48,000 more lines)"
+        );
+        assert_eq!(
+            show_label(1_234_567),
+            "Show more (18,000 of 1,234,567 more lines)"
+        );
     }
 
     fn perm() -> PermissionRequest {

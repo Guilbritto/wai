@@ -11,7 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::{PermissionChoice, ToolStatus};
 
-use super::model::{ChatItem, NoticeKind, ToolItem, TurnState, UsageInfo};
+use super::model::{ChatItem, NoticeKind, ToolItem, TurnState, UsageInfo, show_label};
 use super::view::{ChatEvent, ChatSession};
 use super::{permission, question};
 
@@ -211,7 +211,7 @@ impl ChatSession {
                     false => Button::new(("show-all", ix))
                         .ghost()
                         .small()
-                        .label(format!("Show all ({n} more lines)"))
+                        .label(show_label(n))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(ChatItem::Tool(tool)) = this.model.items.get_mut(ix) {
                                 tool.expanded = true;

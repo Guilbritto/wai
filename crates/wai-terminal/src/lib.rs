@@ -245,6 +245,11 @@ impl TerminalModel {
         self.term.lock().scroll_display(Scroll::Delta(lines));
     }
 
+    /// Back to the bottom, where the shell writes.
+    pub fn scroll_to_bottom(&self) {
+        self.term.lock().scroll_display(Scroll::Bottom);
+    }
+
     /// Starts a selection at visible cell `(col, row)`; `right`: the pointer is on the cell's
     /// right half. A selection that never grows selects nothing.
     pub fn select(&self, col: u16, row: u16, right: bool) {

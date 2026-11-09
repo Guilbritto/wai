@@ -834,6 +834,12 @@ impl Workspace {
     /// unsaved edits, else after asking "Save all / Discard / Cancel". Save all stops, and
     /// everything stays, at the first save that fails.
     pub(crate) fn leave(&mut self, then: Leave, window: &mut Window, cx: &mut Context<Self>) {
+        // R41: opening the folder already open changes nothing.
+        if let Leave::Open(project) = &then
+            && canonical(project) == self.project
+        {
+            return;
+        }
         let dirty = self.dirty_tabs(cx);
         if dirty.is_empty() {
             return self.proceed(then, window, cx);
@@ -1828,42 +1834,29 @@ pub(crate) mod tests {
             })
         });
         let pid = std::fs::read_to_string(&pid_file).unwrap();
+        // The shell ignores SIGHUP, so the terminal's stop holds it ~200 ms before the kill. It
+        // marks the agent's death, which it sees only while it still runs: before that stop.
+        let seen = dir.path().join("agent-dead");
         cx.simulate_keystrokes("ctrl-`");
-        cx.simulate_input("trap '' HUP; printf wai-%s trapped");
+        cx.simulate_input(&format!(
+            "trap '' HUP; printf wai-%s watching; while kill -0 {} 2>/dev/null; do :; done; : > '{}'",
+            pid.trim(),
+            seen.display()
+        ));
         cx.simulate_keystrokes("enter");
         let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().unwrap());
-        wait_until(cx, "the trap", |cx| {
+        wait_until(cx, "the watch", |cx| {
             terminal.read_with(cx, |t, _| {
                 t.snapshot.rows.iter().any(|row| {
                     let text: String = row.iter().map(|run| run.text.as_str()).collect();
-                    text.contains("wai-trapped")
+                    text.contains("wai-watching")
                 })
             })
         });
 
-        let started = Instant::now();
-        let dead = std::thread::spawn(move || {
-            while std::process::Command::new("kill")
-                .args(["-0", pid.trim()])
-                .stderr(std::process::Stdio::null())
-                .status()
-                .unwrap()
-                .success()
-            {
-                assert!(
-                    started.elapsed() < Duration::from_secs(2),
-                    "agent still alive"
-                );
-            }
-            started.elapsed()
-        });
         cx.cx.update(|app| app.shutdown());
 
-        let dead = dead.join().unwrap();
-        assert!(
-            dead < Duration::from_millis(150),
-            "the agent died {dead:?} into quit"
-        );
+        assert!(seen.exists(), "the terminal stopped before the agent died");
     }
 
     /// R41: each agent numbers its requests from 1, so a resolution reaches only the sessions of

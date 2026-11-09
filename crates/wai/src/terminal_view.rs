@@ -151,8 +151,9 @@ impl TerminalView {
             return;
         };
         model.write(bytes);
+        // Not by the snapshot's offset: output since it was taken moved the view further up.
         if self.snapshot.display_offset > 0 {
-            model.scroll(-(self.snapshot.display_offset as i32));
+            model.scroll_to_bottom();
             self.refresh(false, cx);
         }
     }
@@ -383,6 +384,42 @@ mod tests {
         assert_eq!(terminal.read_with(cx, |t, _| t.snapshot.display_offset), 3);
 
         // Typing goes back to the bottom.
+        cx.simulate_input("x");
+        assert_eq!(terminal.read_with(cx, |t, _| t.snapshot.display_offset), 0);
+    }
+
+    /// R41: output that comes while scrolled up moves the view with it, ahead of the snapshot
+    /// until the next redraw; typing still lands at the bottom.
+    #[gpui_kit::test]
+    fn typing_returns_to_the_bottom_past_new_output(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the shell is a real process
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        cx.simulate_input("seq 1 200");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "the output", |cx| find(&terminal, "199", cx).is_some());
+        let bounds = cx.debug_bounds("terminal").expect("terminal drawn");
+        cx.simulate_event(ScrollEvent {
+            position: bounds.center(),
+            delta: ScrollDelta::Lines(point(0., 3.)),
+            ..Default::default()
+        });
+        assert_eq!(terminal.read_with(cx, |t, _| t.snapshot.display_offset), 3);
+
+        // More output, straight to the shell; the view's tasks do not run meanwhile.
+        let offset = |cx: &mut VisualTestContext| {
+            terminal.read_with(cx, |t, _| {
+                t.model.as_ref().unwrap().snapshot().display_offset
+            })
+        };
+        terminal.read_with(cx, |t, _| t.model.as_ref().unwrap().write(b"seq 1 50\r"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while offset(cx) < 50 {
+            assert!(std::time::Instant::now() < deadline, "no new output");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
         cx.simulate_input("x");
         assert_eq!(terminal.read_with(cx, |t, _| t.snapshot.display_offset), 0);
     }

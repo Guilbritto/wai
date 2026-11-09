@@ -536,4 +536,28 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "mine one\n");
         assert!(!tab.read_with(cx, |t, _| t.dirty || t.disk_changed));
     }
+
+    /// R41: ⌘O on the folder already open changes nothing: no question, the files stay.
+    #[gpui_kit::test]
+    fn opening_the_open_project_changes_nothing(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the project's watcher reports from a real thread
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonical(dir.path());
+        let path = root.join("a.txt");
+        fs::write(&path, "a").unwrap();
+        let (workspace, cx) = open(cx, Settings::default());
+        leave(&workspace, Leave::Open(root.clone()), cx);
+        open_file(&workspace, &path, None, cx);
+        cx.simulate_input("edit ");
+
+        // Spelled another way (`/var/…` against `/private/var/…`), it still is the same folder.
+        leave(&workspace, Leave::Open(dir.path().to_path_buf()), cx);
+
+        assert!(!dialog(cx), "no question");
+        assert_eq!(
+            text(&active_tab(&workspace, cx), cx),
+            "edit a",
+            "the tab stays"
+        );
+    }
 }
