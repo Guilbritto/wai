@@ -87,6 +87,19 @@ impl ChatSession {
         cx.notify();
     }
 
+    /// Puts `text` in the prompt box without sending it.
+    pub fn prefill(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            input.set_value(text.to_string(), window, cx)
+        });
+    }
+
+    /// The text waiting in the prompt box.
+    #[cfg(test)]
+    pub fn draft(&self, cx: &App) -> String {
+        self.input.read(cx).value().to_string()
+    }
+
     pub(super) fn cancel(&mut self, _: &CancelTurn, _: &mut Window, cx: &mut Context<Self>) {
         match self.model.state {
             TurnState::Working | TurnState::NeedsYou => self.handle.cancel(self.id.clone()),

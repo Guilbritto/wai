@@ -12,7 +12,7 @@ use wai_agent::{
     StopReason,
 };
 use wai_project::{FsChange, ProjectWatcher};
-use wai_settings::{AppState, OpenSession, Settings};
+use wai_settings::{AppState, OpenSession, Settings, Template};
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::agents_view::{AgentsView, ShowSession};
@@ -69,6 +69,8 @@ pub struct Workspace {
     /// Canonical, so history cwds compare with it (R3).
     pub project: PathBuf,
     pub settings: Settings,
+    /// The "New from template" menu's entries; empty hides the menu.
+    pub templates: Vec<Template>,
     pub registry: Entity<AgentRegistry>,
     /// Every open session, shown in a pane or not, in the order they opened.
     pub sessions: Vec<Entity<ChatSession>>,
@@ -167,6 +169,7 @@ impl Workspace {
         Self {
             project,
             settings,
+            templates: Vec::new(),
             registry,
             agents,
             sessions: Vec::new(),
@@ -605,6 +608,46 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let agent = self.settings.default_agent.clone();
+        self.start_session(agent, None, window, cx)
+    }
+
+    /// `new_session` for template `ix`: its agent (the default one if it names none), its prompt
+    /// pre-filled and not sent. An agent the settings do not define is an error in the pane.
+    pub(crate) fn start_template(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(template) = self.templates.get(ix).cloned() else {
+            return;
+        };
+        let agent = template
+            .agent
+            .clone()
+            .unwrap_or_else(|| self.settings.default_agent.clone());
+        if !self.settings.agents.contains_key(&agent) {
+            let pane = self.session_pane();
+            if matches!(self.panes[pane], Pane::Preparing { .. }) {
+                return;
+            }
+            self.panes[pane] = Pane::Empty(Some(format!(
+                "Template \"{}\" uses unknown agent \"{agent}\"",
+                template.name
+            )));
+            return cx.notify();
+        }
+        self.start_session(agent, Some(template.prompt), window, cx)
+    }
+
+    fn start_session(
+        &mut self,
+        agent: String,
+        prefill: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let ix = self.session_pane();
         if matches!(self.panes[ix], Pane::Preparing { .. }) {
             return;
@@ -612,7 +655,6 @@ impl Workspace {
         if ix != self.focused_pane {
             self.focus_pane(ix, window, cx);
         }
-        let agent = self.settings.default_agent.clone();
         let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
             self.panes[ix] = Pane::Empty(Some(format!("No agent named {agent} in the settings.")));
             return cx.notify();
@@ -641,6 +683,9 @@ impl Workspace {
                         let session = cx.new(|cx| {
                             ChatSession::new(agent, started, cwd, handle, registry, window, cx)
                         });
+                        if let Some(text) = prefill {
+                            session.update(cx, |s, cx| s.prefill(&text, window, cx));
+                        }
                         this.add_session(session.clone(), window, cx);
                         this.refresh_history(cx);
                         Pane::Session(session)
@@ -1219,6 +1264,60 @@ pub(crate) mod tests {
         workspace.read_with(cx, |w, _| {
             assert_eq!(w.sessions.len(), 1);
             assert_eq!(w.panes[0].session(), w.sessions.first());
+        });
+    }
+
+    fn template(name: &str, agent: Option<&str>, prompt: &str) -> wai_settings::Template {
+        wai_settings::Template {
+            name: name.into(),
+            agent: agent.map(Into::into),
+            prompt: prompt.into(),
+        }
+    }
+
+    #[gpui_kit::test]
+    fn template_prefills_prompt_without_sending(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        // No templates, no menu.
+        assert!(!cx.debug_bounds("sidebar-templates").is_some());
+        workspace.update(cx, |w, cx| {
+            w.templates = vec![template("review", None, "Review this diff\nline 2")];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("sidebar-templates").is_some());
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.start_template(0, window, cx));
+        });
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
+        });
+        workspace.read_with(cx, |w, cx| {
+            let session = w.panes[0].session().unwrap().read(cx);
+            assert_eq!(session.agent, "fake");
+            assert_eq!(session.draft(cx), "Review this diff\nline 2");
+            assert!(session.model.items.is_empty(), "nothing was sent");
+            assert_eq!(session.model.state, TurnState::Idle);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn template_unknown_agent_is_error(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
+        workspace.update(cx, |w, _| {
+            w.templates = vec![template("review", Some("ghost"), "x")];
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.start_template(0, window, cx));
+        });
+        workspace.read_with(cx, |w, _| {
+            assert!(matches!(
+                &w.panes[0],
+                Pane::Empty(Some(m)) if m == "Template \"review\" uses unknown agent \"ghost\""
+            ));
+            assert!(w.sessions.is_empty());
         });
     }
 

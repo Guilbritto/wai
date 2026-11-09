@@ -13,7 +13,7 @@ mod workspace;
 use std::path::PathBuf;
 
 use anyhow::Context as _;
-use wai_settings::{AppState, Settings, config_dir};
+use wai_settings::{AppState, Settings, config_dir, load_templates};
 
 fn main() -> anyhow::Result<()> {
     // `WAI_STATE_PATH=<file>` keeps a manual run away from the real state.
@@ -26,10 +26,12 @@ fn main() -> anyhow::Result<()> {
     // Everything relative is resolved by now; agents spawn from a neutral dir, not a repo.
     wai_agent::enter_neutral_dir(&config_dir()).context("cannot enter the config dir")?;
     let (settings, notices) = Settings::load(&config_dir(), Some(&project))?;
+    let (templates, template_notices) = load_templates(&config_dir(), Some(&project));
+    let notices: Vec<String> = notices.into_iter().chain(template_notices).collect();
     for notice in &notices {
         eprintln!("wai: {notice}");
     }
-    app::run(project, settings, notices, state_path);
+    app::run(project, settings, templates, notices, state_path);
     Ok(())
 }
 

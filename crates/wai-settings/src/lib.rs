@@ -149,6 +149,61 @@ impl Settings {
     }
 }
 
+/// A named starting point for a conversation: which agent, and a first prompt that is
+/// pre-filled but not sent.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct Template {
+    pub name: String,
+    /// `None`: the default agent. It can only name an agent the user or the defaults define.
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub prompt: String,
+}
+
+#[derive(Deserialize)]
+struct TemplateFile {
+    #[serde(default)]
+    template: Vec<Template>,
+}
+
+fn read_templates(path: &Path, notices: &mut Vec<String>) -> Vec<Template> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            notices.push(format!(
+                "Ignored templates: cannot read {}: {e}",
+                path.display()
+            ));
+            return Vec::new();
+        }
+    };
+    match toml::from_str::<TemplateFile>(&text) {
+        Ok(file) => file.template,
+        Err(e) => {
+            notices.push(format!("Ignored templates in {}: {e}", path.display()));
+            Vec::new()
+        }
+    }
+}
+
+/// `<user_dir>/templates.toml` then `<project_dir>/.wai/templates.toml`, each a list of
+/// `[[template]]` tables (`name`, optional `agent`, `prompt`). Project entries come after the
+/// user's; a project template replaces a user one of the same name. A file that does not load
+/// is skipped with a notice (templates never block a launch or hold code, so the project may
+/// define them, R15).
+pub fn load_templates(user_dir: &Path, project_dir: Option<&Path>) -> (Vec<Template>, Vec<String>) {
+    let mut notices = Vec::new();
+    let mut all = read_templates(&user_dir.join("templates.toml"), &mut notices);
+    if let Some(dir) = project_dir {
+        let project = read_templates(&dir.join(".wai").join("templates.toml"), &mut notices);
+        all.retain(|t| !project.iter().any(|p| p.name == t.name));
+        all.extend(project);
+    }
+    (all, notices)
+}
+
 pub fn config_dir() -> PathBuf {
     #[cfg(windows)]
     {
@@ -340,5 +395,49 @@ mod tests {
         assert_eq!(AppState::load(&path), state);
         std::fs::write(&path, "{").unwrap();
         assert_eq!(AppState::load(&path), AppState::default());
+    }
+
+    #[test]
+    fn templates_merge_user_and_project() {
+        let u = tempfile::tempdir().unwrap();
+        let p = tempfile::tempdir().unwrap();
+        write(
+            u.path(),
+            "templates.toml",
+            "[[template]]\nname = \"review\"\nprompt = \"user review\"\n\
+             [[template]]\nname = \"docs\"\nagent = \"other\"\nprompt = \"write docs\"\n",
+        );
+        write(
+            p.path(),
+            ".wai/templates.toml",
+            "[[template]]\nname = \"review\"\nprompt = \"project review\"\n\
+             [[template]]\nname = \"bug\"\nprompt = \"\"\"\nline 1\nline 2\n\"\"\"\n",
+        );
+        let (all, notices) = load_templates(u.path(), Some(p.path()));
+        assert_eq!(notices, Vec::<String>::new());
+        let names: Vec<_> = all.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["docs", "review", "bug"]);
+        assert_eq!(all[0].agent.as_deref(), Some("other"));
+        assert_eq!(all[1].prompt, "project review");
+        assert_eq!(all[2].prompt, "line 1\nline 2\n");
+    }
+
+    #[test]
+    fn malformed_templates_are_skipped_with_a_notice() {
+        let u = tempfile::tempdir().unwrap();
+        let p = tempfile::tempdir().unwrap();
+        write(u.path(), "templates.toml", "[[template]]\nname = \"ok\"\n");
+        write(
+            p.path(),
+            ".wai/templates.toml",
+            "[[template]]\nprompt = 3\n",
+        );
+        let (all, notices) = load_templates(u.path(), Some(p.path()));
+        assert_eq!(all.len(), 1);
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].starts_with("Ignored templates in "),
+            "{notices:?}"
+        );
     }
 }

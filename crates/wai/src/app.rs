@@ -6,7 +6,7 @@ use gpui_kit::component::input::CursorBlink;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{Theme, ThemeMode, WindowExt as _};
 use gpui_kit::*;
-use wai_settings::{Settings, ThemeChoice};
+use wai_settings::{Settings, Template, ThemeChoice};
 
 use crate::workspace::Workspace;
 
@@ -74,7 +74,13 @@ fn bind_keys(cx: &mut App) {
 
 /// `notices`: what the settings left out, shown once in the window.
 /// `state_path`: where the open sessions, the project and the terminal's visibility are kept.
-pub fn run(project: PathBuf, settings: Settings, notices: Vec<String>, state_path: PathBuf) {
+pub fn run(
+    project: PathBuf,
+    settings: Settings,
+    templates: Vec<Template>,
+    notices: Vec<String>,
+    state_path: PathBuf,
+) {
     // Without the asset source every component icon (status, chevrons) renders blank.
     let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
     app.run(move |cx| {
@@ -103,6 +109,7 @@ pub fn run(project: PathBuf, settings: Settings, notices: Vec<String>, state_pat
         window
             .update(cx, |_, window, cx| {
                 workspace.update(cx, |w, cx| {
+                    w.templates = templates;
                     w.start_agent(cx);
                     w.watch_project(window, cx);
                     w.restore(window, cx);

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -154,6 +155,38 @@ impl Workspace {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(folder_name(&self.project)),
                     )
+                    .when(!self.templates.is_empty(), |el| {
+                        let (workspace, names) = (
+                            cx.entity().downgrade(),
+                            self.templates
+                                .iter()
+                                .map(|t| t.name.clone())
+                                .collect::<Vec<_>>(),
+                        );
+                        el.child(
+                            div().debug_selector(|| "sidebar-templates".into()).child(
+                                Button::new("sidebar-templates")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::ChevronDown)
+                                    .tooltip("New from template")
+                                    .dropdown_menu(move |menu, _, _| {
+                                        names.iter().enumerate().fold(menu, |menu, (ix, name)| {
+                                            let workspace = workspace.clone();
+                                            menu.item(PopupMenuItem::new(name.clone()).on_click(
+                                                move |_, window, cx| {
+                                                    workspace
+                                                        .update(cx, |w, cx| {
+                                                            w.start_template(ix, window, cx)
+                                                        })
+                                                        .ok();
+                                                },
+                                            ))
+                                        })
+                                    }),
+                            ),
+                        )
+                    })
                     .child(
                         Button::new("sidebar-new")
                             .ghost()
