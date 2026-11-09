@@ -51,7 +51,8 @@ pub fn import() {
     unsafe { std::env::set_var("PATH", path) };
     if cached {
         // ponytail: the refreshed PATH is for the next launch; this one keeps the cached PATH
-        // (no `set_var` once threads run).
+        // (no `set_var` once threads run). A quit during the refresh orphans the shell; it ends
+        // when its rc does.
         std::thread::spawn(move || {
             if let Err(e) = ask_shell(&shell, &dir, &current, TIMEOUT) {
                 eprintln!(
@@ -155,8 +156,8 @@ fn login_path(
     let open = File::options()
         .read(true)
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
+        .mode(0o600)
         .open(&name);
     let mut out = open.map_err(|e| format!("cannot create {}: {e}", name.display()))?;
     std::fs::remove_file(&name).ok();
@@ -177,7 +178,6 @@ fn login_path(
         if Instant::now() >= deadline {
             let pid = rustix::process::Pid::from_child(&child);
             let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-            let _ = child.kill();
             let _ = child.wait();
             return Err(format!("no answer in {timeout:?}"));
         }
@@ -277,7 +277,7 @@ PATH="$(pwd -P)/bin:/usr/bin:/bin"; export PATH
 eval "$4"
 echo "logout noise""#;
         let shell = fake_shell(bin.path(), body);
-        let found = login_path(&shell, cwd.path(), LAUNCH.as_ref(), SECOND).unwrap();
+        let found = login_path(&shell, cwd.path(), LAUNCH.as_ref(), PATIENCE).unwrap();
         let cwd_real = wai_settings::canonical(cwd.path());
         assert_eq!(found, format!("{}/bin:/usr/bin:/bin", cwd_real.display()));
         // The output file is gone (R18: and it lives in the config dir, never a repository).
@@ -303,9 +303,35 @@ echo "logout noise""#;
         assert!(Duration::from_millis(300) <= elapsed && elapsed < Duration::from_secs(2));
     }
 
+    #[test]
+    fn a_hanging_login_shell_dies_with_what_it_started() {
+        let bin = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        let ticks = bin.path().join("ticks");
+        // A job an rc file starts in the background: one line every 50 ms, for 10 s at most.
+        let body = "[ \"$1\" = warm ] && exit 0\n\
+                    t=\"$(dirname \"$0\")/ticks\"\n\
+                    (for i in $(seq 200); do echo x >> \"$t\"; sleep 0.05; done) &\n\
+                    sleep 30";
+        let shell = fake_shell(bin.path(), body);
+        // The first exec of a new file can wait seconds under load (macOS checks it), past any
+        // deadline here: run it once first, so the job surely starts before the kill.
+        assert!(Command::new(&shell).arg("warm").status().unwrap().success());
+        let found = login_path(&shell, cfg.path(), LAUNCH.as_ref(), Duration::from_secs(1));
+        assert!(
+            found.as_ref().is_err_and(|e| e.contains("no answer")),
+            "{found:?}"
+        );
+        let size = || std::fs::metadata(&ticks).map_or(0, |m| m.len());
+        std::thread::sleep(Duration::from_millis(100));
+        let before = size();
+        assert!(before > 0, "the background job never ran");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(size(), before, "the background job outlived the shell");
+    }
+
     /// A fake login shell in its own dir that puts `/shell/bin` before the PATH it inherits, as a
-    /// `.zprofile` does, and leaves `ran` there,
-    /// and an empty config dir.
+    /// `.zprofile` does, and leaves `ran` there; and an empty config dir.
     fn harness() -> (tempfile::TempDir, PathBuf, tempfile::TempDir) {
         let bin = tempfile::tempdir().unwrap();
         let body = "/usr/bin/touch \"$(/usr/bin/dirname \"$0\")/ran\"\nPATH=\"/shell/bin:$PATH\"; export PATH\neval \"$4\"";
@@ -322,14 +348,14 @@ echo "logout noise""#;
         std::fs::symlink_metadata(path).unwrap().mode() & 0o777
     }
 
-    const SECOND: Duration = Duration::from_secs(10);
+    const PATIENCE: Duration = Duration::from_secs(10);
     const LAUNCH: &str = "/usr/bin:/bin";
 
     #[test]
     fn a_trusted_cache_is_used_and_the_shell_is_not_asked() {
         let (bin, shell, cfg) = harness();
         write_cache_file(&cfg.path().join(CACHE), "/cached/bin:/usr/bin", 0o600);
-        let found = resolve(&shell, cfg.path(), LAUNCH.as_ref(), SECOND).unwrap();
+        let found = resolve(&shell, cfg.path(), LAUNCH.as_ref(), PATIENCE).unwrap();
         assert_eq!(found, ("/cached/bin:/usr/bin:/bin".into(), true));
         assert!(!bin.path().join("ran").exists());
     }
@@ -337,7 +363,7 @@ echo "logout noise""#;
     #[test]
     fn without_a_cache_the_shell_is_asked_and_its_path_cached() {
         let (bin, shell, cfg) = harness();
-        let found = resolve(&shell, cfg.path(), LAUNCH.as_ref(), SECOND).unwrap();
+        let found = resolve(&shell, cfg.path(), LAUNCH.as_ref(), PATIENCE).unwrap();
         assert_eq!(found, ("/shell/bin:/usr/bin:/bin".into(), false));
         assert!(bin.path().join("ran").exists());
         let cache = cfg.path().join(CACHE);
@@ -364,7 +390,7 @@ echo "logout noise""#;
                 }
                 _ => write_cache_file(&cache, &oversized, 0o600),
             }
-            let found = resolve(&shell, cfg.path(), LAUNCH.as_ref(), SECOND).unwrap();
+            let found = resolve(&shell, cfg.path(), LAUNCH.as_ref(), PATIENCE).unwrap();
             assert_eq!(found, ("/shell/bin:/usr/bin:/bin".into(), false), "{case}");
             assert!(bin.path().join("ran").exists(), "{case}");
             // Replaced by a trusted one; a symlink's target is left alone.
@@ -386,7 +412,7 @@ echo "logout noise""#;
         write_cache_file(&cache, "/old/bin", 0o600);
         let mut old = std::fs::File::open(&cache).unwrap();
         assert_eq!(
-            ask_shell(&shell, cfg.path(), "/launch/bin".as_ref(), SECOND).unwrap(),
+            ask_shell(&shell, cfg.path(), "/launch/bin".as_ref(), PATIENCE).unwrap(),
             "/shell/bin:/launch/bin"
         );
         assert_eq!(

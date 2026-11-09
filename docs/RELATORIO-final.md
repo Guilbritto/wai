@@ -150,7 +150,7 @@ Os números finais do `.app` ficam na seção abaixo.
 | R65 | Adiados: o DMG em si não é notarizado (o app dentro é); rodar de novo pode criar 2º rascunho; certificado Windows em hardware precisa de `sign-command` | Um passo de notarização a mais depois |
 | R66 | `wai-rotinas` pode limitar cada espera a 1 min, porque o relógio do Go para durante o sono do Mac | ~60 despertares/h numa extensão opcional |
 | R67 | `wai-rotinas` recusa todo script no Windows (não há checagem de ACL na stdlib) | Sem rotinas no Windows até existir essa checagem |
-| R68 | No macOS, aberto fora do terminal (sem `TERM`), o wai pega só o `PATH` do shell de login (`-i -l`, 3 s, uma vez, antes de qualquer thread) | O `.zshrc` atrasa toda abertura pelo Finder (~1,6 s nesta máquina) |
+| R68 | No macOS, aberto fora do terminal (sem `TERM`), o wai pega só o `PATH` do shell de login (`-i -l`, 3 s, uma vez, antes de qualquer thread) | O `.zshrc` atrasa a abertura pelo Finder: ~1,6 s só na 1ª abertura desde a R69 |
 | R69 | Cache do `PATH` do shell: o 1º launch espera o shell uma vez, os seguintes usam o cache e atualizam em segundo plano | Um `PATH` novo só vale no launch seguinte |
 
 ## Lacunas conhecidas (atuais)
