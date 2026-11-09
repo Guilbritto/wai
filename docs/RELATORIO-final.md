@@ -68,33 +68,71 @@ Documentação nova (em inglês):
 | 4.3 Atualização | Checagem **desligada por padrão**, uma vez por abertura, só avisa (`wai <versão> is available`). Nunca baixa nada |
 | 4.4 Extensões próprias | `wai-navegador` (MCP do Playwright via `npx`), `wai-rotinas` (scripts agendados de uma lista sua) e `wai-remoto` (só o desenho) |
 | 4.5 Documentação | README, guia do usuário, guia de extensões, este relatório |
+| 4.5.1 PATH pelo Finder | Aberto pelo Finder ou Dock, o wai pega o `PATH` do seu shell de login, com cache (R68, R69). Sem isso, o agente padrão (`npx`) não abria no 1º uso do DMG |
+| 4.6 Revisão final | Revisão do branch inteiro, uma leva de correções (R70), medições do `.app` e teste com o Claude real |
 
 ## Números ao longo das fases
 
 Build release, neste Mac.
 
-| Métrica | Meta | Central | S2 (Fase 0) | Fase 1 | Fase 2 | Fase 3 |
-|---|---|---|---|---|---|---|
-| CPU parado | < 0,5% | ~8–9% | 0,0% | **0,15%** | **0,15%** (0,18% com 5 arquivos) | **0,16%** (extensão ligada) |
-| Memória (1 projeto, 3 sessões, terminal) | < 300 MB | servidor 33–95 MB + aba do Chrome | 153 MB (spike, sem sessões) | 127–133 MB | **72 MB** (119 MB com 5 arquivos) | **72 MB** |
-| Janela visível | < 1 s | aba do navegador | ~180 ms | 0,23–0,27 s (0,69 s a frio) | 0,24–0,29 s | painel "My cards" em 0,22–0,29 s |
-| CPU com streaming a 40 tokens/s | < 10% | texto com até 2 s de atraso | 14–17% | 6,4% | 7,5% | — |
-| Arquivo de 100 MB | sem travar | não existe | rolagem 0,6–2,6 ms/quadro | — | abre em 436 ms, só leitura | — |
-| Listar conversas | — | varre 1,2 GB de jsonl | 74 ms (94 sessões) | pelo protocolo | — | 93 sessões |
-| Busca (`fn ` no front da Way) | — | — | — | — | 1º resultado em 6 ms, total 55 ms | — |
-| Processo de uma extensão | — | — | — | — | — | ~6 MB |
-| Testes automáticos | — | — | — | 71 | 159 | 250 |
+| Métrica | Meta | Central | S2 (Fase 0) | Fase 1 | Fase 2 | Fase 3 | Fase 4 (`.app`) |
+|---|---|---|---|---|---|---|---|
+| CPU parado | < 0,5% | ~8–9% | 0,0% | **0,15%** | **0,15%** (0,18% com 5 arquivos) | **0,16%** (extensão ligada) | **0,16%** (0,12% por `open -n`) |
+| Memória (1 projeto, 3 sessões, terminal) | < 300 MB | servidor 33–95 MB + aba do Chrome | 153 MB (spike, sem sessões) | 127–133 MB | **72 MB** (119 MB com 5 arquivos) | **72 MB** | **73–74 MB** |
+| Janela visível | < 1 s | aba do navegador | ~180 ms | 0,23–0,27 s (0,69 s a frio) | 0,24–0,29 s | painel "My cards" em 0,22–0,29 s | **0,25–0,30 s** (0,33–0,36 s por `open -n`) |
+| CPU com streaming a 40 tokens/s | < 10% | texto com até 2 s de atraso | 14–17% | 6,4% | 7,5% | — | — |
+| Arquivo de 100 MB | sem travar | não existe | rolagem 0,6–2,6 ms/quadro | — | abre em 436 ms, só leitura | — | — |
+| Listar conversas | — | varre 1,2 GB de jsonl | 74 ms (94 sessões) | pelo protocolo | — | 93 sessões | 101 sessões |
+| Busca (`fn ` no front da Way) | — | — | — | — | 1º resultado em 6 ms, total 55 ms | — | — |
+| Processo de uma extensão | — | — | — | — | — | ~6 MB | ~6 MB |
+| Testes automáticos | — | — | — | 71 | 159 | 250 | 283 + 15 em Go |
 
-**Fase 4 até a revisão final:**
-- 283 testes em Rust e 15 em Go (8 em `wai-rotinas`, 7 em `wai-waycarbon`);
-- `wai.app` de 44 MB e DMG de ~14 MB, depois que a checagem de atualização trouxe a pilha HTTPS;
-- janela visível ~0,54 s depois de abrir o `.app` (medição da 4.1).
-
-Os números finais do `.app` ficam na seção abaixo.
+Na Fase 4, os 15 testes em Go são 8 do `wai-rotinas` e 7 do `wai-waycarbon`. O detalhe do `.app` fica na seção abaixo.
 
 ## Fase 4: medições do .app e revisão final
 
-(preenchido na Tarefa 4.6)
+### Medições do `.app`
+
+Detalhe e amostras brutas em `docs/spikes/fase-4-medicoes.md`. O `.app` foi gerado pelo `cargo-packager` do commit 23ef679, sem a feature `demo`, e aberto como pelo Finder: com `env -i`, sem `TERM`, a partir de `/`, e também por `open -n`. Tudo rodou num `HOME` temporário, com agente falso, `wai-waycarbon` ligada e um `jira` falso.
+
+| Métrica | Meta | Resultado |
+|---|---|---|
+| CPU parado (30 s) | < 0,5% | **0,16%** (`open -n`: 0,12%) |
+| RAM do wai (`top`) | < 300 MB | **73–74 MB** (RSS do `ps`: 113–114 MB) |
+| Janela visível, 1ª abertura (espera o shell de login) | < 1 s | **261–297 ms** |
+| Janela visível, com o `PATH` em cache (R69) | < 1 s | **251–264 ms** |
+| Janela visível por `open -n` | < 1 s | **326–362 ms** |
+| Com um rc de 1 s (`sleep 1` no `.zprofile`) | — | 1ª abertura 1,27–1,31 s; com cache 0,24–0,47 s |
+| `wai.app` / DMG | — | **44 MB** / **14,0 MB** |
+
+O que isso mostra:
+- **A R68 funciona de ponta a ponta.** O `jira` falso só estava no `PATH` do `.zprofile`, e toda abertura com ele chamou o `jira`. Sem o rc, nenhuma chamada.
+- **A R69 tira o shell da abertura.** Com um rc de 1 s, só a 1ª abertura espera; as seguintes ficam em 0,24 s.
+- **Novo: a 1ª execução de uma cópia nova do app custa 0,5–1,4 s a mais**, antes de qualquer código do wai. A 2ª execução da mesma cópia leva ~0,23 s. A causa provável é a verificação que o macOS faz num executável novo, então isso aparece na 1ª abertura depois de copiar o app do DMG. Um DMG baixado, com quarentena e Gatekeeper, não foi medido.
+- **O RSS subiu ~17 MB desde a Fase 3** (96–97 para 113–114 MB), com o `top` igual. Não investiguei. A causa provável é o binário maior: a checagem de atualização trouxe a pilha HTTPS, e o RSS conta páginas mapeadas do binário.
+
+Não medido: CPU com streaming a 40 tokens/s (sem `demo` não há como mandar um prompt de fora; o caminho não mudou desde a Fase 2), o painel "My cards" à frente, lançamento a frio e o `.zshrc` real.
+
+### Teste com o Claude real
+
+`cargo test -p wai-agent --test real_claude -- --ignored --nocapture`, com o `claude-agent-acp@0.101.0` e o seu login (o wai não lê credenciais): **2 de 2 passaram** em 17,3 s.
+- Escrita de `hello.txt` num turno de 3,3 s, com `Diff` e sem pedido de permissão.
+- `load_session` com replay em 2,7 s; fork anunciado e recarregado em 2,3 s.
+- `list_sessions` achou 101 sessões.
+- `AskUserQuestion` virou pergunta no wai em 2,0 s; a resposta "Red" voltou como resposta final.
+
+### Revisão final
+
+Revisão do branch inteiro da Fase 4 (`48033ac..1642055`): **nenhum problema crítico**. Saíram 2 importantes e 6 menores, todos corrigidos numa leva só (23ef679, R70):
+- **`wai-navegador`:** o `npx` rodava na pasta do projeto, então um repositório podia plantar `node_modules` ou `.npmrc`. Agora roda com `--prefix=/` (no Windows, ver R71).
+- **Corrida de pipes:** processos iniciados ao mesmo tempo podiam herdar o pipe um do outro, e a queda de uma extensão demorava a ser notada. Era a causa do teste instável `crash_loop_stops_after_three`. Agora os inícios de extensão passam por uma trava.
+- Menores: um limite duplicado, a versão do `cargo-packager` sem pin na doc, a folga de um teste, contagens deste relatório, uma nota sobre o Windows e um caminho pessoal num benchmark.
+
+A re-revisão de 23ef679 deu **pronto para merge e tag `v0.1.0`**. Verificações:
+- 283 testes em Rust passaram duas vezes, mais os 15 em Go;
+- `go vet` com `GOOS=windows` limpo;
+- o pacote gerado de um checkout limpo;
+- o teste de estresse da trava passou 720 de 720 vezes, e mais 48 de 48 na re-revisão.
 
 ## Decisões que eu tomei sem você (confira)
 
@@ -115,7 +153,7 @@ Os números finais do `.app` ficam na seção abaixo.
 | R16 | Extras na leva final da Fase 1 | Diff maior |
 | R17 | Ao sair, o grupo de processos do agente leva SIGKILL na hora | A última linha do histórico pode ficar incompleta |
 | R18 | O agente herdava a pasta de onde o wai foi aberto | Resolvida na 2.0 |
-| R19 | Sem registro nos relatórios | — |
+| R19 | Merge local da Fase 1 (`feat/fase-1-core` → `development` → `main`) e tag `fase-1` sem perguntar: repositório só local, sem remoto | Um `git reset` |
 | R20 | ⌘W é contextual: no editor fecha a aba, no chat fecha a sessão | Um atalho |
 | R21 | "Open full output" grava em `~/.config/wai/scratch/`, limpo ao abrir | Arquivos temporários |
 | R22–R24 | Perguntas: mostrar descrições; recusar formulários desconhecidos; "Needs you" até responder | Formulários exóticos ficam sem resposta |
@@ -128,7 +166,7 @@ Os números finais do `.app` ficam na seção abaixo.
 | R38 | Ajustes de segurança e texto incorporados na 2.9 | Tarefa maior |
 | R39–R41 | Salvar seguro (nunca por cima do que você não viu), arquivo temporário sem seguir symlink, `.wai/` até 1 MB | Um clique a mais após "Keep mine" |
 | R42 | Dois caminhos de sobrescrita | Resolvida na 3.0 |
-| R43 | Sem registro nos relatórios | — |
+| R43 | Merge local da Fase 2 e tag `fase-2` (mesmo motivo da R19) | Um `git reset` |
 | R44, R46 | Divisão de tarefas da Fase 3; a API de sessão ganhou servidores MCP | Nenhum |
 | R45 | WayCarbon chama `jira me` e depois `jira issue list`, sem shell | Um processo a mais por atualização |
 | R47 | O aviso de "mudou no disco" depende de a aba estar editada | Nenhum |
@@ -140,7 +178,7 @@ Os números finais do `.app` ficam na seção abaixo.
 | R55 | Licenças: `[licenses.private] ignore = true` até você escolher a licença | Nenhum |
 | R56 | Extensão abre no máximo 1 sessão a cada 2 s; ⌘N tem prioridade; `ssh -o BatchMode=yes`; comando sem caminho só pelo PATH absoluto | Config de ssh customizada não vale ao instalar extensões |
 | R57 | Sobras da Fase 3 (painéis extras, largura de lista, nota do PATH do MCP) | Resolvida na 4.0 e na 4.5 |
-| R58 | Sem registro: o ledger da Fase 4 cita R1–R58, mas o relatório da Fase 3 termina na R57 | — |
+| R58 | Merge local da Fase 3 e tag `fase-3` (mesmo motivo da R19) | Um `git reset` |
 | R59 | Timer que dorme até a próxima rotina é agendamento por evento, não polling | Nenhum |
 | R60 | Hot-exit grava uma cópia ~1 s depois da última edição **e** ao sair, então crash e Dock também ficam cobertos | Pequenas escritas na pasta de config enquanto você edita |
 | R61 | Cópia > 50 MB não é gravada (com aviso); aviso único quando a cópia falha; sessão de extensão nunca toma o painel focado | Nenhum |
@@ -150,8 +188,11 @@ Os números finais do `.app` ficam na seção abaixo.
 | R65 | Adiados: o DMG em si não é notarizado (o app dentro é); rodar de novo pode criar 2º rascunho; certificado Windows em hardware precisa de `sign-command` | Um passo de notarização a mais depois |
 | R66 | `wai-rotinas` pode limitar cada espera a 1 min, porque o relógio do Go para durante o sono do Mac | ~60 despertares/h numa extensão opcional |
 | R67 | `wai-rotinas` recusa todo script no Windows (não há checagem de ACL na stdlib) | Sem rotinas no Windows até existir essa checagem |
-| R68 | No macOS, aberto fora do terminal (sem `TERM`), o wai pega só o `PATH` do shell de login (`-i -l`, 3 s, uma vez, antes de qualquer thread) | O `.zshrc` atrasa a abertura pelo Finder: ~1,6 s só na 1ª abertura desde a R69 |
+| R68 | No macOS, aberto fora do terminal (sem `TERM`), o wai pega só o `PATH` do shell de login (`-i -l`, 3 s, uma vez, antes de qualquer thread) | O `.zshrc` atrasa a abertura pelo Finder. Nesta máquina o `-i -l` leva 1,4–1,7 s, e desde a R69 isso só pesa na 1ª abertura |
 | R69 | Cache do `PATH` do shell: o 1º launch espera o shell uma vez, os seguintes usam o cache e atualizam em segundo plano | Um `PATH` novo só vale no launch seguinte |
+| R70 | Revisão final: corrigidos o `npx` do `wai-navegador` (agora `--prefix=/`, para um repositório não plantar `node_modules`/`.npmrc`) e a corrida de pipes entre processos iniciados ao mesmo tempo (trava só nos inícios de extensão). Uma trava única para todo processo que o wai inicia fica para depois da v0.1.0 | Raramente, o fim de uma extensão que caiu demora a ser notado |
+| R71 | No Windows, `--prefix=/` é a raiz do disco, que outros usuários da máquina costumam poder escrever. Aceito na v0.1.0 (ainda melhor que a pasta do projeto) | Em máquina Windows compartilhada, outro usuário poderia plantar um pacote MCP |
+| R72 | Merge local da Fase 4 e tags `fase-4` e `v0.1.0`, só locais (a `v0.1.0` só é empurrada por você no passo 8) | Um `git reset` / `git tag -d` |
 
 ## Lacunas conhecidas (atuais)
 
@@ -163,6 +204,7 @@ Os números finais do `.app` ficam na seção abaixo.
   - No Windows, o que um agente `npx` inicia sobrevive a ele até o stdin fechar.
 - **O DMG só foi gerado com `CI=true`.** O passo que arruma a janela do DMG pelo Finder nunca rodou.
 - **A notificação a partir do `.app` não foi testada de ponta a ponta.** Precisa de um turno real terminando com a janela em segundo plano.
+- **A 1ª abertura de uma cópia nova do app leva 0,5–1,4 s a mais**, pela verificação do macOS, fora do controle do wai. A abertura de um DMG baixado da internet (com quarentena) não foi medida.
 
 **Uso**
 - **Aberto pelo Finder, Dock ou Launchpad, o wai usa o PATH do shell de login (R68), guardado em cache (R69).**
@@ -193,7 +235,10 @@ Os números finais do `.app` ficam na seção abaixo.
 - **"My cards"** só foi testado com um `jira` falso.
 - **`wai-rotinas`:**
   - no Windows recusa todo script (R67);
-  - um horário que cai durante o sono do Mac roda atrasado até a correção da R66 entrar.
+  - um horário que cai durante o sono do Mac roda até 1 min depois de acordar (R66);
+  - um script que estoura o tempo morre, mas o que ele iniciou só morre quando o wai para a extensão;
+  - scripts em `/Applications` são recusados (a pasta é gravável pelo grupo `admin`).
+- **`wai-navegador` no Windows:** o `--prefix=/` aponta para a raiz do disco (R71).
 - **`wai-remoto`** é só desenho: precisa da permissão `listen` e de eventos de sessão que o host ainda não tem.
 - **`wai-waycarbon`** descreve repositórios e convenções internas da Way. Antes de publicar, decida se ele fica no repositório público (ver o item 1 da lista).
 
@@ -217,8 +262,21 @@ Na ordem. Os comandos rodam na raiz do repositório e foram testados aqui. Os de
 
 ### 2. Remoto e push
 
-1. **Crie o repositório** no GitHub (por exemplo `<dono>/wai`), vazio: sem README, sem licença e sem `.gitignore`.
-2. **Empurre todas as branches e as tags de fase:**
+1. **Decida o histórico antes do 1º push.**
+   - Todos os commits têm como autor o e-mail do `git config` aplicado a esta pasta, que não é o da WayCarbon. Se quiser outro autor, ajuste `git config user.email` antes do commit novo.
+   - O commit `e39062f` tem um caminho absoluto desta máquina num teste (removido depois, na `23ef679`).
+   - **Para publicar limpo**, crie um único commit inicial com o conteúdo do `main` e empurre só ele; as outras branches e as tags `fase-*` ficam locais, e no passo 8 a `v0.1.0` é criada em `publico` (troque `main` por `publico` no comando):
+
+     ```sh
+     git checkout --orphan publico main
+     git commit -m "feat: wai 0.1.0"
+     git remote add origin git@github.com:<dono>/wai.git
+     git push -u origin publico:main
+     ```
+
+   - **Para manter o histórico**, siga os passos 2 e 3.
+2. **Crie o repositório** no GitHub (por exemplo `<dono>/wai`), vazio: sem README, sem licença e sem `.gitignore`.
+3. **Empurre todas as branches e as tags de fase:**
 
    ```sh
    git remote add origin git@github.com:<dono>/wai.git
