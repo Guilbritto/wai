@@ -390,6 +390,7 @@ impl Render for ExtPanel {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::path::Path;
 
     use gpui_kit::test::TestWindowExt as _;
@@ -402,7 +403,9 @@ mod tests {
 
     use super::ExtPanel;
     use crate::app;
+    #[cfg(unix)]
     use crate::sidebar::SidebarTab;
+    #[cfg(unix)]
     use crate::workspace::Workspace;
 
     /// An `ExtPanel` alone in a window.

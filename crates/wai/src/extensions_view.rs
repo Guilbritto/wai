@@ -447,15 +447,20 @@ pub(crate) mod tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{ElementId, Entity, TestAppContext, VisualTestContext};
-    use wai_ext::{ExtId, ExtStore, Installed, MANIFEST_FILE, Permission, Source, staging_dir};
+    #[cfg(unix)]
+    use wai_ext::{ExtId, ExtStore};
+    use wai_ext::{Installed, MANIFEST_FILE, Permission, Source, staging_dir};
     use wai_settings::Settings;
 
     use wai_ext::panel::clamp;
 
     use super::{ExtensionsView, LIMITATION, plugin_install};
+    #[cfg(unix)]
     use crate::ext_host::ExtStatus;
     use crate::workspace::Workspace;
-    use crate::workspace::tests::{open, wait_until};
+    use crate::workspace::tests::open;
+    #[cfg(unix)]
+    use crate::workspace::tests::wait_until;
 
     const MANIFEST: &str = "id = \"sample\"\nname = \"Sample\"\nversion = \"1.2.0\"\n\
         description = \"A sample\"\n\
