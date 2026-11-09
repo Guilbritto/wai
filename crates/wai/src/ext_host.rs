@@ -35,11 +35,11 @@ const TOO_MANY_OPENS: &str = "Too many sessions opened; try again later";
 
 /// An extension's `sessions/open`, `sessions/prompt` or `sessions/list`, for the workspace to
 /// carry out (and answer through the event's `Reply`).
-pub struct SessionCall(Cell<Option<ExtEvent>>);
+pub struct SessionCall(Cell<Option<(ExtId, ExtEvent)>>);
 
 impl SessionCall {
-    /// The request, to the first subscriber that takes it.
-    pub fn take(&self) -> Option<ExtEvent> {
+    /// The extension and its request, to the first subscriber that takes it.
+    pub fn take(&self) -> Option<(ExtId, ExtEvent)> {
         self.0.take()
     }
 }
@@ -336,7 +336,7 @@ impl ExtHost {
             event @ (ExtEvent::OpenSession { .. }
             | ExtEvent::Prompt { .. }
             | ExtEvent::ListSessions { .. }) => {
-                return cx.emit(SessionCall(Cell::new(Some(event))));
+                return cx.emit(SessionCall(Cell::new(Some((id.clone(), event)))));
             }
         };
         if let Some(running) = self.running.get_mut(id) {
