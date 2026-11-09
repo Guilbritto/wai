@@ -79,10 +79,19 @@ impl FileEditor {
             .update(cx, |s, cx| s.set_cursor_position(position, window, cx));
     }
 
-    /// Writes the buffer (⌘S). `false` when nothing was written: read-only, or the write failed
-    /// (a notice says why).
+    /// Writes the buffer (⌘S, Save all, the close dialog). `false` when nothing was written:
+    /// read-only, the file changed on disk since it was read (R39: the banner asks first), or
+    /// the write failed (a notice says why).
     pub fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.read_only {
+            return false;
+        }
+        // The stamp catches what no watcher reports (a file outside the project).
+        if self.disk_changed || file::stamp(&self.path) != self.stamp {
+            self.disk_changed = true;
+            let notice = "Changed on disk — Reload or Keep mine before saving";
+            window.push_notification(Notification::warning(notice), cx);
+            cx.notify();
             return false;
         }
         // ponytail: written on the main thread; at most 20 MB, so tens of ms at worst. Move it to
@@ -226,6 +235,8 @@ impl Render for FileEditor {
                                 .ghost()
                                 .label(keep)
                                 .on_click(cx.listener(|this, _, _, cx| {
+                                    // What is on disk now is what the next Save replaces.
+                                    this.stamp = file::stamp(&this.path);
                                     this.disk_changed = false;
                                     cx.notify();
                                 })),

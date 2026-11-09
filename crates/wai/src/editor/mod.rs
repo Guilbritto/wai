@@ -478,5 +478,62 @@ mod tests {
             tab.read_with(cx, |t, _| t.disk_changed)
         });
         assert_eq!(text(&tab, cx), "text\n");
+
+        cx.simulate_keystrokes("secondary-s");
+        assert_eq!(fs::read(&path).unwrap(), b"\0\x01binary", "Save refused");
+    }
+
+    fn notices(cx: &mut VisualTestContext) -> usize {
+        cx.update(|window, cx| window.notifications(cx).len())
+    }
+
+    /// R39: ⌘S never writes over a change on disk the buffer does not show; the banner asks.
+    #[gpui_kit::test]
+    fn save_refuses_over_a_change_on_disk(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the watcher reports from a real thread
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonical(dir.path());
+        let path = root.join("notes.md");
+        fs::write(&path, "one\n").unwrap();
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.set_project(root.clone(), window, cx))
+        });
+        open_file(&workspace, &path, None, cx);
+        let tab = active_tab(&workspace, cx);
+        cx.simulate_input("mine ");
+        fs::write(&path, "theirs\n").unwrap();
+        wait_until(cx, "the banner", |cx| {
+            tab.read_with(cx, |t, _| t.disk_changed)
+        });
+
+        cx.simulate_keystrokes("secondary-s");
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "theirs\n");
+        assert!(tab.read_with(cx, |t, _| t.dirty && t.disk_changed));
+        assert_eq!(notices(cx), 1, "a notice says why");
+    }
+
+    /// R39: a file no watcher sees (outside the project) still is not overwritten: its stamp on
+    /// disk is not the one read. Keep mine takes the disk's stamp, so the next ⌘S writes.
+    #[gpui_kit::test]
+    fn save_finds_a_change_no_watcher_saw(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("outside.txt");
+        fs::write(&path, "one\n").unwrap();
+        let (workspace, cx) = open(cx, Settings::default());
+        open_file(&workspace, &path, None, cx);
+        let tab = active_tab(&workspace, cx);
+        cx.simulate_input("mine ");
+        fs::write(&path, "theirs\n").unwrap();
+
+        cx.simulate_keystrokes("secondary-s");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "theirs\n");
+        assert!(tab.read_with(cx, |t, _| t.disk_changed), "the banner shows");
+
+        click("keep-mine", cx);
+        cx.simulate_keystrokes("secondary-s");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "mine one\n");
+        assert!(!tab.read_with(cx, |t, _| t.dirty || t.disk_changed));
     }
 }
