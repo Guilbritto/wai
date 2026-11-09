@@ -96,11 +96,16 @@ pub fn save(path: &Path, text: &str) -> io::Result<Option<Stamp>> {
     let name = target.file_name().ok_or(io::ErrorKind::InvalidInput)?;
     let tmp = target.with_file_name(format!(".{}.wai-save", name.to_string_lossy()));
     let written = (|| {
+        // R40: the temp name is predictable, and a cloned repository can ship it as a symlink to
+        // a file of the user's. Unlink whatever is there (the link, never its target), then
+        // create the temp file anew: `create_new` refuses any path that exists, a link included.
+        // ponytail: a failed unlink shows as `create_new`'s error.
+        fs::remove_file(&tmp).ok();
         // The target's mode before any content: a private file is never readable by others,
         // not even as a temp file (one left by a crash included).
         let permissions = fs::metadata(&target).ok().map(|meta| meta.permissions());
         let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.write(true).create_new(true);
         #[cfg(unix)]
         if let Some(permissions) = &permissions {
             use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
@@ -144,5 +149,27 @@ mod tests {
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         assert!(!stale.exists());
+    }
+
+    /// R40: a cloned repository can ship the temp name as a symlink to a file of the user's;
+    /// saving unlinks it and writes a new file, never through it.
+    #[test]
+    fn save_never_follows_a_planted_temp_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("setup.sh");
+        fs::write(&path, "old").unwrap();
+        let victim = dir.path().join("victim");
+        fs::write(&victim, "precious").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join(".setup.sh.wai-save")).unwrap();
+
+        super::save(&path, "new").unwrap();
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        let link = fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink();
+        assert!(!link, "the target is a file, not the planted link");
     }
 }
