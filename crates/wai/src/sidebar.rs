@@ -30,7 +30,7 @@ pub enum SidebarTab {
     Agents,
     /// Opened from the header's Extensions button; it has no tab.
     Extensions,
-    /// An extension's panel, by its view: gone with its extension, it shows the sessions.
+    /// An extension's panel, by its view. When the panel goes, the sessions show again.
     Panel(EntityId),
 }
 
@@ -124,13 +124,11 @@ impl Workspace {
             .iter()
             .find(|p| self.sidebar_tab == SidebarTab::Panel(p.view.entity_id()));
         let content = match self.sidebar_tab {
-            SidebarTab::Panel(_) if shown.is_some() => div()
+            SidebarTab::Panel(_) => div()
                 .size_full()
                 .children(shown.map(|p| p.view.clone()))
                 .into_any_element(),
-            SidebarTab::Sessions | SidebarTab::Panel(_) => {
-                self.render_sessions(cx).into_any_element()
-            }
+            SidebarTab::Sessions => self.render_sessions(cx).into_any_element(),
             SidebarTab::Files => self.files.clone().into_any_element(),
             SidebarTab::Search => self.search.clone().into_any_element(),
             SidebarTab::Agents => div()

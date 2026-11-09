@@ -172,8 +172,15 @@ impl Workspace {
         window.set_window_title(&title(&project));
         let project = canonical(&project);
         let ext_host = cx.new(|_| ExtHost::new(project.clone()));
-        // Its panels are sidebar tabs.
-        let panels = cx.observe(&ext_host, |_, _, cx| cx.notify());
+        // Its panels are sidebar tabs: a shown one that goes leaves the sessions shown.
+        let panels = cx.observe(&ext_host, |this: &mut Self, host, cx| {
+            if let SidebarTab::Panel(shown) = this.sidebar_tab
+                && !(host.read(cx).panels().iter()).any(|p| p.view.entity_id() == shown)
+            {
+                this.sidebar_tab = SidebarTab::Sessions;
+            }
+            cx.notify();
+        });
         let files = cx.new(|cx| FileTree::new(project.clone(), global_ignores, cx));
         let open_file = cx.subscribe_in(&files, window, |this, _, OpenFile(path), window, cx| {
             this.open_file(path.clone(), None, window, cx)

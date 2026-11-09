@@ -14,6 +14,8 @@
 //!   with text trees `0` to `n - 1`.
 //! - `--panel`: after `initialize`, render the sample tree (`sample` below) on panel `main`; each
 //!   `panel/action` renders it again, its last text saying `last action: <id> <values as JSON>`.
+//!   Its form's initial values are `query` "is:open", `scope` "Mine", `done` false; after action
+//!   `reset`, they are "", "Team" and true.
 //! - `--oversized`: after `initialize`, send a 5 MB `notify` request titled `big`, then a `notify`
 //!   notification titled `after`.
 //! - `--call <method>` (repeatable): after `initialize`, call each method with params `{}`, with
@@ -36,19 +38,24 @@ fn notify(title: &str, body: String) -> Value {
 }
 
 /// One node of each type, an unknown one included.
-fn sample(last: &str) -> Value {
+fn sample(last: &str, reset: bool) -> Value {
+    let (query, scope, done) = if reset {
+        ("", "Team", true)
+    } else {
+        ("is:open", "Mine", false)
+    };
     json!({"type": "column", "children": [
         {"type": "row", "children": [
             {"type": "text", "text": "My cards"},
             {"type": "badge", "text": "3 open"},
         ]},
         {"type": "markdown", "text": "Cards assigned to **you**, newest first."},
-        {"type": "input", "id": "query", "placeholder": "Filter cards"},
+        {"type": "input", "id": "query", "placeholder": "Filter cards", "value": query},
         {"type": "row", "children": [
-            {"type": "select", "id": "scope", "options": ["Mine", "Team"]},
-            {"type": "checkbox", "id": "done", "label": "Include done"},
+            {"type": "select", "id": "scope", "options": ["Mine", "Team"], "value": scope},
+            {"type": "checkbox", "id": "done", "label": "Include done", "checked": done},
         ]},
-        {"type": "list", "items": [
+        {"type": "list", "fill": true, "items": [
             {"id": "card-1", "title": "Fix the login timeout", "subtitle": "In progress", "badge": "P1"},
             {"id": "card-2", "title": "Add the export button", "subtitle": "To do"},
             {"id": "card-3", "title": "Update the docs", "subtitle": "In review", "badge": "P3"},
@@ -56,7 +63,7 @@ fn sample(last: &str) -> Value {
         {"type": "progress", "value": 0.4},
         {"type": "row", "children": [
             {"type": "button", "id": "refresh", "label": "Refresh", "style": "primary"},
-            {"type": "button", "id": "clear", "label": "Clear", "style": "danger"},
+            {"type": "button", "id": "reset", "label": "Reset", "style": "danger"},
         ]},
         {"type": "sparkline", "points": [1, 2, 3]},
         {"type": "text", "text": last, "muted": true},
@@ -86,6 +93,7 @@ fn main() {
         std::fs::write(path, sleep.unwrap().id().to_string()).unwrap();
     }
 
+    let mut reset = false;
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
@@ -111,7 +119,7 @@ fn main() {
                     }
                 }
                 if flag("--panel") {
-                    send(render(sample("last action: none")));
+                    send(render(sample("last action: none", reset)));
                 }
                 if flag("--oversized") {
                     let big = "x".repeat(5 << 20);
@@ -134,10 +142,9 @@ fn main() {
                 if method == "panel/action" && flag("--panel") {
                     let p = &msg["params"];
                     let action_id = p["action_id"].as_str().unwrap_or_default();
-                    send(render(sample(&format!(
-                        "last action: {action_id} {}",
-                        p["values"]
-                    ))));
+                    reset |= action_id == "reset";
+                    let last = format!("last action: {action_id} {}", p["values"]);
+                    send(render(sample(&last, reset)));
                 }
             }
             None => send(notify("reply", line)),

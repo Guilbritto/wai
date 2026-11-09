@@ -2,8 +2,9 @@
 //! (and on install or enable) and stop on disable, before uninstall and at quit. They inherit
 //! wai's cwd, the config dir (R18).
 //!
-//! Each one granted `panels` shows its declared panels as sidebar tabs. A panel outlives a
-//! restart of its process (a project switch), so what the user typed stays.
+//! Each live one granted `panels` shows its declared panels as sidebar tabs. A panel outlives a
+//! restart of its process (a project switch), so what the user typed stays; it goes when its
+//! extension stops, fails or crashes.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -29,6 +30,12 @@ pub enum ExtStatus {
     Ready,
     Failed(String),
     Crashed(String),
+}
+
+impl ExtStatus {
+    fn live(&self) -> bool {
+        matches!(self, Self::Starting | Self::Ready)
+    }
 }
 
 struct Running {
@@ -69,9 +76,10 @@ impl ExtHost {
             }
         }
         let mut old = std::mem::take(&mut self.panels);
-        let granted = wanted
-            .iter()
-            .filter(|i| i.granted.contains(&Permission::Panels));
+        let live = |id| self.running.get(id).is_some_and(|r| r.status.live());
+        let granted: Vec<_> = (wanted.iter())
+            .filter(|i| i.granted.contains(&Permission::Panels) && live(&i.manifest.id))
+            .collect();
         for installed in granted {
             let ext = &installed.manifest.id;
             for spec in &installed.manifest.contributes.panels {
@@ -87,9 +95,10 @@ impl ExtHost {
     }
 
     /// Kills its process now, on this thread.
-    pub fn stop(&mut self, id: &ExtId) {
+    pub fn stop(&mut self, id: &ExtId, cx: &mut Context<Self>) {
         self.running.remove(id);
         self.panels.retain(|p| p.ext != *id);
+        cx.notify();
     }
 
     pub fn stop_all(&mut self) {
@@ -104,9 +113,8 @@ impl ExtHost {
             return;
         }
         self.project = project;
-        let live = |r: &Running| matches!(r.status, ExtStatus::Starting | ExtStatus::Ready);
         let restart: Vec<ExtId> = (self.running.iter())
-            .filter(|(_, r)| live(r))
+            .filter(|(_, r)| r.status.live())
             .map(|(id, _)| id.clone())
             .collect();
         for id in restart {
@@ -194,6 +202,9 @@ impl ExtHost {
             _ => return,
         };
         if let Some(running) = self.running.get_mut(id) {
+            if !status.live() {
+                self.panels.retain(|p| p.ext != *id);
+            }
             running.status = status;
             cx.notify();
         }

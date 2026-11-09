@@ -22,8 +22,7 @@ use crate::sidebar::ROW_HEIGHT;
 
 /// A list row with a subtitle: two lines.
 const TWO_LINE_ROW: f32 = 44.;
-/// ponytail: a list shows at most this many rows and scrolls the rest (virtual, any length); a
-/// list that fills the panel would need the layout to know which node may grow.
+/// A list without `fill` shows at most this many rows and scrolls the rest.
 const LIST_ROWS: usize = 12;
 
 /// A list item or button was clicked: `values` holds each form field's value by id.
@@ -35,10 +34,16 @@ pub struct PanelAction {
 pub struct ExtPanel {
     /// `None` until the extension renders. Parsed once per render, off the main thread.
     tree: Option<Result<Rc<Node>, TooLarge>>,
-    /// What was typed, per input id. Kept across renders while the id stays an input.
-    inputs: HashMap<String, Entity<InputState>>,
+    /// What was typed and the placeholder shown, per input id. Kept across renders while the id
+    /// stays an input.
+    inputs: HashMap<String, (Entity<InputState>, Arc<str>)>,
     /// Each select's choice and each checkbox's state, per id; kept the same way.
     values: HashMap<String, Value>,
+    /// The initial value the extension last sent, per field id. Only a different one replaces
+    /// what the user did.
+    initials: HashMap<String, Value>,
+    /// Initial input values not shown yet: setting one needs the window, so it waits for render.
+    pending: HashMap<String, Arc<str>>,
 }
 
 impl EventEmitter<PanelAction> for ExtPanel {}
@@ -49,6 +54,8 @@ impl ExtPanel {
             tree: None,
             inputs: HashMap::new(),
             values: HashMap::new(),
+            initials: HashMap::new(),
+            pending: HashMap::new(),
         }
     }
 
@@ -56,17 +63,38 @@ impl ExtPanel {
         // A refused tree leaves the form as it was.
         if let Ok(tree) = &tree {
             let (mut inputs, mut fields) = (HashSet::new(), HashSet::new());
-            tree.walk(&mut |node| match node {
-                Node::Input { id, .. } => {
-                    inputs.insert(id.as_str());
+            tree.walk(&mut |node| {
+                let (id, initial) = match node {
+                    Node::Input { id, value, .. } => {
+                        inputs.insert(id.as_str());
+                        (id, value.as_deref().map(Value::from))
+                    }
+                    Node::Select { id, value, .. } => (id, value.as_deref().map(Value::from)),
+                    Node::Checkbox { id, checked, .. } => (id, checked.map(Value::Bool)),
+                    _ => return,
+                };
+                fields.insert(id.as_str());
+                let Some(initial) = initial else {
+                    self.initials.remove(id);
+                    return;
+                };
+                if self.initials.get(id) == Some(&initial) {
+                    return;
                 }
-                Node::Select { id, .. } | Node::Checkbox { id, .. } => {
-                    fields.insert(id.as_str());
+                match (node, &initial) {
+                    (Node::Input { .. }, Value::String(text)) => {
+                        self.pending.insert(id.clone(), text.as_str().into());
+                    }
+                    _ => {
+                        self.values.insert(id.clone(), initial.clone());
+                    }
                 }
-                _ => {}
+                self.initials.insert(id.clone(), initial);
             });
             self.inputs.retain(|id, _| inputs.contains(id.as_str()));
+            self.pending.retain(|id, _| inputs.contains(id.as_str()));
             self.values.retain(|id, _| fields.contains(id.as_str()));
+            self.initials.retain(|id, _| fields.contains(id.as_str()));
         }
         self.tree = Some(tree.map(Rc::new));
         cx.notify();
@@ -89,10 +117,12 @@ impl ExtPanel {
             tree.walk(&mut |node| {
                 let (id, value) = match node {
                     Node::Input { id, .. } => {
-                        let text = self.inputs.get(id).map(|s| s.read(cx).value());
-                        (id, Value::from(text.unwrap_or_default().to_string()))
+                        let typed =
+                            || (self.inputs.get(id)).map(|(s, _)| s.read(cx).value().to_string());
+                        let text = self.pending.get(id).map(|t| t.to_string()).or_else(typed);
+                        (id, Value::from(text.unwrap_or_default()))
                     }
-                    Node::Select { id, options } => {
+                    Node::Select { id, options, .. } => {
                         let chosen = self.chosen(id, options);
                         (id, chosen.map_or(Value::Null, |o| Value::from(&**o)))
                     }
@@ -116,27 +146,44 @@ impl ExtPanel {
         self.values.get(id) == Some(&Value::Bool(true))
     }
 
+    /// The node and whether it grows to fill the panel's height: a `fill` list whose parents
+    /// are all columns, and those columns. `in_column`: the parent is a column or the panel.
     /// `n` numbers the lists, markdown and progress bars for their element ids. Recursion is
     /// bounded: a tree is at most `MAX_DEPTH` deep.
     fn node(
         &mut self,
         node: &Node,
+        in_column: bool,
         n: &mut usize,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> (AnyElement, bool) {
         let muted = cx.theme().muted_foreground;
         *n += 1;
-        match node {
+        let element = match node {
             Node::Column(children) | Node::Row(children) => {
+                let column = matches!(node, Node::Column(_));
+                let mut fills = false;
                 let children: Vec<_> = (children.iter())
-                    .map(|child| self.node(child, n, window, cx))
+                    .map(|child| {
+                        let (element, grows) = self.node(child, column, n, window, cx);
+                        fills |= grows;
+                        element
+                    })
                     .collect();
-                match node {
-                    Node::Row(_) => h_flex().gap_2().flex_wrap().children(children),
-                    _ => v_flex().gap_2().children(children),
-                }
-                .into_any_element()
+                let element = match column {
+                    true => v_flex().gap_2().when(fills, |el| el.flex_1().min_h_0()),
+                    false => h_flex().gap_2().flex_wrap(),
+                };
+                return (element.children(children).into_any_element(), fills);
+            }
+            Node::List {
+                items,
+                subtitles,
+                fill,
+            } => {
+                let fill = *fill && in_column;
+                return (self.list(*n, items, *subtitles, fill, cx), fill);
             }
             Node::Text { text, muted: dim } => div()
                 .text_sm()
@@ -146,7 +193,6 @@ impl ExtPanel {
             Node::Markdown(text) => TextView::markdown(("panel-md", *n), SharedString::from(text))
                 .text_sm()
                 .into_any_element(),
-            Node::List { items, subtitles } => self.list(*n, items, *subtitles, cx),
             Node::Button { id, label, style } => {
                 let action = id.clone();
                 Button::new(name("panel-button", id))
@@ -160,16 +206,29 @@ impl ExtPanel {
                     .on_click(cx.listener(move |this, _, _, cx| this.act(action.clone(), cx)))
                     .into_any_element()
             }
-            Node::Input { id, placeholder } => {
-                // ponytail: the placeholder is the one the input was created with; update it here
-                // if extensions come to change it.
-                let state = self.inputs.entry(id.clone()).or_insert_with(|| {
-                    let placeholder = SharedString::from(placeholder);
-                    cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
-                });
-                Input::new(state).small().into_any_element()
+            Node::Input {
+                id, placeholder, ..
+            } => {
+                let (state, shown) = (self.inputs.entry(id.clone()))
+                    .or_insert_with(|| (cx.new(|cx| InputState::new(window, cx)), "".into()));
+                let new = (*shown != *placeholder).then(|| placeholder.clone());
+                if let Some(placeholder) = &new {
+                    *shown = placeholder.clone();
+                }
+                let (state, initial) = (state.clone(), self.pending.remove(id));
+                if new.is_some() || initial.is_some() {
+                    state.update(cx, |state, cx| {
+                        if let Some(placeholder) = new {
+                            state.set_placeholder(SharedString::from(placeholder), window, cx);
+                        }
+                        if let Some(text) = initial {
+                            state.set_value(text.to_string(), window, cx);
+                        }
+                    });
+                }
+                Input::new(&state).small().into_any_element()
             }
-            Node::Select { id, options } => {
+            Node::Select { id, options, .. } => {
                 let chosen = self.chosen(id, options).cloned();
                 let label = chosen.as_ref().map_or("—".into(), SharedString::from);
                 let (this, field, options) = (cx.weak_entity(), id.clone(), options.clone());
@@ -193,7 +252,7 @@ impl ExtPanel {
                     })
                     .into_any_element()
             }
-            Node::Checkbox { id, label } => {
+            Node::Checkbox { id, label, .. } => {
                 let field = id.clone();
                 Checkbox::new(name("panel-checkbox", id))
                     .small()
@@ -211,7 +270,8 @@ impl ExtPanel {
                 .value(value * 100.)
                 .into_any_element(),
             Node::Unsupported => unsupported(muted),
-        }
+        };
+        (element, false)
     }
 
     /// Only the visible rows render: a list may hold any number of items.
@@ -220,6 +280,7 @@ impl ExtPanel {
         n: usize,
         items: &Arc<[Option<Item>]>,
         subtitles: bool,
+        fill: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
         let height = if subtitles { TWO_LINE_ROW } else { ROW_HEIGHT };
@@ -231,7 +292,11 @@ impl ExtPanel {
                 .collect::<Vec<_>>()
         })
         .w_full()
-        .h(px(height * rows))
+        .map(|list| match fill {
+            true => list.flex_1().min_h_0(),
+            // A list scrolls, so in a filling column it would shrink to nothing.
+            false => list.h(px(height * rows)).flex_none(),
+        })
         .into_any_element()
     }
 }
@@ -308,16 +373,17 @@ impl Render for ExtPanel {
                 .child(text)
                 .into_any_element()
         };
-        let body = match self.tree.clone() {
-            None => status("Waiting for the extension…", "panel-waiting"),
-            Some(Err(TooLarge)) => status("Panel too large", "panel-too-large"),
-            Some(Ok(tree)) => self.node(&tree, &mut 0, window, cx),
+        let (body, fills) = match self.tree.clone() {
+            None => (status("Waiting for the extension…", "panel-waiting"), false),
+            Some(Err(TooLarge)) => (status("Panel too large", "panel-too-large"), false),
+            Some(Ok(tree)) => self.node(&tree, true, &mut 0, window, cx),
         };
+        // A filling list scrolls itself; anything else scrolls with the panel.
         v_flex()
             .id("ext-panel")
             .size_full()
             .p_2()
-            .overflow_y_scroll()
+            .when(!fills, |el| el.overflow_y_scroll())
             .child(body)
     }
 }
@@ -336,6 +402,7 @@ mod tests {
 
     use super::ExtPanel;
     use crate::app;
+    use crate::sidebar::SidebarTab;
     use crate::workspace::Workspace;
 
     /// An `ExtPanel` alone in a window.
@@ -355,6 +422,15 @@ mod tests {
         cx.update(|window, cx| window.render_frame(cx));
     }
 
+    fn shown(id: impl Into<ElementId>, cx: &mut VisualTestContext) -> bool {
+        let id = id.into();
+        cx.update(|window, _| window.try_find(id).is_some_and(|e| e.visible()))
+    }
+
+    fn name(id: &str) -> ElementId {
+        ElementId::Name(SharedString::from(id.to_string()))
+    }
+
     /// Each kind of bad node is drawn as one muted line; the good ones around it still show.
     #[gpui_kit::test]
     fn unknown_node_renders_placeholder(cx: &mut TestAppContext) {
@@ -368,7 +444,7 @@ mod tests {
             cx,
         );
         assert!(cx.debug_bounds("panel-unsupported").is_some());
-        assert!(cx.update(|window, _| window.try_find(name("panel-button:go")).is_some()));
+        assert!(shown(name("panel-button:go"), cx));
 
         // Too deep: the whole panel says so.
         let mut deep = json!({"type": "text", "text": "leaf"});
@@ -380,49 +456,114 @@ mod tests {
         assert!(cx.debug_bounds("panel-unsupported").is_none());
     }
 
-    /// The renderer never panics: broken nodes, cut strings, a huge list, every node kind.
+    /// The renderer never panics on what fits in one message (4 MB): broken nodes, 128 KB
+    /// strings in every field, 50,000 list items, every node kind; and a tree with too many nodes
+    /// says so.
     #[gpui_kit::test]
     fn hostile_trees_render(cx: &mut TestAppContext) {
         let (panel, cx) = panel_window(cx);
         let huge = "x\n".repeat(1 << 16);
-        let items: Vec<_> = (0..50_000)
+        let mut items: Vec<_> = (0..50_000)
             .map(|n| match n % 3 {
-                0 => json!({"id": "same", "title": huge, "subtitle": huge, "badge": huge}),
+                0 => json!({"id": "same", "title": "t", "subtitle": "s", "badge": "b"}),
                 1 => json!({"id": n.to_string(), "title": "t"}),
                 _ => json!(n),
             })
             .collect();
-        let trees = [
-            json!(null),
-            json!([]),
-            json!({"type": "column", "children": [
-                {"type": "list", "items": items},
-                {"type": "list", "items": []},
-                {"type": "text", "text": huge, "muted": true},
-                {"type": "markdown", "text": "# Title\n\n```rust\nfn main() {}\n```\n| a |\n|---|"},
-                {"type": "markdown", "text": huge},
-                {"type": "row", "children": [
-                    {"type": "button", "id": "b", "label": huge, "style": "danger"},
-                    {"type": "input", "id": "i", "placeholder": huge},
-                    {"type": "select", "id": "s", "options": []},
-                    {"type": "select", "id": "t", "options": [huge]},
-                    {"type": "checkbox", "id": "c", "label": huge},
-                    {"type": "badge", "text": huge},
-                    {"type": "progress", "value": 2},
-                    {"type": "progress", "value": -2},
-                ]},
-                {"type": "row", "children": [1, "a", null, [], {}]},
-                {"type": "column", "children": []},
-            ]}),
-        ];
-        for tree in trees {
+        let big = json!({"id": "big", "title": huge, "subtitle": huge, "badge": huge});
+        items.splice(0..0, [big.clone(), big]);
+        let tree = json!({"type": "column", "children": [
+            {"type": "list", "items": items},
+            {"type": "list", "items": [], "fill": true},
+            {"type": "text", "text": huge, "muted": true},
+            {"type": "markdown", "text": "# Title\n\n```rust\nfn main() {}\n```\n| a |\n|---|"},
+            {"type": "markdown", "text": huge},
+            {"type": "row", "children": [
+                {"type": "button", "id": "b", "label": huge, "style": "danger"},
+                {"type": "input", "id": "i", "placeholder": huge, "value": huge},
+                {"type": "select", "id": "s", "options": []},
+                {"type": "select", "id": "t", "options": [huge], "value": huge},
+                {"type": "checkbox", "id": "c", "label": huge, "checked": 1},
+                {"type": "list", "items": [{"id": "x", "title": "t"}], "fill": true},
+                {"type": "progress", "value": 2},
+                {"type": "progress", "value": -2},
+            ]},
+            {"type": "row", "children": [1, "a", null, [], {}]},
+            {"type": "column", "children": []},
+        ]});
+        let wire = serde_json::to_vec(&tree).unwrap().len();
+        assert!(
+            wire <= wai_ext::MAX_MESSAGE,
+            "{wire} bytes: more than a message"
+        );
+        for tree in [json!(null), json!([]), tree] {
             show(&panel, tree, cx);
         }
-        cx.update(|window, _| window.try_find(("panel-item", 0usize)).expect("list rows"));
+        // The first list is node 2, after the root column.
+        let row = cx.update(|window, _| {
+            let rows = window
+                .within(("panel-list", 2usize))
+                .find_all(("panel-item", 0usize));
+            rows.first().is_some_and(|row| row.visible())
+        });
+        assert!(row, "list rows");
+        let mut cut = 0;
+        let tree = panel.read_with(cx, |p, _| p.tree.clone());
+        tree.unwrap().unwrap().walk(&mut |node| {
+            if let Node::Text { text, .. } | Node::Markdown(text) = node {
+                assert!(text.chars().count() <= panel::TEXT_CHARS + 1);
+                cut += usize::from(text.ends_with('…'));
+            }
+        });
+        assert_eq!(cut, 2, "the huge text and markdown are cut");
+
+        let nodes = vec![json!({"type": "badge", "text": "b"}); panel::MAX_NODES];
+        show(&panel, json!({"type": "column", "children": nodes}), cx);
+        assert!(cx.debug_bounds("panel-too-large").is_some());
     }
 
-    fn name(id: &str) -> ElementId {
-        ElementId::Name(SharedString::from(id.to_string()))
+    /// A `fill` list takes the panel's remaining height, through columns only; an input's
+    /// placeholder follows each render.
+    #[gpui_kit::test]
+    fn fill_and_placeholder_follow_the_tree(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        let items: Vec<_> = (0..200)
+            .map(|n| json!({"id": n.to_string(), "title": "t"}))
+            .collect();
+        let list = |fill: bool| json!({"type": "list", "fill": fill, "items": items});
+        let tree = |list: Value, placeholder: &str| {
+            json!({"type": "column", "children": [
+                {"type": "input", "id": "q", "placeholder": placeholder},
+                {"type": "column", "children": [list]},
+                {"type": "button", "id": "after", "label": "After"},
+            ]})
+        };
+        let placeholder = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| window.find("input-state").placeholder().map(str::to_owned))
+        };
+        let below = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| {
+                let after = window.find(name("panel-button:after")).bounds();
+                after.bottom() <= window.viewport_size().height
+            })
+        };
+
+        show(&panel, tree(list(false), "First"), cx);
+        assert!(shown(("panel-item", 11usize), cx) && !shown(("panel-item", 30usize), cx));
+        assert_eq!(placeholder(cx).as_deref(), Some("First"));
+
+        show(&panel, tree(list(true), "Second"), cx);
+        assert!(
+            shown(("panel-item", 30usize), cx),
+            "the list fills the panel"
+        );
+        assert!(below(cx), "what follows the list stays in view");
+        assert_eq!(placeholder(cx).as_deref(), Some("Second"));
+
+        // In a row, `fill` has no height to take.
+        let row = json!({"type": "row", "children": [list(true)]});
+        show(&panel, tree(row, "Second"), cx);
+        assert!(!shown(("panel-item", 30usize), cx));
     }
 
     #[cfg(unix)]
@@ -430,8 +571,31 @@ mod tests {
         permissions = [\"process\", \"panels\"]\n[process]\ncommand = \"bin/run\"\n\
         [[contributes.panels]]\nid = \"main\"\ntitle = \"Cards\"\n";
 
-    /// The workspace with extension `cards` (`wai-fake-ext --panel`) running and its panel's tab
-    /// open, once its first tree has arrived.
+    /// The workspace with extension `cards` (`wai-fake-ext <flags>`) installed and started.
+    #[cfg(unix)]
+    fn start_sample<'a>(
+        tmp: &Path,
+        flags: &str,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+        use wai_ext::{ExtStore, Permission, Source};
+
+        use crate::extensions_view::tests::{running_sample_with, workspace};
+
+        cx.executor().allow_parking(); // the extension is a real process
+        let config = tmp.join("config");
+        let src = running_sample_with(&tmp.join("src"), MANIFEST, &tmp.join("pid"), flags);
+        let mut store = ExtStore::open(&config);
+        let staged = store.stage(&Source::Folder(src)).unwrap();
+        store
+            .commit(staged, vec![Permission::Process, Permission::Panels])
+            .unwrap();
+        let (workspace, cx) = workspace(&config, cx);
+        workspace.update(cx, |w, cx| w.start_extensions(cx));
+        (workspace, cx)
+    }
+
+    /// `start_sample` with `--panel`, its panel's tab open once its first tree has arrived.
     #[cfg(unix)]
     fn open_sample<'a>(
         tmp: &Path,
@@ -441,21 +605,10 @@ mod tests {
         Entity<ExtPanel>,
         &'a mut VisualTestContext,
     ) {
-        use wai_ext::{ExtStore, Permission, Source};
-
-        use crate::extensions_view::tests::{click, running_sample_with, workspace};
+        use crate::extensions_view::tests::click;
         use crate::workspace::tests::wait_until;
 
-        cx.executor().allow_parking(); // the extension is a real process
-        let config = tmp.join("config");
-        let src = running_sample_with(&tmp.join("src"), MANIFEST, &tmp.join("pid"), "--panel");
-        let mut store = ExtStore::open(&config);
-        let staged = store.stage(&Source::Folder(src)).unwrap();
-        store
-            .commit(staged, vec![Permission::Process, Permission::Panels])
-            .unwrap();
-        let (workspace, cx) = workspace(&config, cx);
-        workspace.update(cx, |w, cx| w.start_extensions(cx));
+        let (workspace, cx) = start_sample(tmp, "--panel", cx);
         let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
         let panel = host.read_with(cx, |h, _| h.panels().first().map(|p| p.view.clone()));
         let panel = panel.expect("a tab for the panel");
@@ -486,29 +639,37 @@ mod tests {
         values.unwrap()
     }
 
-    /// Clicking a list row sends `panel/action` with the row's id and the form's values; the
-    /// tab sits after the built-in ones.
+    /// Types `text` into the panel's `query` input.
+    #[cfg(unix)]
+    fn type_query(panel: &Entity<ExtPanel>, text: &str, cx: &mut VisualTestContext) {
+        let input = panel.read_with(cx, |p, _| p.inputs.get("query").map(|(s, _)| s.clone()));
+        let input = input.expect("the query input");
+        cx.update(|window, cx| input.update(cx, |s, cx| s.set_value(text, window, cx)));
+    }
+
+    /// Clicking a list row sends `panel/action` with the row's id and the form's values, the
+    /// initial ones at first; the tab sits after the built-in ones.
     #[cfg(unix)]
     #[gpui_kit::test]
     fn panel_list_click_sends_action(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
         let (_, panel, cx) = open_sample(tmp.path(), cx);
         let tabs = cx.update(|window, _| {
-            ["tab-agents", "tab-panel"].map(|id| match id {
-                "tab-panel" => window.find(("tab-panel", 0usize)).bounds(),
-                id => window.find(id).bounds(),
-            })
+            let agents = window.find("tab-agents").bounds();
+            (agents, window.find(("tab-panel", 0usize)).bounds())
         });
-        assert!(tabs[0].right() <= tabs[1].left() || tabs[0].bottom() <= tabs[1].top());
+        assert!(tabs.0.right() <= tabs.1.left() || tabs.0.bottom() <= tabs.1.top());
+        let input = cx.update(|window, _| window.find("input-state").value().map(str::to_owned));
+        assert_eq!(input.as_deref(), Some("is:open"), "the initial value shows");
 
         crate::extensions_view::tests::click(("panel-item", 1usize), cx);
         assert_eq!(
             echoed(&panel, "card-2", cx),
-            json!({"query": "", "scope": "Mine", "done": false})
+            json!({"query": "is:open", "scope": "Mine", "done": false})
         );
     }
 
-    /// A button sends what the form holds; the form keeps it across the re-render that follows.
+    /// A button sends what the form holds; a re-render with the same initial values keeps it.
     #[cfg(unix)]
     #[gpui_kit::test]
     fn panel_button_sends_form_values(cx: &mut TestAppContext) {
@@ -516,9 +677,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let (_, panel, cx) = open_sample(tmp.path(), cx);
-        let input = panel.read_with(cx, |p, _| p.inputs.get("query").cloned());
-        let input = input.expect("the query input");
-        cx.update(|window, cx| input.update(cx, |s, cx| s.set_value("login", window, cx)));
+        type_query(&panel, "login", cx);
         click(name("panel-checkbox:done"), cx);
         click(name("panel-select:scope"), cx);
         cx.update(|window, cx| window.within("items").click(1usize, cx));
@@ -527,16 +686,48 @@ mod tests {
         click(name("panel-button:refresh"), cx);
         let values = json!({"query": "login", "scope": "Team", "done": true});
         assert_eq!(echoed(&panel, "refresh", cx), values);
-        click(name("panel-button:clear"), cx);
-        assert_eq!(echoed(&panel, "clear", cx), values);
+        click(("panel-item", 0usize), cx);
+        assert_eq!(echoed(&panel, "card-1", cx), values);
     }
 
-    /// R44: only an enabled extension granted `panels` has tabs. When its tab goes, the sidebar
-    /// shows the sessions.
+    /// R53: a different initial value replaces what the user did; the same one again does not.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn new_initial_values_replace_edits(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, panel, cx) = open_sample(tmp.path(), cx);
+        type_query(&panel, "login", cx);
+        click(name("panel-button:reset"), cx);
+        let edited = json!({"query": "login", "scope": "Mine", "done": false});
+        assert_eq!(echoed(&panel, "reset", cx), edited);
+        let checked = |cx: &mut VisualTestContext| {
+            let id = name("panel-checkbox:done");
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.find(id).checked()
+            })
+        };
+        assert_eq!(checked(cx), Some(true), "the new initial value shows");
+        click(("panel-item", 0usize), cx);
+        let reset = json!({"query": "", "scope": "Team", "done": true});
+        assert_eq!(echoed(&panel, "card-1", cx), reset);
+
+        type_query(&panel, "again", cx);
+        click(name("panel-checkbox:done"), cx);
+        click(name("panel-button:reset"), cx);
+        echoed(&panel, "reset", cx);
+        click(("panel-item", 1usize), cx);
+        let kept = json!({"query": "again", "scope": "Team", "done": false});
+        assert_eq!(echoed(&panel, "card-2", cx), kept);
+    }
+
+    /// R44: only an enabled extension granted `panels` has tabs. When the shown tab goes, the
+    /// sidebar shows the sessions.
     #[cfg(unix)]
     #[gpui_kit::test]
     fn panel_tabs_need_the_grant(cx: &mut TestAppContext) {
-        use gpui_kit::test::TestWindowExt as _;
         use wai_ext::{ExtStore, Permission};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -546,18 +737,56 @@ mod tests {
         let sync = |list: Vec<wai_ext::Installed>, cx: &mut VisualTestContext| {
             host.update(cx, |h, cx| h.sync(&list, cx));
             cx.update(|window, cx| window.render_frame(cx));
-            cx.update(|window, _| window.try_find(("tab-panel", 0usize)).is_some())
+            shown(("tab-panel", 0usize), cx)
         };
+        let tab = |cx: &mut VisualTestContext| workspace.read_with(cx, |w, _| w.sidebar_tab);
+        assert!(matches!(tab(cx), SidebarTab::Panel(_)));
 
         let mut ungranted = installed.clone();
         ungranted[0].granted.retain(|p| *p != Permission::Panels);
         assert!(!sync(ungranted, cx), "a tab without the grant");
         assert!(host.read_with(cx, |h, _| h.panels().is_empty()));
-        assert!(cx.update(|window, _| window.try_find("all-projects").is_some()));
+        assert_eq!(tab(cx), SidebarTab::Sessions);
+        assert!(shown("all-projects", cx));
 
         let mut disabled = installed.clone();
         disabled[0].enabled = false;
         assert!(!sync(disabled, cx), "a tab while disabled");
         assert!(sync(installed, cx));
+    }
+
+    /// A crashed extension's tab goes, and the sidebar shows the sessions; a later sync does not
+    /// bring it back.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn crashed_extension_loses_its_tab(cx: &mut TestAppContext) {
+        use wai_ext::ExtStore;
+
+        use crate::ext_host::ExtStatus;
+        use crate::workspace::tests::wait_until;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (workspace, cx) = start_sample(tmp.path(), "--crash", cx);
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        let panel = host.read_with(cx, |h, _| h.panels()[0].view.entity_id());
+        workspace.update(cx, |w, cx| {
+            w.sidebar_tab = SidebarTab::Panel(panel);
+            cx.notify();
+        });
+        let id = wai_ext::ExtId::new("cards").unwrap();
+        wait_until(cx, "Crashed", |cx| {
+            host.read_with(cx, |h, _| {
+                matches!(h.status(&id), Some(ExtStatus::Crashed(_)))
+            })
+        });
+        assert!(host.read_with(cx, |h, _| h.panels().is_empty()));
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w.sidebar_tab),
+            SidebarTab::Sessions
+        );
+
+        let list = ExtStore::open(&tmp.path().join("config")).list();
+        host.update(cx, |h, cx| h.sync(&list, cx));
+        assert!(host.read_with(cx, |h, _| h.panels().is_empty()));
     }
 }

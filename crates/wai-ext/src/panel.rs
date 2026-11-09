@@ -11,6 +11,9 @@
 //!   that node `Unsupported`. List item ids may repeat.
 //! - Nodes are the tree's root and each element of a `children` array, whatever it holds. List
 //!   items and select options are not nodes; options past `MAX_OPTIONS` are dropped.
+//! - `value` (input, select) and `checked` (checkbox) are initial values: wai applies one when the
+//!   field first appears or when the extension sends a different one; otherwise what the user
+//!   did stays. `fill` makes a list take the panel's remaining height.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -38,6 +41,7 @@ pub enum Node {
     List {
         items: Arc<[Option<Item>]>,
         subtitles: bool,
+        fill: bool,
     },
     Button {
         id: String,
@@ -47,14 +51,17 @@ pub enum Node {
     Input {
         id: String,
         placeholder: Arc<str>,
+        value: Option<Arc<str>>,
     },
     Select {
         id: String,
         options: Vec<Arc<str>>,
+        value: Option<Arc<str>>,
     },
     Checkbox {
         id: String,
         label: Arc<str>,
+        checked: Option<bool>,
     },
     Badge(Arc<str>),
     /// From 0 to 1.
@@ -159,10 +166,11 @@ impl Parser {
 
     fn leaf(&mut self, kind: &str, o: &Map<String, Value>) -> Option<Node> {
         let text = || str_field(o, "text").map(|t| cut(t, TEXT_CHARS).into());
+        let flag = |key| o.get(key).and_then(Value::as_bool);
         let node = match kind {
             "text" => Node::Text {
                 text: text()?,
-                muted: o.get("muted").and_then(Value::as_bool).unwrap_or(false),
+                muted: flag("muted").unwrap_or(false),
             },
             "markdown" => Node::Markdown(text()?),
             "badge" => Node::Badge(line(o, "text")?),
@@ -171,7 +179,11 @@ impl Parser {
                 let items = o.get("items")?.as_array()?;
                 let items: Arc<[Option<Item>]> = items.iter().map(item).collect();
                 let subtitles = items.iter().flatten().any(|i| i.subtitle.is_some());
-                Node::List { items, subtitles }
+                Node::List {
+                    items,
+                    subtitles,
+                    fill: flag("fill").unwrap_or(false),
+                }
             }
             "button" => Node::Button {
                 id: id(o)?,
@@ -185,6 +197,7 @@ impl Parser {
             "input" => Node::Input {
                 id: id(o)?,
                 placeholder: line(o, "placeholder")?,
+                value: line(o, "value"),
             },
             "select" => {
                 let options = o.get("options")?.as_array()?.iter().take(MAX_OPTIONS);
@@ -192,11 +205,13 @@ impl Parser {
                 Node::Select {
                     id: id(o)?,
                     options: options.collect::<Option<_>>()?,
+                    value: line(o, "value"),
                 }
             }
             "checkbox" => Node::Checkbox {
                 id: id(o)?,
                 label: line(o, "label")?,
+                checked: flag("checked"),
             },
             _ => return None,
         };
@@ -291,16 +306,19 @@ mod tests {
                 {"type": "badge", "text": "3"},
             ]},
             {"type": "markdown", "text": "# Title\n\n- a"},
-            {"type": "list", "items": [
+            {"type": "list", "fill": true, "items": [
                 {"id": "a", "title": "First", "subtitle": "sub", "badge": "new"},
                 {"id": "b", "title": "Second"},
             ]},
             {"type": "button", "id": "go", "label": "Go", "style": "primary"},
             {"type": "button", "id": "rm", "label": "Remove", "style": "danger"},
             {"type": "button", "id": "plain", "label": "Plain"},
-            {"type": "input", "id": "q", "placeholder": "Search"},
-            {"type": "select", "id": "scope", "options": ["Mine", "All"]},
-            {"type": "checkbox", "id": "done", "label": "Done"},
+            {"type": "input", "id": "q", "placeholder": "Search", "value": "rust"},
+            {"type": "select", "id": "scope", "options": ["Mine", "All"], "value": "All"},
+            {"type": "checkbox", "id": "done", "label": "Done", "checked": true},
+            {"type": "input", "id": "q2", "placeholder": "No value"},
+            {"type": "select", "id": "s2", "options": ["Mine"]},
+            {"type": "checkbox", "id": "c2", "label": "Unchecked"},
             {"type": "progress", "value": 0.25},
         ]});
         let expected = Node::Column(vec![
@@ -329,6 +347,7 @@ mod tests {
                 ]
                 .into(),
                 subtitles: true,
+                fill: true,
             },
             Node::Button {
                 id: "go".into(),
@@ -348,14 +367,32 @@ mod tests {
             Node::Input {
                 id: "q".into(),
                 placeholder: "Search".into(),
+                value: Some("rust".into()),
             },
             Node::Select {
                 id: "scope".into(),
                 options: vec!["Mine".into(), "All".into()],
+                value: Some("All".into()),
             },
             Node::Checkbox {
                 id: "done".into(),
                 label: "Done".into(),
+                checked: Some(true),
+            },
+            Node::Input {
+                id: "q2".into(),
+                placeholder: "No value".into(),
+                value: None,
+            },
+            Node::Select {
+                id: "s2".into(),
+                options: vec!["Mine".into()],
+                value: None,
+            },
+            Node::Checkbox {
+                id: "c2".into(),
+                label: "Unchecked".into(),
+                checked: None,
             },
             Node::Progress(0.25),
         ]);
@@ -380,7 +417,7 @@ mod tests {
         let items = vec![json!({"id": "i", "title": "t"}); 10 * MAX_NODES];
         let list = parse(&json!({"type": "list", "items": items}));
         assert!(
-            matches!(list, Ok(Node::List { items, subtitles: false }) if items.len() == 10 * MAX_NODES)
+            matches!(list, Ok(Node::List { items, subtitles: false, fill: false }) if items.len() == 10 * MAX_NODES)
         );
     }
 
@@ -454,10 +491,14 @@ mod tests {
             json!({"type": "text", "text": "t", "muted": "yes", "extra": {"deep": [1]}}),
             json!({"type": "button", "id": "b", "label": "B", "style": 9}),
             json!({"type": "button", "id": "c", "label": "C", "style": "huge"}),
-            json!({"type": "list", "items": [{"id": "a", "title": "A", "subtitle": 1, "badge": []}]}),
+            json!({"type": "list", "fill": "yes", "items": [{"id": "a", "title": "A", "subtitle": 1, "badge": []}]}),
             json!({"type": "progress", "value": 7}),
             json!({"type": "progress", "value": -1}),
             json!({"type": "text", "id": 12, "text": "ids of other nodes are ignored"}),
+            json!({"type": "input", "id": "i", "placeholder": "P", "value": 5}),
+            json!({"type": "select", "id": "s", "options": ["a"], "value": ["a"]}),
+            json!({"type": "checkbox", "id": "c2", "label": "L", "checked": "true"}),
+            json!({"type": "input", "id": "j", "placeholder": "P", "value": "two\nlines"}),
         ]);
         let button = |id: &str, label: &str| Node::Button {
             id: id.into(),
@@ -479,10 +520,32 @@ mod tests {
                 Node::List {
                     items: vec![Some(item)].into(),
                     subtitles: false,
+                    fill: false,
                 },
                 Node::Progress(1.),
                 Node::Progress(0.),
                 text("ids of other nodes are ignored"),
+                Node::Input {
+                    id: "i".into(),
+                    placeholder: "P".into(),
+                    value: None,
+                },
+                Node::Select {
+                    id: "s".into(),
+                    options: vec!["a".into()],
+                    value: None,
+                },
+                Node::Checkbox {
+                    id: "c2".into(),
+                    label: "L".into(),
+                    checked: None,
+                },
+                // An input holds one line.
+                Node::Input {
+                    id: "j".into(),
+                    placeholder: "P".into(),
+                    value: Some("two lines".into()),
+                },
             ]
         );
     }
@@ -528,7 +591,8 @@ mod tests {
                 Node::Unsupported,
                 Node::Select {
                     id: "y".into(),
-                    options: vec![]
+                    options: vec![],
+                    value: None,
                 },
                 Node::Row(vec![Node::Unsupported]),
             ]
@@ -544,7 +608,7 @@ mod tests {
             json!({"type": "markdown", "text": huge}),
             json!({"type": "list", "items": [{"id": "a", "title": huge, "subtitle": huge, "badge": huge}]}),
             json!({"type": "button", "id": "b", "label": huge}),
-            json!({"type": "input", "id": "i", "placeholder": huge}),
+            json!({"type": "input", "id": "i", "placeholder": huge, "value": huge}),
             json!({"type": "select", "id": "s", "options": options}),
             json!({"type": "checkbox", "id": "c", "label": huge}),
             json!({"type": "badge", "text": huge}),
@@ -568,7 +632,12 @@ mod tests {
                     line(item.badge.as_deref().unwrap());
                 }
                 Node::Button { label, .. } | Node::Checkbox { label, .. } => line(label),
-                Node::Input { placeholder, .. } => line(placeholder),
+                Node::Input {
+                    placeholder, value, ..
+                } => {
+                    line(placeholder);
+                    line(value.as_deref().unwrap());
+                }
                 Node::Badge(text) => line(text),
                 Node::Select { options, .. } => assert_eq!(options.len(), MAX_OPTIONS),
                 other => panic!("unexpected {other:?}"),

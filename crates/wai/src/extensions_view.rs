@@ -270,7 +270,7 @@ impl ExtensionsView {
     /// Its process is killed first (Review Focus 3). The folder leaves `extensions/` at once;
     /// its files are deleted off the main thread.
     fn uninstall(&mut self, id: &ExtId, window: &mut Window, cx: &mut Context<Self>) {
-        self.host.update(cx, |host, _| host.stop(id));
+        self.host.update(cx, |host, cx| host.stop(id, cx));
         match self.store.uninstall(id) {
             Ok(trash) => cx
                 .background_spawn(async move { std::fs::remove_dir_all(trash).ok() })
