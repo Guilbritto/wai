@@ -8144,7 +8144,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
- "dunce",
  "gpui-kit",
  "notify-rust",
  "serde_json",

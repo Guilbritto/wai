@@ -182,8 +182,7 @@ pub fn revert(diff: &FileDiff, created: bool, asked: &Undo) -> Result<(), Revert
         undo if undo != *asked => Err(RevertError::Changed),
         Undo::Delete => fs::remove_file(&diff.path).map_err(io),
         Undo::Whole(text) | Undo::Snippet(text) => {
-            // The text is the file's own bytes, line ends included.
-            editor::save(&diff.path, &text, false).map(drop).map_err(io)
+            editor::save(&diff.path, &text).map(drop).map_err(io)
         }
     }
 }

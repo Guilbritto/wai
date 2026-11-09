@@ -95,7 +95,7 @@ impl FileEditor {
         if self.read_only {
             return false;
         }
-        if let Ok(now) = dunce::canonicalize(&self.path)
+        if let Ok(now) = wai_settings::try_canonical(&self.path)
             && Some(&now) != self.real.as_ref()
         {
             let notice = "File was replaced by a link — reopen it to edit";
@@ -112,9 +112,9 @@ impl FileEditor {
         }
         // ponytail: written on the main thread; at most 20 MB, so tens of ms at worst. Move it to
         // the background executor (with an edit counter for `dirty`) if it ever shows.
-        let text = self.editor.read(cx).text().to_string();
+        let text = file::line_ends(&self.editor.read(cx).text().to_string(), self.crlf);
         let target = self.real.as_deref().unwrap_or(&self.path);
-        match file::save_resolved(target, &text, self.crlf) {
+        match file::save_resolved(target, &text) {
             Ok(stamp) => {
                 self.stamp = stamp;
                 (self.dirty, self.disk_changed) = (false, false);

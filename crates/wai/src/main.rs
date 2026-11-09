@@ -52,8 +52,8 @@ fn resolve_project(arg: Option<PathBuf>, last: Option<PathBuf>) -> anyhow::Resul
         (None, None) => std::env::current_dir()?,
     };
     let shown = wai_settings::shown;
-    let project =
-        dunce::canonicalize(&path).with_context(|| format!("cannot open {}", shown(&path)))?;
+    let project = wai_settings::try_canonical(&path)
+        .with_context(|| format!("cannot open {}", shown(&path)))?;
     anyhow::ensure!(project.is_dir(), "{} is not a folder", shown(&project));
     Ok(project)
 }

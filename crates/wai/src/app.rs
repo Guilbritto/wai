@@ -66,8 +66,8 @@ fn bind_keys(cx: &mut App) {
         (paste, Box::new(Paste), Some("Terminal")),
         (copy, Box::new(CopySelection), Some("Terminal")),
     ];
-    if cfg!(windows) {
-        let terminal = windows_terminal_keymap().into_iter();
+    if cfg!(not(target_os = "macos")) {
+        let terminal = terminal_ctrl_keymap().into_iter();
         keymap.extend(terminal.map(|(keys, action)| (keys, action, Some("Terminal"))));
     }
     // `KeyBinding::new` rejects `secondary-`; `load` resolves it for the host OS.
@@ -81,9 +81,10 @@ fn bind_keys(cx: &mut App) {
     cx.bind_keys(bindings);
 }
 
-/// Windows, in the Terminal context: `NoAction` hides the app's ctrl-c/v/n/w/o/q (`secondary-`
-/// is ctrl there), so they reach the shell, and the app's actions move to ctrl-shift.
-fn windows_terminal_keymap() -> [(&'static str, Box<dyn Action>); 10] {
+/// Off macOS (Windows, and Linux alike), in the Terminal context: `NoAction` hides the app's
+/// ctrl-c/v/n/w/o/q (`secondary-` is ctrl there), so they reach the shell, and the app's actions
+/// move to ctrl-shift.
+fn terminal_ctrl_keymap() -> [(&'static str, Box<dyn Action>); 10] {
     [
         ("ctrl-c", Box::new(NoAction)),
         ("ctrl-v", Box::new(NoAction)),
@@ -395,11 +396,11 @@ fn screenshot(
 
 #[cfg(test)]
 mod tests {
-    /// Windows, terminal focused: the shell gets ctrl-c/v/n/w/o/q, the app's actions move to
+    /// Off macOS, terminal focused: the shell gets ctrl-c/v/n/w/o/q, the app's actions move to
     /// ctrl-shift (copy and paste are ctrl-shift-c/v off macOS already).
     #[test]
     fn windows_terminal_keymap_table() {
-        let table: Vec<(&str, &str)> = super::windows_terminal_keymap()
+        let table: Vec<(&str, &str)> = super::terminal_ctrl_keymap()
             .iter()
             .map(|(keys, action)| (*keys, action.name()))
             .collect();

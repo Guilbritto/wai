@@ -13,7 +13,7 @@ mod tests {
 
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{ElementId, Entity, TestAppContext, VisualTestContext};
+    use gpui_kit::{ClipboardItem, ElementId, Entity, TestAppContext, VisualTestContext};
     use wai_settings::Settings;
 
     use super::file::{OpenError, OpenMode, classify};
@@ -198,6 +198,27 @@ mod tests {
             cx.simulate_keystrokes("enter");
             cx.simulate_keystrokes("secondary-s");
             let saved = ["zero", "one", "two", ""].join(ending);
+            assert_eq!(fs::read_to_string(path).unwrap(), saved);
+        }
+    }
+
+    /// A Windows clipboard holds CRLF text: pasted, it takes the file's line ends, never `\r\r\n`
+    /// in a CRLF file nor a stray `\r\n` in an LF one.
+    #[gpui_kit::test]
+    fn pasted_crlf_takes_the_files_line_ends(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let [crlf, lf] = ["win.txt", "unix.txt"].map(|name| dir.path().join(name));
+        fs::write(&crlf, "one\r\n").unwrap();
+        fs::write(&lf, "one\n").unwrap();
+        let (workspace, cx) = open(cx, Settings::default());
+
+        for (path, ending) in [(&crlf, "\r\n"), (&lf, "\n")] {
+            open_file(&workspace, path, None, cx);
+            let clipboard = ClipboardItem::new_string("a\r\nb\r\n".into());
+            cx.update(|_, cx| cx.write_to_clipboard(clipboard));
+            cx.simulate_keystrokes("secondary-v");
+            cx.simulate_keystrokes("secondary-s");
+            let saved = ["a", "b", "one", ""].join(ending);
             assert_eq!(fs::read_to_string(path).unwrap(), saved);
         }
     }

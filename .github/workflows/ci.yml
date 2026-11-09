@@ -34,7 +34,11 @@ jobs:
       # The UI and agent tests start it.
       - run: cargo build -p wai-agent --bin wai-fake-agent
       - run: cargo test --workspace
+      - run: go vet ./...
+        working-directory: extensions/wai-waycarbon
+      # Its tests put a sh-script `jira` on a `:`-joined PATH: unix only.
       - run: go test ./...
+        if: runner.os != 'Windows'
         working-directory: extensions/wai-waycarbon
 
   licenses:

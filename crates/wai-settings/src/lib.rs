@@ -248,7 +248,12 @@ pub fn config_dir() -> PathBuf {
 /// Windows without the `\\?\` prefix (dunce), which keeps it only where dropping it would name
 /// another file: what wai compares, shows, sends to agents and uses as a terminal cwd.
 pub fn canonical(path: &Path) -> PathBuf {
-    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    try_canonical(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// `canonical`, or why the path does not resolve.
+pub fn try_canonical(path: &Path) -> std::io::Result<PathBuf> {
+    dunce::canonicalize(path)
 }
 
 /// A path as wai shows it: never with Windows' verbatim prefix (`\\?\C:\x` shows as `C:\x`,

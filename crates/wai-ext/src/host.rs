@@ -207,11 +207,18 @@ fn kill_on_close_job(child: &Child) -> Option<std::os::windows::io::OwnedHandle>
     };
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let failed = |what: &str| {
+        let error = std::io::Error::last_os_error();
+        eprintln!(
+            "wai: no job object for an extension ({what}: {error}); its children may outlive it"
+        );
+    };
     // SAFETY: the job handle is checked, then owned (closed once); `limits` outlives the call
     // that reads it, with its size; the child's handle is valid while `child` is.
     unsafe {
         let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
         if job.is_null() {
+            failed("create");
             return None;
         }
         let job = OwnedHandle::from_raw_handle(job);
@@ -221,9 +228,15 @@ fn kill_on_close_job(child: &Child) -> Option<std::os::windows::io::OwnedHandle>
             (&raw const limits).cast(),
             size_of_val(&limits) as u32,
         );
-        let joined =
-            set != 0 && AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) != 0;
-        joined.then_some(job)
+        if set == 0 {
+            failed("limit");
+            return None;
+        }
+        if AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) == 0 {
+            failed("assign");
+            return None;
+        }
+        Some(job)
     }
 }
 
