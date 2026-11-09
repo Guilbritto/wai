@@ -148,7 +148,8 @@ impl Workspace {
             let agents = this.registry.read(cx).shutdown_all();
             this.ext_host.update(cx, |host, _| host.stop_all());
             for tab in this.dirty_tabs(cx) {
-                tab.read(cx).keep_edits(cx);
+                // Logged; no notice can show now.
+                tab.read(cx).keep_edits(cx).ok();
             }
             this.save_state(cx);
             if let Some(terminal) = &this.terminal {
@@ -373,6 +374,9 @@ impl Workspace {
                 .await;
             this.update_in(cx, |this, window, cx| {
                 for found in found {
+                    // Its name is never handed out again, even once the tab drops it (saved).
+                    let after = recovery::number(&found.file).map_or(0, |n| n + 1);
+                    this.next_recovery = this.next_recovery.max(after);
                     // ponytail: a second entry for one file (two runs of wai) waits for a launch
                     // without the first.
                     if this.reveal(&found.entry.path, None, window, cx) {
@@ -650,14 +654,18 @@ impl Workspace {
     /// R57: the pane an extension's session takes: its last session's (or its start's), else an
     /// empty one, else a new one while there are fewer than `MAX_PANES`. `None` when no pane is
     /// free (each shows a user's session, the editor or another start): it opens in the open
-    /// list only.
+    /// list only. R61: never the focused pane's session, even its own: the user is in it.
     fn ext_pane(&mut self, ext: &ExtId) -> Option<usize> {
-        let last = self.ext_sessions.get(ext);
-        let theirs = self.panes.iter().position(|pane| match pane {
-            Pane::Session(session) => Some(&session.entity_id()) == last,
-            Pane::Preparing { by_extension, .. } => by_extension.as_ref() == Some(ext),
-            _ => false,
-        });
+        let (last, focused) = (self.ext_sessions.get(ext), self.focused_pane);
+        let theirs = self
+            .panes
+            .iter()
+            .enumerate()
+            .position(|(ix, pane)| match pane {
+                Pane::Session(session) => ix != focused && Some(&session.entity_id()) == last,
+                Pane::Preparing { by_extension, .. } => by_extension.as_ref() == Some(ext),
+                _ => false,
+            });
         let empty = || self.panes.iter().position(|p| matches!(p, Pane::Empty(_)));
         if let Some(ix) = theirs.or_else(empty) {
             return Some(ix);
@@ -2515,8 +2523,9 @@ pub(crate) mod tests {
         assert_eq!(AppState::load(&path).open_sessions, []);
     }
 
-    /// R57: an extension's sessions reuse the pane of its last one, never a pane showing the
-    /// user's session; with no pane free they open in the open list only. None takes the focus.
+    /// R57: an extension's sessions reuse the pane of its last one (R61: unless the user is in
+    /// it), never a pane showing the user's session; with no pane free they open in the open
+    /// list only. None takes the focus.
     #[gpui_kit::test]
     fn extension_opens_never_replace_user_sessions(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
@@ -2556,6 +2565,16 @@ pub(crate) mod tests {
             assert_eq!(w.panes[1].session(), Some(&second));
         });
 
+        // R61: not while the user is in that pane.
+        workspace.update(cx, |w, _| w.focused_pane = 1);
+        let third = theirs("three", cx);
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 3);
+            assert_eq!(w.panes[1].session(), Some(&second));
+            assert_eq!(w.panes[2].session(), Some(&third));
+            assert_eq!(w.focused_pane, 1);
+        });
+
         // Every pane the user's (a session, three starts): none is free.
         let users = |ticket| Pane::Preparing {
             agent: "fake".into(),
@@ -2565,7 +2584,7 @@ pub(crate) mod tests {
         workspace.update(cx, |w, _| {
             w.panes = vec![Pane::Session(mine.clone()), users(90), users(91), users(92)];
         });
-        let third = theirs("three", cx);
+        let fourth = theirs("four", cx);
         workspace.read_with(cx, |w, _| {
             assert_eq!(w.panes.len(), super::MAX_PANES);
             assert_eq!(w.panes[0].session(), Some(&mine));
@@ -2574,7 +2593,7 @@ pub(crate) mod tests {
                     .iter()
                     .all(|p| matches!(p, Pane::Preparing { .. }))
             );
-            assert!(w.sessions.contains(&third), "in the open list only");
+            assert!(w.sessions.contains(&fourth), "in the open list only");
         });
     }
 }

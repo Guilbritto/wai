@@ -1,5 +1,6 @@
 //! An editor pane: open files in tabs, each a code editor kept in step with the disk.
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -49,6 +50,8 @@ pub struct FileEditor {
     /// Reopened from the last run's unsaved edits: the banner says so until they are saved or
     /// dropped.
     recovered: bool,
+    /// A failed backup was shown (R61): the next one is not, until a backup works again.
+    warned: bool,
     _edits: Subscription,
 }
 
@@ -70,16 +73,20 @@ impl FileEditor {
             state.set_value(loaded.text, window, cx);
             state
         });
-        let edits = cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
-            if !matches!(event, InputEvent::Change) {
-                return;
-            }
-            this.keep_later(cx);
-            if !this.dirty {
-                this.dirty = true;
-                cx.notify();
-            }
-        });
+        let edits = cx.subscribe_in(
+            &editor,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if !matches!(event, InputEvent::Change) {
+                    return;
+                }
+                this.keep_later(window, cx);
+                if !this.dirty {
+                    this.dirty = true;
+                    cx.notify();
+                }
+            },
+        );
         Self {
             path,
             dirty: false,
@@ -94,6 +101,7 @@ impl FileEditor {
             recovery,
             keeping: None,
             recovered: false,
+            warned: false,
             _edits: edits,
         }
     }
@@ -125,22 +133,38 @@ impl FileEditor {
 
     /// Keeps the edits `KEEP_AFTER` after typing pauses: one write per burst, and no timer at
     /// all while nothing changes.
-    fn keep_later(&mut self, cx: &mut Context<Self>) {
+    fn keep_later(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.recovery.is_none() {
             return;
         }
-        self.keeping = Some(cx.spawn(async move |this, cx| {
+        self.keeping = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(KEEP_AFTER).await;
-            this.update(cx, |this, cx| this.keep_edits(cx)).ok();
+            this.update_in(cx, |this, window, cx| this.keep_or_warn(window, cx))
+                .ok();
         }));
     }
 
+    /// `keep_edits` after typing pauses. R61: a backup that fails says so, once until one works.
+    fn keep_or_warn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let error = match self.keep_edits(cx) {
+            Ok(()) => return self.warned = false,
+            Err(_) if self.warned => return,
+            Err(e) => e,
+        };
+        self.warned = true;
+        let notice = match error.kind() {
+            io::ErrorKind::FileTooLarge => format!("Too large to back up: {}", self.name()),
+            _ => format!("Could not back up unsaved changes: {error}"),
+        };
+        window.push_notification(Notification::error(notice).autohide(false), cx);
+    }
+
     /// Writes the unsaved edits to the recovery file, now: after typing pauses, and at quit.
-    /// ponytail: on the main thread, like Save (at most 20 MB, tens of ms at worst), so no write
-    /// can land after the save or discard that deletes it.
-    pub fn keep_edits(&self, cx: &App) {
+    /// ponytail: on the main thread, like Save (an entry over 50 MB is not written, so tens of
+    /// ms at worst), so no write can land after the save or discard that deletes it.
+    pub fn keep_edits(&self, cx: &App) -> io::Result<()> {
         let Some(file) = self.recovery.as_ref().filter(|_| self.dirty) else {
-            return;
+            return Ok(());
         };
         let entry = recovery::Entry {
             path: self.path.clone(),
@@ -148,12 +172,9 @@ impl FileEditor {
             crlf: self.crlf,
             stamp: self.stamp,
         };
-        if let Err(e) = recovery::write(file, &entry) {
-            eprintln!(
-                "wai: could not keep the edits to {}: {e}",
-                self.path.display()
-            );
-        }
+        recovery::write(file, &entry).inspect_err(|e| {
+            eprintln!("wai: could not back up {}: {e}", self.path.display());
+        })
     }
 
     /// The edits were saved, or the user dropped them: nothing is left to recover.

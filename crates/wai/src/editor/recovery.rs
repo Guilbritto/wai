@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use super::file::{self, Stamp};
 
-/// A recovery file over this is left alone (and logged): reading it would hold up the launch.
+/// A recovery entry over this is neither written nor read (R61): it would hold up the UI thread
+/// and the launch.
 const MAX_BYTES: u64 = 50 * 1024 * 1024;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -35,13 +36,18 @@ pub struct Recovered {
 }
 
 /// Writes `entry` to `file` through a temp file renamed over it: a crash leaves the old entry or
-/// the new one. Buffers can hold secrets, so the folder is 0700 and the file 0600.
+/// the new one. Buffers can hold secrets, so the folder is 0700 and the file 0600. Over 50 MB
+/// nothing is written (`FileTooLarge`); an older entry stays.
 /// ponytail: no fsync (a full flush on macOS costs tens of ms per write); the page cache outlives
 /// a crash of wai, and an entry a power loss empties is skipped at launch.
 pub fn write(file: &Path, entry: &Entry) -> io::Result<()> {
     let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else {
         return Err(io::ErrorKind::InvalidInput.into());
     };
+    let bytes = serde_json::to_vec(entry)?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(io::ErrorKind::FileTooLarge.into());
+    }
     fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
@@ -49,7 +55,6 @@ pub fn write(file: &Path, entry: &Entry) -> io::Result<()> {
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     }
     let tmp = dir.join(format!(".{}.tmp", name.to_string_lossy()));
-    let bytes = serde_json::to_vec(entry)?;
     let written = (|| {
         // R40: unlink whatever has the temp name (a link included), then create it anew.
         fs::remove_file(&tmp).ok();
@@ -116,8 +121,14 @@ fn skip(file: &Path, why: &str) -> Option<Recovered> {
     None
 }
 
-/// A recovery file name in `dir` that no entry has: `<n>.json` from `*next` on. ponytail: one
-/// wai at a time; two would share these names (and `state.json`).
+/// A recovery file name in `dir` that no entry has: `<n>.json` from `*next` on. Names a tab
+/// holds stay below `*next` (`number`), so none is handed out twice. ponytail: one wai at a
+/// time; two would share these names (and `state.json`).
+/// The `n` of a `<n>.json` recovery file.
+pub fn number(file: &Path) -> Option<u64> {
+    file.file_stem()?.to_str()?.parse().ok()
+}
+
 pub fn next_file(dir: &Path, next: &mut u64) -> PathBuf {
     loop {
         let file = dir.join(format!("{next}.json"));
@@ -187,6 +198,21 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].entry.text, "mine a");
         assert!(huge.exists(), "left alone");
+    }
+
+    /// R61: an entry over 50 MB is not written (the launch would skip it).
+    #[test]
+    fn oversized_entry_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        fs::write(&path, "a").unwrap();
+        let file = dir.path().join("recovery").join("0.json");
+        let big = "x".repeat(50 * 1024 * 1024 + 1);
+
+        let error = write(&file, &entry(&path, &big)).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
+        assert!(!file.exists());
     }
 
     /// Edits that came back to the file's text recover nothing: the entry goes.

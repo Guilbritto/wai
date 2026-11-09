@@ -890,4 +890,88 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "mine one\n");
         assert!(recovery_files(&state).is_empty());
     }
+
+    fn recovered_texts(state: &Path) -> Vec<String> {
+        let entry = |file: PathBuf| -> serde_json::Value {
+            serde_json::from_str(&fs::read_to_string(file).unwrap()).unwrap()
+        };
+        let texts = recovery_files(state).into_iter().map(entry);
+        let mut texts: Vec<_> = texts.map(|e| e["text"].as_str().unwrap().into()).collect();
+        texts.sort();
+        texts
+    }
+
+    /// A reopened tab keeps its recovery file, and no tab opened later is handed the same name,
+    /// not even once the reopened tab's file is gone (saved): each tab's edits stay its own.
+    #[gpui_kit::test]
+    fn recovered_tabs_keep_their_own_backup(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        let root = canonical(dir.path());
+        let [a, b] = ["a.txt", "b.txt"].map(|name| root.join(name));
+        fs::write(&a, "a").unwrap();
+        fs::write(&b, "b").unwrap();
+        let (workspace, cx) = run_at(&state, cx);
+        open_file(&workspace, &a, None, cx);
+        cx.simulate_input("first ");
+        quit(cx);
+
+        let (workspace, cx) = run_at(&state, &mut cx.cx);
+        cx.simulate_keystrokes("secondary-s");
+        assert!(recovery_files(&state).is_empty());
+        open_file(&workspace, &b, None, cx);
+        cx.simulate_input("theirs ");
+        open_file(&workspace, &a, None, cx);
+        cx.simulate_input("again ");
+        quit(cx);
+
+        assert_eq!(recovered_texts(&state), ["again first a", "theirs b"]);
+    }
+
+    /// R61: an entry over 50 MB is not written, and a notice says so once.
+    #[gpui_kit::test]
+    fn oversized_backup_is_skipped_with_a_notice(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        let path = canonical(dir.path()).join("big.txt");
+        fs::write(&path, "a").unwrap();
+        let (workspace, cx) = run_at(&state, cx);
+        open_file(&workspace, &path, None, cx);
+        let tab = active_tab(&workspace, cx);
+        // 51 MB in 1 KB lines, pasted into a small file.
+        let big = format!("{}\n", "x".repeat(1023)).repeat(51 * 1024);
+        cx.update(|window, cx| {
+            let editor = tab.read(cx).editor.clone();
+            editor.update(cx, |s, cx| s.set_value(big, window, cx));
+        });
+
+        cx.simulate_input("1");
+        wait(1_000, cx);
+        assert_eq!(notices(cx), 1);
+        assert!(recovery_files(&state).is_empty());
+        cx.simulate_input("2");
+        wait(1_000, cx);
+        assert_eq!(notices(cx), 1, "once");
+    }
+
+    /// R61: a backup that cannot be written (here `recovery` is a file) says so, once.
+    #[gpui_kit::test]
+    fn failed_backup_says_so_once(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        fs::create_dir_all(state.parent().unwrap()).unwrap();
+        fs::write(state.with_file_name("recovery"), "").unwrap();
+        let path = canonical(dir.path()).join("a.txt");
+        fs::write(&path, "a").unwrap();
+        let (workspace, cx) = run_at(&state, cx);
+        open_file(&workspace, &path, None, cx);
+
+        cx.simulate_input("1");
+        wait(1_000, cx);
+        assert_eq!(notices(cx), 1);
+        cx.simulate_input("2");
+        wait(1_000, cx);
+        assert_eq!(notices(cx), 1, "once");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a");
+    }
 }
