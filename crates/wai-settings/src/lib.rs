@@ -12,6 +12,7 @@ pub struct Settings {
     pub agents: BTreeMap<String, AgentConfig>,
     pub terminal: TerminalSettings,
     pub theme: ThemeChoice,
+    pub updates: UpdateSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -23,6 +24,17 @@ pub struct AgentConfig {
 #[serde(default)]
 pub struct TerminalSettings {
     pub shell: Option<String>,
+}
+
+/// The opt-in update check, from the user's settings only (see `Settings::load`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct UpdateSettings {
+    /// Off by default: wai makes no request unless the user turns this on.
+    pub check: bool,
+    /// `owner/repo` on GitHub whose latest release is checked. Unset, nothing is checked; this
+    /// default is the placeholder until wai has a public repository.
+    pub repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -56,6 +68,7 @@ impl Default for Settings {
             )]),
             terminal: TerminalSettings::default(),
             theme: ThemeChoice::default(),
+            updates: UpdateSettings::default(),
         }
     }
 }
@@ -135,8 +148,8 @@ impl Settings {
     /// Merges defaults, then `<user_dir>/settings.toml`, then `<project_dir>/.wai/settings.toml`.
     /// An error in the user's file fails the load. The project file may not set `agents` or
     /// `terminal` (R15: opening a cloned repository must not choose what wai runs), so its
-    /// `default_agent` can only name an agent the defaults or the user define. Those tables, or a
-    /// project file that does not load, are left out; the returned notices say so.
+    /// `default_agent` can only name an agent the defaults or the user define; nor `updates`. Those
+    /// tables, or a project file that does not load, are left out; the returned notices say so.
     pub fn load(
         user_dir: &Path,
         project_dir: Option<&Path>,
@@ -159,6 +172,13 @@ impl Settings {
             if stripped.iter().any(Option::is_some) {
                 notices.push(format!(
                     "Ignored agents/terminal settings from {}: project settings cannot change commands.",
+                    path.display()
+                ));
+            }
+            // Nor may it make wai send a request, or name the repository whose page wai opens.
+            if layer.remove("updates").is_some() {
+                notices.push(format!(
+                    "Ignored updates settings from {}: only user settings can turn on the update check.",
                     path.display()
                 ));
             }
@@ -313,7 +333,7 @@ pub fn resolve_on_path(
 }
 
 /// A file the user may run (on Windows: any file).
-fn executable(path: &Path) -> bool {
+pub fn executable(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -429,6 +449,41 @@ mod tests {
                 path.display()
             )]
         );
+    }
+
+    /// A cloned repository cannot turn the update check on or point it at another repository
+    /// (whose release page the notice would open).
+    #[test]
+    fn project_cannot_set_updates() {
+        let u = tempfile::tempdir().unwrap();
+        let p = tempfile::tempdir().unwrap();
+        assert_eq!(Settings::default().updates, UpdateSettings::default());
+        assert!(!UpdateSettings::default().check && UpdateSettings::default().repo.is_none());
+        write(
+            p.path(),
+            ".wai/settings.toml",
+            "theme = \"light\"\n[updates]\ncheck = true\nrepo = \"evil/wai\"\n",
+        );
+        let (s, notices) = Settings::load(u.path(), Some(p.path())).unwrap();
+        assert_eq!(s.theme, ThemeChoice::Light);
+        assert_eq!(s.updates, UpdateSettings::default());
+        let path = p.path().join(".wai").join("settings.toml");
+        assert_eq!(
+            notices,
+            [format!(
+                "Ignored updates settings from {}: only user settings can turn on the update check.",
+                path.display()
+            )]
+        );
+
+        write(
+            u.path(),
+            "settings.toml",
+            "[updates]\ncheck = true\nrepo = \"owner/wai\"\n",
+        );
+        let (s, _) = Settings::load(u.path(), None).unwrap();
+        assert!(s.updates.check);
+        assert_eq!(s.updates.repo.as_deref(), Some("owner/wai"));
     }
 
     #[test]

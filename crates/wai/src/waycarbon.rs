@@ -94,10 +94,13 @@ fn my_cards_panel_renders_and_click_prefills(cx: &mut TestAppContext) {
 
     click(("tab-panel", 0usize), cx);
     click(("panel-item", 1usize), cx);
+    // Beside the focused (empty) pane: an extension's session never takes it (R61).
     wait_until(cx, "a pre-filled session", |cx| {
-        workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
+        workspace.read_with(cx, |w, _| {
+            w.panes.get(1).is_some_and(|p| p.session().is_some())
+        })
     });
-    let session = workspace.read_with(cx, |w, _| w.panes[0].session().cloned().unwrap());
+    let session = workspace.read_with(cx, |w, _| w.panes[1].session().cloned().unwrap());
     let draft = session.read_with(cx, |s, cx| s.draft(cx));
     assert_eq!(draft, "Work on EC-102: Add the export button");
     assert!(

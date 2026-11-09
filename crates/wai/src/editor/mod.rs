@@ -2,6 +2,7 @@
 
 mod file;
 mod pane;
+pub mod recovery;
 
 pub use file::{load, save};
 pub use pane::{EditorPane, Emptied, FileEditor, Saved};
@@ -10,6 +11,7 @@ pub use pane::{EditorPane, Emptied, FileEditor, Saved};
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
@@ -19,7 +21,7 @@ mod tests {
     use super::file::{OpenError, OpenMode, classify};
     use super::{EditorPane, FileEditor};
     use crate::sidebar::canonical;
-    use crate::workspace::tests::{fake_settings, open, wait_until};
+    use crate::workspace::tests::{fake_settings, open, open_at, wait_until};
     use crate::workspace::{Leave, MAX_PANES, Pane, Workspace};
 
     const MB: u64 = 1024 * 1024;
@@ -291,7 +293,7 @@ mod tests {
         let busy = || Pane::Preparing {
             agent: "fake".into(),
             ticket: 0,
-            by_extension: false,
+            by_extension: None,
         };
         workspace.update(cx, |w, _| {
             w.panes = vec![busy()];
@@ -696,5 +698,280 @@ mod tests {
             "edit a",
             "the tab stays"
         );
+    }
+
+    /// A run of wai that keeps its state, and its unsaved edits, beside `state` (a temp dir):
+    /// what a launch restores, without the agent.
+    fn run_at<'a>(
+        state: &Path,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+        let (workspace, cx) = open_at(cx, Settings::default(), Some(state.to_path_buf()));
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.restore(window, cx)));
+        cx.run_until_parked();
+        (workspace, cx)
+    }
+
+    /// What every quit runs, ⌘Q, Dock and logout alike: the quit hooks.
+    fn quit(cx: &mut VisualTestContext) {
+        cx.cx.update(|app| app.shutdown());
+    }
+
+    fn recovery_files(state: &Path) -> Vec<PathBuf> {
+        let dir = fs::read_dir(state.with_file_name("recovery"));
+        let files = dir.into_iter().flatten().map(|e| e.unwrap().path());
+        files.collect()
+    }
+
+    fn recovered_banner(cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| window.render_frame(cx));
+        cx.debug_bounds("recovered-banner").is_some()
+    }
+
+    fn wait(ms: u64, cx: &mut VisualTestContext) {
+        cx.executor().advance_clock(Duration::from_millis(ms));
+        cx.run_until_parked();
+    }
+
+    /// Hot-exit: a quit that never asks (Dock, logout) keeps the unsaved edits, even before their
+    /// snapshot; the next launch reopens them, edited, with the banner. The file is never written
+    /// until Save, which keeps its line ends.
+    #[gpui_kit::test]
+    fn dirty_buffers_are_recovered_after_quit(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        let path = canonical(dir.path()).join("win.txt");
+        fs::write(&path, "one\r\n").unwrap();
+        let (workspace, cx) = run_at(&state, cx);
+        open_file(&workspace, &path, None, cx);
+        cx.simulate_input("mine ");
+
+        quit(cx);
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "one\r\n",
+            "never written"
+        );
+        assert_eq!(recovery_files(&state).len(), 1);
+        let (workspace, cx) = run_at(&state, &mut cx.cx);
+        let tab = active_tab(&workspace, cx);
+        assert_eq!(tab.read_with(cx, |t, _| t.path.clone()), path);
+        assert_eq!(text(&tab, cx), "mine one\n");
+        assert!(tab.read_with(cx, |t, _| t.dirty && !t.disk_changed));
+        assert!(recovered_banner(cx));
+        assert_eq!(super::pane::RECOVERED, "Recovered unsaved changes");
+
+        cx.simulate_keystrokes("secondary-s");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "mine one\r\n");
+        assert!(!recovered_banner(cx));
+        assert!(recovery_files(&state).is_empty());
+    }
+
+    /// The recovery file goes once the edits are saved or dropped (Don't save, Discard); a quit
+    /// after Discard keeps nothing.
+    #[gpui_kit::test]
+    fn recovery_is_cleared_on_save_and_discard(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        let root = canonical(dir.path());
+        let [a, b] = ["a.txt", "b.txt"].map(|name| root.join(name));
+        fs::write(&a, "a").unwrap();
+        fs::write(&b, "b").unwrap();
+        let (workspace, cx) = run_at(&state, cx);
+
+        open_file(&workspace, &a, None, cx);
+        cx.simulate_input("saved ");
+        wait(1_000, cx);
+        assert_eq!(recovery_files(&state).len(), 1);
+        cx.simulate_keystrokes("secondary-s");
+        assert!(recovery_files(&state).is_empty(), "Save");
+
+        open_file(&workspace, &b, None, cx);
+        cx.simulate_input("dropped ");
+        wait(1_000, cx);
+        assert_eq!(recovery_files(&state).len(), 1);
+        cx.simulate_keystrokes("secondary-w");
+        click("dont-save", cx);
+        assert!(recovery_files(&state).is_empty(), "Don't save");
+        assert_eq!(fs::read_to_string(&b).unwrap(), "b");
+
+        cx.simulate_input("discarded ");
+        wait(1_000, cx);
+        assert_eq!(recovery_files(&state).len(), 1);
+        cx.simulate_keystrokes("secondary-q");
+        click("discard", cx);
+        assert!(recovery_files(&state).is_empty(), "Discard");
+        quit(cx);
+        assert!(recovery_files(&state).is_empty(), "the quit keeps nothing");
+        assert_eq!(fs::read_to_string(&a).unwrap(), "saved a");
+    }
+
+    /// One write per burst of typing, 1 s after it pauses; nothing runs while nothing changes.
+    #[gpui_kit::test]
+    fn recovery_waits_for_typing_to_pause(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        let path = canonical(dir.path()).join("a.txt");
+        fs::write(&path, "a").unwrap();
+        let (workspace, cx) = run_at(&state, cx);
+        open_file(&workspace, &path, None, cx);
+
+        cx.simulate_input("1");
+        wait(600, cx);
+        cx.simulate_input("2");
+        wait(600, cx);
+        assert!(recovery_files(&state).is_empty(), "still typing");
+        wait(400, cx);
+        let files = recovery_files(&state);
+        assert_eq!(files.len(), 1);
+        assert!(fs::read_to_string(&files[0]).unwrap().contains("\"12a\""));
+
+        fs::remove_file(&files[0]).unwrap();
+        wait(5_000, cx);
+        assert!(
+            recovery_files(&state).is_empty(),
+            "no write without an edit"
+        );
+    }
+
+    /// The file changed after the edits were kept: neither side is dropped. The tab shows the
+    /// edits and asks (R39: Save waits); Reload takes the disk's text and the entry goes.
+    #[gpui_kit::test]
+    fn recovery_keeps_a_change_on_disk(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        let path = canonical(dir.path()).join("notes.md");
+        fs::write(&path, "one\n").unwrap();
+        let (workspace, cx) = run_at(&state, cx);
+        open_file(&workspace, &path, None, cx);
+        cx.simulate_input("mine ");
+        quit(cx);
+        fs::write(&path, "theirs, longer\n").unwrap();
+
+        let (workspace, cx) = run_at(&state, &mut cx.cx);
+        let tab = active_tab(&workspace, cx);
+        assert_eq!(text(&tab, cx), "mine one\n");
+        assert!(tab.read_with(cx, |t, _| t.dirty && t.disk_changed));
+        assert!(recovered_banner(cx));
+        cx.simulate_keystrokes("secondary-s");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "theirs, longer\n");
+
+        click("reload", cx);
+        assert_eq!(text(&tab, cx), "theirs, longer\n");
+        assert!(recovery_files(&state).is_empty());
+    }
+
+    /// The file is gone: its tab comes back, edited, under its path. Save recreates it once Keep
+    /// mine answers the Save flow's own question.
+    #[gpui_kit::test]
+    fn recovery_reopens_a_deleted_file(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        let path = canonical(dir.path()).join("gone.txt");
+        fs::write(&path, "one\n").unwrap();
+        let (workspace, cx) = run_at(&state, cx);
+        open_file(&workspace, &path, None, cx);
+        cx.simulate_input("mine ");
+        quit(cx);
+        fs::remove_file(&path).unwrap();
+
+        let (workspace, cx) = run_at(&state, &mut cx.cx);
+        let tab = active_tab(&workspace, cx);
+        assert_eq!(tab.read_with(cx, |t, _| t.path.clone()), path);
+        assert_eq!(text(&tab, cx), "mine one\n");
+        assert!(tab.read_with(cx, |t, _| t.dirty));
+        assert!(recovered_banner(cx));
+        cx.simulate_keystrokes("secondary-s");
+        assert!(!path.exists(), "Save asks first");
+
+        click("keep-mine", cx);
+        cx.simulate_keystrokes("secondary-s");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "mine one\n");
+        assert!(recovery_files(&state).is_empty());
+    }
+
+    fn recovered_texts(state: &Path) -> Vec<String> {
+        let entry = |file: PathBuf| -> serde_json::Value {
+            serde_json::from_str(&fs::read_to_string(file).unwrap()).unwrap()
+        };
+        let texts = recovery_files(state).into_iter().map(entry);
+        let mut texts: Vec<_> = texts.map(|e| e["text"].as_str().unwrap().into()).collect();
+        texts.sort();
+        texts
+    }
+
+    /// A reopened tab keeps its recovery file, and no tab opened later is handed the same name,
+    /// not even once the reopened tab's file is gone (saved): each tab's edits stay its own.
+    #[gpui_kit::test]
+    fn recovered_tabs_keep_their_own_backup(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        let root = canonical(dir.path());
+        let [a, b] = ["a.txt", "b.txt"].map(|name| root.join(name));
+        fs::write(&a, "a").unwrap();
+        fs::write(&b, "b").unwrap();
+        let (workspace, cx) = run_at(&state, cx);
+        open_file(&workspace, &a, None, cx);
+        cx.simulate_input("first ");
+        quit(cx);
+
+        let (workspace, cx) = run_at(&state, &mut cx.cx);
+        cx.simulate_keystrokes("secondary-s");
+        assert!(recovery_files(&state).is_empty());
+        open_file(&workspace, &b, None, cx);
+        cx.simulate_input("theirs ");
+        open_file(&workspace, &a, None, cx);
+        cx.simulate_input("again ");
+        quit(cx);
+
+        assert_eq!(recovered_texts(&state), ["again first a", "theirs b"]);
+    }
+
+    /// R61: an entry over 50 MB is not written, and a notice says so once.
+    #[gpui_kit::test]
+    fn oversized_backup_is_skipped_with_a_notice(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        let path = canonical(dir.path()).join("big.txt");
+        fs::write(&path, "a").unwrap();
+        let (workspace, cx) = run_at(&state, cx);
+        open_file(&workspace, &path, None, cx);
+        let tab = active_tab(&workspace, cx);
+        // 51 MB in 1 KB lines, pasted into a small file.
+        let big = format!("{}\n", "x".repeat(1023)).repeat(51 * 1024);
+        cx.update(|window, cx| {
+            let editor = tab.read(cx).editor.clone();
+            editor.update(cx, |s, cx| s.set_value(big, window, cx));
+        });
+
+        cx.simulate_input("1");
+        wait(1_000, cx);
+        assert_eq!(notices(cx), 1);
+        assert!(recovery_files(&state).is_empty());
+        cx.simulate_input("2");
+        wait(1_000, cx);
+        assert_eq!(notices(cx), 1, "once");
+    }
+
+    /// R61: a backup that cannot be written (here `recovery` is a file) says so, once.
+    #[gpui_kit::test]
+    fn failed_backup_says_so_once(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        fs::create_dir_all(state.parent().unwrap()).unwrap();
+        fs::write(state.with_file_name("recovery"), "").unwrap();
+        let path = canonical(dir.path()).join("a.txt");
+        fs::write(&path, "a").unwrap();
+        let (workspace, cx) = run_at(&state, cx);
+        open_file(&workspace, &path, None, cx);
+
+        cx.simulate_input("1");
+        wait(1_000, cx);
+        assert_eq!(notices(cx), 1);
+        cx.simulate_input("2");
+        wait(1_000, cx);
+        assert_eq!(notices(cx), 1, "once");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a");
     }
 }

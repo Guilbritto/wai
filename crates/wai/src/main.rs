@@ -10,18 +10,24 @@ mod files;
 mod notify;
 mod palette;
 mod search_view;
+#[cfg(target_os = "macos")]
+mod shell_path;
 mod sidebar;
 mod terminal_view;
+mod update;
 #[cfg(all(test, unix))]
 mod waycarbon;
 mod workspace;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use wai_settings::{AppState, Settings, config_dir, load_templates};
 
 fn main() -> anyhow::Result<()> {
+    // First: it may set PATH, which is sound only while no other thread exists.
+    #[cfg(target_os = "macos")]
+    shell_path::import();
     // `WAI_STATE_PATH=<file>` keeps a manual run away from the real state.
     let state_path = std::env::var_os("WAI_STATE_PATH").map_or_else(
         || Ok(config_dir().join("state.json")),
@@ -45,17 +51,35 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `wai [PATH]`: the argument, else the last project while it exists, else the current dir.
+/// `wai [PATH]`: the argument, else the last project while it exists, else the current dir (see
+/// `fallback_project`).
 fn resolve_project(arg: Option<PathBuf>, last: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     let path = match (arg, last.filter(|p| p.is_dir())) {
         (Some(path), _) | (None, Some(path)) => path,
-        (None, None) => std::env::current_dir()?,
+        (None, None) => {
+            let canonical = wai_settings::canonical;
+            let exe_dir = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(canonical));
+            let cwd = canonical(&std::env::current_dir()?);
+            fallback_project(cwd, exe_dir.as_deref(), std::env::home_dir())
+        }
     };
     let shown = wai_settings::shown;
     let project = wai_settings::try_canonical(&path)
         .with_context(|| format!("cannot open {}", shown(&path)))?;
     anyhow::ensure!(project.is_dir(), "{} is not a folder", shown(&project));
     Ok(project)
+}
+
+/// The current dir, unless a launcher picked it: Finder, the Dock and `open` start the app at `/`,
+/// a Windows shortcut in its install dir. Then the home folder, never a whole disk.
+fn fallback_project(cwd: PathBuf, exe_dir: Option<&Path>, home: Option<PathBuf>) -> PathBuf {
+    let launched = cwd.parent().is_none() || exe_dir == Some(cwd.as_path());
+    match home {
+        Some(home) if launched => home,
+        _ => cwd,
+    }
 }
 
 #[cfg(test)]
@@ -73,5 +97,14 @@ mod tests {
         assert_eq!(resolve_project(None, Some(missing.clone())).unwrap(), cwd);
         assert_eq!(resolve_project(None, None).unwrap(), cwd);
         assert!(resolve_project(Some(missing), None).is_err());
+
+        // Finder, the Dock and `open` start the app at `/`; a Windows shortcut, in its own dir.
+        let (home, exe_dir) = (PathBuf::from("/home/me"), Path::new("/apps/wai"));
+        let fallback = |cwd: &str| fallback_project(cwd.into(), Some(exe_dir), Some(home.clone()));
+        assert_eq!(fallback("/"), home);
+        assert_eq!(fallback("/apps/wai"), home);
+        assert_eq!(fallback("/src/project"), PathBuf::from("/src/project"));
+        assert_eq!(fallback("/apps"), PathBuf::from("/apps"));
+        assert_eq!(fallback_project("/".into(), None, None), PathBuf::from("/"));
     }
 }

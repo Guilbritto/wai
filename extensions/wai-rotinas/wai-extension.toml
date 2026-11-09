@@ -1,0 +1,12 @@
+id = "wai-rotinas"
+name = "Rotinas"
+version = "0.1.0"
+description = "Runs your own scripts on a schedule from rotinas.toml and tells you when their output changes"
+permissions = ["process", "notify", "panels"]
+
+[process]
+command = "bin/wai-rotinas"
+
+[[contributes.panels]]
+id = "rotinas"
+title = "Routines"

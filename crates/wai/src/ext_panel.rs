@@ -24,6 +24,8 @@ use crate::sidebar::ROW_HEIGHT;
 const TWO_LINE_ROW: f32 = 44.;
 /// A list without `fill` shows at most this many rows and scrolls the rest.
 const LIST_ROWS: usize = 12;
+/// R57: a list is never narrower, so a wide sibling in a row wraps below it instead.
+const LIST_MIN_WIDTH: f32 = 160.;
 
 /// A list item or button was clicked: `values` holds each form field's value by id.
 pub struct PanelAction {
@@ -298,6 +300,7 @@ impl ExtPanel {
                 .collect::<Vec<_>>()
         })
         .w_full()
+        .min_w(px(LIST_MIN_WIDTH))
         .map(|list| match fill {
             true => list.flex_1().min_h_0(),
             // A list scrolls, so in a filling column it would shrink to nothing.
@@ -574,6 +577,25 @@ mod tests {
         let row = json!({"type": "row", "children": [list(true)]});
         show(&panel, tree(row, "Second"), cx);
         assert!(!shown(("panel-item", 30usize), cx));
+    }
+
+    /// R57: a list in a column in a row keeps 160 px beside a sibling as wide as the row is
+    /// (a long line of text, all but ~40 px of this window), instead of being squeezed to that.
+    #[gpui_kit::test]
+    fn row_column_list_keeps_min_width(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        let list = json!({"type": "list", "items": [{"id": "0", "title": "t"}]});
+        show(
+            &panel,
+            json!({"type": "row", "children": [
+                {"type": "column", "children": [list]},
+                {"type": "text", "text": "x".repeat(175)},
+            ]}),
+            cx,
+        );
+
+        let width = cx.update(|window, _| window.find(("panel-item", 0usize)).bounds().size.width);
+        assert!(width >= px(160.), "{width:?}");
     }
 
     /// R56: nor below a row, even in a column: such a list keeps its own height (it does not

@@ -1,6 +1,8 @@
 //! An editor pane: open files in tabs, each a code editor kept in step with the disk.
 
+use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
@@ -13,6 +15,12 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::file::{self, Loaded, OpenError, OpenMode, Stamp};
+use super::recovery::{self, Recovered};
+
+/// The banner of a tab reopened from the last run's unsaved edits.
+pub(crate) const RECOVERED: &str = "Recovered unsaved changes";
+/// Unsaved edits are kept this long after typing pauses.
+const KEEP_AFTER: Duration = Duration::from_secs(1);
 
 /// One open file.
 pub struct FileEditor {
@@ -35,6 +43,15 @@ pub struct FileEditor {
     crlf: bool,
     /// The file is gone from disk (a clean tab can then only close).
     deleted: bool,
+    /// Where its unsaved edits are kept (hot-exit); `None` keeps nothing (tests, tool outputs).
+    recovery: Option<PathBuf>,
+    /// The write of the edits that waits for typing to pause; each edit replaces it.
+    keeping: Option<Task<()>>,
+    /// Reopened from the last run's unsaved edits: the banner says so until they are saved or
+    /// dropped.
+    recovered: bool,
+    /// A failed backup was shown (R61): the next one is not, until a backup works again.
+    warned: bool,
     _edits: Subscription,
 }
 
@@ -43,6 +60,7 @@ impl FileEditor {
         path: PathBuf,
         loaded: Loaded,
         scratch: bool,
+        recovery: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -55,12 +73,20 @@ impl FileEditor {
             state.set_value(loaded.text, window, cx);
             state
         });
-        let edits = cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) && !this.dirty {
-                this.dirty = true;
-                cx.notify();
-            }
-        });
+        let edits = cx.subscribe_in(
+            &editor,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if !matches!(event, InputEvent::Change) {
+                    return;
+                }
+                this.keep_later(window, cx);
+                if !this.dirty {
+                    this.dirty = true;
+                    cx.notify();
+                }
+            },
+        );
         Self {
             path,
             dirty: false,
@@ -72,8 +98,103 @@ impl FileEditor {
             real: loaded.real,
             crlf: loaded.crlf,
             deleted: false,
+            recovery,
+            keeping: None,
+            recovered: false,
+            warned: false,
             _edits: edits,
         }
+    }
+
+    /// A tab for the last run's unsaved edits, kept in `found.file`: edited, with the banner.
+    /// Its file changed or gone since, the "Changed on disk" banner asks too (R39: Save waits
+    /// for Reload or Keep mine), so neither side is dropped unasked.
+    pub fn recovered(found: Recovered, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let Recovered {
+            file,
+            entry,
+            real,
+            now,
+        } = found;
+        let loaded = Loaded {
+            mode: OpenMode::Editable,
+            text: entry.text,
+            stamp: entry.stamp,
+            real,
+            crlf: entry.crlf,
+        };
+        let mut tab = Self::new(entry.path, loaded, false, Some(file), window, cx);
+        tab.dirty = true;
+        tab.recovered = true;
+        tab.disk_changed = now != entry.stamp;
+        tab.deleted = now.is_none();
+        tab
+    }
+
+    /// Keeps the edits `KEEP_AFTER` after typing pauses: one write per burst, and no timer at
+    /// all while nothing changes.
+    fn keep_later(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recovery.is_none() {
+            return;
+        }
+        self.keeping = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(KEEP_AFTER).await;
+            this.update_in(cx, |this, window, cx| this.keep_or_warn(window, cx))
+                .ok();
+        }));
+    }
+
+    /// `keep_edits` after typing pauses. R61: a backup that fails says so, once until one works.
+    fn keep_or_warn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let error = match self.keep_edits(cx) {
+            Ok(()) => return self.warned = false,
+            Err(_) if self.warned => return,
+            Err(e) => e,
+        };
+        self.warned = true;
+        let notice = match error.kind() {
+            io::ErrorKind::FileTooLarge => format!("Too large to back up: {}", self.name()),
+            _ => format!("Could not back up unsaved changes: {error}"),
+        };
+        window.push_notification(Notification::error(notice).autohide(false), cx);
+    }
+
+    /// Writes the unsaved edits to the recovery file, now: after typing pauses, and at quit.
+    /// ponytail: on the main thread, like Save, so no write can land after the save or discard
+    /// that deletes it; a buffer over 50 MB is not even copied, so up to 50 MB of JSON per pause.
+    pub fn keep_edits(&self, cx: &App) -> io::Result<()> {
+        let Some(file) = self.recovery.as_ref().filter(|_| self.dirty) else {
+            return Ok(());
+        };
+        let text = self.editor.read(cx).text();
+        if text.len() as u64 > recovery::MAX_BYTES {
+            eprintln!("wai: too large to back up: {}", self.path.display());
+            return Err(io::ErrorKind::FileTooLarge.into());
+        }
+        let entry = recovery::Entry {
+            path: self.path.clone(),
+            text: text.to_string(),
+            crlf: self.crlf,
+            stamp: self.stamp,
+        };
+        recovery::write(file, &entry).inspect_err(|e| {
+            eprintln!("wai: could not back up {}: {e}", self.path.display());
+        })
+    }
+
+    /// The edits were saved, or the user dropped them: nothing is left to recover.
+    fn forget_edits(&mut self) {
+        self.keeping = None;
+        self.recovered = false;
+        if let Some(file) = &self.recovery {
+            std::fs::remove_file(file).ok();
+        }
+    }
+
+    /// Don't save / Discard: the edits go, and no quit keeps them.
+    pub fn discard(&mut self) {
+        self.dirty = false;
+        self.forget_edits();
     }
 
     pub fn name(&self) -> String {
@@ -118,6 +239,7 @@ impl FileEditor {
             Ok(stamp) => {
                 self.stamp = stamp;
                 (self.dirty, self.disk_changed) = (false, false);
+                self.forget_edits();
                 cx.emit(Saved);
                 cx.notify();
                 true
@@ -181,6 +303,7 @@ impl FileEditor {
                 self.crlf = loaded.crlf;
                 self.deleted = false;
                 (self.dirty, self.disk_changed) = (false, false);
+                self.forget_edits();
                 self.editor.update(cx, |s, cx| {
                     // Crossing 20 MB either way switches the grammar too (before the text).
                     if read_only != self.read_only {
@@ -235,6 +358,13 @@ impl Render for FileEditor {
         };
         v_flex()
             .size_full()
+            .when(self.recovered && self.dirty, |el| {
+                el.child(
+                    banner(cx)
+                        .debug_selector(|| "recovered-banner".into())
+                        .child(RECOVERED),
+                )
+            })
             .when(self.read_only, |el| {
                 el.child(
                     banner(cx)
@@ -377,7 +507,14 @@ impl EditorPane {
                 move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                     window.close_dialog(cx);
                     pane.update(cx, |pane, cx| {
-                        if !save || tab.update(cx, |tab, cx| tab.save(window, cx)) {
+                        let closes = tab.update(cx, |tab, cx| match save {
+                            true => tab.save(window, cx),
+                            false => {
+                                tab.discard();
+                                true
+                            }
+                        });
+                        if closes {
                             pane.remove(&tab, window, cx);
                         }
                     })

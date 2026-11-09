@@ -21,7 +21,7 @@ use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::agents_view::{AgentsView, ShowSession};
 use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, Quit, Save, ToggleTerminal};
 use crate::chat::{ChatEvent, ChatSession, TurnState, signed_out};
-use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved};
+use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved, recovery};
 use crate::ext_host::{ExtHost, SessionCall};
 use crate::extensions_view::{ExtensionsView, InstallPlugin};
 use crate::files::{FileTree, OpenFile};
@@ -45,11 +45,12 @@ pub enum Pane {
     /// The start hint, and why the last start failed, if it did.
     Empty(Option<String>),
     /// Reserved while `new_session` runs; `ticket` tells this request's placeholder apart.
-    /// `by_extension`: an extension's `sessions/open`, which gives way to the user's own start.
+    /// `by_extension`: the extension whose `sessions/open` this is; it gives way to the user's
+    /// own start.
     Preparing {
         agent: String,
         ticket: u64,
-        by_extension: bool,
+        by_extension: Option<ExtId>,
     },
     Session(Entity<ChatSession>),
     /// Open files in tabs; one pane at most. Not kept between runs.
@@ -116,9 +117,13 @@ pub struct Workspace {
     /// usage, commands) before `new_session` returns. Kept, `EARLY_EVENTS` per id, only while a
     /// session of that agent is starting.
     early: HashMap<(String, String), Vec<SessionEvent>>,
+    /// The last session each extension opened: its next one takes that one's pane (R57).
+    ext_sessions: HashMap<ExtId, EntityId>,
     /// Where the open sessions, the project and the terminal's visibility are kept between runs;
-    /// `None` keeps nothing (tests).
+    /// `None` keeps nothing (tests). Unsaved edits are kept beside it, in `recovery/`.
     state_path: Option<PathBuf>,
+    /// The next recovery file number to try (`recovery::next_file`).
+    next_recovery: u64,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -137,9 +142,15 @@ impl Workspace {
         // The process ends ~200 ms after the quit hooks: nothing it started may outlive it. The
         // agents are signalled and the extensions killed first: stopping a shell that ignores
         // SIGHUP blocks for 200 ms.
+        // Hot-exit: every quit runs these, the ones that never ask too (Dock, logout), so the
+        // unsaved edits are kept here; their next launch reopens them.
         let quit = cx.on_app_quit(|this, cx| {
             let agents = this.registry.read(cx).shutdown_all();
             this.ext_host.update(cx, |host, _| host.stop_all());
+            for tab in this.dirty_tabs(cx) {
+                // Logged; no notice can show now.
+                tab.read(cx).keep_edits(cx).ok();
+            }
             this.save_state(cx);
             if let Some(terminal) = &this.terminal {
                 terminal.update(cx, |t, _| t.stop());
@@ -191,8 +202,8 @@ impl Workspace {
             &ext_host,
             window,
             |this, _, call: &SessionCall, window, cx| {
-                if let Some(call) = call.take() {
-                    this.session_call(call, window, cx);
+                if let Some((ext, call)) = call.take() {
+                    this.session_call(ext, call, window, cx);
                 }
             },
         );
@@ -241,7 +252,9 @@ impl Workspace {
             cancelled: HashSet::new(),
             starting: HashMap::new(),
             early: HashMap::new(),
+            ext_sessions: HashMap::new(),
             state_path,
+            next_recovery: 0,
             focus,
             _subscriptions: vec![
                 routing,
@@ -341,6 +354,41 @@ impl Workspace {
         }
         self.focus_pane(0, window, cx);
         self.save_state(cx);
+        self.recover(window, cx);
+    }
+
+    /// Where unsaved edits are kept: beside the state file.
+    fn recovery_dir(&self) -> Option<PathBuf> {
+        Some(self.state_path.as_ref()?.parent()?.join("recovery"))
+    }
+
+    /// Hot-exit: reopens the last run's unsaved edits (read on the background executor), each as
+    /// an edited tab with the banner.
+    fn recover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.recovery_dir() else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let found = cx
+                .background_spawn(async move { recovery::load(&dir) })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                for found in found {
+                    // Its name is never handed out again, even once the tab drops it (saved).
+                    let after = recovery::number(&found.file).map_or(0, |n| n + 1);
+                    this.next_recovery = this.next_recovery.max(after);
+                    // ponytail: a second entry for one file (two runs of wai) waits for a launch
+                    // without the first.
+                    if this.reveal(&found.entry.path, None, window, cx) {
+                        continue;
+                    }
+                    let tab = cx.new(|cx| FileEditor::recovered(found, window, cx));
+                    this.add_tab(tab, None, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Writes what the next launch restores: on each structural change and at quit, never on a
@@ -603,6 +651,35 @@ impl Workspace {
         }
     }
 
+    /// R57: the pane an extension's session takes: its last session's (or its start's), else an
+    /// empty one, else a new one while there are fewer than `MAX_PANES`. `None` when no pane is
+    /// free (each shows a user's session, the editor or another start): it opens in the open
+    /// list only. R61: never the focused pane, its own session's or an empty one (the user is
+    /// in it, maybe reading why their start failed).
+    fn ext_pane(&mut self, ext: &ExtId) -> Option<usize> {
+        let (last, focused) = (self.ext_sessions.get(ext), self.focused_pane);
+        let theirs = self
+            .panes
+            .iter()
+            .enumerate()
+            .position(|(ix, pane)| match pane {
+                Pane::Session(session) => ix != focused && Some(&session.entity_id()) == last,
+                Pane::Preparing { by_extension, .. } => by_extension.as_ref() == Some(ext),
+                _ => false,
+            });
+        let empty = || {
+            (self.panes.iter().enumerate())
+                .position(|(ix, p)| ix != focused && matches!(p, Pane::Empty(_)))
+        };
+        if let Some(ix) = theirs.or_else(empty) {
+            return Some(ix);
+        }
+        (self.panes.len() < MAX_PANES).then(|| {
+            self.panes.push(Pane::Empty(None));
+            self.panes.len() - 1
+        })
+    }
+
     /// Opens a history row: the open session with that id, else a new one that loads it.
     pub fn resume(
         &mut self,
@@ -768,7 +845,13 @@ impl Workspace {
     }
 
     /// R51: an extension's session request, already checked against its permissions.
-    fn session_call(&mut self, call: ExtEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn session_call(
+        &mut self,
+        ext: ExtId,
+        call: ExtEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match call {
             ExtEvent::ListSessions { reply } => {
                 let sessions = self.sessions.iter().map(|session| {
@@ -792,7 +875,7 @@ impl Workspace {
                 if !self.registry.read(cx).knows(&agent) {
                     return reply.send(Err(format!("No agent named {agent}")));
                 }
-                self.start_session(agent, prompt, send, Some(reply), window, cx);
+                self.start_session(agent, prompt, send, Some((ext, Some(reply))), window, cx);
             }
             ExtEvent::Prompt {
                 agent,
@@ -810,52 +893,67 @@ impl Workspace {
     }
 
     /// Starts a session of `agent` in the session pane with `prompt` pre-filled, or sent with
-    /// `send`. `reply` (an extension's `sessions/open`) gets `{agent, session}` or why not.
+    /// `send`. `by`: the extension whose `sessions/open` this is, and its reply, which gets
+    /// `{agent, session}` or why not.
     ///
     /// R56: an extension's session never takes the keyboard: the user may be typing elsewhere
     /// (its pane shows it all the same). And it never holds up the user: a start of theirs takes
-    /// over the pane where an extension's session prepares, which then opens in no pane.
+    /// over the pane where an extension's session prepares, which then opens in no pane. R57:
+    /// nor does it take the user's pane (`ext_pane`).
     pub(crate) fn start_session(
         &mut self,
         agent: String,
         prompt: Option<String>,
         send: bool,
-        reply: Option<Reply>,
+        by: Option<(ExtId, Option<Reply>)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let (ext, reply) = by.map_or((None, None), |(ext, reply)| (Some(ext), reply));
         let refuse = |reply: Option<Reply>, why: &str| {
             if let Some(reply) = reply {
                 reply.send(Err(why.into()));
             }
         };
-        let by_extension = reply.is_some();
-        let ix = self.session_pane();
-        if let Pane::Preparing {
-            by_extension: theirs,
-            ..
-        } = self.panes[ix]
-            && (by_extension || !theirs)
+        let by_extension = ext.is_some();
+        let ix = match &ext {
+            Some(ext) => self.ext_pane(ext),
+            None => Some(self.session_pane()),
+        };
+        if let Some(ix) = ix
+            && let Pane::Preparing {
+                by_extension: theirs,
+                ..
+            } = &self.panes[ix]
+            && (by_extension || theirs.is_none())
         {
             return refuse(reply, "A session is already starting there");
         }
-        if ix != self.focused_pane && !by_extension {
+        if let Some(ix) = ix
+            && ix != self.focused_pane
+            && !by_extension
+        {
             self.focus_pane(ix, window, cx);
         }
         let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
             let error = format!("No agent named {agent}");
             refuse(reply, &error);
-            self.panes[ix] = Pane::Empty(Some(format!("{error} in the settings or extensions.")));
+            if let Some(ix) = ix {
+                let error = format!("{error} in the settings or extensions.");
+                self.panes[ix] = Pane::Empty(Some(error));
+            }
             return cx.notify();
         };
         let mcp = self.registry.read(cx).mcp_servers();
         let ticket = self.next_ticket;
         self.next_ticket += 1;
-        self.panes[ix] = Pane::Preparing {
-            agent: agent.clone(),
-            ticket,
-            by_extension,
-        };
+        if let Some(ix) = ix {
+            self.panes[ix] = Pane::Preparing {
+                agent: agent.clone(),
+                ticket,
+                by_extension: ext.clone(),
+            };
+        }
         *self.starting.entry(agent.clone()).or_default() += 1;
         cx.notify();
         let cwd = self.project.clone();
@@ -901,6 +999,9 @@ impl Workspace {
                         }
                         if let Some(reply) = reply {
                             reply.send(Ok(json!({"agent": agent, "session": id})));
+                        }
+                        if let Some(ext) = ext {
+                            this.ext_sessions.insert(ext, session.entity_id());
                         }
                         this.refresh_history(cx);
                         Pane::Session(session)
@@ -1060,6 +1161,11 @@ impl Workspace {
                     if save && !dirty.iter().all(saved) {
                         return;
                     }
+                    if !save {
+                        dirty
+                            .iter()
+                            .for_each(|tab| tab.update(cx, |t, _| t.discard()));
+                    }
                     this.update(cx, |this, cx| this.proceed(then.clone(), window, cx))
                         .ok();
                 }
@@ -1187,18 +1293,11 @@ impl Workspace {
                 if !this.reveal(&path, line, window, cx) {
                     #[cfg(feature = "demo")]
                     let started = std::time::Instant::now();
-                    let tab =
-                        cx.new(|cx| FileEditor::new(path.clone(), loaded, scratch, window, cx));
-                    cx.subscribe(&tab, |this, tab, _: &Saved, cx| {
-                        let path = tab.read(cx).path.clone();
-                        this.ext_host
-                            .read(cx)
-                            .broadcast(HostEvent::FileSaved { path });
-                    })
-                    .detach();
-                    let pane = this.editor_pane(window, cx);
-                    pane.update(cx, |p, cx| p.add(tab, window, cx));
-                    this.reveal(&path, line, window, cx);
+                    let keep = this.recovery_dir().filter(|_| !scratch);
+                    let keep = keep.map(|dir| recovery::next_file(&dir, &mut this.next_recovery));
+                    let tab = cx
+                        .new(|cx| FileEditor::new(path.clone(), loaded, scratch, keep, window, cx));
+                    this.add_tab(tab, line, window, cx);
                     #[cfg(feature = "demo")]
                     eprintln!(
                         "wai: {} took {:?} on the main thread",
@@ -1210,6 +1309,27 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// Adds `tab` to the editor pane and focuses it, at `line`.
+    fn add_tab(
+        &mut self,
+        tab: Entity<FileEditor>,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe(&tab, |this, tab, _: &Saved, cx| {
+            let path = tab.read(cx).path.clone();
+            this.ext_host
+                .read(cx)
+                .broadcast(HostEvent::FileSaved { path });
+        })
+        .detach();
+        let path = tab.read(cx).path.clone();
+        let pane = self.editor_pane(window, cx);
+        pane.update(cx, |p, cx| p.add(tab, window, cx));
+        self.reveal(&path, line, window, cx);
     }
 
     /// Focuses `path`'s tab, at `line`, if a pane has one.
@@ -1599,7 +1719,7 @@ pub(crate) mod tests {
     }
 
     /// `open`, keeping the state in `state_path` (never the real `~/.config/wai/state.json`).
-    fn open_at(
+    pub(crate) fn open_at(
         cx: &mut TestAppContext,
         mut settings: Settings,
         state_path: Option<PathBuf>,
@@ -2405,5 +2525,83 @@ pub(crate) mod tests {
         });
         assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
         assert_eq!(AppState::load(&path).open_sessions, []);
+    }
+
+    /// R57: an extension's sessions reuse the pane of its last one (R61: unless the user is in
+    /// it), never a pane showing the user's session; with no pane free they open in the open
+    /// list only. None takes the focus.
+    #[gpui_kit::test]
+    fn extension_opens_never_replace_user_sessions(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        cx.simulate_keystrokes("secondary-n");
+        wait_until(cx, "the user's session", |cx| {
+            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
+        });
+        let mine = pane_session(&workspace, 0, cx);
+        let ext = wai_ext::ExtId::new("opener").unwrap();
+        let theirs = |prompt: &str, cx: &mut VisualTestContext| {
+            let n = workspace.read_with(cx, |w, _| w.sessions.len());
+            let (prompt, by) = (Some(prompt.to_string()), Some((ext.clone(), None)));
+            cx.update(|window, cx| {
+                workspace.update(cx, |w, cx| {
+                    w.start_session("fake".into(), prompt, false, by, window, cx)
+                })
+            });
+            wait_until(cx, "their session", |cx| {
+                workspace.read_with(cx, |w, _| w.sessions.len() == n + 1)
+            });
+            workspace.read_with(cx, |w, _| w.sessions[n].clone())
+        };
+
+        let first = theirs("one", cx);
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 2, "a pane beside the user's");
+            assert_eq!(w.panes[0].session(), Some(&mine));
+            assert_eq!(w.panes[1].session(), Some(&first));
+            assert_eq!(w.focused_pane, 0);
+        });
+
+        let second = theirs("two", cx);
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 2, "its last session's pane, no new one");
+            assert_eq!(w.panes[0].session(), Some(&mine));
+            assert_eq!(w.panes[1].session(), Some(&second));
+        });
+
+        // R61: not while the user is in that pane.
+        workspace.update(cx, |w, _| w.focused_pane = 1);
+        let third = theirs("three", cx);
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 3);
+            assert_eq!(w.panes[1].session(), Some(&second));
+            assert_eq!(w.panes[2].session(), Some(&third));
+            assert_eq!(w.focused_pane, 1);
+        });
+
+        // Every pane the user's (a session, two starts) but the focused one, empty and saying
+        // why their own start failed: none is free (R61: not even the focused empty pane).
+        let users = |ticket| Pane::Preparing {
+            agent: "fake".into(),
+            ticket,
+            by_extension: None,
+        };
+        workspace.update(cx, |w, _| {
+            let failed = Pane::Empty(Some("Could not start".into()));
+            w.panes = vec![Pane::Session(mine.clone()), users(90), users(91), failed];
+            w.focused_pane = 3;
+        });
+        let fourth = theirs("four", cx);
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), super::MAX_PANES);
+            assert_eq!(w.panes[0].session(), Some(&mine));
+            assert!(
+                w.panes[1..3]
+                    .iter()
+                    .all(|p| matches!(p, Pane::Preparing { .. }))
+            );
+            assert!(matches!(&w.panes[3], Pane::Empty(Some(why)) if why == "Could not start"));
+            assert!(w.sessions.contains(&fourth), "in the open list only");
+        });
     }
 }

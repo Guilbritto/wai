@@ -27,9 +27,26 @@ wai-terminal = { path = "../wai-terminal" }
 anyhow.workspace = true
 base64.workspace = true
 notify-rust.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 smol.workspace = true
 similar.workspace = true
+# The update check's HTTPS GET (update.rs). GPUI ships no HTTP client; these are the versions
+# Cargo.lock already holds (gpui-kit-assets' reqwest on wasm), with rustls on ring (no aws-lc-rs).
+http-body-util = "0.1.5"
+hyper = "1.12.0"
+hyper-rustls = { version = "0.27.10", default-features = false, features = [
+    "http1",
+    "native-tokio",
+    "ring",
+    "tls12",
+] }
+hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "tokio"] }
+tokio = { version = "1.54.1", features = ["rt", "time"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Already in the tree (wai-ext): the login shell's own session, killed as a group (shell_path.rs).
+rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
@@ -44,3 +61,17 @@ demo = []
 # WAI_SHOT=docs/screens/fase-1-shell.png cargo run -p wai --features screenshot -- <folder>
 # With WAI_SHOT_PROMPT too, the capture waits for that turn's permission card (fase-1-chat.png).
 screenshot = ["demo", "gpui-kit/test-support"]
+
+# `cargo packager --release` (docs/building.md). No `formats`: the platform default is app + dmg
+# on macOS and nsis on Windows. Version: the workspace's.
+# When signing, release.yml appends [package.metadata.packager.macos] and .windows to this file.
+[package.metadata.packager]
+product-name = "wai"
+# Placeholder bundle id; this is the one place to change it.
+identifier = "app.wai.ide"
+# Only the app: the fake agent and extension are test binaries of other crates.
+binaries = [{ path = "wai", main = true }]
+before-packaging-command = "cargo build --release -p wai"
+# cargo-packager builds the .icns from the pngs; NSIS needs the .ico (assets/icon/generate.sh).
+icons = ["assets/icon/icon.png", "assets/icon/icon@2x.png"]
+nsis = { installer-icon = "assets/icon/icon.ico" }

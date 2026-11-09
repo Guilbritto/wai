@@ -1,5 +1,6 @@
-//! Opt-in timing of `fn ` over real trees (read-only):
-//! `cargo test --release -p wai-project --test search_bench -- --ignored --nocapture`
+//! Opt-in timing of `fn ` over real trees (read-only): this workspace, and the folder in
+//! `WAI_BENCH_DIR` when set:
+//! `WAI_BENCH_DIR=<folder> cargo test --release -p wai-project --test search_bench -- --ignored --nocapture`
 
 use std::path::Path;
 use std::time::Instant;
@@ -40,8 +41,8 @@ fn search_fn_over_real_repos() {
             .join("../..")
             .as_path(),
     );
-    let front = Path::new("/Users/guilherme.brito/Project/waycarbon-ecosystem-front");
-    if front.is_dir() {
-        time(front);
+    match std::env::var_os("WAI_BENCH_DIR") {
+        Some(dir) => time(Path::new(&dir)),
+        None => println!("SKIPPED: set WAI_BENCH_DIR to also time a folder of your own"),
     }
 }
