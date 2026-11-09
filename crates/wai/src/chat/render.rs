@@ -11,9 +11,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::{PermissionChoice, ToolStatus};
 
-use super::model::{ChatItem, NoticeKind, ToolItem, TurnState, UsageInfo};
-use super::permission;
-use super::view::ChatSession;
+use super::model::{ChatItem, NoticeKind, ToolItem, TurnState, UsageInfo, show_label};
+use super::view::{ChatEvent, ChatSession};
+use super::{permission, question};
 
 /// `43k`, `1M`, `1.5M`.
 fn tokens(n: u64) -> String {
@@ -66,7 +66,12 @@ impl ChatSession {
             }))
     }
 
-    fn render_item(&mut self, ix: usize, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_item(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         match &self.model.items[ix] {
@@ -116,9 +121,26 @@ impl ChatSession {
                         this.answer(id, choice, cx)
                     }));
                 let diffs = self.diffs.get(&ix).map_or(&[][..], Vec::as_slice);
-                permission::card(ix, request, answered.as_deref(), diffs, on_choose, cx)
-                    .into_any_element()
+                let on_open = Self::on_open(cx);
+                permission::card(
+                    ix,
+                    request,
+                    answered.as_deref(),
+                    diffs,
+                    on_choose,
+                    &on_open,
+                    cx,
+                )
+                .into_any_element()
             }
+            ChatItem::Question { request, answered } => question::card(
+                ix,
+                request,
+                answered.as_deref(),
+                &mut self.questions,
+                window,
+                cx,
+            ),
             ChatItem::Notice { text, kind } => {
                 let restart = *kind == NoticeKind::Error
                     && ix + 1 == self.model.items.len()
@@ -137,6 +159,9 @@ impl ChatSession {
                     })
                     .into_any_element()
             }
+            ChatItem::Edits { turn, files } => {
+                self.render_edits(ix, *turn, files, cx).into_any_element()
+            }
         }
     }
 
@@ -154,7 +179,9 @@ impl ChatSession {
             ToolStatus::Failed => (IconName::CircleX, theme.danger),
         };
         let (output, hidden) = tool.visible_text();
+        let on_open = Self::on_open(cx);
         v_flex()
+            .id(("tool", ix))
             .gap_2()
             .p_2()
             .rounded_md()
@@ -180,24 +207,38 @@ impl ChatSession {
                 )
             })
             .children(hidden.map(|n| {
-                Button::new(("show-all", ix))
-                    .ghost()
-                    .small()
-                    .label(format!("Show all ({n} more lines)"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(ChatItem::Tool(tool)) = this.model.items.get_mut(ix) {
-                            tool.expanded = true;
-                        }
-                        this.sync_rows(Some(ix), cx);
-                        cx.notify();
-                    }))
+                match tool.expanded {
+                    false => Button::new(("show-all", ix))
+                        .ghost()
+                        .small()
+                        .label(show_label(n))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(ChatItem::Tool(tool)) = this.model.items.get_mut(ix) {
+                                tool.expanded = true;
+                            }
+                            this.sync_rows(Some(ix), cx);
+                            cx.notify();
+                        })),
+                    // R21: past what "Show all" draws, the whole output opens in the editor.
+                    true => Button::new(("open-output", ix))
+                        .ghost()
+                        .small()
+                        .label("Open full output in editor")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(ChatItem::Tool(tool)) = this.model.items.get(ix) {
+                                let (tool, text) = (tool.id.clone(), tool.text.clone());
+                                cx.emit(ChatEvent::OpenOutput { tool, text });
+                            }
+                        })),
+                }
             }))
             .children(
                 self.diffs
                     .get(&ix)
                     .into_iter()
                     .flatten()
-                    .map(|d| d.render(cx)),
+                    .enumerate()
+                    .map(|(k, d)| d.render(("diff", k).into(), &on_open, cx)),
             )
     }
 

@@ -1,36 +1,60 @@
-//! The permission card and the unified diffs it shares with tool rows.
+//! The permission card and the unified diffs it shares with tool rows and the Edits block.
 
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use similar::{ChangeTag, TextDiff};
 use wai_agent::{ChoiceKind, FileDiff, PermissionChoice, PermissionRequest};
 
-pub const MAX_DIFF_LINES: usize = 200;
+use super::edits::{DiffLine, bounded_diff};
 
 /// What a choice button calls.
 pub type OnChoose = Rc<dyn Fn(&PermissionChoice, &mut Window, &mut App)>;
+/// Opens a file (as the agent named it) at a 1-based line.
+pub type OnOpen = Rc<dyn Fn(&(PathBuf, u32), &mut Window, &mut App)>;
 
 /// A file's unified diff, computed once when its row changes.
 pub struct DiffView {
-    path: SharedString,
+    /// The file and the line its first change is on.
+    at: (PathBuf, u32),
+    label: SharedString,
     lines: Vec<SharedString>,
+    truncated: bool,
 }
 
 impl DiffView {
-    pub fn new(diff: &FileDiff) -> Self {
+    /// The path shows relative to `cwd`, the session's folder, when it is inside; `line` is
+    /// where Open puts the caret.
+    pub fn new(diff: &FileDiff, cwd: &Path, line: u32) -> Self {
+        let old = diff.old_text.as_deref().unwrap_or("");
+        let mut truncated = false;
+        let lines = bounded_diff(old, &diff.new_text)
+            .into_iter()
+            .filter_map(|line| match line {
+                DiffLine::Text(text) => Some(text.into()),
+                DiffLine::Truncated => {
+                    truncated = true;
+                    None
+                }
+            })
+            .collect();
         Self {
-            path: diff.path.display().to_string().into(),
-            lines: diff_lines(diff.old_text.as_deref().unwrap_or(""), &diff.new_text)
-                .into_iter()
-                .map(SharedString::from)
-                .collect(),
+            at: (diff.path.clone(), line),
+            label: (diff.path.strip_prefix(cwd).unwrap_or(&diff.path))
+                .display()
+                .to_string()
+                .into(),
+            lines,
+            truncated,
         }
     }
 
-    pub fn render(&self, cx: &App) -> impl IntoElement + use<> {
+    /// `id` sets this diff apart from its siblings; its path and "Open file to see all" open the
+    /// file at the first change.
+    pub fn render(&self, id: ElementId, on_open: &OnOpen, cx: &App) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let (added, removed, muted) = (theme.success, theme.danger, theme.muted_foreground);
         let lines = self.lines.iter().map(|line| {
@@ -45,9 +69,22 @@ impl DiffView {
                 .text_color(color)
                 .child(line.clone())
         });
+        let link = |id: &'static str| {
+            let (on_open, at) = (on_open.clone(), self.at.clone());
+            div()
+                .id(id)
+                .text_sm()
+                .cursor_pointer()
+                .on_click(move |_, window, cx| on_open(&at, window, cx))
+        };
         v_flex()
+            .id(id)
             .gap_1()
-            .child(div().text_sm().text_color(muted).child(self.path.clone()))
+            .child(
+                link("diff-path")
+                    .text_color(muted)
+                    .child(self.label.clone()),
+            )
             .child(
                 v_flex()
                     .p_2()
@@ -58,29 +95,14 @@ impl DiffView {
                     .text_size(theme.mono_font_size)
                     .children(lines),
             )
+            .when(self.truncated, |el| {
+                el.child(
+                    link("diff-open-all")
+                        .text_color(theme.link)
+                        .child("Open file to see all"),
+                )
+            })
     }
-}
-
-/// `@@` hunk headers and ` `/`+`/`-` lines with 3 lines of context, at most `MAX_DIFF_LINES`.
-pub fn diff_lines(old: &str, new: &str) -> Vec<String> {
-    let diff = TextDiff::from_lines(old, new);
-    let mut lines = Vec::new();
-    for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
-        if lines.len() >= MAX_DIFF_LINES {
-            break;
-        }
-        lines.push(hunk.header().to_string());
-        lines.extend(hunk.iter_changes().map(|change| {
-            let sign = match change.tag() {
-                ChangeTag::Delete => '-',
-                ChangeTag::Insert => '+',
-                ChangeTag::Equal => ' ',
-            };
-            format!("{sign}{}", change.value().trim_end_matches(['\n', '\r']))
-        }));
-    }
-    lines.truncate(MAX_DIFF_LINES);
-    lines
 }
 
 /// The element id of a choice's button, e.g. `perm-allow_once`.
@@ -100,6 +122,7 @@ pub fn card(
     answered: Option<&str>,
     diffs: &[DiffView],
     on_choose: OnChoose,
+    on_open: &OnOpen,
     cx: &App,
 ) -> impl IntoElement + use<> {
     let theme = cx.theme();
@@ -136,21 +159,11 @@ pub fn card(
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(request.title.clone()),
         )
-        .children(diffs.iter().map(|diff| diff.render(cx)))
+        .children(
+            diffs
+                .iter()
+                .enumerate()
+                .map(|(k, diff)| diff.render(("diff", k).into(), on_open, cx)),
+        )
         .child(footer)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{MAX_DIFF_LINES, diff_lines};
-
-    #[test]
-    fn diff_is_unified_and_capped() {
-        assert_eq!(
-            diff_lines("a\nb\n", "a\nc\n"),
-            ["@@ -1,2 +1,2 @@", " a", "-b", "+c"]
-        );
-        let new: String = (0..500).map(|i| format!("{i}\n")).collect();
-        assert_eq!(diff_lines("", &new).len(), MAX_DIFF_LINES);
-    }
 }

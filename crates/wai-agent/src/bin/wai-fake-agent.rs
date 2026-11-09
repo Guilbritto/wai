@@ -7,20 +7,42 @@
 //! - `--chunk-delay-ms <n>`: pause before each chunk.
 //! - `--ask-permission`: send an Edit tool call for `notes.md`, ask permission and
 //!   reply `chose:<option_id>` or `chose:cancelled`.
+//! - `--ask-question`: ask a form (a required single choice `color`: `red`/`blue`, and an
+//!   optional text `note`) and reply `answered:<json>`, `answered:declined` or
+//!   `answered:cancelled`. Like claude-agent-acp, it asks only a client that advertises form
+//!   elicitation, and replies `answered:unsupported` otherwise.
+//! - `--withdraw-question`: with `--ask-question`, first ask the same form and withdraw it at
+//!   once (`$/cancel_request`).
+//! - `--ask-unsupported-question`: `--ask-question` with one more field `shape` of an unknown
+//!   schema type (`_shape`).
 //! - `--crash-after <n>`: after n chunks print `fake agent crashed` to stderr and exit 3.
 //! - `--require-auth`: `session/new` fails with the ACP auth-required error.
 //! - `--require-auth-on-prompt`: `session/prompt` fails with the ACP auth-required error.
+//! - `--fail-fork`: `session/fork` fails with an internal error.
+//! - `--no-load`: do not advertise `loadSession`.
 //! - `--flood <bytes>`: start the turn with one tool call carrying that many bytes of `x\n`.
+//! - `--edit <path>`, `--write <path>`, `--edit-hunk <path>` (repeatable, run in order): start the
+//!   turn with file edits, each like claude-agent-acp's: a pending Edit tool call (diff and
+//!   location), a permission request (`allow-once` writes the file, `reject-once` fails the call),
+//!   then a completed (or failed) update.
+//!   - `--edit`: appends `edited by the fake agent` (creating the file if missing); the diff holds
+//!     the whole file.
+//!   - `--write`: replaces the file with `written by the fake agent`; the diff has no old text,
+//!     like a Write, even when the file existed.
+//!   - `--edit-hunk`: appends ` // edited` to the file's middle line; the call starts with that
+//!     line as the snippet, and completes with the hunk (3 lines of context, no trailing newline)
+//!     and its first line as the location.
 //! - `--sessions <n>`: `session/list` returns n sessions titled `Session <i>`, 10 per page.
 //! - `--sessions-cwd <path>`: the cwd of those sessions; default `/tmp`.
 //! - `--pid-file <path>`: write the process id there at start.
+//! - `--cwd-file <path>`: write the process working directory there at start.
 //!
 //! `session/load` replays `previous prompt` and `previous answer`; for an id starting with
 //! `missing` it fails with the ACP session-not-found error instead.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,18 +51,33 @@ use agent_client_protocol::{Agent, Client, Error, Stdio};
 
 const PAGE: usize = 10;
 
+#[derive(Clone, Copy)]
+enum EditKind {
+    Append,
+    Write,
+    Hunk,
+}
+
 struct Opts {
     reply: String,
     reply_file: bool,
     chunk_delay: Duration,
     ask_permission: bool,
+    plan: bool,
+    ask_question: bool,
+    withdraw_question: bool,
+    unsupported_question: bool,
     crash_after: Option<usize>,
     require_auth: bool,
     require_auth_on_prompt: bool,
+    fail_fork: bool,
+    no_load: bool,
     flood: Option<usize>,
+    edits: Vec<(EditKind, PathBuf)>,
     sessions: usize,
     sessions_cwd: PathBuf,
     pid_file: Option<PathBuf>,
+    cwd_file: Option<PathBuf>,
 }
 
 fn parse_args() -> Opts {
@@ -49,13 +86,21 @@ fn parse_args() -> Opts {
         reply_file: false,
         chunk_delay: Duration::ZERO,
         ask_permission: false,
+        plan: false,
+        ask_question: false,
+        withdraw_question: false,
+        unsupported_question: false,
         crash_after: None,
         require_auth: false,
         require_auth_on_prompt: false,
+        fail_fork: false,
+        no_load: false,
         flood: None,
+        edits: Vec::new(),
         sessions: 0,
         sessions_cwd: "/tmp".into(),
         pid_file: None,
+        cwd_file: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -77,13 +122,26 @@ fn parse_args() -> Opts {
             }
             "--chunk-delay-ms" => opts.chunk_delay = Duration::from_millis(number(value()) as u64),
             "--ask-permission" => opts.ask_permission = true,
+            "--plan" => opts.plan = true,
+            "--ask-question" => opts.ask_question = true,
+            "--withdraw-question" => opts.withdraw_question = true,
+            "--ask-unsupported-question" => {
+                opts.ask_question = true;
+                opts.unsupported_question = true;
+            }
             "--crash-after" => opts.crash_after = Some(number(value())),
             "--require-auth" => opts.require_auth = true,
             "--require-auth-on-prompt" => opts.require_auth_on_prompt = true,
+            "--fail-fork" => opts.fail_fork = true,
+            "--no-load" => opts.no_load = true,
             "--flood" => opts.flood = Some(number(value())),
+            "--edit" => opts.edits.push((EditKind::Append, value().into())),
+            "--write" => opts.edits.push((EditKind::Write, value().into())),
+            "--edit-hunk" => opts.edits.push((EditKind::Hunk, value().into())),
             "--sessions" => opts.sessions = number(value()),
             "--sessions-cwd" => opts.sessions_cwd = value().into(),
             "--pid-file" => opts.pid_file = Some(value().into()),
+            "--cwd-file" => opts.cwd_file = Some(value().into()),
             other => panic!("unknown flag {other}"),
         }
     }
@@ -94,6 +152,8 @@ struct Fake {
     opts: Opts,
     next_session: AtomicU64,
     cancelled: Mutex<HashSet<String>>,
+    /// The client advertised `elicitation.form` at initialize.
+    forms: AtomicBool,
 }
 
 impl Fake {
@@ -122,6 +182,23 @@ impl Fake {
                 ))]);
             send(cx, session, acp::SessionUpdate::ToolCall(call))?;
         }
+        if self.opts.plan {
+            let entry = |c: &str, s| acp::PlanEntry::new(c, acp::PlanEntryPriority::Medium, s);
+            let entries = vec![
+                entry("Read the code", acp::PlanEntryStatus::Completed),
+                entry("Write the change", acp::PlanEntryStatus::InProgress),
+                entry("Run the tests", acp::PlanEntryStatus::Pending),
+            ];
+            send(
+                cx,
+                session,
+                acp::SessionUpdate::Plan(acp::Plan::new(entries)),
+            )?;
+        }
+        for (i, (kind, path)) in self.opts.edits.iter().enumerate() {
+            self.edit(cx, session, &format!("edit-file-{i}"), *kind, path)
+                .await?;
+        }
         if self.opts.ask_permission && self.opts.reply_file {
             let reason = self.stream(cx, session, &self.opts.reply).await?;
             if reason != acp::StopReason::EndTurn {
@@ -130,6 +207,8 @@ impl Fake {
         }
         let reply = if self.opts.ask_permission {
             format!("chose:{}", self.ask_permission(cx, session).await?)
+        } else if self.opts.ask_question {
+            format!("answered:{}", self.ask_question(cx, session).await?)
         } else {
             self.opts.reply.clone()
         };
@@ -168,6 +247,88 @@ impl Fake {
         Ok(acp::StopReason::EndTurn)
     }
 
+    /// One file edit, shaped like claude-agent-acp's (see `--edit`).
+    async fn edit(
+        &self,
+        cx: &ConnectionTo<Client>,
+        session: &acp::SessionId,
+        id: &str,
+        kind: EditKind,
+        path: &PathBuf,
+    ) -> Result<(), Error> {
+        let old = std::fs::read_to_string(path).ok();
+        // The diff the call starts with, the file written, and the hunk the update reports.
+        let (start, new, hunk) = match kind {
+            EditKind::Append => {
+                let new = format!("{}edited by the fake agent\n", old.as_deref().unwrap_or(""));
+                (
+                    acp::Diff::new(path.clone(), new.clone()).old_text(old),
+                    new,
+                    None,
+                )
+            }
+            EditKind::Write => {
+                let new = "written by the fake agent\n".to_string();
+                (acp::Diff::new(path.clone(), new.clone()), new, None)
+            }
+            EditKind::Hunk => {
+                let old = old.expect("--edit-hunk needs an existing file");
+                let old_lines: Vec<&str> = old.lines().collect();
+                let n = old_lines.len() / 2;
+                let edited = format!("{} // edited", old_lines[n]);
+                let mut lines = old_lines.clone();
+                lines[n] = &edited;
+                let (from, to) = (n.saturating_sub(3), (n + 3).min(lines.len() - 1));
+                let old_hunk = old_lines[from..=to].join("\n");
+                let new_hunk = lines[from..=to].join("\n");
+                let snippet = acp::Diff::new(path.clone(), edited.clone()).old_text(old_lines[n]);
+                let mut new = lines.join("\n");
+                if old.ends_with('\n') {
+                    new.push('\n');
+                }
+                let hunk = acp::Diff::new(path.clone(), new_hunk).old_text(old_hunk);
+                (snippet, new, Some((hunk, from as u32 + 1)))
+            }
+        };
+        let title = format!("Edit {}", path.file_name().unwrap_or_default().display());
+        let call = acp::ToolCall::new(id.to_string(), title.clone())
+            .kind(acp::ToolKind::Edit)
+            .status(acp::ToolCallStatus::Pending)
+            .content(vec![acp::ToolCallContent::Diff(start)])
+            .locations(vec![acp::ToolCallLocation::new(path.clone())]);
+        send(cx, session, acp::SessionUpdate::ToolCall(call))?;
+
+        let options = vec![
+            acp::PermissionOption::new("allow-once", "Yes", acp::PermissionOptionKind::AllowOnce),
+            acp::PermissionOption::new("reject-once", "No", acp::PermissionOptionKind::RejectOnce),
+        ];
+        let fields = acp::ToolCallUpdateFields::new().title(title);
+        let request = acp::RequestPermissionRequest::new(
+            session.clone(),
+            acp::ToolCallUpdate::new(id.to_string(), fields),
+            options,
+        );
+        let response = cx.send_request(request).block_task().await?;
+        let allowed = matches!(
+            response.outcome,
+            acp::RequestPermissionOutcome::Selected(s) if s.option_id.to_string() == "allow-once"
+        );
+        let fields = if allowed {
+            std::fs::write(path, &new).map_err(Error::into_internal_error)?;
+            let done = acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Completed);
+            match hunk {
+                Some((hunk, line)) => done
+                    .content(vec![acp::ToolCallContent::Diff(hunk)])
+                    .locations(vec![acp::ToolCallLocation::new(path.clone()).line(line)]),
+                None => done,
+            }
+        } else {
+            acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Failed)
+        };
+        let update = acp::ToolCallUpdate::new(id.to_string(), fields);
+        send(cx, session, acp::SessionUpdate::ToolCallUpdate(update))
+    }
+
     async fn ask_permission(
         &self,
         cx: &ConnectionTo<Client>,
@@ -204,6 +365,54 @@ impl Fake {
             _ => "cancelled".into(),
         })
     }
+
+    async fn ask_question(
+        &self,
+        cx: &ConnectionTo<Client>,
+        session: &acp::SessionId,
+    ) -> Result<String, Error> {
+        if !self.forms.load(Ordering::Relaxed) {
+            return Ok("unsupported".into());
+        }
+        let mut schema = acp::ElicitationSchema::new()
+            .property(
+                "color",
+                acp::StringPropertySchema::new()
+                    .title("Color".to_string())
+                    .one_of(vec![
+                        acp::EnumOption::new("red", "Red"),
+                        acp::EnumOption::new("blue", "Blue"),
+                    ]),
+                true,
+            )
+            .property(
+                "note",
+                acp::StringPropertySchema::new().title("Note".to_string()),
+                false,
+            );
+        if self.opts.unsupported_question {
+            let shape = acp::OtherElicitationPropertySchema::new("_shape", Default::default());
+            schema = schema.property("shape", acp::ElicitationPropertySchema::Other(shape), false);
+        }
+        let form = acp::ElicitationFormMode::new(
+            acp::ElicitationSessionScope::new(session.clone()),
+            schema,
+        );
+        let request = acp::CreateElicitationRequest::new(form, "Pick a color");
+        if self.opts.withdraw_question {
+            // Dropping the sent request withdraws it with `$/cancel_request`.
+            drop(cx.send_request(request.clone()));
+        }
+        let response = cx.send_request(request).block_task().await?;
+        Ok(match response.action {
+            acp::ElicitationAction::Accept(accept) => {
+                serde_json::to_string(&accept.content.unwrap_or_default())
+                    .map_err(Error::into_internal_error)?
+            }
+            acp::ElicitationAction::Decline => "declined".into(),
+            _ => "cancelled".into(),
+        })
+    }
 }
 
 fn text_block(text: impl Into<String>) -> acp::ContentBlock {
@@ -237,10 +446,15 @@ fn main() -> Result<(), Error> {
     if let Some(path) = &opts.pid_file {
         std::fs::write(path, std::process::id().to_string()).expect("write pid file");
     }
+    if let Some(path) = &opts.cwd_file {
+        let cwd = std::env::current_dir().expect("current dir");
+        std::fs::write(path, cwd.to_string_lossy().as_bytes()).expect("write cwd file");
+    }
     let fake = Arc::new(Fake {
         opts,
         next_session: AtomicU64::new(1),
         cancelled: Mutex::default(),
+        forms: AtomicBool::new(false),
     });
     smol::block_on(serve(fake))
 }
@@ -250,21 +464,31 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
         .v1()
         .name("wai-fake-agent")
         .on_receive_request(
-            async |request: acp::InitializeRequest, responder, _cx| {
-                let caps = acp::AgentCapabilities::new()
-                    .load_session(true)
-                    .prompt_capabilities(acp::PromptCapabilities::new().image(true))
-                    .session_capabilities(
-                        acp::SessionCapabilities::new().list(acp::SessionListCapabilities::new()),
-                    );
-                responder.respond(
-                    acp::InitializeResponse::new(request.protocol_version)
-                        .agent_info(acp::Implementation::new(
-                            "wai-fake-agent",
-                            env!("CARGO_PKG_VERSION"),
-                        ))
-                        .agent_capabilities(caps),
-                )
+            {
+                let fake = fake.clone();
+                async move |request: acp::InitializeRequest, responder, _cx| {
+                    let forms = request
+                        .client_capabilities
+                        .elicitation
+                        .is_some_and(|e| e.supports_form());
+                    fake.forms.store(forms, Ordering::Relaxed);
+                    let caps = acp::AgentCapabilities::new()
+                        .load_session(!fake.opts.no_load)
+                        .prompt_capabilities(acp::PromptCapabilities::new().image(true))
+                        .session_capabilities(
+                            acp::SessionCapabilities::new()
+                                .list(acp::SessionListCapabilities::new())
+                                .fork(acp::SessionForkCapabilities::new()),
+                        );
+                    responder.respond(
+                        acp::InitializeResponse::new(request.protocol_version)
+                            .agent_info(acp::Implementation::new(
+                                "wai-fake-agent",
+                                env!("CARGO_PKG_VERSION"),
+                            ))
+                            .agent_capabilities(caps),
+                    )
+                }
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -299,6 +523,24 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                     acp::SessionUpdate::AgentMessageChunk(chunk("previous answer")),
                 )?;
                 responder.respond(acp::LoadSessionResponse::new().modes(modes()))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let fake = fake.clone();
+                async move |request: acp::ForkSessionRequest, responder, _cx| {
+                    if fake.opts.fail_fork {
+                        return responder.respond_with_error(Error::internal_error());
+                    }
+                    if request.session_id.0.starts_with("missing") {
+                        return responder.respond_with_error(
+                            acp::Error::session_not_found(request.session_id).into(),
+                        );
+                    }
+                    let id = format!("fork-{}", fake.next_session.fetch_add(1, Ordering::Relaxed));
+                    responder.respond(acp::ForkSessionResponse::new(id).modes(modes()))
+                }
             },
             agent_client_protocol::on_receive_request!(),
         )

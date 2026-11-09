@@ -30,6 +30,11 @@ enum Command {
         cwd: PathBuf,
         reply: Reply<SessionStarted>,
     },
+    ForkSession {
+        id: SessionId,
+        cwd: PathBuf,
+        reply: Reply<SessionStarted>,
+    },
     ListSessions {
         cursor: Option<String>,
         reply: Reply<Page>,
@@ -101,6 +106,17 @@ impl AgentHandle {
             .await
     }
 
+    /// Copies session `id` into a new one (the agent must advertise `AgentCaps::fork`). The
+    /// copy is not replayed here: `load_session` of the returned id does that.
+    pub async fn fork_session(
+        &self,
+        id: SessionId,
+        cwd: PathBuf,
+    ) -> Result<SessionStarted, AgentError> {
+        self.request(|reply| Command::ForkSession { id, cwd, reply })
+            .await
+    }
+
     /// Lists every session the agent knows, following `next_cursor` to the end.
     pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>, AgentError> {
         let mut all = Vec::new();
@@ -144,6 +160,15 @@ impl AgentHandle {
         self.broker.answer(id, choice)
     }
 
+    /// Answers a pending question.
+    pub fn answer_question(
+        &self,
+        id: QuestionId,
+        answer: QuestionAnswer,
+    ) -> Result<(), BrokerError> {
+        self.broker.answer_question(id, answer)
+    }
+
     /// Kills the agent now (its whole process group on unix): the SDK's graceful exit waits
     /// seconds, and a quitting app has about 200 ms. Resolves once it is gone, after `Exited`.
     pub fn shutdown(&self) -> impl Future<Output = ()> + use<> {
@@ -173,16 +198,45 @@ impl AgentHandle {
 
 struct Pending {
     session: SessionId,
-    responder: Responder<acp::RequestPermissionResponse>,
+    parked: Parked,
+}
+
+/// A request of the agent waiting for the user.
+enum Parked {
+    Permission(Responder<acp::RequestPermissionResponse>),
+    Question {
+        responder: Responder<acp::CreateElicitationResponse>,
+        /// Dropped with the question: ends the watch for the agent withdrawing it.
+        _watch: Sender<()>,
+    },
+}
+
+impl Parked {
+    /// Answers "cancelled" in the request's own terms; returns the event that reports it.
+    fn cancel(self, id: u64) -> AgentEvent {
+        // ponytail: a failed respond means the connection is closing; `Exited` reports it.
+        match self {
+            Parked::Permission(responder) => {
+                let _ = responder.respond(acp::RequestPermissionResponse::new(
+                    acp::RequestPermissionOutcome::Cancelled,
+                ));
+                AgentEvent::PermissionResolved { id }
+            }
+            Parked::Question { responder, .. } => {
+                let _ = responder.respond(convert::question_response(QuestionAnswer::Cancel));
+                AgentEvent::QuestionResolved { id }
+            }
+        }
+    }
 }
 
 /// Shared between the handle and the connection thread: the event sender and the
-/// permission requests waiting for an answer.
+/// permission requests and questions waiting for an answer (one id sequence for both).
 struct Broker {
     agent: String,
     events: Sender<AgentEvent>,
     next_id: AtomicU64,
-    pending: Mutex<HashMap<PermissionRequestId, Pending>>,
+    pending: Mutex<HashMap<u64, Pending>>,
 }
 
 impl Broker {
@@ -191,61 +245,117 @@ impl Broker {
         let _ = self.events.try_send(event);
     }
 
-    fn park(
+    fn park(&self, id: u64, session: SessionId, parked: Parked, event: AgentEvent) {
+        self.pending
+            .lock()
+            .expect("broker poisoned")
+            .insert(id, Pending { session, parked });
+        self.emit(event);
+    }
+
+    fn park_permission(
         &self,
         request: acp::RequestPermissionRequest,
         responder: Responder<acp::RequestPermissionResponse>,
     ) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = convert::permission_request(id, request);
-        let pending = Pending {
-            session: request.session.clone(),
-            responder,
+        let session = request.session.clone();
+        let event = AgentEvent::PermissionRequested(request);
+        self.park(id, session, Parked::Permission(responder), event);
+    }
+
+    /// Parks a session's form until the user answers; anything else is declined at once (a
+    /// session's form wai cannot show says so first). If the agent withdraws it
+    /// (`$/cancel_request`), it resolves as cancelled.
+    fn park_question(
+        self: &Arc<Self>,
+        request: acp::CreateElicitationRequest,
+        responder: Responder<acp::CreateElicitationResponse>,
+        cx: &ConnectionTo<Agent>,
+    ) -> Result<(), Error> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let question = match convert::question_request(id, request) {
+            Ok(question) => question,
+            Err(session) => {
+                if let Some(session) = session {
+                    self.emit(AgentEvent::QuestionUnsupported { session });
+                }
+                return responder.respond(convert::question_response(QuestionAnswer::Decline));
+            }
         };
+        let withdrawn = responder.cancellation();
+        let (watch, answered) = async_channel::bounded::<()>(1);
+        let session = question.session.clone();
+        let parked = Parked::Question {
+            responder,
+            _watch: watch,
+        };
+        self.park(id, session, parked, AgentEvent::QuestionAsked(question));
+        let broker = self.clone();
+        cx.spawn(async move {
+            let withdrawn = async {
+                withdrawn.cancelled().await;
+                true
+            };
+            // Closes once the question left the broker another way.
+            let answered = async {
+                let _ = answered.recv().await;
+                false
+            };
+            if smol::future::or(withdrawn, answered).await {
+                // ponytail: Stale means it was answered meanwhile.
+                let _ = broker.answer_question(id, QuestionAnswer::Cancel);
+            }
+            Ok(())
+        })
+    }
+
+    /// Takes request `id` out of the broker if it is still pending and is a question (or not).
+    fn take(&self, id: u64, question: bool) -> Option<Parked> {
         self.pending
             .lock()
-            .expect("permission broker poisoned")
-            .insert(id, pending);
-        self.emit(AgentEvent::PermissionRequested(request));
+            .expect("broker poisoned")
+            .extract_if(|k, p| *k == id && matches!(p.parked, Parked::Question { .. }) == question)
+            .next()
+            .map(|(_, pending)| pending.parked)
     }
 
     fn answer(&self, id: PermissionRequestId, choice: Option<String>) -> Result<(), BrokerError> {
-        let pending = self
-            .pending
-            .lock()
-            .expect("permission broker poisoned")
-            .remove(&id)
-            .ok_or(BrokerError::Stale)?;
+        let Some(Parked::Permission(responder)) = self.take(id, false) else {
+            return Err(BrokerError::Stale);
+        };
         let outcome = match choice {
             Some(option) => {
                 acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option))
             }
             None => acp::RequestPermissionOutcome::Cancelled,
         };
-        let sent = pending
-            .responder
-            .respond(acp::RequestPermissionResponse::new(outcome));
+        let sent = responder.respond(acp::RequestPermissionResponse::new(outcome));
         self.emit(AgentEvent::PermissionResolved { id });
         // The connection is gone, so the request no longer exists on the agent side either.
         sent.map_err(|_| BrokerError::Stale)
     }
 
-    /// Answers `Cancelled` to every pending request that matches `session` (all when `None`).
+    fn answer_question(&self, id: QuestionId, answer: QuestionAnswer) -> Result<(), BrokerError> {
+        let Some(Parked::Question { responder, .. }) = self.take(id, true) else {
+            return Err(BrokerError::Stale);
+        };
+        let sent = responder.respond(convert::question_response(answer));
+        self.emit(AgentEvent::QuestionResolved { id });
+        sent.map_err(|_| BrokerError::Stale)
+    }
+
+    /// Answers "cancelled" to every pending request that matches `session` (all when `None`).
     fn cancel_pending(&self, session: Option<&str>) {
         let cancelled: Vec<_> = self
             .pending
             .lock()
-            .expect("permission broker poisoned")
+            .expect("broker poisoned")
             .extract_if(|_, p| session.is_none_or(|s| p.session == s))
             .collect();
         for (id, pending) in cancelled {
-            // ponytail: a failed respond means the connection is closing; `Exited` reports it.
-            let _ = pending
-                .responder
-                .respond(acp::RequestPermissionResponse::new(
-                    acp::RequestPermissionOutcome::Cancelled,
-                ));
-            self.emit(AgentEvent::PermissionResolved { id });
+            self.emit(pending.parked.cancel(id));
         }
     }
 
@@ -301,6 +411,7 @@ async fn connect(
     let agent = AcpAgent::from_str(&spec.command)?;
     let updates = broker.clone();
     let permissions = broker.clone();
+    let questions = broker.clone();
     Client
         .v1()
         .name(format!("wai-agent:{}", spec.name))
@@ -319,8 +430,14 @@ async fn connect(
         .on_receive_request(
             async move |request: acp::RequestPermissionRequest, responder, _cx| {
                 // Parked until the user answers; the dispatch loop moves on at once.
-                permissions.park(request, responder);
+                permissions.park_permission(request, responder);
                 Ok(())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: acp::CreateElicitationRequest, responder, cx| {
+                questions.park_question(request, responder, &cx)
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -338,7 +455,15 @@ async fn actor_loop(
     let init = cx
         .send_request(
             acp::InitializeRequest::new(ProtocolVersion::V1)
-                .client_info(acp::Implementation::new("wai", env!("CARGO_PKG_VERSION"))),
+                .client_info(acp::Implementation::new("wai", env!("CARGO_PKG_VERSION")))
+                // Forms only: wai opens no URLs for an agent. With it, Claude asks its
+                // AskUserQuestion through `elicitation/create`.
+                .client_capabilities(
+                    acp::ClientCapabilities::new().elicitation(
+                        acp::ElicitationCapabilities::new()
+                            .form(acp::ElicitationFormCapabilities::new()),
+                    ),
+                ),
         )
         .block_task()
         .await?;
@@ -353,6 +478,7 @@ async fn actor_loop(
         caps: AgentCaps {
             load_session: caps.load_session,
             list_sessions: caps.session_capabilities.list.is_some(),
+            fork: caps.session_capabilities.fork.is_some(),
             images: caps.prompt_capabilities.image,
         },
     });
@@ -382,6 +508,13 @@ async fn actor_loop(
                 acp::LoadSessionRequest::new(id.clone(), cwd),
                 reply,
                 |r| convert::session_started(id, r.modes),
+            )?,
+            Command::ForkSession { id, cwd, reply } => request(
+                &cx,
+                broker,
+                acp::ForkSessionRequest::new(id, cwd),
+                reply,
+                |r| convert::session_started(r.session_id.to_string(), r.modes),
             )?,
             Command::ListSessions { cursor, reply } => request(
                 &cx,

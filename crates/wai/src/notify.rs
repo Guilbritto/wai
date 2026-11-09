@@ -24,7 +24,8 @@ pub fn should_notify(
     }
 }
 
-/// Title and body: the pending permission's title, or the start of the last agent message.
+/// Title and body: the pending permission's title or question, or the start of the last agent
+/// message.
 pub fn message(kind: NotifyKind, model: &ChatModel) -> (String, String) {
     let title = model.title.as_deref().unwrap_or("New session");
     let mut items = model.items.iter().rev();
@@ -35,6 +36,10 @@ pub fn message(kind: NotifyKind, model: &ChatModel) -> (String, String) {
                     request,
                     answered: None,
                 } => Some(request.title.clone()),
+                ChatItem::Question {
+                    request,
+                    answered: None,
+                } => Some(request.message.clone()),
                 _ => None,
             });
             (format!("{title} needs you"), body.unwrap_or_default())

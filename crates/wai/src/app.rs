@@ -6,7 +6,7 @@ use gpui_kit::component::input::CursorBlink;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{Theme, ThemeMode, WindowExt as _};
 use gpui_kit::*;
-use wai_settings::{Settings, ThemeChoice};
+use wai_settings::{Settings, Template, ThemeChoice};
 
 use crate::workspace::Workspace;
 
@@ -20,7 +20,9 @@ actions!(
         FocusNextPane,
         OpenFolder,
         CancelTurn,
-        Paste
+        Paste,
+        CopySelection,
+        Save
     ]
 );
 
@@ -41,22 +43,26 @@ pub fn init(settings: &Settings, cx: &mut App) {
 
 fn bind_keys(cx: &mut App) {
     let workspace = Some("Workspace");
-    // ctrl-v reaches the shell as a literal ^V, so other platforms paste with ctrl-shift-v.
-    let paste = if cfg!(target_os = "macos") {
-        "cmd-v"
+    // ctrl-v (ctrl-c) reaches the shell as a literal ^V (^C), so other platforms paste (copy)
+    // with ctrl-shift-v (ctrl-shift-c).
+    let (paste, copy) = if cfg!(target_os = "macos") {
+        ("cmd-v", "cmd-c")
     } else {
-        "ctrl-shift-v"
+        ("ctrl-shift-v", "ctrl-shift-c")
     };
-    let keymap: [(&str, Box<dyn Action>, Option<&str>); 8] = [
+    let keymap: [(&str, Box<dyn Action>, Option<&str>); 10] = [
         ("secondary-q", Box::new(Quit), None),
         ("secondary-n", Box::new(NewSession), workspace),
         ("ctrl-`", Box::new(ToggleTerminal), workspace),
+        // R20: in an editor pane it closes the active tab.
         ("secondary-w", Box::new(CloseSession), workspace),
+        ("secondary-s", Box::new(Save), workspace),
         ("secondary-alt-right", Box::new(FocusNextPane), workspace),
         ("secondary-o", Box::new(OpenFolder), workspace),
         // The prompt box lets Escape through (it has nothing to clear).
         ("escape", Box::new(CancelTurn), Some("ChatSession")),
         (paste, Box::new(Paste), Some("Terminal")),
+        (copy, Box::new(CopySelection), Some("Terminal")),
     ];
     // `KeyBinding::new` rejects `secondary-`; `load` resolves it for the host OS.
     let bindings: Vec<_> = keymap
@@ -71,12 +77,18 @@ fn bind_keys(cx: &mut App) {
 
 /// `notices`: what the settings left out, shown once in the window.
 /// `state_path`: where the open sessions, the project and the terminal's visibility are kept.
-pub fn run(project: PathBuf, settings: Settings, notices: Vec<String>, state_path: PathBuf) {
+pub fn run(
+    project: PathBuf,
+    settings: Settings,
+    templates: Vec<Template>,
+    notices: Vec<String>,
+    state_path: PathBuf,
+) {
     // Without the asset source every component icon (status, chevrons) renders blank.
     let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
     app.run(move |cx| {
         init(&settings, cx);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        // Quit is the workspace's: it asks about unsaved edits first.
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -93,14 +105,16 @@ pub fn run(project: PathBuf, settings: Settings, notices: Vec<String>, state_pat
             ..Default::default()
         };
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
-            cx.new(|cx| Workspace::new(project, settings, Some(state_path), window, cx))
+            cx.new(|cx| Workspace::new(project, settings, Some(state_path), true, window, cx))
         })
         .expect("open window");
         let (window, workspace) = opened.clone();
         window
             .update(cx, |_, window, cx| {
                 workspace.update(cx, |w, cx| {
+                    w.templates = templates;
                     w.start_agent(cx);
+                    w.watch_project(window, cx);
                     w.restore(window, cx);
                 });
                 for notice in notices {
@@ -122,6 +136,10 @@ pub fn run(project: PathBuf, settings: Settings, notices: Vec<String>, state_pat
                 run_in_terminal(window, &command, cx).await;
             })
             .detach();
+        }
+        #[cfg(feature = "demo")]
+        if let Ok(files) = std::env::var("WAI_SHOT_OPEN") {
+            open_files(opened.clone(), files, cx);
         }
         #[cfg(feature = "screenshot")]
         if let Ok(path) = std::env::var("WAI_SHOT") {
@@ -151,6 +169,29 @@ fn send_prompt(
         }
         window
             .update(cx, |_, window, cx| type_text(&prompt, window, cx))
+            .ok();
+    })
+    .detach();
+}
+
+/// Scripted run (`WAI_SHOT_OPEN=<files>`): after 1 s, opens `files` (comma-separated, relative
+/// to the project) in the editor, the one read last focused; each logs its main-thread time.
+#[cfg(feature = "demo")]
+fn open_files(
+    (window, workspace): (AnyWindowHandle, Entity<Workspace>),
+    files: String,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(Duration::from_secs(1)).await;
+        window
+            .update(cx, |_, window, cx| {
+                workspace.update(cx, |w, cx| {
+                    for file in files.split(',') {
+                        w.open_file(w.project.join(file), None, window, cx);
+                    }
+                })
+            })
             .ok();
     })
     .detach();
@@ -192,10 +233,17 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 }
 
 /// Saves the window to `path` and quits, offscreen so it also works with the screen locked.
-/// With `WAI_SHOT_PROMPT`, once that turn shows its permission card; otherwise after 2 s,
+/// With `WAI_SHOT_PROMPT`, once that turn needs the user (a permission or question card) or ends
+/// with an Edits block (fase-2-edits.png); otherwise after 2 s,
 /// with the terminal panel shown and `echo wai` run in it.
 /// `WAI_SHOT=docs/screens/fase-1-sidebar.png WAI_SHOT_PROMPT=… WAI_SHOT_SIDE=1` with a fake
 /// agent run with `--sessions 8 --ask-permission --reply-file …`.
+/// `WAI_SHOT_AGENTS=1` (with `WAI_SHOT_PROMPT`): the Agents tab (fase-2-agents.png).
+/// `WAI_SHOT_FILES=<dir>`: the Files tab with `<dir>` (relative to the project) expanded, and
+/// no terminal (fase-2-files.png).
+/// `WAI_SHOT_TEMPLATES=1`: the open template menu (fase-2-templates.png).
+/// `WAI_SHOT_SCROLLBACK=<command>`: the terminal scrolled back with a selection
+/// (fase-2-terminal.png).
 #[cfg(feature = "screenshot")]
 fn screenshot(
     (window, workspace): (AnyWindowHandle, Entity<Workspace>),
@@ -207,13 +255,16 @@ fn screenshot(
         let executor = cx.background_executor().clone();
         executor.timer(Duration::from_secs(2)).await;
         if chat {
-            // The prompt, the reply, the tool call and its permission card.
-            let rows = |w: &Workspace, cx: &App| {
-                w.panes[0]
-                    .session()
-                    .map_or(0, |s| s.read(cx).model.items.len())
+            let needs_you = |w: &Workspace, cx: &App| {
+                w.panes[0].session().is_some_and(|s| {
+                    let model = &s.read(cx).model;
+                    model.state == crate::chat::TurnState::NeedsYou
+                        || (model.state == crate::chat::TurnState::Idle
+                            && (model.items.iter())
+                                .any(|i| matches!(i, crate::chat::ChatItem::Edits { .. })))
+                })
             };
-            while workspace.read_with(cx, rows) < 4 {
+            while !workspace.read_with(cx, needs_you) {
                 executor.timer(Duration::from_millis(50)).await;
             }
             // `WAI_SHOT_SIDE`: the first history row opens to the side (fase-1-sidebar.png).
@@ -229,6 +280,40 @@ fn screenshot(
                     .ok();
                 executor.timer(Duration::from_millis(500)).await;
             }
+            // `WAI_SHOT_AGENTS`: the Agents tab (fase-2-agents.png).
+            if std::env::var("WAI_SHOT_AGENTS").is_ok() {
+                workspace.update(cx, |w, cx| {
+                    w.sidebar_tab = crate::sidebar::SidebarTab::Agents;
+                    cx.notify();
+                });
+                executor.timer(Duration::from_millis(500)).await;
+            }
+        } else if std::env::var("WAI_SHOT_TEMPLATES").is_ok() {
+            // `WAI_SHOT_TEMPLATES=1`: the "New from template" menu open (fase-2-templates.png).
+            window
+                .update(cx, |_, window, cx| {
+                    window.draw(cx).clear(cx);
+                    gpui_kit::test::TestWindowExt::click(window, "sidebar-templates", cx)
+                })
+                .ok();
+            executor.timer(Duration::from_millis(500)).await;
+        } else if let Ok(dir) = std::env::var("WAI_SHOT_FILES") {
+            workspace.update(cx, |w, cx| {
+                w.sidebar_tab = crate::sidebar::SidebarTab::Files;
+                let dir = w.project.join(dir);
+                w.files.update(cx, |files, cx| files.toggle(dir, cx));
+            });
+            executor.timer(Duration::from_millis(500)).await;
+        } else if let Ok(command) = std::env::var("WAI_SHOT_SCROLLBACK") {
+            // `WAI_SHOT_SCROLLBACK=<command>`: its output scrolled back 20 lines, one row
+            // selected (fase-2-terminal.png).
+            run_in_terminal(window, &command, cx).await;
+            executor.timer(Duration::from_millis(500)).await;
+            workspace.update(cx, |w, cx| {
+                if let Some(terminal) = &w.terminal {
+                    terminal.update(cx, |t, cx| t.show_history(20, 3, cx));
+                }
+            });
         } else {
             run_in_terminal(window, "echo wai", cx).await;
         }

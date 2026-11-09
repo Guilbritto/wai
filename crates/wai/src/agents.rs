@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use gpui_kit::*;
 use wai_agent::{
-    AgentCaps, AgentEvent, AgentHandle, AgentSpec, PermissionRequest, SessionEvent, StopReason,
+    AgentCaps, AgentEvent, AgentHandle, AgentSpec, PermissionRequest, QuestionRequest,
+    SessionEvent, StopReason,
 };
 use wai_settings::{AgentConfig, Settings};
 
@@ -25,7 +26,23 @@ pub enum RegistryEvent {
         agent: String,
         request: PermissionRequest,
     },
-    PermissionResolved(u64),
+    /// Request ids restart at 1 per agent: only `agent`'s sessions hold this one.
+    PermissionResolved {
+        agent: String,
+        id: u64,
+    },
+    Question {
+        agent: String,
+        request: QuestionRequest,
+    },
+    QuestionResolved {
+        agent: String,
+        id: u64,
+    },
+    QuestionUnsupported {
+        agent: String,
+        session: String,
+    },
     TurnEnded {
         agent: String,
         session: String,
@@ -103,7 +120,7 @@ impl AgentRegistry {
         Some(handle)
     }
 
-    /// Kills every agent (at quit); resolves once they are all gone.
+    /// Signals every agent to stop, at once (at quit); resolves once they are all gone.
     pub fn shutdown_all(&self) -> impl Future<Output = ()> + use<> {
         let stopped: Vec<_> = self.agents.values().map(|a| a.handle.shutdown()).collect();
         async move {
@@ -166,7 +183,28 @@ impl AgentRegistry {
                 });
             }
             AgentEvent::PermissionResolved { id } => {
-                return cx.emit(RegistryEvent::PermissionResolved(id));
+                return cx.emit(RegistryEvent::PermissionResolved {
+                    agent: agent.into(),
+                    id,
+                });
+            }
+            AgentEvent::QuestionAsked(request) => {
+                return cx.emit(RegistryEvent::Question {
+                    agent: agent.into(),
+                    request,
+                });
+            }
+            AgentEvent::QuestionResolved { id } => {
+                return cx.emit(RegistryEvent::QuestionResolved {
+                    agent: agent.into(),
+                    id,
+                });
+            }
+            AgentEvent::QuestionUnsupported { session } => {
+                return cx.emit(RegistryEvent::QuestionUnsupported {
+                    agent: agent.into(),
+                    session,
+                });
             }
             AgentEvent::TurnEnded { session, reason } => {
                 return cx.emit(RegistryEvent::TurnEnded {

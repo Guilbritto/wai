@@ -24,6 +24,8 @@ thiserror = "2"
 base64 = "0.22"
 notify-rust = "4"
 url = "2"
+ignore = "0.4"
+notify = "8"
 
 [profile.dev]
 debug = "limited"

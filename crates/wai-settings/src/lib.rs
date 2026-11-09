@@ -76,10 +76,36 @@ fn merge(base: &mut toml::Value, over: toml::Value) {
     }
 }
 
+/// Config files are small; one past this is not read.
+const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+
+/// A config file's text; `None` when it does not exist. R41: a repository can ship a huge file,
+/// a FIFO or a link to /dev/zero as `.wai/…`: only a regular file is opened, and at most 1 MB
+/// of it is read.
+fn read_config(path: &Path) -> std::io::Result<Option<String>> {
+    use std::io::{Error, ErrorKind, Read as _};
+    match std::fs::metadata(path) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+        Ok(meta) if !meta.is_file() => return Err(Error::other("not a regular file")),
+        Ok(_) => {}
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(Error::other("larger than 1 MB"));
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|e| Error::new(ErrorKind::InvalidData, e))
+}
+
 fn read_layer(path: &Path) -> Result<Option<toml::Table>, SettingsError> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+    let text = match read_config(path) {
+        Ok(Some(t)) => t,
+        Ok(None) => return Ok(None),
         Err(source) => {
             return Err(SettingsError::Io {
                 path: path.into(),
@@ -147,6 +173,61 @@ impl Settings {
             }
         }
     }
+}
+
+/// A named starting point for a conversation: which agent, and a first prompt that is
+/// pre-filled but not sent.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct Template {
+    pub name: String,
+    /// `None`: the default agent. It can only name an agent the user or the defaults define.
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub prompt: String,
+}
+
+#[derive(Deserialize)]
+struct TemplateFile {
+    #[serde(default)]
+    template: Vec<Template>,
+}
+
+fn read_templates(path: &Path, notices: &mut Vec<String>) -> Vec<Template> {
+    let text = match read_config(path) {
+        Ok(Some(t)) => t,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            notices.push(format!(
+                "Ignored templates: cannot read {}: {e}",
+                path.display()
+            ));
+            return Vec::new();
+        }
+    };
+    match toml::from_str::<TemplateFile>(&text) {
+        Ok(file) => file.template,
+        Err(e) => {
+            notices.push(format!("Ignored templates in {}: {e}", path.display()));
+            Vec::new()
+        }
+    }
+}
+
+/// `<user_dir>/templates.toml` then `<project_dir>/.wai/templates.toml`, each a list of
+/// `[[template]]` tables (`name`, optional `agent`, `prompt`). Project entries come after the
+/// user's; a project template replaces a user one of the same name. A file that does not load
+/// is skipped with a notice (templates never block a launch or hold code, so the project may
+/// define them, R15).
+pub fn load_templates(user_dir: &Path, project_dir: Option<&Path>) -> (Vec<Template>, Vec<String>) {
+    let mut notices = Vec::new();
+    let mut all = read_templates(&user_dir.join("templates.toml"), &mut notices);
+    if let Some(dir) = project_dir {
+        let project = read_templates(&dir.join(".wai").join("templates.toml"), &mut notices);
+        all.retain(|t| !project.iter().any(|p| p.name == t.name));
+        all.extend(project);
+    }
+    (all, notices)
 }
 
 pub fn config_dir() -> PathBuf {
@@ -340,5 +421,103 @@ mod tests {
         assert_eq!(AppState::load(&path), state);
         std::fs::write(&path, "{").unwrap();
         assert_eq!(AppState::load(&path), AppState::default());
+    }
+
+    #[test]
+    fn templates_merge_user_and_project() {
+        let u = tempfile::tempdir().unwrap();
+        let p = tempfile::tempdir().unwrap();
+        write(
+            u.path(),
+            "templates.toml",
+            "[[template]]\nname = \"review\"\nprompt = \"user review\"\n\
+             [[template]]\nname = \"docs\"\nagent = \"other\"\nprompt = \"write docs\"\n",
+        );
+        write(
+            p.path(),
+            ".wai/templates.toml",
+            "[[template]]\nname = \"review\"\nprompt = \"project review\"\n\
+             [[template]]\nname = \"bug\"\nprompt = \"\"\"\nline 1\nline 2\n\"\"\"\n",
+        );
+        let (all, notices) = load_templates(u.path(), Some(p.path()));
+        assert_eq!(notices, Vec::<String>::new());
+        let names: Vec<_> = all.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["docs", "review", "bug"]);
+        assert_eq!(all[0].agent.as_deref(), Some("other"));
+        assert_eq!(all[1].prompt, "project review");
+        assert_eq!(all[2].prompt, "line 1\nline 2\n");
+    }
+
+    /// R41: a repository can ship a huge `.wai/` file: past 1 MB it is skipped with a notice.
+    #[test]
+    fn oversized_project_files_are_skipped_with_a_notice() {
+        let u = tempfile::tempdir().unwrap();
+        let p = tempfile::tempdir().unwrap();
+        write(u.path(), "settings.toml", "theme = \"light\"\n");
+        let padding = format!("# {}\n", "x".repeat(2 * 1024 * 1024));
+        write(
+            p.path(),
+            ".wai/settings.toml",
+            &format!("theme = \"dark\"\n{padding}"),
+        );
+        write(
+            p.path(),
+            ".wai/templates.toml",
+            &format!("[[template]]\nname = \"big\"\n{padding}"),
+        );
+
+        let (s, notices) = Settings::load(u.path(), Some(p.path())).unwrap();
+        assert_eq!(s.theme, ThemeChoice::Light);
+        let path = p.path().join(".wai").join("settings.toml");
+        let want = format!(
+            "Ignored project settings: cannot read {}: larger than 1 MB",
+            path.display()
+        );
+        assert_eq!(notices, [want]);
+
+        let (all, notices) = load_templates(u.path(), Some(p.path()));
+        assert_eq!(all, []);
+        let path = p.path().join(".wai").join("templates.toml");
+        let want = format!(
+            "Ignored templates: cannot read {}: larger than 1 MB",
+            path.display()
+        );
+        assert_eq!(notices, [want]);
+    }
+
+    /// R41: nor is a `.wai/` file that is no regular file opened (/dev/zero never ends).
+    #[cfg(unix)]
+    #[test]
+    fn project_files_that_are_not_regular_are_skipped() {
+        let u = tempfile::tempdir().unwrap();
+        let p = tempfile::tempdir().unwrap();
+        std::fs::create_dir(p.path().join(".wai")).unwrap();
+        for name in ["settings.toml", "templates.toml"] {
+            std::os::unix::fs::symlink("/dev/zero", p.path().join(".wai").join(name)).unwrap();
+        }
+
+        let (_, notices) = Settings::load(u.path(), Some(p.path())).unwrap();
+        assert!(notices[0].ends_with(": not a regular file"), "{notices:?}");
+        let (_, notices) = load_templates(u.path(), Some(p.path()));
+        assert!(notices[0].ends_with(": not a regular file"), "{notices:?}");
+    }
+
+    #[test]
+    fn malformed_templates_are_skipped_with_a_notice() {
+        let u = tempfile::tempdir().unwrap();
+        let p = tempfile::tempdir().unwrap();
+        write(u.path(), "templates.toml", "[[template]]\nname = \"ok\"\n");
+        write(
+            p.path(),
+            ".wai/templates.toml",
+            "[[template]]\nprompt = 3\n",
+        );
+        let (all, notices) = load_templates(u.path(), Some(p.path()));
+        assert_eq!(all.len(), 1);
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].starts_with("Ignored templates in "),
+            "{notices:?}"
+        );
     }
 }

@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use async_channel::Receiver;
 use wai_agent::{
-    AgentCaps, AgentError, AgentEvent, AgentHandle, AgentSpec, BrokerError, ChoiceKind,
-    PermissionRequest, PromptBlock, SessionEvent, StopReason, ToolContent,
+    AgentCaps, AgentError, AgentEvent, AgentHandle, AgentSpec, BrokerError, Choice, ChoiceKind,
+    FieldKind, PermissionRequest, PromptBlock, QuestionAnswer, QuestionRequest, SessionEvent,
+    StopReason, ToolContent,
 };
 
 fn run(test: impl Future<Output = ()>) {
@@ -77,6 +78,16 @@ async fn permission(rx: &Receiver<AgentEvent>) -> PermissionRequest {
     }
 }
 
+async fn question(rx: &Receiver<AgentEvent>) -> QuestionRequest {
+    match until(rx, |e| matches!(e, AgentEvent::QuestionAsked(_)))
+        .await
+        .pop()
+    {
+        Some(AgentEvent::QuestionAsked(q)) => q,
+        other => unreachable!("{other:?}"),
+    }
+}
+
 fn hello() -> Vec<PromptBlock> {
     vec![PromptBlock::Text("hello".into())]
 }
@@ -93,6 +104,7 @@ fn streams_agent_text_and_ends_turn() {
                     AgentCaps {
                         load_session: true,
                         list_sessions: true,
+                        fork: true,
                         images: true
                     }
                 );
@@ -173,6 +185,126 @@ fn late_permission_answer_is_stale() {
                 session: session.id,
                 reason: StopReason::Cancelled
             })
+        );
+    });
+}
+
+/// The fake asks only when wai advertises form elicitation, as claude-agent-acp does.
+#[test]
+fn question_roundtrip() {
+    run(async {
+        let (agent, rx) = spawn(&["--ask-question"]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd()).await.unwrap();
+        agent.prompt(session.id.clone(), hello());
+
+        let q = question(&rx).await;
+        assert_eq!(q.session, session.id);
+        assert_eq!(q.message, "Pick a color");
+        let choice = |value: &str, label: &str| Choice {
+            value: value.into(),
+            label: label.into(),
+            description: None,
+        };
+        let fields: Vec<_> = q
+            .fields
+            .iter()
+            .map(|f| (f.key.as_str(), f.title.as_str(), f.required, f.kind.clone()))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                (
+                    "color",
+                    "Color",
+                    true,
+                    FieldKind::SingleChoice(vec![choice("red", "Red"), choice("blue", "Blue")])
+                ),
+                ("note", "Note", false, FieldKind::Text),
+            ]
+        );
+
+        let serde_json::Value::Object(content) = serde_json::json!({"color": "blue", "note": "x"})
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            agent.answer_question(q.id, QuestionAnswer::Accept(content)),
+            Ok(())
+        );
+        let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+        assert!(
+            events.contains(&AgentEvent::QuestionResolved { id: q.id }),
+            "{events:?}"
+        );
+        let text = agent_text(&events);
+        assert!(
+            text.starts_with("answered:") && text.contains(r#""color":"blue""#),
+            "{text}"
+        );
+    });
+}
+
+/// Review Focus 5: the turn is cancelled while the form is open.
+#[test]
+fn late_question_answer_is_stale() {
+    run(async {
+        let (agent, rx) = spawn(&["--ask-question"]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd()).await.unwrap();
+        agent.prompt(session.id.clone(), hello());
+        let q = question(&rx).await;
+
+        agent.cancel(session.id.clone());
+        until(&rx, |e| *e == AgentEvent::QuestionResolved { id: q.id }).await;
+        assert_eq!(
+            agent.answer_question(q.id, QuestionAnswer::Decline),
+            Err(BrokerError::Stale)
+        );
+        let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+        assert_eq!(
+            events.last(),
+            Some(&AgentEvent::TurnEnded {
+                session: session.id,
+                reason: StopReason::Cancelled
+            })
+        );
+    });
+}
+
+/// Review Focus 5: the agent withdraws the form (`$/cancel_request`) while the turn goes on.
+#[test]
+fn withdrawn_question_resolves_on_its_own() {
+    run(async {
+        let (agent, rx) = spawn(&["--ask-question", "--withdraw-question"]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd()).await.unwrap();
+        agent.prompt(session.id.clone(), hello());
+        let withdrawn = question(&rx).await;
+
+        // A second, regular question keeps the turn open: only the withdrawal resolves the first.
+        let (mut resolved, mut next) = (false, None);
+        until(&rx, |e| {
+            match e {
+                AgentEvent::QuestionResolved { id } if *id == withdrawn.id => resolved = true,
+                AgentEvent::QuestionAsked(q) => next = Some(q.id),
+                _ => {}
+            }
+            resolved && next.is_some()
+        })
+        .await;
+        assert_eq!(
+            agent.answer_question(withdrawn.id, QuestionAnswer::Decline),
+            Err(BrokerError::Stale)
+        );
+        assert_eq!(
+            agent.answer_question(next.unwrap(), QuestionAnswer::Decline),
+            Ok(())
+        );
+        let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+        assert!(
+            agent_text(&events).contains("answered:declined"),
+            "{events:?}"
         );
     });
 }
@@ -337,6 +469,40 @@ fn load_session_replays_history() {
             ]
         );
         assert_eq!(agent.set_mode("abc".into(), "plan".into()).await, Ok(()));
+    });
+}
+
+#[test]
+fn fork_replays_source_history() {
+    run(async {
+        let (agent, rx) = spawn(&[]);
+        ready(&rx).await;
+        let forked = agent.fork_session("abc".into(), cwd()).await.unwrap();
+        assert_ne!(forked.id, "abc");
+        assert_eq!(forked.modes.len(), 2);
+
+        // The fork holds the source's conversation: loading it replays it under the new id.
+        agent.load_session(forked.id.clone(), cwd()).await.unwrap();
+        let replay: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(
+            replay,
+            vec![
+                AgentEvent::Update {
+                    session: forked.id.clone(),
+                    event: SessionEvent::UserText("previous prompt".into())
+                },
+                AgentEvent::Update {
+                    session: forked.id,
+                    event: SessionEvent::AgentText("previous answer".into())
+                },
+            ]
+        );
+
+        let missing = agent.fork_session("missing".into(), cwd()).await;
+        assert!(
+            matches!(missing, Err(AgentError::Protocol(_))),
+            "{missing:?}"
+        );
     });
 }
 

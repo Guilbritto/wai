@@ -1,7 +1,11 @@
 mod agents;
+mod agents_view;
 mod app;
 mod chat;
+mod editor;
+mod files;
 mod notify;
+mod search_view;
 mod sidebar;
 mod terminal_view;
 mod workspace;
@@ -9,19 +13,27 @@ mod workspace;
 use std::path::PathBuf;
 
 use anyhow::Context as _;
-use wai_settings::{AppState, Settings, config_dir};
+use wai_settings::{AppState, Settings, config_dir, load_templates};
 
 fn main() -> anyhow::Result<()> {
     // `WAI_STATE_PATH=<file>` keeps a manual run away from the real state.
-    let state_path = std::env::var_os("WAI_STATE_PATH")
-        .map_or_else(|| config_dir().join("state.json"), PathBuf::from);
+    let state_path = std::env::var_os("WAI_STATE_PATH").map_or_else(
+        || Ok(config_dir().join("state.json")),
+        |p| std::path::absolute(PathBuf::from(p)),
+    )?;
     let state = AppState::load(&state_path);
     let project = resolve_project(std::env::args_os().nth(1).map(PathBuf::from), state.project)?;
+    // Everything relative is resolved by now; agents spawn from a neutral dir, not a repo.
+    wai_agent::enter_neutral_dir(&config_dir()).context("cannot enter the config dir")?;
     let (settings, notices) = Settings::load(&config_dir(), Some(&project))?;
+    let (templates, template_notices) = load_templates(&config_dir(), Some(&project));
+    // R21: the last run's tool outputs.
+    std::fs::remove_dir_all(config_dir().join("scratch")).ok();
+    let notices: Vec<String> = notices.into_iter().chain(template_notices).collect();
     for notice in &notices {
         eprintln!("wai: {notice}");
     }
-    app::run(project, settings, notices, state_path);
+    app::run(project, settings, templates, notices, state_path);
     Ok(())
 }
 

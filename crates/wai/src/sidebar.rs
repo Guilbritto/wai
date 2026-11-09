@@ -1,9 +1,12 @@
-//! The sidebar: the project, its open sessions with their status, and the agent's history.
+//! The sidebar: the project, then tabs: its open sessions with their status and the agent's
+//! history, its files, search, and the agents.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -15,7 +18,34 @@ use crate::app::NewSession;
 use crate::chat::{ChatSession, TurnState};
 use crate::workspace::{MAX_PANES, Workspace, folder_name};
 
-const ROW_HEIGHT: f32 = 28.;
+pub(crate) const ROW_HEIGHT: f32 = 28.;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SidebarTab {
+    #[default]
+    Sessions,
+    Files,
+    Search,
+    Agents,
+}
+
+/// Each tab with its element id and label.
+const TABS: [(SidebarTab, &str, &str); 4] = [
+    (SidebarTab::Sessions, "tab-sessions", "Sessions"),
+    (SidebarTab::Files, "tab-files", "Files"),
+    (SidebarTab::Search, "tab-search", "Search"),
+    (SidebarTab::Agents, "tab-agents", "Agents"),
+];
+
+/// The status dot's colour, shared by the open list and the agent cards.
+pub(crate) fn status_color(state: &TurnState, theme: &gpui_kit::component::Theme) -> Hsla {
+    match state {
+        TurnState::Working => theme.blue,
+        TurnState::NeedsYou => theme.warning,
+        TurnState::Idle => theme.muted_foreground,
+        TurnState::Error(_) => theme.danger,
+    }
+}
 
 /// R3: `/tmp` and `/private/tmp` are one folder; a path that does not exist stays as given.
 pub fn canonical(path: &Path) -> PathBuf {
@@ -81,7 +111,30 @@ impl Workspace {
 
     pub(crate) fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
-        let rows = self.history_rows().len();
+        let content = match self.sidebar_tab {
+            SidebarTab::Sessions => self.render_sessions(cx).into_any_element(),
+            SidebarTab::Files => self.files.clone().into_any_element(),
+            SidebarTab::Search => self.search.clone().into_any_element(),
+            SidebarTab::Agents => div()
+                .size_full()
+                .child(self.agents.clone())
+                .into_any_element(),
+        };
+        let tabs = TABS.map(|(tab, id, label)| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .label(label)
+                .selected(self.sidebar_tab == tab)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.sidebar_tab = tab;
+                    if tab == SidebarTab::Search {
+                        let focus = this.search.read(cx).query_focus(cx);
+                        window.focus(&focus, cx);
+                    }
+                    cx.notify();
+                }))
+        });
         v_flex()
             .debug_selector(|| "sidebar".into())
             .size_full()
@@ -102,6 +155,38 @@ impl Workspace {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(folder_name(&self.project)),
                     )
+                    .when(!self.templates.is_empty(), |el| {
+                        let (workspace, names) = (
+                            cx.entity().downgrade(),
+                            self.templates
+                                .iter()
+                                .map(|t| t.name.clone())
+                                .collect::<Vec<_>>(),
+                        );
+                        el.child(
+                            div().debug_selector(|| "sidebar-templates".into()).child(
+                                Button::new("sidebar-templates")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::ChevronDown)
+                                    .tooltip("New from template")
+                                    .dropdown_menu(move |menu, _, _| {
+                                        names.iter().enumerate().fold(menu, |menu, (ix, name)| {
+                                            let workspace = workspace.clone();
+                                            menu.item(PopupMenuItem::new(name.clone()).on_click(
+                                                move |_, window, cx| {
+                                                    workspace
+                                                        .update(cx, |w, cx| {
+                                                            w.start_template(ix, window, cx)
+                                                        })
+                                                        .ok();
+                                                },
+                                            ))
+                                        })
+                                    }),
+                            ),
+                        )
+                    })
                     .child(
                         Button::new("sidebar-new")
                             .ghost()
@@ -113,6 +198,14 @@ impl Workspace {
                             })),
                     ),
             )
+            .child(h_flex().px_2().gap_1().children(tabs))
+            .child(v_flex().flex_1().min_h_0().child(content))
+    }
+
+    fn render_sessions(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let rows = self.history_rows().len();
+        v_flex()
+            .size_full()
             .child(heading("Open", cx))
             .children(
                 self.sessions
@@ -160,15 +253,14 @@ impl Workspace {
     ) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let s = session.read(cx);
-        let (dot, label) = match s.status() {
-            TurnState::Working => (theme.blue, None),
-            TurnState::NeedsYou => (theme.warning, Some("Needs you")),
-            TurnState::Idle => (theme.muted_foreground, None),
-            TurnState::Error(_) => (theme.danger, None),
-        };
+        let dot = status_color(s.status(), theme);
+        let label = matches!(s.status(), TurnState::NeedsYou).then_some("Needs you");
         let title = s.model.title.clone().unwrap_or("New session".into());
         let active = self.panes[self.focused_pane].session() == Some(session);
         let (open, side) = (session.clone(), session.clone());
+        let (agent, id, cwd) = (s.agent.clone(), s.id.clone(), s.cwd.clone());
+        let forkable = self.can_fork(&agent, cx);
+        let fork_title = s.model.title.clone();
         row(active, cx)
             .child(
                 h_flex()
@@ -189,6 +281,20 @@ impl Workspace {
                     move |this, _, window, cx| this.show(side.clone(), true, window, cx),
                 )))
             })
+            .when(forkable, |el| {
+                el.child(fork_button(("open-fork", ix)).on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        this.fork(
+                            agent.clone(),
+                            id.clone(),
+                            fork_title.clone(),
+                            cwd.clone(),
+                            window,
+                            cx,
+                        )
+                    },
+                )))
+            })
     }
 
     fn history_row(
@@ -198,7 +304,8 @@ impl Workspace {
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
         let title = summary.title.clone().unwrap_or_else(|| summary.id.clone());
-        let (open, side) = (summary.clone(), summary.clone());
+        let (open, side, source) = (summary.clone(), summary.clone(), summary.clone());
+        let forkable = self.can_fork(&self.settings.default_agent, cx);
         row(false, cx)
             .child(
                 div()
@@ -216,6 +323,16 @@ impl Workspace {
                     cx.listener(move |this, _, window, cx| this.resume(&side, true, window, cx)),
                 ))
             })
+            .when(forkable, |el| {
+                el.child(fork_button(("history-fork", ix)).on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        let (id, title, cwd) =
+                            (source.id.clone(), source.title.clone(), source.cwd.clone());
+                        let agent = this.settings.default_agent.clone();
+                        this.fork(agent, id, title, cwd, window, cx)
+                    },
+                )))
+            })
     }
 }
 
@@ -230,7 +347,7 @@ fn heading(text: &'static str, cx: &App) -> impl IntoElement {
         .child(text)
 }
 
-fn row(active: bool, cx: &App) -> Div {
+pub(crate) fn row(active: bool, cx: &App) -> Div {
     let theme = cx.theme();
     h_flex()
         .w_full()
@@ -253,4 +370,12 @@ fn side_button(id: impl Into<ElementId>) -> Button {
         .xsmall()
         .icon(IconName::PanelRightOpen)
         .tooltip("Open to the side")
+}
+
+fn fork_button(id: impl Into<ElementId>) -> Button {
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .icon(IconName::Copy)
+        .tooltip("Fork")
 }

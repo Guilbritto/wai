@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 pub type SessionId = String;
 pub type PermissionRequestId = u64;
+pub type QuestionId = u64;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentSpec {
@@ -41,6 +42,7 @@ pub enum PromptBlock {
 pub struct AgentCaps {
     pub load_session: bool,
     pub list_sessions: bool,
+    pub fork: bool,
     pub images: bool,
 }
 
@@ -58,6 +60,16 @@ pub enum AgentEvent {
     PermissionRequested(PermissionRequest),
     PermissionResolved {
         id: PermissionRequestId,
+    },
+    /// An ACP form elicitation (Claude's AskUserQuestion); answer with `answer_question`.
+    QuestionAsked(QuestionRequest),
+    /// Answered, cancelled with the turn, or withdrawn by the agent.
+    QuestionResolved {
+        id: QuestionId,
+    },
+    /// The session's form had a field wai cannot show (an unknown schema): it was declined.
+    QuestionUnsupported {
+        session: SessionId,
     },
     TurnEnded {
         session: SessionId,
@@ -97,6 +109,7 @@ pub struct ToolCallView {
     pub kind: String,
     pub status: ToolStatus,
     pub content: Vec<ToolContent>,
+    pub locations: Vec<Location>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -105,6 +118,16 @@ pub struct ToolCallPatch {
     pub title: Option<String>,
     pub status: Option<ToolStatus>,
     pub content: Option<Vec<ToolContent>>,
+    /// Replaces the call's locations as a whole, like `content`.
+    pub locations: Option<Vec<Location>>,
+}
+
+/// A file a tool call touches and, when the agent knows it, the 1-based line (for an edit hunk,
+/// the hunk's first line in the new file).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Location {
+    pub path: PathBuf,
+    pub line: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +189,47 @@ pub enum ChoiceKind {
     RejectAlways,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuestionRequest {
+    pub id: QuestionId,
+    pub session: SessionId,
+    pub message: String,
+    pub fields: Vec<QuestionField>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuestionField {
+    pub key: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub required: bool,
+    pub kind: FieldKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FieldKind {
+    SingleChoice(Vec<Choice>),
+    MultiChoice(Vec<Choice>),
+    Text,
+    Boolean,
+    Number,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Choice {
+    pub value: String,
+    pub label: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum QuestionAnswer {
+    /// The form's values by field key: strings, numbers, booleans and string arrays.
+    Accept(serde_json::Map<String, serde_json::Value>),
+    Decline,
+    Cancel,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
     EndTurn,
@@ -187,6 +251,6 @@ pub enum AgentError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum BrokerError {
-    #[error("the permission request is no longer pending")]
+    #[error("the request is no longer pending")]
     Stale,
 }

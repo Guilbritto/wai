@@ -6,12 +6,13 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Term, TermMode, viewport_to_point};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
@@ -39,6 +40,8 @@ pub struct GridSnapshot {
     pub rows: Vec<Vec<CellRun>>,
     /// `(col, row)` of the visible cursor.
     pub cursor: Option<(u16, u16)>,
+    /// How many lines the view is scrolled up into the history.
+    pub display_offset: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,6 +97,8 @@ pub struct TerminalModel {
 /// Default text and background colours; a run with `DEFAULT_BG` has no background of its own.
 pub const DEFAULT_FG: Rgb = Rgb(0xcc, 0xcc, 0xcc);
 pub const DEFAULT_BG: Rgb = Rgb(0x1e, 0x1e, 0x1e);
+/// Lines kept above the screen.
+const SCROLLBACK: usize = 10_000;
 
 const ANSI16: [Rgb; 16] = [
     Rgb(0x00, 0x00, 0x00),
@@ -167,8 +172,12 @@ impl TerminalModel {
         let (tx, rx) = async_channel::bounded(1);
         let (replies_tx, replies_rx) = std::sync::mpsc::channel::<String>();
         let events = Arc::new(Mutex::new(Vec::new()));
+        let config = Config {
+            scrolling_history: SCROLLBACK,
+            ..Config::default()
+        };
         let term = Arc::new(FairMutex::new(Term::new(
-            Config::default(),
+            config,
             &TermSize::new(size.cols as usize, size.rows as usize),
             Listener {
                 replies: replies_tx,
@@ -231,6 +240,37 @@ impl TerminalModel {
         }
     }
 
+    /// Moves the view `lines` up into the history (down when negative), as far as it goes.
+    pub fn scroll(&self, lines: i32) {
+        self.term.lock().scroll_display(Scroll::Delta(lines));
+    }
+
+    /// Back to the bottom, where the shell writes.
+    pub fn scroll_to_bottom(&self) {
+        self.term.lock().scroll_display(Scroll::Bottom);
+    }
+
+    /// Starts a selection at visible cell `(col, row)`; `right`: the pointer is on the cell's
+    /// right half. A selection that never grows selects nothing.
+    pub fn select(&self, col: u16, row: u16, right: bool) {
+        let mut term = self.term.lock();
+        let point = viewport_to_point(term.grid().display_offset(), cell(col, row));
+        term.selection = Some(Selection::new(SelectionType::Simple, point, side(right)));
+    }
+
+    /// Moves the selection's end to visible cell `(col, row)`.
+    pub fn select_to(&self, col: u16, row: u16, right: bool) {
+        let mut term = self.term.lock();
+        let point = viewport_to_point(term.grid().display_offset(), cell(col, row));
+        if let Some(selection) = &mut term.selection {
+            selection.update(point, side(right));
+        }
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        self.term.lock().selection_to_string()
+    }
+
     pub fn app_cursor(&self) -> bool {
         self.term.lock().mode().contains(TermMode::APP_CURSOR)
     }
@@ -242,11 +282,14 @@ impl TerminalModel {
     pub fn snapshot(&self) -> GridSnapshot {
         let term = self.term.lock();
         let grid = term.grid();
+        let offset = grid.display_offset();
+        let selection = term.selection.as_ref().and_then(|s| s.to_range(&term));
         let mut rows = Vec::with_capacity(grid.screen_lines());
         for r in 0..grid.screen_lines() {
+            let line = Line(r as i32 - offset as i32);
             let mut runs: Vec<CellRun> = Vec::new();
             for c in 0..grid.columns() {
-                let cell = &grid[Line(r as i32)][Column(c)];
+                let cell = &grid[line][Column(c)];
                 if cell
                     .flags
                     .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
@@ -254,7 +297,9 @@ impl TerminalModel {
                     continue;
                 }
                 let (mut fg, mut bg) = (resolve(cell.fg, DEFAULT_FG), resolve(cell.bg, DEFAULT_BG));
-                if cell.flags.contains(Flags::INVERSE) {
+                // Selected cells show inverted.
+                let selected = selection.is_some_and(|s| s.contains(Point::new(line, Column(c))));
+                if cell.flags.contains(Flags::INVERSE) != selected {
                     std::mem::swap(&mut fg, &mut bg);
                 }
                 let bold = cell.flags.contains(Flags::BOLD);
@@ -286,10 +331,17 @@ impl TerminalModel {
             }
             rows.push(runs);
         }
+        // Scrolled up, the cursor may be below the view.
         let p = grid.cursor.point;
-        let cursor = (term.mode().contains(TermMode::SHOW_CURSOR) && p.line.0 >= 0)
-            .then_some((p.column.0 as u16, p.line.0 as u16));
-        GridSnapshot { rows, cursor }
+        let row = p.line.0 + offset as i32;
+        let shown = (0..grid.screen_lines() as i32).contains(&row);
+        let cursor = (term.mode().contains(TermMode::SHOW_CURSOR) && shown)
+            .then_some((p.column.0 as u16, row as u16));
+        GridSnapshot {
+            rows,
+            cursor,
+            display_offset: offset,
+        }
     }
 }
 
@@ -306,6 +358,14 @@ fn push_cell(text: &mut String, cell: &alacritty_terminal::term::cell::Cell) {
     if let Some(z) = cell.zerowidth() {
         text.extend(z);
     }
+}
+
+fn cell(col: u16, row: u16) -> Point<usize> {
+    Point::new(row as usize, Column(col as usize))
+}
+
+fn side(right: bool) -> Side {
+    if right { Side::Right } else { Side::Left }
 }
 
 fn pty_size(s: GridSize) -> PtySize {
@@ -416,6 +476,23 @@ mod tests {
         wait_for(&m, &rx, |s| {
             s.rows.iter().any(|r| text(r).contains("wai-ok"))
         });
+    }
+
+    /// 10,000 lines of history: scrolling to the top shows where it starts, not line 1.
+    #[test]
+    fn scrollback_keeps_10000_lines() {
+        let (m, rx, _d) = spawn();
+        m.write(b"seq 1 12000\r");
+        wait_for(&m, &rx, |s| {
+            s.rows.iter().any(|r| text(r).trim() == "12000")
+        });
+
+        m.scroll(20_000);
+
+        let snap = m.snapshot();
+        assert_eq!(snap.display_offset, 10_000);
+        let top: usize = text(&snap.rows[0]).trim().parse().expect("a number");
+        assert!(top > 1, "the oldest lines are gone, top is {top}");
     }
 
     #[test]
