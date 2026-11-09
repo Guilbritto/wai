@@ -51,7 +51,7 @@ fn write_a_file_then_resume() {
         let dir: PathBuf =
             std::env::temp_dir().join(format!("wai-real-claude-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let dir = dir.canonicalize().unwrap();
+        let dir = wai_settings::canonical(&dir);
         let t0 = Instant::now();
 
         let (agent, rx) = spawn();
@@ -208,7 +208,7 @@ fn answer_a_question() {
         let dir: PathBuf =
             std::env::temp_dir().join(format!("wai-real-claude-q-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let dir = dir.canonicalize().unwrap();
+        let dir = wai_settings::canonical(&dir);
 
         let (agent, rx) = spawn();
         ready(&rx).await;

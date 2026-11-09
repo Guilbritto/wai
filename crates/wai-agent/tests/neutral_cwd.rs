@@ -3,19 +3,19 @@
 
 use std::time::Duration;
 
-use wai_agent::{AgentEvent, AgentHandle, AgentSpec};
+use wai_agent::{AgentEvent, AgentHandle, AgentSpec, quote};
 
 #[test]
 fn agent_process_cwd_is_neutral() {
     let tmp = tempfile::tempdir().unwrap();
-    let neutral = tmp.path().canonicalize().unwrap().join("config");
+    let neutral = wai_settings::canonical(tmp.path()).join("config");
     let cwd_file = tmp.path().join("cwd.txt");
 
     wai_agent::enter_neutral_dir(&neutral).unwrap();
     let command = format!(
-        "'{}' --cwd-file '{}'",
-        env!("CARGO_BIN_EXE_wai-fake-agent"),
-        cwd_file.display()
+        "{} --cwd-file {}",
+        quote(env!("CARGO_BIN_EXE_wai-fake-agent")),
+        quote(&cwd_file)
     );
     let (_handle, events) = AgentHandle::spawn(AgentSpec {
         name: "fake".into(),
@@ -30,8 +30,5 @@ fn agent_process_cwd_is_neutral() {
     ));
 
     let written = std::fs::read_to_string(&cwd_file).unwrap();
-    assert_eq!(
-        std::path::Path::new(&written).canonicalize().unwrap(),
-        neutral
-    );
+    assert_eq!(wai_settings::canonical(written.as_ref()), neutral);
 }

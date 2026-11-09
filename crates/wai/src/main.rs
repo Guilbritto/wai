@@ -51,10 +51,10 @@ fn resolve_project(arg: Option<PathBuf>, last: Option<PathBuf>) -> anyhow::Resul
         (Some(path), _) | (None, Some(path)) => path,
         (None, None) => std::env::current_dir()?,
     };
-    let project = path
-        .canonicalize()
-        .with_context(|| format!("cannot open {}", path.display()))?;
-    anyhow::ensure!(project.is_dir(), "{} is not a folder", project.display());
+    let shown = wai_settings::shown;
+    let project =
+        dunce::canonicalize(&path).with_context(|| format!("cannot open {}", shown(&path)))?;
+    anyhow::ensure!(project.is_dir(), "{} is not a folder", shown(&project));
     Ok(project)
 }
 
@@ -64,8 +64,8 @@ mod tests {
 
     #[test]
     fn project_comes_from_arg_then_last_then_cwd() {
-        let tmp = std::env::temp_dir().canonicalize().unwrap();
-        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let tmp = wai_settings::canonical(&std::env::temp_dir());
+        let cwd = wai_settings::canonical(&std::env::current_dir().unwrap());
         let missing = PathBuf::from("/nonexistent-wai-project");
 
         assert_eq!(resolve_project(Some(tmp.clone()), None).unwrap(), tmp);

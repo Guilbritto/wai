@@ -1,6 +1,7 @@
 //! Reading and saving a file for the editor, without GPUI. Everything here blocks: callers run it
 //! on the background executor.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read as _, Write as _};
@@ -90,6 +91,8 @@ pub struct Loaded {
     /// The file's resolved real path, when it resolves: Save refuses once the path resolves
     /// elsewhere (a link swapped in).
     pub real: Option<PathBuf>,
+    /// Its line ends are `\r\n`: `text` holds `\n`, and Save writes `\r\n` back.
+    pub crlf: bool,
 }
 
 pub fn load(path: &Path) -> Result<Loaded, OpenError> {
@@ -98,28 +101,37 @@ pub fn load(path: &Path) -> Result<Loaded, OpenError> {
     // ponytail: text that is not UTF-8 does not open (the error says so); a lossy read-only
     // view would be the upgrade.
     let text = String::from_utf8(fs::read(path)?).map_err(|_| OpenError::NotUtf8)?;
-    let real = fs::canonicalize(path).ok();
+    // ponytail: the first line end decides, so a mixed file is all CRLF once saved.
+    let crlf = text.find('\n').is_some_and(|i| text[..i].ends_with('\r'));
+    let text = if crlf {
+        text.replace("\r\n", "\n")
+    } else {
+        text
+    };
+    let real = dunce::canonicalize(path).ok();
     Ok(Loaded {
         mode,
         text,
         stamp,
         real,
+        crlf,
     })
 }
 
 /// Writes `text` to a temp file beside `path`, then renames it over `path`: a crash leaves the
 /// old file or the new one, never half of one. The file keeps its permissions, and a symlink
-/// keeps pointing to it. Returns the new stamp.
-pub fn save(path: &Path, text: &str) -> io::Result<Option<Stamp>> {
-    save_resolved(
-        &fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
-        text,
-    )
+/// keeps pointing to it. `crlf`: `text`'s `\n` are written as `\r\n`. Returns the new stamp.
+pub fn save(path: &Path, text: &str, crlf: bool) -> io::Result<Option<Stamp>> {
+    save_resolved(&wai_settings::canonical(path), text, crlf)
 }
 
 /// `save` to a path already resolved (a tab's real path at load): nothing is resolved again
 /// between the caller's check and the write.
-pub fn save_resolved(target: &Path, text: &str) -> io::Result<Option<Stamp>> {
+pub fn save_resolved(target: &Path, text: &str, crlf: bool) -> io::Result<Option<Stamp>> {
+    let text = match crlf {
+        true => Cow::Owned(text.replace('\n', "\r\n")),
+        false => Cow::Borrowed(text),
+    };
     let name = target.file_name().ok_or(io::ErrorKind::InvalidInput)?;
     let tmp = target.with_file_name(format!(".{}.wai-save", name.to_string_lossy()));
     let written = (|| {
@@ -170,7 +182,7 @@ mod tests {
         fs::write(&stale, "stale").unwrap();
         fs::set_permissions(&stale, fs::Permissions::from_mode(0o644)).unwrap();
 
-        super::save(&path, "new").unwrap();
+        super::save(&path, "new", false).unwrap();
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "new");
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -189,7 +201,7 @@ mod tests {
         fs::write(&victim, "precious").unwrap();
         std::os::unix::fs::symlink(&victim, dir.path().join(".setup.sh.wai-save")).unwrap();
 
-        super::save(&path, "new").unwrap();
+        super::save(&path, "new", false).unwrap();
 
         assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
         assert_eq!(fs::read_to_string(&path).unwrap(), "new");

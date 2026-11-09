@@ -1,6 +1,5 @@
 //! An editor pane: open files in tabs, each a code editor kept in step with the disk.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -32,6 +31,8 @@ pub struct FileEditor {
     stamp: Option<Stamp>,
     /// The resolved real path at load.
     real: Option<PathBuf>,
+    /// The file's line ends are `\r\n` (the buffer holds `\n`).
+    crlf: bool,
     /// The file is gone from disk (a clean tab can then only close).
     deleted: bool,
     _edits: Subscription,
@@ -69,6 +70,7 @@ impl FileEditor {
             editor,
             stamp: loaded.stamp,
             real: loaded.real,
+            crlf: loaded.crlf,
             deleted: false,
             _edits: edits,
         }
@@ -93,7 +95,7 @@ impl FileEditor {
         if self.read_only {
             return false;
         }
-        if let Ok(now) = fs::canonicalize(&self.path)
+        if let Ok(now) = dunce::canonicalize(&self.path)
             && Some(&now) != self.real.as_ref()
         {
             let notice = "File was replaced by a link — reopen it to edit";
@@ -112,7 +114,7 @@ impl FileEditor {
         // the background executor (with an edit counter for `dirty`) if it ever shows.
         let text = self.editor.read(cx).text().to_string();
         let target = self.real.as_deref().unwrap_or(&self.path);
-        match file::save_resolved(target, &text) {
+        match file::save_resolved(target, &text, self.crlf) {
             Ok(stamp) => {
                 self.stamp = stamp;
                 (self.dirty, self.disk_changed) = (false, false);
@@ -176,6 +178,7 @@ impl FileEditor {
             Ok(loaded) => {
                 let read_only = self.scratch || loaded.mode == OpenMode::ReadOnlyLarge;
                 self.stamp = loaded.stamp;
+                self.crlf = loaded.crlf;
                 self.deleted = false;
                 (self.dirty, self.disk_changed) = (false, false);
                 self.editor.update(cx, |s, cx| {

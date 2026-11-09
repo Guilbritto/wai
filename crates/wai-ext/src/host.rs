@@ -116,7 +116,7 @@ impl HostEvent {
             ),
             Self::FileSaved { path } => (
                 "event/file_saved",
-                json!({"path": path.to_string_lossy()}),
+                json!({"path": dunce::simplified(&path).to_string_lossy()}),
                 None,
             ),
         }
@@ -173,18 +173,71 @@ pub(crate) enum Command {
 #[derive(Default)]
 struct Shared {
     stopped: bool,
-    child: Option<Child>,
+    child: Option<Process>,
+}
+
+/// The extension's process and, on Windows (no process groups there), the job it runs in:
+/// closing the job kills whatever the extension started too.
+struct Process {
+    child: Child,
+    #[cfg(windows)]
+    _job: Option<std::os::windows::io::OwnedHandle>,
+}
+
+impl Process {
+    fn new(child: Child) -> Process {
+        Process {
+            #[cfg(windows)]
+            _job: kill_on_close_job(&child),
+            child,
+        }
+    }
+}
+
+/// A job that kills every process in it once its last handle closes, with `child` in it.
+/// ponytail: what the child starts before it joins (its first instant) escapes the job;
+/// spawning it suspended would close that gap.
+#[cfg(windows)]
+fn kill_on_close_job(child: &Child) -> Option<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: the job handle is checked, then owned (closed once); `limits` outlives the call
+    // that reads it, with its size; the child's handle is valid while `child` is.
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return None;
+        }
+        let job = OwnedHandle::from_raw_handle(job);
+        let set = SetInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectExtendedLimitInformation,
+            (&raw const limits).cast(),
+            size_of_val(&limits) as u32,
+        );
+        let joined =
+            set != 0 && AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) != 0;
+        joined.then_some(job)
+    }
 }
 
 fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
     shared.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The extension and, on unix, its whole process group: what it started dies with it.
-fn kill(mut child: Child) {
+/// The extension and its process group (unix) or job (Windows, closed when `process` drops):
+/// what it started dies with it.
+fn kill(mut process: Process) {
+    let child = &mut process.child;
     #[cfg(unix)]
     {
-        let pid = rustix::process::Pid::from_child(&child);
+        let pid = rustix::process::Pid::from_child(child);
         let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
     }
     let _ = child.kill();
@@ -295,6 +348,8 @@ impl Ext {
             return Err("it may not run its own programs".into());
         }
         let program = installed.program(&spec.command);
+        let program = wai_settings::find_program(&program)
+            .ok_or_else(|| format!("{} is not on PATH", program.display()))?;
         let granted: Vec<String> = installed.granted.iter().map(ToString::to_string).collect();
         Ok(Ext {
             id: m.id.clone(),
@@ -308,8 +363,8 @@ impl Ext {
                 "wai_version": env!("CARGO_PKG_VERSION"),
                 "ext_id": m.id.as_str(),
                 "granted": granted,
-                "project": project.to_string_lossy(),
-                "ext_dir": installed.dir.to_string_lossy(),
+                "project": dunce::simplified(project).to_string_lossy(),
+                "ext_dir": dunce::simplified(&installed.dir).to_string_lossy(),
             }),
         })
     }
@@ -330,16 +385,19 @@ impl Ext {
             .stderr(Stdio::piped());
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("cannot start {}: {e}", self.program.display()))?;
+        let mut process = Process::new(
+            command
+                .spawn()
+                .map_err(|e| format!("cannot start {}: {e}", self.program.display()))?,
+        );
+        let child = &mut process.child;
         let (stdin, stdout, stderr) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take());
         let (Some(mut stdin), Some(stdout), Some(stderr)) = (stdin, stdout, stderr) else {
-            kill(child);
+            kill(process);
             return Err("its pipes did not open".into());
         };
-        shared.child = Some(child);
+        shared.child = Some(process);
         drop(shared);
 
         let name = |what: &str| format!("ext-{}-{what}", self.id.as_str());

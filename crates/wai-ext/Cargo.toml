@@ -12,10 +12,20 @@ toml.workspace = true
 smol.workspace = true
 thiserror.workspace = true
 wai-settings = { path = "../wai-settings" }
+dunce.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # Already in the tree (agent-client-protocol): kills an extension's whole process group.
 rustix = { version = "1", features = ["process"] }
+
+[target.'cfg(windows)'.dependencies]
+# Already in the tree: a job object kills an extension's whole process tree.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3"

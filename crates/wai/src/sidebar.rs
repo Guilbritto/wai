@@ -2,7 +2,6 @@
 //! history, its files, search, the agents, then each running extension's panels.
 
 use std::ops::Range;
-use std::path::{Path, PathBuf};
 
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -13,6 +12,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::SessionSummary;
 use wai_ext::panel::clamp;
+pub use wai_settings::canonical;
 
 use crate::agents::AgentStatus;
 use crate::app::NewSession;
@@ -53,11 +53,6 @@ pub(crate) fn status_color(state: &TurnState, theme: &gpui_kit::component::Theme
         TurnState::Idle => theme.muted_foreground,
         TurnState::Error(_) => theme.danger,
     }
-}
-
-/// R3: `/tmp` and `/private/tmp` are one folder; a path that does not exist stays as given.
-pub fn canonical(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 impl Workspace {

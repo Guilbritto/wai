@@ -12,6 +12,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 url.workspace = true
+# `find_program`: bare agent and MCP server names resolved on PATH, never in a cwd.
+wai-settings = { path = "../wai-settings" }
 
 [dev-dependencies]
 tempfile = "3"

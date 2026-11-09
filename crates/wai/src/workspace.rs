@@ -15,7 +15,7 @@ use wai_agent::{
 };
 use wai_ext::{CommandSpec, ExtEvent, ExtId, HostEvent, Reply};
 use wai_project::{FsChange, ProjectWatcher};
-use wai_settings::{AppState, OpenSession, Settings, Template, config_dir, load_templates};
+use wai_settings::{AppState, OpenSession, Settings, Template, config_dir, load_templates, shown};
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::agents_view::{AgentsView, ShowSession};
@@ -1133,7 +1133,7 @@ impl Workspace {
             this.update_in(cx, |this, window, cx| match written {
                 Ok(()) => this.open(path, None, true, window, cx),
                 Err(e) => {
-                    let notice = format!("Could not write {}: {e}", path.display());
+                    let notice = format!("Could not write {}: {e}", shown(&path));
                     window.push_notification(Notification::error(notice), cx)
                 }
             })
@@ -1436,7 +1436,7 @@ pub(crate) fn folder_name(project: &Path) -> String {
     project
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| project.display().to_string())
+        .unwrap_or_else(|| shown(project))
 }
 
 fn title(project: &Path) -> String {
@@ -1624,7 +1624,7 @@ pub(crate) mod tests {
             .map(|dir| dir.join(&name))
             .find(|path| path.is_file())
             .expect("run `cargo build -p wai-agent --bin wai-fake-agent` first");
-        let command = format!("'{}' {flag}", fake.display());
+        let command = format!("{} {flag}", wai_agent::quote(&fake));
         Settings {
             default_agent: "fake".into(),
             agents: [("fake".into(), AgentConfig { command })].into(),
@@ -1652,8 +1652,8 @@ pub(crate) mod tests {
     pub(crate) fn history_settings(n: usize) -> Settings {
         let cwd = std::env::temp_dir();
         fake_settings(&format!(
-            "--sessions {n} --sessions-cwd '{}'",
-            cwd.display()
+            "--sessions {n} --sessions-cwd {}",
+            wai_agent::quote(&cwd)
         ))
     }
 
@@ -1946,8 +1946,8 @@ pub(crate) mod tests {
         cx.executor().allow_parking(); // the fake agent is a real process
         let cwd = std::env::temp_dir();
         let flags = format!(
-            "--fail-fork --sessions 2 --sessions-cwd '{}'",
-            cwd.display()
+            "--fail-fork --sessions 2 --sessions-cwd {}",
+            wai_agent::quote(&cwd)
         );
         let (workspace, cx) = open(cx, fake_settings(&flags));
         load_history(&workspace, 2, cx);

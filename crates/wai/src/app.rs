@@ -51,7 +51,7 @@ fn bind_keys(cx: &mut App) {
     } else {
         ("ctrl-shift-v", "ctrl-shift-c")
     };
-    let keymap: [(&str, Box<dyn Action>, Option<&str>); 11] = [
+    let mut keymap: Vec<(&str, Box<dyn Action>, Option<&str>)> = vec![
         ("secondary-q", Box::new(Quit), None),
         ("secondary-n", Box::new(NewSession), workspace),
         ("ctrl-`", Box::new(ToggleTerminal), workspace),
@@ -66,6 +66,10 @@ fn bind_keys(cx: &mut App) {
         (paste, Box::new(Paste), Some("Terminal")),
         (copy, Box::new(CopySelection), Some("Terminal")),
     ];
+    if cfg!(windows) {
+        let terminal = windows_terminal_keymap().into_iter();
+        keymap.extend(terminal.map(|(keys, action)| (keys, action, Some("Terminal"))));
+    }
     // `KeyBinding::new` rejects `secondary-`; `load` resolves it for the host OS.
     let bindings: Vec<_> = keymap
         .into_iter()
@@ -75,6 +79,23 @@ fn bind_keys(cx: &mut App) {
         })
         .collect();
     cx.bind_keys(bindings);
+}
+
+/// Windows, in the Terminal context: `NoAction` hides the app's ctrl-c/v/n/w/o/q (`secondary-`
+/// is ctrl there), so they reach the shell, and the app's actions move to ctrl-shift.
+fn windows_terminal_keymap() -> [(&'static str, Box<dyn Action>); 10] {
+    [
+        ("ctrl-c", Box::new(NoAction)),
+        ("ctrl-v", Box::new(NoAction)),
+        ("ctrl-n", Box::new(NoAction)),
+        ("ctrl-w", Box::new(NoAction)),
+        ("ctrl-o", Box::new(NoAction)),
+        ("ctrl-q", Box::new(NoAction)),
+        ("ctrl-shift-n", Box::new(NewSession)),
+        ("ctrl-shift-w", Box::new(CloseSession)),
+        ("ctrl-shift-o", Box::new(OpenFolder)),
+        ("ctrl-shift-q", Box::new(Quit)),
+    ]
 }
 
 /// `notices`: what the settings left out, shown once in the window.
@@ -370,4 +391,31 @@ fn screenshot(
         cx.update(|cx| cx.quit());
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    /// Windows, terminal focused: the shell gets ctrl-c/v/n/w/o/q, the app's actions move to
+    /// ctrl-shift (copy and paste are ctrl-shift-c/v off macOS already).
+    #[test]
+    fn windows_terminal_keymap_table() {
+        let table: Vec<(&str, &str)> = super::windows_terminal_keymap()
+            .iter()
+            .map(|(keys, action)| (*keys, action.name()))
+            .collect();
+        let shell = "zed::NoAction";
+        let expected = [
+            ("ctrl-c", shell),
+            ("ctrl-v", shell),
+            ("ctrl-n", shell),
+            ("ctrl-w", shell),
+            ("ctrl-o", shell),
+            ("ctrl-q", shell),
+            ("ctrl-shift-n", "wai::NewSession"),
+            ("ctrl-shift-w", "wai::CloseSession"),
+            ("ctrl-shift-o", "wai::OpenFolder"),
+            ("ctrl-shift-q", "wai::Quit"),
+        ];
+        assert_eq!(table, expected);
+    }
 }

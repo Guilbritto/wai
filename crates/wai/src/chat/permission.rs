@@ -43,10 +43,7 @@ impl DiffView {
             .collect();
         Self {
             at: (diff.path.clone(), line),
-            label: (diff.path.strip_prefix(cwd).unwrap_or(&diff.path))
-                .display()
-                .to_string()
-                .into(),
+            label: wai_settings::shown(diff.path.strip_prefix(cwd).unwrap_or(&diff.path)).into(),
             lines,
             truncated,
         }

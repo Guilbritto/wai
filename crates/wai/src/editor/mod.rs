@@ -180,6 +180,28 @@ mod tests {
         }
     }
 
+    /// A CRLF file stays CRLF: the buffer holds `\n` (no stray `\r` to edit around), and Save
+    /// writes `\r\n` back, for the lines typed too. An LF file stays LF.
+    #[gpui_kit::test]
+    fn crlf_roundtrip_preserved(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let [crlf, lf] = ["win.txt", "unix.txt"].map(|name| dir.path().join(name));
+        fs::write(&crlf, "one\r\ntwo\r\n").unwrap();
+        fs::write(&lf, "one\ntwo\n").unwrap();
+        let (workspace, cx) = open(cx, Settings::default());
+
+        for (path, ending) in [(&crlf, "\r\n"), (&lf, "\n")] {
+            open_file(&workspace, path, None, cx);
+            let tab = active_tab(&workspace, cx);
+            assert_eq!(text(&tab, cx), "one\ntwo\n");
+            cx.simulate_input("zero");
+            cx.simulate_keystrokes("enter");
+            cx.simulate_keystrokes("secondary-s");
+            let saved = ["zero", "one", "two", ""].join(ending);
+            assert_eq!(fs::read_to_string(path).unwrap(), saved);
+        }
+    }
+
     /// Review Focus 1: a clean buffer follows the disk; an edited one keeps the edits and asks.
     #[gpui_kit::test]
     fn external_change_reloads_clean_buffer_and_prompts_dirty(cx: &mut TestAppContext) {

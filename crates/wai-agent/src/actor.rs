@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::{ConnectionTo, Responder, schema as acp};
 use agent_client_protocol::{
-    AcpAgent, Agent, Client, Error, ErrorCode, JsonRpcRequest, is_connection_terminated,
-    is_incoming_transport_closed,
+    AcpAgent, AcpAgentConfig, Agent, Client, Error, ErrorCode, JsonRpcRequest,
+    is_connection_terminated, is_incoming_transport_closed,
 };
 use async_channel::{Receiver, Sender};
 
@@ -428,7 +428,19 @@ async fn connect(
     commands: &Receiver<Command>,
     broker: &Arc<Broker>,
 ) -> Result<bool, Error> {
-    let agent = AcpAgent::from_str(&spec.command)?;
+    // ponytail: the SDK spawns and kills the agent; on Windows it kills only that process (no
+    // job object), so what an `npx` agent started outlives it until its stdin closes.
+    let config = AcpAgent::from_str(&spec.command)?.into_config();
+    let program = config.command();
+    let Some(found) = wai_settings::find_program(program) else {
+        let missing = format!("{} is not on PATH", program.display());
+        return Err(Error::into_internal_error(std::io::Error::other(missing)));
+    };
+    let agent = AcpAgent::new(
+        AcpAgentConfig::new(found)
+            .args(config.arguments().iter().cloned())
+            .envs(config.environment().clone()),
+    );
     let updates = broker.clone();
     let permissions = broker.clone();
     let questions = broker.clone();

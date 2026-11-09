@@ -27,7 +27,7 @@ impl Attachment {
     /// png/jpeg/gif/webp up to 5 MB become images; anything else a resource link.
     pub fn new(path: &Path) -> Self {
         let name = path.file_name().map_or_else(
-            || path.display().to_string(),
+            || wai_settings::shown(path),
             |n| n.to_string_lossy().into_owned(),
         );
         let block = image(path).unwrap_or_else(|| PromptBlock::Resource {

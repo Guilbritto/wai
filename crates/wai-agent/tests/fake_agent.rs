@@ -6,7 +6,7 @@ use async_channel::Receiver;
 use wai_agent::{
     AgentCaps, AgentError, AgentEvent, AgentHandle, AgentSpec, BrokerError, Choice, ChoiceKind,
     FieldKind, McpServer, PermissionRequest, PromptBlock, QuestionAnswer, QuestionRequest,
-    SessionEvent, StopReason, ToolContent,
+    SessionEvent, StopReason, ToolContent, quote,
 };
 
 fn run(test: impl Future<Output = ()>) {
@@ -19,7 +19,7 @@ fn run(test: impl Future<Output = ()>) {
 fn spawn(args: &[&str]) -> (AgentHandle, Receiver<AgentEvent>) {
     let command = std::iter::once(env!("CARGO_BIN_EXE_wai-fake-agent"))
         .chain(args.iter().copied())
-        .map(|a| format!("'{a}'"))
+        .map(quote)
         .collect::<Vec<_>>()
         .join(" ");
     AgentHandle::spawn(AgentSpec {

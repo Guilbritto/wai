@@ -31,7 +31,7 @@ pub enum Source {
 impl std::fmt::Display for Source {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Source::Folder(dir) => write!(f, "{}", dir.display()),
+            Source::Folder(dir) => f.write_str(&wai_settings::shown(dir)),
             Source::Git { url, rev: None } => f.write_str(url),
             Source::Git {
                 url,

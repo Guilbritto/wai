@@ -7,7 +7,18 @@ pub type QuestionId = u64;
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentSpec {
     pub name: String,
+    /// Split like a POSIX shell line on every platform (or a JSON `{"command", "args", "env"}`):
+    /// build it with `quote`.
     pub command: String,
+}
+
+/// `arg` single-quoted for `AgentSpec.command`: a Windows path keeps its backslashes, and a `'`
+/// in it survives.
+pub fn quote(arg: impl AsRef<std::ffi::OsStr>) -> String {
+    format!(
+        "'{}'",
+        arg.as_ref().to_string_lossy().replace('\'', r"'\''")
+    )
 }
 
 /// An MCP server the agent starts for a session, over stdio.
@@ -262,4 +273,29 @@ pub enum AgentError {
 pub enum BrokerError {
     #[error("the request is no longer pending")]
     Stale,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::str::FromStr as _;
+
+    use agent_client_protocol::AcpAgent;
+
+    use super::quote;
+
+    /// The SDK splits `AgentSpec.command` like a POSIX shell line on every platform: a quoted
+    /// Windows path keeps its backslashes, and a `'` in a path or an argument survives.
+    #[test]
+    fn agent_command_quoting() {
+        for program in [
+            r"C:\Users\O'Neil\wai\target\debug\wai-fake-agent.exe",
+            "/Users/me/my agent/wai-fake-agent",
+        ] {
+            let command = format!("{} --reply {}", quote(program), quote("it's done"));
+            let config = AcpAgent::from_str(&command).unwrap().into_config();
+            assert_eq!(config.command(), Path::new(program));
+            assert_eq!(config.arguments(), ["--reply", "it's done"]);
+        }
+    }
 }

@@ -822,11 +822,8 @@ mod tests {
         let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
         fs::write(&a, "x\n").unwrap();
         // The fake agent edits a, creates b, then edits a again.
-        let flags = format!(
-            "--edit '{0}' --edit '{1}' --edit '{0}'",
-            a.display(),
-            b.display()
-        );
+        let (qa, qb) = (wai_agent::quote(&a), wai_agent::quote(&b));
+        let flags = format!("--edit {qa} --edit {qb} --edit {qa}");
         let (workspace, cx) = open(cx, fake_settings(&flags));
         let session = start_session(&workspace, cx);
         let edited = "edited by the fake agent\n";
@@ -907,9 +904,9 @@ mod tests {
         fs::write(&lib, &original).unwrap();
         fs::write(&keep, "mine\n").unwrap();
         let flags = format!(
-            "--edit-hunk '{}' --write '{}'",
-            lib.display(),
-            keep.display()
+            "--edit-hunk {} --write {}",
+            wai_agent::quote(&lib),
+            wai_agent::quote(&keep)
         );
         let (workspace, cx) = open(cx, fake_settings(&flags));
         let session = start_session(&workspace, cx);
@@ -1075,8 +1072,8 @@ mod tests {
         cx.executor().allow_parking(); // the fake agent is a real process
         let cwd = std::env::temp_dir();
         let flags = format!(
-            "--ask-permission --sessions 1 --sessions-cwd '{}'",
-            cwd.display()
+            "--ask-permission --sessions 1 --sessions-cwd {}",
+            wai_agent::quote(&cwd)
         );
         let (workspace, cx) = open(cx, fake_settings(&flags));
         let rows = load_history(&workspace, 1, cx);
