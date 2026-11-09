@@ -248,6 +248,8 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 /// (fase-2-terminal.png).
 /// `WAI_SHOT_CONSENT=<absolute extension folder>`: the Extensions view with the consent dialog
 /// for that folder (fase-3-consent.png).
+/// `WAI_SHOT_PANEL=1`: the first extension panel's tab, an enabled extension having rendered it
+/// (fase-3-panel.png).
 #[cfg(feature = "screenshot")]
 fn screenshot(
     (window, workspace): (AnyWindowHandle, Entity<Workspace>),
@@ -312,6 +314,15 @@ fn screenshot(
                 })
                 .ok();
             executor.timer(Duration::from_secs(1)).await;
+        } else if std::env::var("WAI_SHOT_PANEL").is_ok() {
+            workspace.update(cx, |w, cx| {
+                let first = w.ext_host.read(cx).panels().first();
+                if let Some(panel) = first.map(|p| p.view.entity_id()) {
+                    w.sidebar_tab = crate::sidebar::SidebarTab::Panel(panel);
+                    cx.notify();
+                }
+            });
+            executor.timer(Duration::from_millis(500)).await;
         } else if let Ok(dir) = std::env::var("WAI_SHOT_FILES") {
             workspace.update(cx, |w, cx| {
                 w.sidebar_tab = crate::sidebar::SidebarTab::Files;

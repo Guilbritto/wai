@@ -11,7 +11,9 @@
 //! - `--no-init`: never answer `initialize`.
 //! - `--crash`: right after answering `initialize`, print `fake ext crashed` to stderr, exit 3.
 //! - `--flood <n>`: after `initialize`, send n `panel/render` notifications for panel `main`,
-//!   with trees `{"n": 0}` to `{"n": n - 1}`.
+//!   with text trees `0` to `n - 1`.
+//! - `--panel`: after `initialize`, render the sample tree (`sample` below) on panel `main`; each
+//!   `panel/action` renders it again, its last text saying `last action: <id> <values as JSON>`.
 //! - `--oversized`: after `initialize`, send a 5 MB `notify` request titled `big`, then a `notify`
 //!   notification titled `after`.
 //! - `--call <method>` (repeatable): after `initialize`, call each method with params `{}`, with
@@ -31,6 +33,38 @@ fn send(msg: Value) {
 
 fn notify(title: &str, body: String) -> Value {
     json!({"jsonrpc": "2.0", "method": "notify", "params": {"title": title, "body": body}})
+}
+
+/// One node of each type, an unknown one included.
+fn sample(last: &str) -> Value {
+    json!({"type": "column", "children": [
+        {"type": "row", "children": [
+            {"type": "text", "text": "My cards"},
+            {"type": "badge", "text": "3 open"},
+        ]},
+        {"type": "markdown", "text": "Cards assigned to **you**, newest first."},
+        {"type": "input", "id": "query", "placeholder": "Filter cards"},
+        {"type": "row", "children": [
+            {"type": "select", "id": "scope", "options": ["Mine", "Team"]},
+            {"type": "checkbox", "id": "done", "label": "Include done"},
+        ]},
+        {"type": "list", "items": [
+            {"id": "card-1", "title": "Fix the login timeout", "subtitle": "In progress", "badge": "P1"},
+            {"id": "card-2", "title": "Add the export button", "subtitle": "To do"},
+            {"id": "card-3", "title": "Update the docs", "subtitle": "In review", "badge": "P3"},
+        ]},
+        {"type": "progress", "value": 0.4},
+        {"type": "row", "children": [
+            {"type": "button", "id": "refresh", "label": "Refresh", "style": "primary"},
+            {"type": "button", "id": "clear", "label": "Clear", "style": "danger"},
+        ]},
+        {"type": "sparkline", "points": [1, 2, 3]},
+        {"type": "text", "text": last, "muted": true},
+    ]})
+}
+
+fn render(tree: Value) -> Value {
+    json!({"jsonrpc": "2.0", "method": "panel/render", "params": {"panel": "main", "tree": tree}})
 }
 
 fn main() {
@@ -73,9 +107,11 @@ fn main() {
                 send(notify("initialize", init.to_string()));
                 if let Some(n) = value("--flood") {
                     for n in 0..n.parse::<u64>().unwrap() {
-                        send(json!({"jsonrpc": "2.0", "method": "panel/render",
-                            "params": {"panel": "main", "tree": {"n": n}}}));
+                        send(render(json!({"type": "text", "text": n.to_string()})));
                     }
+                }
+                if flag("--panel") {
+                    send(render(sample("last action: none")));
                 }
                 if flag("--oversized") {
                     let big = "x".repeat(5 << 20);
@@ -94,6 +130,14 @@ fn main() {
                 send(notify(method, msg["params"].to_string()));
                 if let Some(id) = msg.get("id") {
                     send(json!({"jsonrpc": "2.0", "id": id, "result": null}));
+                }
+                if method == "panel/action" && flag("--panel") {
+                    let p = &msg["params"];
+                    let action_id = p["action_id"].as_str().unwrap_or_default();
+                    send(render(sample(&format!(
+                        "last action: {action_id} {}",
+                        p["values"]
+                    ))));
                 }
             }
             None => send(notify("reply", line)),

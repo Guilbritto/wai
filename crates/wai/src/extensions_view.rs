@@ -14,6 +14,9 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+// A manifest's text goes through `clamp`: a hostile one cannot push the permissions out of the
+// consent dialog.
+use wai_ext::panel::clamp;
 use wai_ext::{ExtId, ExtStore, Installed, Permission, Source, Staged};
 
 use crate::ext_host::{ExtHost, ExtStatus};
@@ -39,20 +42,6 @@ fn permissions_text(permissions: &[Permission]) -> Vec<String> {
         return vec!["No permissions".into()];
     }
     permissions.iter().map(permission_text).collect()
-}
-
-/// A manifest's text on one line (whitespace and control characters collapsed), at most `max`
-/// characters: a hostile manifest cannot push the permissions out of the consent dialog.
-pub fn clamp(text: &str, max: usize) -> String {
-    let words = text.split(|c: char| c.is_whitespace() || c.is_control());
-    let line = words
-        .filter(|w| !w.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    match line.char_indices().nth(max) {
-        Some((end, _)) => format!("{}…", &line[..end]),
-        None => line,
-    }
 }
 
 const NAME_CHARS: usize = 80;
@@ -406,7 +395,7 @@ impl Render for ExtensionsView {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
@@ -416,7 +405,9 @@ mod tests {
     use wai_ext::{ExtId, ExtStore, Installed, MANIFEST_FILE, Permission, Source, staging_dir};
     use wai_settings::Settings;
 
-    use super::{ExtensionsView, LIMITATION, clamp};
+    use wai_ext::panel::clamp;
+
+    use super::{ExtensionsView, LIMITATION};
     use crate::ext_host::ExtStatus;
     use crate::workspace::Workspace;
     use crate::workspace::tests::{open, wait_until};
@@ -430,7 +421,7 @@ mod tests {
         sample_with(dir, MANIFEST)
     }
 
-    fn sample_with(dir: &Path, manifest: &str) -> PathBuf {
+    pub(crate) fn sample_with(dir: &Path, manifest: &str) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join(MANIFEST_FILE), manifest).unwrap();
         dir.to_path_buf()
@@ -444,7 +435,7 @@ mod tests {
     ];
 
     /// A workspace whose config dir is `config`, never the developer's.
-    fn workspace<'a>(
+    pub(crate) fn workspace<'a>(
         config: &Path,
         cx: &'a mut TestAppContext,
     ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
@@ -453,7 +444,7 @@ mod tests {
         (workspace, cx)
     }
 
-    fn click(id: impl Into<ElementId>, cx: &mut VisualTestContext) {
+    pub(crate) fn click(id: impl Into<ElementId>, cx: &mut VisualTestContext) {
         let id = id.into();
         cx.update(|window, cx| {
             window.render_frame(cx);
@@ -606,9 +597,20 @@ mod tests {
     /// An extension `sample` whose process is `wai-fake-ext --pid-file <pid_file> <flags>`.
     #[cfg(unix)]
     fn running_sample(dir: &Path, pid_file: &Path, flags: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
         let manifest = "id = \"sample\"\nname = \"Sample\"\nversion = \"1.0.0\"\n\
             permissions = [\"process\"]\n[process]\ncommand = \"bin/run\"\n";
+        running_sample_with(dir, manifest, pid_file, flags)
+    }
+
+    /// `running_sample` with `manifest`, whose process must be `bin/run`.
+    #[cfg(unix)]
+    pub(crate) fn running_sample_with(
+        dir: &Path,
+        manifest: &str,
+        pid_file: &Path,
+        flags: &str,
+    ) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
         let src = sample_with(dir, manifest);
         let run = src.join("bin/run");
         std::fs::create_dir_all(src.join("bin")).unwrap();
@@ -735,15 +737,6 @@ mod tests {
         cx.run_until_parked();
         assert!(matches!(status(cx), Some(ExtStatus::Crashed(_))));
         assert!(!pid_file.exists(), "a crashed extension started again");
-    }
-
-    #[test]
-    fn clamp_collapses_lines_and_cuts() {
-        assert_eq!(clamp("  a\n\n b\t\u{7}c  ", 80), "a b c");
-        let long = clamp(&"é".repeat(100), 80);
-        assert_eq!(long.chars().count(), 81);
-        assert!(long.ends_with('…'));
-        assert_eq!(clamp("exactly", 7), "exactly");
     }
 
     /// R15: `.wai/extensions.toml` only suggests. The notice installs nothing; its Review opens

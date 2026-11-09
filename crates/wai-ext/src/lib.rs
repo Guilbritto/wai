@@ -1,6 +1,7 @@
 mod host;
 mod install;
 mod manifest;
+pub mod panel;
 mod rpc;
 mod store;
 

@@ -172,6 +172,8 @@ impl Workspace {
         window.set_window_title(&title(&project));
         let project = canonical(&project);
         let ext_host = cx.new(|_| ExtHost::new(project.clone()));
+        // Its panels are sidebar tabs.
+        let panels = cx.observe(&ext_host, |_, _, cx| cx.notify());
         let files = cx.new(|cx| FileTree::new(project.clone(), global_ignores, cx));
         let open_file = cx.subscribe_in(&files, window, |this, _, OpenFile(path), window, cx| {
             this.open_file(path.clone(), None, window, cx)
@@ -219,7 +221,7 @@ impl Workspace {
             early: HashMap::new(),
             state_path,
             focus,
-            _subscriptions: vec![routing, quit, open_file, open_match, open_session],
+            _subscriptions: vec![routing, quit, open_file, open_match, open_session, panels],
         }
     }
 
@@ -1617,6 +1619,9 @@ pub(crate) mod tests {
         assert_eq!(names(cx), ["beta", "gamma"]);
         switch(&c, cx);
         assert!(names(cx).is_empty(), "the malformed file adds nothing");
+        // The test window is never dropped: stop the project's watcher before its folder goes,
+        // or its event lands on the test scheduler from the watcher's thread.
+        switch(&PathBuf::from("/nonexistent"), cx);
         for p in [a, b, c] {
             std::fs::remove_dir_all(p).ok();
         }

@@ -1,5 +1,5 @@
 //! The sidebar: the project, then tabs: its open sessions with their status and the agent's
-//! history, its files, search, and the agents.
+//! history, its files, search, the agents, then each running extension's panels.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,7 @@ use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_fl
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::SessionSummary;
+use wai_ext::panel::clamp;
 
 use crate::agents::AgentStatus;
 use crate::app::NewSession;
@@ -29,7 +30,12 @@ pub enum SidebarTab {
     Agents,
     /// Opened from the header's Extensions button; it has no tab.
     Extensions,
+    /// An extension's panel, by its view: gone with its extension, it shows the sessions.
+    Panel(EntityId),
 }
+
+/// A panel's tab title, one line: the manifest's words.
+const PANEL_TITLE_CHARS: usize = 24;
 
 /// Each tab with its element id and label.
 const TABS: [(SidebarTab, &str, &str); 4] = [
@@ -113,8 +119,18 @@ impl Workspace {
 
     pub(crate) fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
+        let panels = self.ext_host.read(cx).panels();
+        let shown = panels
+            .iter()
+            .find(|p| self.sidebar_tab == SidebarTab::Panel(p.view.entity_id()));
         let content = match self.sidebar_tab {
-            SidebarTab::Sessions => self.render_sessions(cx).into_any_element(),
+            SidebarTab::Panel(_) if shown.is_some() => div()
+                .size_full()
+                .children(shown.map(|p| p.view.clone()))
+                .into_any_element(),
+            SidebarTab::Sessions | SidebarTab::Panel(_) => {
+                self.render_sessions(cx).into_any_element()
+            }
             SidebarTab::Files => self.files.clone().into_any_element(),
             SidebarTab::Search => self.search.clone().into_any_element(),
             SidebarTab::Agents => div()
@@ -126,21 +142,34 @@ impl Workspace {
                 .children(self.extensions.clone())
                 .into_any_element(),
         };
-        let tabs = TABS.map(|(tab, id, label)| {
-            Button::new(id)
-                .ghost()
-                .xsmall()
-                .label(label)
-                .selected(self.sidebar_tab == tab)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.sidebar_tab = tab;
-                    if tab == SidebarTab::Search {
-                        let focus = this.search.read(cx).query_focus(cx);
-                        window.focus(&focus, cx);
-                    }
-                    cx.notify();
-                }))
+        let built_in = TABS.map(|(tab, id, label)| (tab, ElementId::from(id), label.into()));
+        let extension = panels.iter().enumerate().map(|(ix, p)| {
+            let title = clamp(&p.title, PANEL_TITLE_CHARS);
+            let tab = SidebarTab::Panel(p.view.entity_id());
+            (
+                tab,
+                ElementId::from(("tab-panel", ix)),
+                SharedString::from(title),
+            )
         });
+        let tabs = built_in
+            .into_iter()
+            .chain(extension)
+            .map(|(tab, id, label)| {
+                Button::new(id)
+                    .ghost()
+                    .xsmall()
+                    .label(label)
+                    .selected(self.sidebar_tab == tab)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.sidebar_tab = tab;
+                        if tab == SidebarTab::Search {
+                            let focus = this.search.read(cx).query_focus(cx);
+                            window.focus(&focus, cx);
+                        }
+                        cx.notify();
+                    }))
+            });
         v_flex()
             .debug_selector(|| "sidebar".into())
             .size_full()
@@ -215,7 +244,7 @@ impl Workspace {
                             })),
                     ),
             )
-            .child(h_flex().px_2().gap_1().children(tabs))
+            .child(h_flex().px_2().gap_1().flex_wrap().children(tabs))
             .child(v_flex().flex_1().min_h_0().child(content))
     }
 

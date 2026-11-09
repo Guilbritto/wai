@@ -17,6 +17,7 @@ use async_channel::{Receiver, Sender};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::panel::{self, Node, TooLarge};
 use crate::rpc::{self, Incoming, Line, RpcError};
 use crate::{ExtId, Installed, Permission};
 
@@ -37,9 +38,10 @@ pub enum ExtEvent {
     Ready {
         id: ExtId,
     },
+    /// The tree is parsed on the extension's thread, never on wai's main thread.
     Render {
         panel: String,
-        tree: Value,
+        tree: Result<Node, TooLarge>,
     },
     Notify {
         title: String,
@@ -544,10 +546,16 @@ impl Renders {
         while let Some(due) = self.next_due() {
             smol::Timer::at(due).await;
             if let Some((panel, tree)) = self.take_due(Instant::now()) {
-                emit(ExtEvent::Render { panel, tree });
+                emit(render(panel, &tree));
             }
         }
     }
+}
+
+/// Only renders that are emitted are parsed: a coalesced one costs nothing.
+fn render(panel: String, tree: &Value) -> ExtEvent {
+    let tree = panel::parse(tree);
+    ExtEvent::Render { panel, tree }
 }
 
 enum End {
@@ -656,7 +664,7 @@ async fn session(
             return End::Failed("it did not answer initialize within 10 s".into());
         }
         if let Some((panel, tree)) = renders.take_due(now) {
-            emit(ExtEvent::Render { panel, tree });
+            emit(render(panel, &tree));
         }
         let deadline = [(!ready).then_some(init_deadline), renders.next_due()]
             .into_iter()
@@ -738,7 +746,7 @@ async fn session(
             Ok(Call::Render(panel, tree)) => {
                 // Now, not the loop's `now`: that was before the wait.
                 if let Some((panel, tree)) = renders.offer(panel, tree, Instant::now()) {
-                    emit(ExtEvent::Render { panel, tree });
+                    emit(render(panel, &tree));
                 }
                 respond(id, Ok(Value::Null));
             }

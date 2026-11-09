@@ -228,6 +228,13 @@ fn ungranted_call_denied() {
     });
 }
 
+fn text(text: &str) -> panel::Node {
+    panel::Node::Text {
+        text: text.into(),
+        muted: false,
+    }
+}
+
 /// At most 100 renders per second; the latest tree always arrives.
 #[test]
 fn flood_is_coalesced() {
@@ -242,7 +249,7 @@ fn flood_is_coalesced() {
         let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
         let events = until(
             &rx,
-            |e| matches!(e, ExtEvent::Render { tree, .. } if tree["n"] == 19999),
+            |e| matches!(e, ExtEvent::Render { tree, .. } if *tree == Ok(text("19999"))),
         )
         .await;
         let elapsed = start.elapsed();
@@ -285,7 +292,7 @@ fn last_render_survives_exit() {
         }
         last_trees.extend(tree);
         // Each of the 4 runs (the first and 3 restarts) ends on its last tree.
-        assert_eq!(last_trees, vec![json!({"n": 49}); 4]);
+        assert_eq!(last_trees, vec![Ok(text("49")); 4]);
     });
 }
 

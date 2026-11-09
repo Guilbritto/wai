@@ -1,12 +1,27 @@
 //! The enabled extensions' processes, one `ExtHandle` each. They start once the window is open
 //! (and on install or enable) and stop on disable, before uninstall and at quit. They inherit
 //! wai's cwd, the config dir (R18).
+//!
+//! Each one granted `panels` shows its declared panels as sidebar tabs. A panel outlives a
+//! restart of its process (a project switch), so what the user typed stays.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use gpui_kit::*;
-use wai_ext::{ExtEvent, ExtHandle, ExtId, Installed};
+use wai_ext::{ExtEvent, ExtHandle, ExtId, Installed, PanelSpec, Permission};
+
+use crate::ext_panel::{ExtPanel, PanelAction};
+
+/// A panel an extension contributes: a sidebar tab.
+pub struct Panel {
+    ext: ExtId,
+    id: String,
+    pub title: String,
+    pub view: Entity<ExtPanel>,
+    /// Its clicks, sent to the extension as `panel/action`.
+    _actions: Subscription,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExtStatus {
@@ -20,7 +35,7 @@ struct Running {
     installed: Installed,
     status: ExtStatus,
     /// Dropping it kills the process.
-    _handle: ExtHandle,
+    handle: ExtHandle,
     _pump: Task<()>,
 }
 
@@ -28,6 +43,8 @@ pub struct ExtHost {
     /// Sent in `initialize`.
     project: PathBuf,
     running: HashMap<ExtId, Running>,
+    /// The running extensions' panels, in the order of the list `sync` got.
+    panels: Vec<Panel>,
 }
 
 impl ExtHost {
@@ -35,6 +52,7 @@ impl ExtHost {
         Self {
             project,
             running: HashMap::new(),
+            panels: Vec::new(),
         }
     }
 
@@ -45,9 +63,24 @@ impl ExtHost {
         let wanted: Vec<_> = list.iter().filter(wanted).collect();
         self.running
             .retain(|id, _| wanted.iter().any(|i| i.manifest.id == *id));
-        for installed in wanted {
+        for installed in &wanted {
             if !self.running.contains_key(&installed.manifest.id) {
-                self.start(installed.clone(), cx);
+                self.start((*installed).clone(), cx);
+            }
+        }
+        let mut old = std::mem::take(&mut self.panels);
+        let granted = wanted
+            .iter()
+            .filter(|i| i.granted.contains(&Permission::Panels));
+        for installed in granted {
+            let ext = &installed.manifest.id;
+            for spec in &installed.manifest.contributes.panels {
+                let kept = old.iter().position(|p| p.ext == *ext && p.id == spec.id);
+                let panel = match kept {
+                    Some(ix) => old.swap_remove(ix),
+                    None => self.panel(ext.clone(), spec, cx),
+                };
+                self.panels.push(panel);
             }
         }
         cx.notify();
@@ -56,10 +89,12 @@ impl ExtHost {
     /// Kills its process now, on this thread.
     pub fn stop(&mut self, id: &ExtId) {
         self.running.remove(id);
+        self.panels.retain(|p| p.ext != *id);
     }
 
     pub fn stop_all(&mut self) {
         self.running.clear();
+        self.panels.clear();
     }
 
     /// `initialize` told them the project: the live ones start again in the new one. A failed or
@@ -80,6 +115,31 @@ impl ExtHost {
             }
         }
         cx.notify();
+    }
+
+    pub fn panels(&self) -> &[Panel] {
+        &self.panels
+    }
+
+    pub fn handle(&self, id: &ExtId) -> Option<&ExtHandle> {
+        self.running.get(id).map(|r| &r.handle)
+    }
+
+    fn panel(&self, ext: ExtId, spec: &PanelSpec, cx: &mut Context<Self>) -> Panel {
+        let view = cx.new(|_| ExtPanel::new());
+        let (to, panel) = (ext.clone(), spec.id.clone());
+        let actions = cx.subscribe(&view, move |this, _, action: &PanelAction, _| {
+            if let Some(handle) = this.handle(&to) {
+                handle.panel_action(&panel, &action.action, action.values.clone());
+            }
+        });
+        Panel {
+            ext,
+            id: spec.id.clone(),
+            title: spec.title.clone(),
+            view,
+            _actions: actions,
+        }
     }
 
     pub fn status(&self, id: &ExtId) -> Option<&ExtStatus> {
@@ -111,7 +171,7 @@ impl ExtHost {
         let running = Running {
             installed,
             status: ExtStatus::Starting,
-            _handle: handle,
+            handle,
             _pump: pump,
         };
         self.running.insert(id, running);
@@ -122,8 +182,15 @@ impl ExtHost {
             ExtEvent::Ready { .. } => ExtStatus::Ready,
             ExtEvent::Failed { error, .. } => ExtStatus::Failed(error),
             ExtEvent::Crashed { stderr_tail, .. } => ExtStatus::Crashed(stderr_tail),
-            // ponytail: panels (3.4) and notifications and sessions (3.5) are routed later; a
-            // dropped request is answered "wai did not answer".
+            ExtEvent::Render { panel, tree } => {
+                let panel = self.panels.iter().find(|p| p.ext == *id && p.id == panel);
+                if let Some(panel) = panel {
+                    panel.view.update(cx, |view, cx| view.set_tree(tree, cx));
+                }
+                return;
+            }
+            // ponytail: notifications and sessions (3.5) are routed later; a dropped request is
+            // answered "wai did not answer".
             _ => return,
         };
         if let Some(running) = self.running.get_mut(id) {
