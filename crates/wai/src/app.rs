@@ -165,6 +165,21 @@ pub fn run(
             .detach();
         }
         #[cfg(feature = "demo")]
+        if std::env::var("WAI_SHOT_PANEL").is_ok() && cfg!(not(feature = "screenshot")) {
+            let workspace = opened.1.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                workspace.update(cx, |w, cx| {
+                    let first = w.ext_host.read(cx).panels().first();
+                    if let Some(panel) = first.map(|p| p.view.entity_id()) {
+                        w.sidebar_tab = crate::sidebar::SidebarTab::Panel(panel);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        #[cfg(feature = "demo")]
         if let Ok(files) = std::env::var("WAI_SHOT_OPEN") {
             open_files(opened.clone(), files, cx);
         }

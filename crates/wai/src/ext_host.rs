@@ -315,6 +315,16 @@ impl ExtHost {
             ExtEvent::Render { panel, tree } => {
                 let panel = self.panels.iter().find(|p| p.ext == *id && p.id == panel);
                 if let Some(panel) = panel {
+                    #[cfg(feature = "demo")]
+                    if let Ok(now) =
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    {
+                        let loading = format!("{tree:?}").contains("Loading");
+                        eprintln!(
+                            "wai: panel render loading={loading} at {} ms",
+                            now.as_millis()
+                        );
+                    }
                     panel.view.update(cx, |view, cx| view.set_tree(tree, cx));
                 }
                 return;
