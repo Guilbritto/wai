@@ -1,5 +1,6 @@
 //! An editor pane: open files in tabs, each a code editor kept in step with the disk.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -29,6 +30,10 @@ pub struct FileEditor {
     pub editor: Entity<EditorState>,
     /// The file as last read, saved or seen changed.
     stamp: Option<Stamp>,
+    /// The resolved real path at load.
+    real: Option<PathBuf>,
+    /// The file is gone from disk (a clean tab can then only close).
+    deleted: bool,
     _edits: Subscription,
 }
 
@@ -63,6 +68,8 @@ impl FileEditor {
             disk_changed: false,
             editor,
             stamp: loaded.stamp,
+            real: loaded.real,
+            deleted: false,
             _edits: edits,
         }
     }
@@ -86,10 +93,20 @@ impl FileEditor {
         if self.read_only {
             return false;
         }
+        if let Ok(now) = fs::canonicalize(&self.path)
+            && Some(&now) != self.real.as_ref()
+        {
+            let notice = "File was replaced by a link — reopen it to edit";
+            window.push_notification(Notification::error(notice), cx);
+            return false;
+        }
         // The stamp catches what no watcher reports (a file outside the project).
         if self.disk_changed || file::stamp(&self.path) != self.stamp {
             self.disk_changed = true;
-            let notice = "Changed on disk — Reload or Keep mine before saving";
+            let notice = format!(
+                "Changed on disk: {} — Reload or Keep mine before saving",
+                self.name()
+            );
             window.push_notification(Notification::warning(notice), cx);
             cx.notify();
             return false;
@@ -121,7 +138,8 @@ impl FileEditor {
         if now == self.stamp {
             return;
         }
-        self.stamp = now;
+        // The stamp stays: until Reload's text lands (or Keep mine), a Save must not pass.
+        self.deleted = now.is_none();
         // R30: a large file, read-only already or grown past 20 MB now, is not reloaded on each
         // change (a growing log would block the main thread each time).
         let large = |(_, len): Stamp| len > file::READ_ONLY_ABOVE;
@@ -159,6 +177,7 @@ impl FileEditor {
             Ok(loaded) => {
                 let read_only = self.scratch || loaded.mode == OpenMode::ReadOnlyLarge;
                 self.stamp = loaded.stamp;
+                self.deleted = false;
                 (self.dirty, self.disk_changed) = (false, false);
                 self.editor.update(cx, |s, cx| {
                     // Crossing 20 MB either way switches the grammar too (before the text).
@@ -208,7 +227,6 @@ fn banner(cx: &App) -> Div {
 
 impl Render for FileEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let keep = if self.dirty { "Keep mine" } else { "Dismiss" };
         let why = match self.scratch {
             true => "Read-only: a tool call's full output.",
             false => "Read-only: files over 20 MB open read-only in wai.",
@@ -223,24 +241,48 @@ impl Render for FileEditor {
                 )
             })
             .when(self.disk_changed, |el| {
+                // A clean tab has no edits to keep: it reloads, or closes when the file is gone.
+                let gone = !self.dirty && self.deleted;
                 el.child(
                     banner(cx)
-                        .child(div().flex_1().child("Changed on disk"))
-                        .child(Button::new("reload").xsmall().label("Reload").on_click(
-                            cx.listener(|this, _, window, cx| this.reload(true, window, cx)),
-                        ))
-                        .child(
-                            Button::new("keep-mine")
-                                .xsmall()
-                                .ghost()
-                                .label(keep)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    // What is on disk now is what the next Save replaces.
-                                    this.stamp = file::stamp(&this.path);
-                                    this.disk_changed = false;
-                                    cx.notify();
-                                })),
-                        ),
+                        .child(div().flex_1().child(if gone {
+                            "Deleted on disk"
+                        } else {
+                            "Changed on disk"
+                        }))
+                        .when(!gone, |el| {
+                            el.child(div().debug_selector(|| "reload".into()).child(
+                                Button::new("reload").xsmall().label("Reload").on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.reload(true, window, cx)
+                                    }),
+                                ),
+                            ))
+                        })
+                        .when(gone, |el| {
+                            el.child(
+                                Button::new("close")
+                                    .xsmall()
+                                    .label("Close")
+                                    .on_click(cx.listener(|_, _, _, cx| cx.emit(CloseRequest))),
+                            )
+                        })
+                        .when(self.dirty, |el| {
+                            el.child(
+                                div().debug_selector(|| "keep-mine".into()).child(
+                                    Button::new("keep-mine")
+                                        .xsmall()
+                                        .ghost()
+                                        .label("Keep mine")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            // What is on disk now is what the next Save replaces.
+                                            this.stamp = file::stamp(&this.path);
+                                            this.disk_changed = false;
+                                            cx.notify();
+                                        })),
+                                ),
+                            )
+                        }),
                 )
             })
             .child(
@@ -256,6 +298,7 @@ impl Render for FileEditor {
 pub struct EditorPane {
     pub tabs: Vec<Entity<FileEditor>>,
     pub active: usize,
+    _subs: Vec<Subscription>,
 }
 
 /// The last tab closed: the workspace drops the pane.
@@ -263,11 +306,17 @@ pub struct Emptied;
 
 impl EventEmitter<Emptied> for EditorPane {}
 
+/// A clean tab whose file is gone asks to be closed.
+pub struct CloseRequest;
+
+impl EventEmitter<CloseRequest> for FileEditor {}
+
 impl EditorPane {
     pub fn new() -> Self {
         Self {
             tabs: Vec::new(),
             active: 0,
+            _subs: Vec::new(),
         }
     }
 
@@ -276,6 +325,10 @@ impl EditorPane {
     }
 
     pub fn add(&mut self, tab: Entity<FileEditor>, window: &mut Window, cx: &mut Context<Self>) {
+        let closing = cx.subscribe_in(&tab, window, |this, tab, _: &CloseRequest, window, cx| {
+            this.remove(tab, window, cx)
+        });
+        self._subs.push(closing);
         self.tabs.push(tab);
         self.activate(self.tabs.len() - 1, window, cx);
     }

@@ -537,6 +537,99 @@ mod tests {
         assert!(!tab.read_with(cx, |t, _| t.dirty || t.disk_changed));
     }
 
+    /// R42: between a disk event and the reload's text landing, a Save must not pass.
+    #[gpui_kit::test]
+    fn save_during_reload_window_refuses(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.md");
+        fs::write(&path, "one\n").unwrap();
+        let (workspace, cx) = open(cx, Settings::default());
+        open_file(&workspace, &path, None, cx);
+        let tab = active_tab(&workspace, cx);
+
+        fs::write(&path, "theirs, longer\n").unwrap();
+        let saved = cx.update(|window, cx| {
+            tab.update(cx, |t, cx| {
+                t.disk_event(window, cx); // the reload is still reading
+                t.dirty = true; // the user types
+                t.save(window, cx)
+            })
+        });
+
+        assert!(!saved);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "theirs, longer\n");
+    }
+
+    /// R42: a clean tab has no edits to keep, so the banner has no Dismiss to adopt the disk.
+    #[gpui_kit::test]
+    fn clean_tab_banner_has_no_dismiss(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the watcher reports from a real thread
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonical(dir.path());
+        let path = root.join("app.rs");
+        fs::write(&path, "fn main() {}\n").unwrap();
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.set_project(root.clone(), window, cx))
+        });
+        open_file(&workspace, &path, None, cx);
+        let tab = active_tab(&workspace, cx);
+
+        let line = format!("// {}\n", "x".repeat(1020));
+        fs::write(&path, line.repeat(21 * 1024)).unwrap();
+        wait_until(cx, "the banner", |cx| {
+            tab.read_with(cx, |t, _| t.disk_changed)
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        assert!(cx.debug_bounds("reload").is_some());
+        assert!(cx.debug_bounds("keep-mine").is_none());
+
+        // Deleted: Close, which drops the tab.
+        let pane = editor_pane(&workspace, cx);
+        fs::remove_file(&path).unwrap();
+        wait_until(cx, "the deleted banner", |cx| {
+            tab.read_with(cx, |t, _| t.disk_changed) && {
+                cx.update(|window, cx| window.render_frame(cx));
+                cx.debug_bounds("reload").is_none()
+            }
+        });
+        click("close", cx);
+        assert!(paths(&pane, cx).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn save_refuses_when_file_became_a_symlink(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.md");
+        let other = dir.path().join("other.md");
+        fs::write(&path, "one\n").unwrap();
+        fs::write(&other, "secret\n").unwrap();
+        let (workspace, cx) = open(cx, Settings::default());
+        open_file(&workspace, &path, None, cx);
+        let tab = active_tab(&workspace, cx);
+        cx.simulate_input("mine ");
+        fs::write(&path, "theirs\n").unwrap();
+        cx.simulate_keystrokes("secondary-s");
+        click("keep-mine", cx);
+
+        // A link to a file with the stamp Keep mine took: only the real path tells them apart.
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&other, "secret\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&other)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&other, &path).unwrap();
+        cx.simulate_keystrokes("secondary-s");
+
+        assert_eq!(fs::read_to_string(&other).unwrap(), "secret\n");
+        assert!(tab.read_with(cx, |t, _| t.dirty));
+    }
+
     /// R41: ⌘O on the folder already open changes nothing: no question, the files stay.
     #[gpui_kit::test]
     fn opening_the_open_project_changes_nothing(cx: &mut TestAppContext) {

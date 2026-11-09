@@ -4,7 +4,7 @@
 use std::fmt;
 use std::fs;
 use std::io::{self, Read as _, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// Above this a file opens read-only: `set_value` blocks the main thread ~350 ms per 100 MB.
@@ -77,6 +77,9 @@ pub struct Loaded {
     pub text: String,
     /// Taken before the read: a change during it shows as a newer stamp later.
     pub stamp: Option<Stamp>,
+    /// The file's resolved real path, when it resolves: Save refuses once the path resolves
+    /// elsewhere (a link swapped in).
+    pub real: Option<PathBuf>,
 }
 
 pub fn load(path: &Path) -> Result<Loaded, OpenError> {
@@ -85,7 +88,13 @@ pub fn load(path: &Path) -> Result<Loaded, OpenError> {
     // ponytail: text that is not UTF-8 does not open (the error says so); a lossy read-only
     // view would be the upgrade.
     let text = String::from_utf8(fs::read(path)?).map_err(|_| OpenError::NotUtf8)?;
-    Ok(Loaded { mode, text, stamp })
+    let real = fs::canonicalize(path).ok();
+    Ok(Loaded {
+        mode,
+        text,
+        stamp,
+        real,
+    })
 }
 
 /// Writes `text` to a temp file beside `path`, then renames it over `path`: a crash leaves the
