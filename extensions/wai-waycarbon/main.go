@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
+	"unicode"
 )
 
 const panelID = "cards"
@@ -22,79 +24,128 @@ type message struct {
 type node = map[string]any
 
 type server struct {
-	mu     sync.Mutex
-	out    io.Writer
+	wmu sync.Mutex // serialises writes
+	out io.Writer
+
+	smu    sync.Mutex // guards the rest
 	nextID int
+	gen    int // the latest render; an older result is stale
 	cards  map[string]Card
 }
 
 func (s *server) write(v any) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
 	b, _ := json.Marshal(v)
 	fmt.Fprintf(s.out, "%s\n", b)
 }
 
 func (s *server) call(method string, params any) {
+	s.smu.Lock()
 	s.nextID++
-	s.write(node{"jsonrpc": "2.0", "id": s.nextID, "method": method, "params": params})
+	id := s.nextID
+	s.smu.Unlock()
+	s.write(node{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 }
 
-func (s *server) render() {
-	cards, err := myCards()
-	s.cards = map[string]Card{}
-	var tree node
-	refresh := node{"type": "button", "id": "refresh", "label": "Refresh"}
-	switch {
-	case err != nil:
-		tree = node{"type": "column", "children": []node{
-			{"type": "text", "text": err.Error()}, refresh}}
-	case len(cards) == 0:
-		tree = node{"type": "column", "children": []node{
-			{"type": "text", "text": "No open cards assigned to you."}, refresh}}
-	default:
-		items := make([]node, 0, len(cards))
-		for _, c := range cards {
-			s.cards[c.Key] = c
-			item := node{"id": c.Key, "title": c.Summary}
-			if c.Status != "" {
-				item["subtitle"] = c.Status
-			}
-			items = append(items, item)
-		}
-		tree = node{"type": "column", "children": []node{
-			{"type": "row", "children": []node{
-				{"type": "text", "text": "My cards"},
-				{"type": "badge", "text": fmt.Sprintf("%d open", len(cards))}}},
-			{"type": "list", "fill": true, "items": items},
-			refresh}}
-	}
+func (s *server) paint(tree node) {
 	s.write(node{"jsonrpc": "2.0", "method": "panel/render", "params": node{"panel": panelID, "tree": tree}})
 }
 
+// render shows Loading… now and the cards when jira answers, off the message loop.
+func (s *server) render() {
+	s.smu.Lock()
+	s.gen++
+	gen := s.gen
+	s.paint(node{"type": "text", "text": "Loading…", "muted": true})
+	s.smu.Unlock()
+	go func() {
+		cards, err := myCards()
+		s.smu.Lock()
+		defer s.smu.Unlock()
+		if gen != s.gen {
+			return
+		}
+		s.cards = map[string]Card{}
+		for _, c := range cards {
+			s.cards[c.Key] = c
+		}
+		s.paint(cardsTree(cards, err))
+	}()
+}
+
+func cardsTree(cards []Card, err error) node {
+	refresh := node{"type": "button", "id": "refresh", "label": "Refresh"}
+	switch {
+	case err != nil:
+		return node{"type": "column", "children": []node{{"type": "text", "text": err.Error()}, refresh}}
+	case len(cards) == 0:
+		return node{"type": "column", "children": []node{{"type": "text", "text": "No open cards assigned to you."}, refresh}}
+	}
+	items := make([]node, 0, len(cards))
+	for _, c := range cards {
+		title := c.Summary
+		if title == "" {
+			title = c.Key
+		}
+		item := node{"id": c.Key, "title": title}
+		if c.Status != "" {
+			item["subtitle"] = c.Status
+		}
+		items = append(items, item)
+	}
+	return node{"type": "column", "children": []node{
+		{"type": "row", "children": []node{
+			{"type": "text", "text": "My cards"},
+			{"type": "badge", "text": fmt.Sprintf("%d open", len(cards))}}},
+		{"type": "list", "fill": true, "items": items},
+		refresh}}
+}
+
+// prompt is the pre-filled session text; control characters of the summary become spaces.
+func prompt(c Card) string {
+	clean := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, c.Summary)
+	clean = strings.Join(strings.Fields(clean), " ")
+	if clean == "" {
+		return "Work on " + c.Key
+	}
+	return "Work on " + c.Key + ": " + clean
+}
+
+func (s *server) reply(id json.RawMessage, result any) {
+	s.write(node{"jsonrpc": "2.0", "id": id, "result": result})
+}
+
 func (s *server) handle(m message) {
-	var result any
 	switch m.Method {
 	case "initialize":
-		result = node{"panels": []string{}}
+		s.reply(m.ID, node{"panels": []string{}})
+		s.render()
 	case "panel/action":
 		var p struct {
 			Action string `json:"action_id"`
 		}
 		json.Unmarshal(m.Params, &p)
-		defer func() {
-			if p.Action == "refresh" {
-				s.render()
-			} else if c, ok := s.cards[p.Action]; ok {
-				s.call("sessions/open", node{"prompt": "Work on " + c.Key + ": " + c.Summary, "send": false})
-			}
-		}()
-	}
-	if m.ID != nil {
-		s.write(node{"jsonrpc": "2.0", "id": m.ID, "result": result})
-	}
-	if m.Method == "initialize" {
-		s.render()
+		s.reply(m.ID, nil)
+		if p.Action == "refresh" {
+			s.render()
+			return
+		}
+		s.smu.Lock()
+		c, ok := s.cards[p.Action]
+		s.smu.Unlock()
+		if ok {
+			s.call("sessions/open", node{"prompt": prompt(c), "send": false})
+		}
+	default:
+		if m.ID != nil {
+			s.write(node{"jsonrpc": "2.0", "id": m.ID, "error": node{"code": -32601, "message": "Method not found"}})
+		}
 	}
 }
 
