@@ -3,6 +3,7 @@ mod agents_view;
 mod app;
 mod chat;
 mod editor;
+mod ext_host;
 mod extensions_view;
 mod files;
 mod notify;

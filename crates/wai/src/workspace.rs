@@ -20,6 +20,7 @@ use crate::agents_view::{AgentsView, ShowSession};
 use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, Quit, Save, ToggleTerminal};
 use crate::chat::{ChatEvent, ChatSession, signed_out};
 use crate::editor::{self, EditorPane, Emptied, FileEditor};
+use crate::ext_host::ExtHost;
 use crate::extensions_view::ExtensionsView;
 use crate::files::{FileTree, OpenFile};
 use crate::notify::{self, should_notify};
@@ -97,6 +98,8 @@ pub struct Workspace {
     /// Created on first use (the sidebar's Extensions button, a project's suggestion): it reads
     /// `user_dir`'s extensions.
     pub(crate) extensions: Option<Entity<ExtensionsView>>,
+    /// The enabled extensions' processes.
+    pub(crate) ext_host: Entity<ExtHost>,
     /// The project's one watcher and the task that hands its changes out; `None` when the
     /// project cannot be watched.
     watch: Option<(ProjectWatcher, Task<()>)>,
@@ -128,9 +131,11 @@ impl Workspace {
         let registry = cx.new(|_| AgentRegistry::new(&settings));
         let routing = cx.subscribe(&registry, |this, _, event, cx| this.route(event, cx));
         // The process ends ~200 ms after the quit hooks: nothing it started may outlive it. The
-        // agents are signalled first: stopping a shell that ignores SIGHUP blocks for 200 ms.
+        // agents are signalled and the extensions killed first: stopping a shell that ignores
+        // SIGHUP blocks for 200 ms.
         let quit = cx.on_app_quit(|this, cx| {
             let agents = this.registry.read(cx).shutdown_all();
+            this.ext_host.update(cx, |host, _| host.stop_all());
             this.save_state(cx);
             if let Some(terminal) = &this.terminal {
                 terminal.update(cx, |t, _| t.stop());
@@ -166,6 +171,7 @@ impl Workspace {
         window.focus(&focus, cx);
         window.set_window_title(&title(&project));
         let project = canonical(&project);
+        let ext_host = cx.new(|_| ExtHost::new(project.clone()));
         let files = cx.new(|cx| FileTree::new(project.clone(), global_ignores, cx));
         let open_file = cx.subscribe_in(&files, window, |this, _, OpenFile(path), window, cx| {
             this.open_file(path.clone(), None, window, cx)
@@ -205,6 +211,7 @@ impl Workspace {
             files,
             search,
             extensions: None,
+            ext_host,
             watch: None,
             next_ticket: 0,
             cancelled: HashSet::new(),
@@ -1095,6 +1102,9 @@ impl Workspace {
             window.push_notification(Notification::warning(notice).autohide(false), cx);
         }
         self.suggest_extensions(window, cx);
+        let project = self.project.clone();
+        self.ext_host
+            .update(cx, |host, cx| host.set_project(project, cx));
         self.save_state(cx);
         cx.notify();
     }
@@ -1107,10 +1117,19 @@ impl Workspace {
         if let Some(view) = &self.extensions {
             return view.clone();
         }
-        let dir = self.user_dir.clone();
-        let view = cx.new(|cx| ExtensionsView::new(&dir, window, cx));
+        let (dir, host) = (self.user_dir.clone(), self.ext_host.clone());
+        let view = cx.new(|cx| ExtensionsView::new(&dir, host, window, cx));
         self.extensions = Some(view.clone());
         view
+    }
+
+    /// Starts the enabled extensions' processes: once the window is open, like the agent.
+    pub fn start_extensions(&mut self, cx: &mut Context<Self>) {
+        let list = match &self.extensions {
+            Some(view) => view.read(cx).store().list(),
+            None => wai_ext::ExtStore::open(&self.user_dir).list(),
+        };
+        self.ext_host.update(cx, |host, cx| host.sync(&list, cx));
     }
 
     /// Shows the Extensions view in the sidebar.

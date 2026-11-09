@@ -8174,8 +8174,11 @@ dependencies = [
 name = "wai-ext"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
+ "rustix",
  "serde",
  "serde_json",
+ "smol",
  "tempfile",
  "thiserror 2.0.21",
  "toml 0.9.12+spec-1.1.0",

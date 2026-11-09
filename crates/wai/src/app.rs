@@ -117,6 +117,7 @@ pub fn run(
                     w.watch_project(window, cx);
                     w.restore(window, cx);
                     w.suggest_extensions(window, cx);
+                    w.start_extensions(cx);
                 });
                 for notice in notices {
                     window.push_notification(Notification::warning(notice).autohide(false), cx);

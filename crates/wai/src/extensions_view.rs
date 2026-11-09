@@ -16,6 +16,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_ext::{ExtId, ExtStore, Installed, Permission, Source, Staged};
 
+use crate::ext_host::{ExtHost, ExtStatus};
+
 /// v1 has no sandbox, and the consent dialog says so in these words.
 pub const LIMITATION: &str = "wai cannot restrict files or network access in this version; only install extensions you trust.";
 
@@ -75,19 +77,34 @@ impl Drop for Pending {
 
 pub struct ExtensionsView {
     store: ExtStore,
+    /// Runs what the store has enabled; told after each change.
+    host: Entity<ExtHost>,
     url: Entity<InputState>,
     /// The stage in progress: a copy or a clone, off the main thread. A new one replaces it.
     staging: Option<Task<()>>,
+    _host_changed: Subscription,
 }
 
 impl ExtensionsView {
-    pub fn new(config_dir: &Path, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        config_dir: &Path,
+        host: Entity<ExtHost>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("https://… or git@…"));
         Self {
             store: ExtStore::open(config_dir),
+            _host_changed: cx.observe(&host, |_, _, cx| cx.notify()),
+            host,
             url,
             staging: None,
         }
+    }
+
+    fn sync_host(&self, cx: &mut Context<Self>) {
+        let list = self.store.list();
+        self.host.update(cx, |host, cx| host.sync(&list, cx));
     }
 
     pub fn store(&self) -> &ExtStore {
@@ -213,7 +230,10 @@ impl ExtensionsView {
         let name = clamp(&staged.manifest().name, NAME_CHARS);
         let granted = staged.manifest().permissions.clone();
         let notice = match self.store.commit(staged, granted) {
-            Ok(_) => Notification::success(format!("Installed {name}")),
+            Ok(_) => {
+                self.sync_host(cx);
+                Notification::success(format!("Installed {name}"))
+            }
             Err(e) => Notification::error(format!("Could not install {name}: {e}")).autohide(false),
         };
         window.push_notification(notice, cx);
@@ -254,12 +274,14 @@ impl ExtensionsView {
             let notice = format!("Could not change {}: {e}", id.as_str());
             window.push_notification(Notification::error(notice), cx);
         }
+        self.sync_host(cx);
         cx.notify();
     }
 
-    /// The folder leaves `extensions/` at once; its files are deleted off the main thread.
-    /// Once extensions run, their processes stop before this.
+    /// Its process is killed first (Review Focus 3). The folder leaves `extensions/` at once;
+    /// its files are deleted off the main thread.
     fn uninstall(&mut self, id: &ExtId, window: &mut Window, cx: &mut Context<Self>) {
+        self.host.update(cx, |host, _| host.stop(id));
         match self.store.uninstall(id) {
             Ok(trash) => cx
                 .background_spawn(async move { std::fs::remove_dir_all(trash).ok() })
@@ -275,6 +297,11 @@ impl ExtensionsView {
     fn card(&self, ix: usize, ext: &Installed, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let (toggle, remove) = (ext.manifest.id.clone(), ext.manifest.id.clone());
+        let problem = match self.host.read(cx).status(&ext.manifest.id) {
+            Some(ExtStatus::Failed(error)) => Some(format!("Failed: {error}")),
+            Some(ExtStatus::Crashed(tail)) => Some(format!("Crashed: {tail}")),
+            _ => None,
+        };
         v_flex()
             .gap_1()
             .p_2()
@@ -305,6 +332,10 @@ impl ExtensionsView {
                     .text_color(theme.muted_foreground)
                     .child(permissions_text(&ext.granted).join(", ")),
             )
+            .children(problem.map(|text| {
+                let text = clamp(&text, DESCRIPTION_CHARS);
+                div().text_xs().text_color(theme.danger).child(text)
+            }))
             .child(
                 h_flex()
                     .justify_between()
@@ -382,12 +413,13 @@ mod tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{ElementId, Entity, TestAppContext, VisualTestContext};
-    use wai_ext::{Installed, MANIFEST_FILE, Permission, Source, staging_dir};
+    use wai_ext::{ExtId, ExtStore, Installed, MANIFEST_FILE, Permission, Source, staging_dir};
     use wai_settings::Settings;
 
     use super::{ExtensionsView, LIMITATION, clamp};
+    use crate::ext_host::ExtStatus;
     use crate::workspace::Workspace;
-    use crate::workspace::tests::open;
+    use crate::workspace::tests::{open, wait_until};
 
     const MANIFEST: &str = "id = \"sample\"\nname = \"Sample\"\nversion = \"1.2.0\"\n\
         description = \"A sample\"\n\
@@ -557,6 +589,118 @@ mod tests {
             );
             assert!(bounds.bottom() <= viewport.height, "{line:?} out of view");
         }
+    }
+
+    /// `wai-fake-ext`, next to the test binary's `deps/` (`cargo test --workspace` builds it).
+    #[cfg(unix)]
+    fn fake_ext() -> PathBuf {
+        let name = format!("wai-fake-ext{}", std::env::consts::EXE_SUFFIX);
+        let found = std::env::current_exe()
+            .unwrap()
+            .ancestors()
+            .map(|d| d.join(&name))
+            .find(|p| p.is_file());
+        found.expect("run `cargo build -p wai-ext --bin wai-fake-ext` first")
+    }
+
+    /// An extension `sample` whose process is `wai-fake-ext --pid-file <pid_file>`.
+    #[cfg(unix)]
+    fn running_sample(dir: &Path, pid_file: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let manifest = "id = \"sample\"\nname = \"Sample\"\nversion = \"1.0.0\"\n\
+            permissions = [\"process\"]\n[process]\ncommand = \"bin/run\"\n";
+        let src = sample_with(dir, manifest);
+        let run = src.join("bin/run");
+        std::fs::create_dir_all(src.join("bin")).unwrap();
+        let script = format!(
+            "#!/bin/sh\nexec '{}' --pid-file '{}'\n",
+            fake_ext().display(),
+            pid_file.display()
+        );
+        std::fs::write(&run, script).unwrap();
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
+        src
+    }
+
+    /// The pid a newly started extension process wrote.
+    #[cfg(unix)]
+    fn started(pid_file: &Path, cx: &mut VisualTestContext) -> String {
+        let written = || std::fs::read_to_string(pid_file).unwrap_or_default();
+        wait_until(cx, "the extension's process", |_| !written().is_empty());
+        written()
+    }
+
+    #[cfg(unix)]
+    fn wait_gone(pid: &str) {
+        let alive = || {
+            std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while alive() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "extension {pid} still alive"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// R44, Review Focus 3: installing starts the extension's process, disabling stops it,
+    /// enabling starts it again, and uninstalling kills it before its folder goes.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn uninstall_stops_processes(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the extension is a real process
+        let tmp = tempfile::tempdir().unwrap();
+        let pid_file = tmp.path().join("ext.pid");
+        let src = running_sample(&tmp.path().join("src"), &pid_file);
+        let (workspace, cx) = workspace(&tmp.path().join("config"), cx);
+        let view =
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.show_extensions(window, cx)));
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        let id = ExtId::new("sample").unwrap();
+
+        review(&view, &src, cx);
+        click("consent-install", cx);
+        let first = started(&pid_file, cx);
+        wait_until(cx, "Ready", |cx| {
+            host.read_with(cx, |h, _| h.status(&id) == Some(&ExtStatus::Ready))
+        });
+
+        click(("ext-enabled", 0usize), cx);
+        wait_gone(&first);
+        std::fs::remove_file(&pid_file).unwrap();
+        click(("ext-enabled", 0usize), cx);
+        let second = started(&pid_file, cx);
+
+        click(("ext-uninstall", 0usize), cx);
+        wait_gone(&second);
+        assert_eq!(host.read_with(cx, |h, _| h.status(&id).cloned()), None);
+    }
+
+    /// Enabled before launch, it starts once the window is open; quitting kills it.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn quit_stops_extensions(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the extension is a real process
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, pid_file) = (tmp.path().join("config"), tmp.path().join("ext.pid"));
+        let src = running_sample(&tmp.path().join("src"), &pid_file);
+        let mut store = ExtStore::open(&config);
+        let staged = store.stage(&Source::Folder(src)).unwrap();
+        store.commit(staged, vec![Permission::Process]).unwrap();
+        let (workspace, cx) = workspace(&config, cx);
+
+        workspace.update(cx, |w, cx| w.start_extensions(cx));
+        let pid = started(&pid_file, cx);
+        // What the platform's quit runs: the quit hooks, then the windows close.
+        cx.cx.update(|app| app.shutdown());
+        wait_gone(&pid);
     }
 
     #[test]
