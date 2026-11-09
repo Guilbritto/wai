@@ -38,7 +38,9 @@ type server struct {
 
 	dir     string        // wai's config dir: rotinas.toml and the state file
 	timeout time.Duration // per run
-	// notifyGap: wai drops an extension's notification within 2 s of its last.
+	// notifyGap: wai drops an extension's notification within 2 s (CALL_GAP) of its last.
+	// ponytail: CALL_GAP plus 0.5 s of slack, since wai times each one when it handles it, after a
+	// pipe, a reader thread and a frame.
 	notifyGap time.Duration
 	notified  time.Time // the last notification; the scheduler's own
 	ctx       context.Context
@@ -57,7 +59,7 @@ type server struct {
 func newServer(out io.Writer, dir string) *server {
 	ctx, stop := context.WithCancel(context.Background())
 	return &server{
-		out: out, dir: dir, timeout: runTimeout, notifyGap: 2 * time.Second, ctx: ctx, stop: stop,
+		out: out, dir: dir, timeout: runTimeout, notifyGap: 2*time.Second + 500*time.Millisecond, ctx: ctx, stop: stop,
 		wake:  make(chan struct{}, 1),
 		state: loadState(filepath.Join(dir, stateFile)), queued: map[string]bool{},
 	}
@@ -228,22 +230,26 @@ func (s *server) run(r Routine) {
 	prev, seen := s.state[r.Name]
 	s.state[r.Name] = record{LastRun: start, Status: o.status, Hash: hash}
 	s.running = ""
-	if err := saveState(filepath.Join(s.dir, stateFile), s.state); err != nil {
-		fmt.Fprintln(os.Stderr, "wai-rotinas: cannot save the last runs:", err)
-	}
 	s.mu.Unlock()
+	s.render()
 	if !seen || prev.Hash != hash {
 		// ponytail: waits on the scheduler, so a run due meanwhile starts up to notifyGap late.
 		time.Sleep(time.Until(s.notified.Add(s.notifyGap)))
 		s.notified = time.Now()
 		s.write(node{"jsonrpc": "2.0", "method": "notify", "params": node{"title": r.Name, "body": summary(o)}})
 	}
-	s.render()
+	// Saved after notifying: quitting in between notifies twice after a restart, never not at all.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := saveState(filepath.Join(s.dir, stateFile), s.state); err != nil {
+		fmt.Fprintln(os.Stderr, "wai-rotinas: cannot save the last runs:", err)
+	}
 }
 
 // summary is the notification's body: what went wrong, or the output's first line, in at most
-// 300 characters (wai shows 300 and drops a message above 4 MB).
+// 300 characters, as wai shows them (it drops a message above 4 MB), the cut note included.
 func summary(o outcome) string {
+	const cut = " (output cut at 1 MB)"
 	s := o.status
 	if s == "OK" {
 		s = "Finished with no output"
@@ -254,11 +260,15 @@ func summary(o outcome) string {
 			}
 		}
 	}
-	if r := []rune(s); len(r) > 300 {
-		s = string(r[:300]) + "…"
+	room := 300
+	if o.truncated {
+		room -= len(cut)
+	}
+	if r := []rune(s); len(r) > room {
+		s = string(r[:room-1]) + "…"
 	}
 	if o.truncated {
-		s += " (output cut at 1 MB)"
+		s += cut
 	}
 	return s
 }

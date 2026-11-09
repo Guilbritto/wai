@@ -312,7 +312,7 @@ func TestOutputCapAndTimeout(t *testing.T) {
 		t.Fatalf("limits: %v, %d", runTimeout, maxOutput)
 	}
 	dir := t.TempDir()
-	if s := newServer(io.Discard, dir); s.timeout != runTimeout || s.notifyGap != 2*time.Second {
+	if s := newServer(io.Discard, dir); s.timeout != runTimeout || s.notifyGap != 2500*time.Millisecond {
 		t.Errorf("the server's timeout %v and notify gap %v", s.timeout, s.notifyGap)
 	}
 	ctx := context.Background()
@@ -324,7 +324,8 @@ func TestOutputCapAndTimeout(t *testing.T) {
 	// One 1 MB line: the notification stays short and says the output was cut.
 	line := script(t, dir, "line.sh", "head -c 3000000 /dev/zero | tr '\\0' x\n")
 	o = runScript(ctx, line, time.Minute)
-	if s := summary(o); utf8.RuneCountInString(s) > 350 || !strings.HasSuffix(s, "(output cut at 1 MB)") {
+	// At most 300 characters, like wai shows, so the note is never cut off.
+	if s := summary(o); utf8.RuneCountInString(s) > 300 || !strings.HasSuffix(s, "(output cut at 1 MB)") {
 		t.Errorf("summary of %d runes: %.80q…", utf8.RuneCountInString(s), s)
 	}
 
@@ -361,42 +362,34 @@ func TestNotifiesOnlyOnChange(t *testing.T) {
 	config(t, dir, routine("news", sh, `at = "03:00"`))
 	r := start(t, dir)
 	r.initialize(t)
-	bodies := func(notes []map[string]any) string {
-		var b []string
-		for _, n := range notes {
-			if n["title"] != "news" {
-				t.Errorf("title: %v", n)
-			}
-			b = append(b, n["body"].(string))
+	// The panel shows the result first: a notification may wait for wai's gap. One that was not
+	// wanted would come before the next run starts, which runNow fails on.
+	expect := func(r *rpc, tree map[string]any, status, want string) {
+		t.Helper()
+		if badge(tree, "news") != status || len(r.notified) > 0 {
+			t.Errorf("want %s shown before any notification, got %v and %v", status, tree, r.notified)
 		}
-		return strings.Join(b, "|")
+		if want == "" {
+			return
+		}
+		if n := r.notification(t); n["title"] != "news" || n["body"] != want {
+			t.Errorf("notified %v, want %q", n, want)
+		}
 	}
 	// Never run: it runs once it is loaded.
-	r.until(t, "news", "OK")
-	if got := bodies(r.notified); got != "first" {
-		t.Errorf("first run notified %q", got)
-	}
-	check := func(r *rpc, status, want string) {
-		t.Helper()
-		got, tree := r.runNow(t, "news")
-		if badge(tree, "news") != status {
-			t.Errorf("status: %v", tree)
-		}
-		if b := bodies(got); b != want {
-			t.Errorf("notified %q, want %q", b, want)
-		}
-	}
-	check(r, "OK", "")
+	expect(r, r.until(t, "news", "OK"), "OK", "first")
+	expect(r, r.runNow(t, "news"), "OK", "")
 	write(news, "second\n")
-	check(r, "OK", "second")
-	check(r, "OK", "")
+	expect(r, r.runNow(t, "news"), "OK", "second")
+	expect(r, r.runNow(t, "news"), "OK", "")
 	write(fail, "")
-	check(r, "Failed", "Failed: exit status 1")
-	check(r, "Failed", "")
+	expect(r, r.runNow(t, "news"), "Failed", "Failed: exit status 1")
+	expect(r, r.runNow(t, "news"), "Failed", "")
 
 	r2 := start(t, dir)
 	r2.initialize(t)
-	check(r2, "Failed", "")
+	expect(r2, r2.runNow(t, "news"), "Failed", "")
+	r2.runNow(t, "news") // fails on a notification the last run should not have sent
 }
 
 // wai drops a notification within 2 s of the last: runs that end close together space theirs.
@@ -409,11 +402,8 @@ func TestNotificationsAreSpaced(t *testing.T) {
 	r.initialize(t)
 	var when []time.Time
 	for len(when) < 2 {
-		r.render(t)
-		for range r.notified {
-			when = append(when, time.Now())
-		}
-		r.notified = nil
+		r.notification(t)
+		when = append(when, time.Now())
 	}
 	if d := when[1].Sub(when[0]); d < gap-50*time.Millisecond {
 		t.Errorf("two notifications %v apart, want at least %v", d, gap)
@@ -562,25 +552,43 @@ func (r *rpc) initialize(t *testing.T) {
 	r.render(t)
 }
 
+// read takes the next message: a render becomes r.last (true), a notification joins r.notified.
+func (r *rpc) read(t *testing.T) (render bool) {
+	t.Helper()
+	m := r.recv()
+	switch m["method"] {
+	case "notify":
+		r.notified = append(r.notified, m["params"].(map[string]any))
+	case "panel/render":
+		p := m["params"].(map[string]any)
+		if p["panel"] != panelID {
+			t.Fatalf("panel: %v", p["panel"])
+		}
+		r.last = p["tree"].(map[string]any)
+		return true
+	default:
+		t.Fatalf("unexpected %v", m)
+	}
+	return false
+}
+
 // render reads up to the next panel/render and returns its tree.
 func (r *rpc) render(t *testing.T) map[string]any {
 	t.Helper()
-	for {
-		m := r.recv()
-		switch m["method"] {
-		case "notify":
-			r.notified = append(r.notified, m["params"].(map[string]any))
-		case "panel/render":
-			p := m["params"].(map[string]any)
-			if p["panel"] != panelID {
-				t.Fatalf("panel: %v", p["panel"])
-			}
-			r.last = p["tree"].(map[string]any)
-			return r.last
-		default:
-			t.Fatalf("unexpected %v", m)
-		}
+	for !r.read(t) {
 	}
+	return r.last
+}
+
+// notification reads up to the next notification and takes it.
+func (r *rpc) notification(t *testing.T) map[string]any {
+	t.Helper()
+	for len(r.notified) == 0 {
+		r.read(t)
+	}
+	n := r.notified[0]
+	r.notified = r.notified[1:]
+	return n
 }
 
 // until reads renders until routine `name` shows `status`.
@@ -593,25 +601,37 @@ func (r *rpc) until(t *testing.T, name, status string) map[string]any {
 	}
 }
 
-// action clicks a button and reads its answer.
+// action clicks a button and reads its answer; a notification of an earlier run may come first.
 func (r *rpc) action(t *testing.T, id string) {
 	t.Helper()
 	r.send(`{"jsonrpc":"2.0","id":7,"method":"panel/action","params":{"panel":"rotinas","action_id":"` + id + `","values":{}}}`)
-	if m := r.recv(); m["id"] != float64(7) {
-		t.Fatalf("panel/action not answered: %v", m)
+	for {
+		m := r.recv()
+		if m["id"] == float64(7) && m["method"] == nil {
+			return
+		}
+		if m["method"] != "notify" {
+			t.Fatalf("panel/action not answered: %v", m)
+		}
+		r.notified = append(r.notified, m["params"].(map[string]any))
 	}
 }
 
-// runNow clicks Run now and waits for the run to end: the notifications sent meanwhile, and the
-// tree after it.
-func (r *rpc) runNow(t *testing.T, name string) ([]map[string]any, map[string]any) {
+// runNow clicks Run now and returns the tree once the run ended. A notification that arrives
+// before the run starts belongs to the run before, which wanted none: it fails the test.
+func (r *rpc) runNow(t *testing.T, name string) map[string]any {
 	t.Helper()
 	r.notified = nil
 	r.action(t, "run:"+name)
+	r.until(t, name, "Running")
+	if len(r.notified) > 0 {
+		t.Errorf("an unexpected notification: %v", r.notified)
+		r.notified = nil
+	}
 	for {
 		tree := r.render(t)
 		if b := badge(tree, name); b != "Queued" && b != "Running" {
-			return r.notified, tree
+			return tree
 		}
 	}
 }
