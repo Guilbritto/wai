@@ -17,7 +17,7 @@ use crate::chat::TurnState;
 use crate::sidebar::SidebarTab;
 use crate::workspace::{Workspace, folder_name};
 
-static BRAND: LazyLock<Arc<Image>> = LazyLock::new(|| {
+pub(crate) static BRAND: LazyLock<Arc<Image>> = LazyLock::new(|| {
     let png = include_bytes!("../assets/icon/icon.png");
     Arc::new(Image::from_bytes(ImageFormat::Png, png.to_vec()))
 });

@@ -564,7 +564,6 @@ impl EditorPane {
 
 impl Render for EditorPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
         // ponytail: tabs show the file name only; two `mod.rs` look alike until a tooltip or the
         // parent folder tells them apart.
         let tabs = self.tabs.iter().enumerate().map(|(ix, tab)| {
@@ -575,24 +574,14 @@ impl Render for EditorPane {
                 tab.name()
             };
             let active = ix == self.active;
-            h_flex()
+            crate::aurora::tab(active, cx)
                 .id(("editor-tab", ix))
-                .h(px(32.))
+                .h(px(30.))
                 .pl_3()
                 .pr_1()
                 .gap_1()
+                .rounded(px(10.))
                 .text_sm()
-                .cursor_pointer()
-                .border_r_1()
-                .border_color(theme.border)
-                .map(|el| {
-                    if active {
-                        el.bg(theme.tab_active)
-                            .text_color(theme.tab_active_foreground)
-                    } else {
-                        el.text_color(theme.muted_foreground)
-                    }
-                })
                 .child(label)
                 .child(
                     Button::new(("editor-tab-close", ix))
@@ -609,13 +598,12 @@ impl Render for EditorPane {
         v_flex()
             .size_full()
             .child(
-                h_flex()
+                crate::aurora::card_bar(cx)
                     .w_full()
                     .flex_none()
                     .overflow_x_hidden()
-                    .bg(theme.tab_bar)
-                    .border_b_1()
-                    .border_color(theme.border)
+                    .p_1()
+                    .gap_1()
                     .children(tabs),
             )
             .child(

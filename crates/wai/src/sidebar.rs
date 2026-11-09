@@ -3,7 +3,6 @@
 
 use std::ops::Range;
 
-use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
@@ -14,6 +13,7 @@ use wai_ext::panel::clamp;
 pub use wai_settings::canonical;
 
 use crate::agents::AgentStatus;
+use crate::aurora;
 use crate::chat::{ChatSession, TurnState};
 use crate::workspace::{MAX_PANES, Workspace};
 
@@ -46,7 +46,7 @@ const TABS: [(SidebarTab, &str, &str); 4] = [
 /// The status dot's colour, shared by the open list and the agent cards.
 pub(crate) fn status_color(state: &TurnState, theme: &gpui_kit::component::Theme) -> Hsla {
     match state {
-        TurnState::Working => theme.blue,
+        TurnState::Working => theme.cyan,
         TurnState::NeedsYou => theme.warning,
         TurnState::Idle => theme.muted_foreground,
         TurnState::Error(_) => theme.danger,
@@ -147,11 +147,14 @@ impl Workspace {
             .into_iter()
             .chain(extension)
             .map(|(tab, id, label)| {
-                Button::new(id)
-                    .ghost()
-                    .xsmall()
-                    .label(label)
-                    .selected(self.sidebar_tab == tab)
+                aurora::tab(self.sidebar_tab == tab, cx)
+                    .id(id)
+                    .h(px(26.))
+                    .px_2()
+                    .rounded(px(9.))
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(label)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.sidebar_tab = tab;
                         if tab == SidebarTab::Search {
@@ -160,12 +163,29 @@ impl Workspace {
                         }
                         cx.notify();
                     }))
+                    .test_support()
             });
         v_flex()
             .size_full()
             .py_2()
             .text_color(theme.sidebar_foreground)
-            .child(h_flex().px_2().gap_1().flex_wrap().children(tabs))
+            .child(
+                h_flex()
+                    .mx_2()
+                    .p(px(3.))
+                    .gap_1()
+                    .flex_wrap()
+                    .rounded(px(12.))
+                    .border_1()
+                    .map(|el| {
+                        if theme.is_dark() {
+                            el.bg(aurora::vidro()).border_color(aurora::borda())
+                        } else {
+                            el.border_color(theme.border)
+                        }
+                    })
+                    .children(tabs),
+            )
             .child(v_flex().flex_1().min_h_0().child(content))
     }
 
@@ -236,7 +256,16 @@ impl Workspace {
                     .min_w_0()
                     .h_full()
                     .gap_2()
-                    .child(div().flex_none().size(px(8.)).rounded_full().bg(dot))
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(8.))
+                            .rounded_full()
+                            .bg(dot)
+                            .shadow(vec![
+                                BoxShadow::new(px(0.), px(0.), dot.alpha(0.7)).blur_radius(px(4.)),
+                            ]),
+                    )
                     .child(div().flex_1().min_w_0().truncate().child(title))
                     .children(label.map(|l| div().text_xs().text_color(dot).child(l)))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -304,31 +333,31 @@ impl Workspace {
 }
 
 fn heading(text: &'static str, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let color = if theme.is_dark() {
+        aurora::nevoa_2()
+    } else {
+        theme.muted_foreground
+    };
     div()
         .px_3()
         .pt_3()
         .pb_1()
-        .text_xs()
+        .text_size(px(11.))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(cx.theme().muted_foreground)
-        .child(text)
+        .text_color(color)
+        .child(text.to_uppercase())
 }
 
 pub(crate) fn row(active: bool, cx: &App) -> Div {
-    let theme = cx.theme();
-    h_flex()
+    aurora::tab(active, cx)
         .w_full()
         .h(px(ROW_HEIGHT))
         .pl_3()
         .pr_1()
         .gap_1()
+        .rounded(px(10.))
         .text_sm()
-        .cursor_pointer()
-        .hover(|el| el.bg(theme.sidebar_accent))
-        .when(active, |el| {
-            el.bg(theme.sidebar_accent)
-                .text_color(theme.sidebar_accent_foreground)
-        })
 }
 
 fn side_button(id: impl Into<ElementId>) -> Button {
@@ -345,4 +374,24 @@ fn fork_button(id: impl Into<ElementId>) -> Button {
         .xsmall()
         .icon(IconName::Copy)
         .tooltip("Fork")
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::TestAppContext;
+    use wai_settings::Settings;
+
+    use gpui_kit::component::ActiveTheme as _;
+
+    use super::{TurnState, status_color};
+    use crate::{app, aurora};
+
+    #[gpui_kit::test]
+    fn working_dot_is_boreal(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            app::init(&Settings::default(), cx);
+            let color = status_color(&TurnState::Working, cx.theme());
+            assert_eq!(aurora::hex(color), aurora::hex(aurora::boreal()));
+        });
+    }
 }

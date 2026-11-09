@@ -233,6 +233,33 @@ pub(crate) fn pill(cx: &App) -> Div {
         .text_color(text)
 }
 
+/// A selectable chip for tabs and rows (`.janela-aba`): the selected one is lilas-tinted. The
+/// caller sets size and radius. Light mode: theme tokens.
+pub(crate) fn tab(active: bool, cx: &App) -> Div {
+    let theme = cx.theme();
+    let base = h_flex()
+        .border_1()
+        .border_color(gpui_kit::transparent_black())
+        .cursor_pointer();
+    if !theme.is_dark() {
+        return if active {
+            base.bg(theme.accent)
+                .border_color(theme.border)
+                .text_color(theme.accent_foreground)
+        } else {
+            base.text_color(theme.muted_foreground)
+                .hover(|el| el.bg(theme.accent))
+        };
+    }
+    if active {
+        base.bg(lilas().alpha(0.16))
+            .border_color(lilas().alpha(0.45))
+            .text_color(tinta())
+    } else {
+        base.text_color(nevoa()).hover(|el| el.bg(vidro()))
+    }
+}
+
 /// Resize handles draw nothing at rest (the gap between cards is the divider) and a
 /// `drag_border` line while hovered or dragged. gpui-component's own renderer paints a
 /// `theme.border` hairline at rest.

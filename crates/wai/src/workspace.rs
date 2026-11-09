@@ -30,6 +30,7 @@ use crate::notify::{self, should_notify};
 use crate::search_view::{OpenMatch, SearchView};
 use crate::sidebar::{SidebarTab, canonical};
 use crate::terminal_view::{self, TerminalView};
+use crate::topbar::BRAND;
 
 const SIDEBAR_WIDTH: f32 = 260.;
 const TERMINAL_HEIGHT: f32 = 260.;
@@ -1548,12 +1549,25 @@ impl Workspace {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let problem = error.cloned().or_else(|| self.agent_problem(cx));
+        let nevoa = if theme.is_dark() {
+            aurora::nevoa()
+        } else {
+            theme.muted_foreground
+        };
         v_flex()
             .size_full()
             .items_center()
             .justify_center()
             .gap_3()
-            .child(div().text_color(theme.muted_foreground).child(START_HINT))
+            .child(img(BRAND.clone()).size(px(48.)).rounded(px(12.)))
+            .child(
+                div()
+                    .font_family(aurora::DISPLAY_FONT)
+                    .text_size(px(20.))
+                    .font_weight(FontWeight::BOLD)
+                    .child("Start a session"),
+            )
+            .child(div().text_color(nevoa).child(START_HINT))
             .child(
                 Button::new(("new-session", ix))
                     .primary()
