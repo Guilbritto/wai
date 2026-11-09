@@ -58,7 +58,7 @@ title = "Hello"
 **How bare names are found.** wai looks a bare name up itself, in the absolute folders on its own `PATH` only (on Windows also with each `PATHEXT` extension). It never uses the current or project folder, or an empty or relative `PATH` entry.
 - A program that is not found fails with `<command> is not on PATH`.
 - An MCP server whose command is not found is left out of sessions, and wai logs `wai: MCP server <name>: <command> is not on PATH`.
-- wai opened from Finder or the Dock takes `PATH` from your login shell at launch. If the shell gives none within 3 seconds, wai keeps macOS's default (`/usr/bin:/bin:/usr/sbin:/sbin`), which has no `npx`. Started from a terminal, wai has the terminal's `PATH`. See the [user guide](user-guide.md#agents-and-path).
+- wai opened from Finder or the Dock takes `PATH` from your login shell, cached from the previous launch. With no cache and no answer within 3 seconds, wai keeps macOS's default (`/usr/bin:/bin:/usr/sbin:/sbin`), which has no `npx`. Started from a terminal, wai has the terminal's `PATH`. See the [user guide](user-guide.md#agents-and-path).
 
 ## Permissions
 

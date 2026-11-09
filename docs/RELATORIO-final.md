@@ -151,6 +151,7 @@ Os números finais do `.app` ficam na seção abaixo.
 | R66 | `wai-rotinas` pode limitar cada espera a 1 min, porque o relógio do Go para durante o sono do Mac | ~60 despertares/h numa extensão opcional |
 | R67 | `wai-rotinas` recusa todo script no Windows (não há checagem de ACL na stdlib) | Sem rotinas no Windows até existir essa checagem |
 | R68 | No macOS, aberto fora do terminal (sem `TERM`), o wai pega só o `PATH` do shell de login (`-i -l`, 3 s, uma vez, antes de qualquer thread) | O `.zshrc` atrasa toda abertura pelo Finder (~1,6 s nesta máquina) |
+| R69 | Cache do `PATH` do shell: o 1º launch espera o shell uma vez, os seguintes usam o cache e atualizam em segundo plano | Um `PATH` novo só vale no launch seguinte |
 
 ## Lacunas conhecidas (atuais)
 
@@ -164,11 +165,11 @@ Os números finais do `.app` ficam na seção abaixo.
 - **A notificação a partir do `.app` não foi testada de ponta a ponta.** Precisa de um turno real terminando com a janela em segundo plano.
 
 **Uso**
-- **Aberto pelo Finder, Dock ou Launchpad, o wai pega o PATH do shell de login (R68), e isso custa tempo de abertura.**
-  - O macOS dá a esses apps o PATH `/usr/bin:/bin:/usr/sbin:/sbin`, sem `npx` nem `node`. Sem `TERM`, o wai roda `$SHELL -i -l` uma vez, logo no início, e põe as pastas do shell na frente. Pelo terminal, continua com o PATH do terminal.
-  - Testei com um job do launchd: um agente `command = "npx"` achou o `npx` que um `.zprofile` punha no PATH.
-  - **Custo:** o tempo do shell entra em toda abertura pelo Finder. ~25 ms com HOME vazio; ~1,6 s com o `.zshrc` desta máquina (só `-l` leva ~20 ms). Passou de 3 s, o wai segue com o PATH do launchd e registra uma linha.
-  - Sem cache por enquanto. Se ficar lento, guardar o resultado na pasta de config e renovar para a próxima abertura.
+- **Aberto pelo Finder, Dock ou Launchpad, o wai usa o PATH do shell de login (R68), guardado em cache (R69).**
+  - O macOS dá a esses apps o PATH `/usr/bin:/bin:/usr/sbin:/sbin`, sem `npx` nem `node`. Sem `TERM`, o wai lê o PATH de `~/.config/wai/shell-path` e, em segundo plano, pergunta de novo ao `$SHELL -i -l` para a próxima abertura. Pelo terminal, continua com o PATH do terminal.
+  - **Um PATH novo (outra versão do Node no nvm, por exemplo) só vale no launch seguinte.** A 1ª abertura depois da mudança ainda usa o cache.
+  - Só a 1ª abertura (sem cache) espera o shell, com limite de 3 s; passou disso, segue com o PATH do launchd. O `.zshrc` desta máquina leva ~1,5–1,8 s. Nas outras aberturas esse tempo corre em segundo plano.
+  - Testei com HOMEs de rascunho e um `.zshrc` de 1,5 s. A 1ª abertura esperou 1543 ms; as seguintes leram o cache (a linha do log sai ~60 ms após o exec, só o início do processo). Um agente `command = "npx"` achou o `npx` do `.zprofile`, e a troca de v1 para v2 valeu na abertura seguinte.
 - **As configurações só são lidas ao abrir o wai.**
   - O `.wai/settings.toml` vale só para a pasta com que o wai foi aberto.
   - Ao trocar de pasta (⌘O), modelos e sugestões de extensão são relidos, mas tema e `default_agent` do projeto novo não.

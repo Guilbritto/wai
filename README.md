@@ -63,9 +63,9 @@ To build the app bundle and DMG yourself, see [docs/building.md](docs/building.m
 
 - **Settings** live in `~/.config/wai/settings.toml` (`%APPDATA%\wai\settings.toml` on Windows). See the [user guide](docs/user-guide.md#settings).
 
-**Opened from Finder, the Dock or Launchpad, wai takes `PATH` from your login shell.** macOS gives such apps only `/usr/bin:/bin:/usr/sbin:/sbin`, which has no `npx`. So at launch wai runs your shell once (`$SHELL -i -l`) and puts its `PATH` first.
+**Opened from Finder, the Dock or Launchpad, wai takes `PATH` from your login shell.** macOS gives such apps only `/usr/bin:/bin:/usr/sbin:/sbin`, which has no `npx`. So wai puts your shell's `PATH` (`$SHELL -i -l`) first. It caches that `PATH` and refreshes the cache in the background, so a change to it reaches wai one launch late.
 - Started from a terminal (`open /Applications/wai.app`, or `wai`), wai uses the terminal's `PATH` instead.
-- If the shell gives no `PATH` within 3 seconds, wai keeps macOS's. See the [user guide](docs/user-guide.md#agents-and-path) for that case.
+- The first launch waits for the shell, up to 3 seconds, then keeps macOS's `PATH`. See the [user guide](docs/user-guide.md#agents-and-path) for that case.
 
 ## Known limitations
 
