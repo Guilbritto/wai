@@ -49,9 +49,9 @@ fn stage_from_folder_parses_and_enables_nothing() {
     let store = ExtStore::open(&config);
     let staged = store.stage(&Source::Folder(sample(tmp.path()))).unwrap();
 
-    assert_eq!(staged.manifest.id.as_str(), "sample");
-    assert_eq!(staged.manifest.version, "1.2.0");
-    assert_eq!(staged.manifest.permissions, perms());
+    assert_eq!(staged.manifest().id.as_str(), "sample");
+    assert_eq!(staged.manifest().version, "1.2.0");
+    assert_eq!(staged.manifest().permissions, perms());
     assert!(staged.dir().starts_with(staging_dir(&config)));
     assert!(staged.dir().join("bin/run").is_file());
     #[cfg(unix)]
@@ -132,10 +132,13 @@ fn enable_disable_and_uninstall_persist() {
     store.set_enabled(&id, true).unwrap();
     assert!(ExtStore::open(&config).list()[0].enabled);
 
-    store.uninstall(&id).unwrap();
+    // The folder leaves `extensions/` at once; the caller deletes it off the main thread.
+    let trash = store.uninstall(&id).unwrap();
+    assert!(!config.join("extensions/sample").exists());
+    assert!(trash.starts_with(staging_dir(&config)));
+    assert!(trash.join(MANIFEST_FILE).is_file());
     assert!(store.list().is_empty());
     assert!(ExtStore::open(&config).list().is_empty());
-    assert!(!config.join("extensions/sample").exists());
     let unknown = ExtId::new("nope").unwrap();
     assert!(store.set_enabled(&unknown, true).is_err());
 }
@@ -264,6 +267,10 @@ fn git_source_rejects_non_https_urls() {
         "https://",
         "git@",
         "git@-oProxyCommand=x:repo",
+        "git@foo/bar",
+        "git@foo/bar:x",
+        "git@:path",
+        "git@host:",
         "https://-host/x.git",
         "https://example.com/x y.git",
         "https://example.com/x\n.git",
@@ -275,7 +282,11 @@ fn git_source_rejects_non_https_urls() {
             "{url:?} accepted"
         );
     }
-    for url in ["https://github.com/a/b.git", "git@github.com:a/b.git"] {
+    for url in [
+        "https://github.com/a/b.git",
+        "git@github.com:a/b.git",
+        "git@host:a",
+    ] {
         assert!(check_git_source(url, None).is_ok(), "{url:?} refused");
     }
     for rev in ["", "-b", "--upload-pack=x", "v1 x", "v1\n"] {
@@ -304,12 +315,26 @@ fn git_source_rejects_non_https_urls() {
 }
 
 #[test]
-fn git_clone_argv_is_fixed() {
-    let dest = Path::new("/tmp/stage/clone");
+fn git_clone_command_is_fixed() {
+    let (dest, cwd) = (Path::new("/tmp/stage/clone"), Path::new("/tmp/stage"));
     let args = |rev| {
-        git_clone_args("https://h/r.git", rev, dest)
-            .into_iter()
-            .map(|a| a.into_string().unwrap())
+        let command = git_clone_command("https://h/r.git", rev, dest, cwd);
+        assert_eq!(command.get_program(), "git");
+        assert_eq!(command.get_current_dir(), Some(cwd));
+        let envs: Vec<_> = command.get_envs().collect();
+        for (key, value) in [
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("GIT_LFS_SKIP_SMUDGE", "1"),
+            ("GIT_ALLOW_PROTOCOL", "https:ssh"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ] {
+            assert!(
+                envs.contains(&(key.as_ref(), Some(value.as_ref()))),
+                "{key}={value} not in {envs:?}"
+            );
+        }
+        (command.get_args())
+            .map(|a| a.to_str().unwrap().to_string())
             .collect::<Vec<_>>()
     };
     assert_eq!(

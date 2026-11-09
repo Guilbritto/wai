@@ -8,7 +8,8 @@
 //! - anything that is not a regular file or a folder (a FIFO blocks the copy, a device never
 //!   ends);
 //! - more than 100 MB or 10,000 entries;
-//! - git URLs other than `https://` and `git@`. git runs with a fixed argv, never a shell.
+//! - git URLs other than `https://` and `git@host:path`. git runs with a fixed argv, never a
+//!   shell.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,19 @@ pub const MANIFEST_FILE: &str = "wai-extension.toml";
 pub enum Source {
     Folder(PathBuf),
     Git { url: String, rev: Option<String> },
+}
+
+impl std::fmt::Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Source::Folder(dir) => write!(f, "{}", dir.display()),
+            Source::Git { url, rev: None } => f.write_str(url),
+            Source::Git {
+                url,
+                rev: Some(rev),
+            } => write!(f, "{url} at {rev}"),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -51,15 +65,26 @@ pub enum InstallError {
     Consent,
 }
 
-/// An extension copied into the staging area, not installed. Dropping it removes the copy.
+/// An extension copied into the staging area, not installed. Dropping it removes the copy:
+/// drop it off the main thread.
 #[derive(Debug)]
 pub struct Staged {
-    pub manifest: Manifest,
+    manifest: Manifest,
+    source: Source,
     /// `<staging>/<n>`; the extension is its `ext` folder.
     root: PathBuf,
 }
 
 impl Staged {
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// Where it was staged from: users tell an extension from a fork with the same id by it.
+    pub fn source(&self) -> &Source {
+        &self.source
+    }
+
     /// The staged extension's folder.
     pub fn dir(&self) -> PathBuf {
         self.root.join("ext")
@@ -92,18 +117,27 @@ const LIMITS: Budget = Budget {
     entries: 10_000,
 };
 
-pub(crate) fn stage(config_dir: &Path, source: &Source) -> Result<Staged, InstallError> {
+/// A new, unused path in the staging area (the folder is not created).
+pub(crate) fn staging_path(config_dir: &Path) -> std::io::Result<PathBuf> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    if let Source::Git { url, rev } = source {
-        check_git_source(url, rev.as_deref())?;
-    }
     let parent = staging_dir(config_dir);
     std::fs::create_dir_all(&parent)?;
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let root = parent.join(format!("{}-{n}", std::process::id()));
+    Ok(parent.join(format!("{}-{n}", std::process::id())))
+}
+
+pub(crate) fn stage(config_dir: &Path, source: &Source) -> Result<Staged, InstallError> {
+    if let Source::Git { url, rev } = source {
+        check_git_source(url, rev.as_deref())?;
+    }
+    let root = staging_path(config_dir)?;
     std::fs::create_dir(&root)?;
     match fill(&root, source) {
-        Ok(manifest) => Ok(Staged { manifest, root }),
+        Ok(manifest) => Ok(Staged {
+            manifest,
+            source: source.clone(),
+            root,
+        }),
         Err(e) => {
             std::fs::remove_dir_all(&root).ok();
             Err(e)
@@ -121,6 +155,7 @@ fn fill(root: &Path, source: &Source) -> Result<Manifest, InstallError> {
             std::fs::remove_dir_all(clone.join(".git"))?;
             // The checked copy: a repository can hold links too.
             copy_tree(&clone, &ext, LIMITS)?;
+            std::fs::remove_dir_all(&clone)?;
         }
     }
     let text =
@@ -160,15 +195,22 @@ fn copy_dir(src: &Path, dst: &Path, budget: &mut Budget) -> Result<(), InstallEr
     Ok(())
 }
 
-/// `https://` or `git@` URLs with no whitespace or control characters, whose host does not
-/// start with `-`; a revision that does not start with `-` either (git or ssh would read it as
-/// an option).
+/// `https://<host>…` or `git@<host>:<path>` URLs with no whitespace or control characters,
+/// whose host does not start with `-`; a revision that does not start with `-` either (git or
+/// ssh would read it as an option).
 pub fn check_git_source(url: &str, rev: Option<&str>) -> Result<(), InstallError> {
     let clean = |s: &str| !s.chars().any(|c| c.is_whitespace() || c.is_control());
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("git@"));
-    if rest.is_none_or(|r| r.is_empty() || r.starts_with('-')) || !clean(url) {
+    let host_ok = |host: &str| !host.is_empty() && !host.starts_with('-');
+    let ok = if let Some(rest) = url.strip_prefix("https://") {
+        host_ok(rest)
+    } else if let Some(rest) = url.strip_prefix("git@") {
+        // scp-like: a `:` with no `/` before it.
+        rest.split_once(':')
+            .is_some_and(|(host, path)| host_ok(host) && !host.contains('/') && !path.is_empty())
+    } else {
+        false
+    };
+    if !ok || !clean(url) {
         return Err(InstallError::BadUrl(url.to_string()));
     }
     if let Some(rev) = rev
@@ -179,24 +221,30 @@ pub fn check_git_source(url: &str, rev: Option<&str>) -> Result<(), InstallError
     Ok(())
 }
 
-/// `clone --depth 1 [--branch <rev>] -- <url> <dest>`: after `--` the URL is never an option.
-pub fn git_clone_args(url: &str, rev: Option<&str>, dest: &Path) -> Vec<OsString> {
+/// `git clone --depth 1 [--branch <rev>] -- <url> <dest>`: after `--` the URL is never an
+/// option. R18: it runs from `cwd` (the staging folder), never from a repository. No prompt can
+/// wait on a terminal, only https and ssh are spoken, LFS filters do not run, and the system
+/// gitconfig is not read.
+pub fn git_clone_command(url: &str, rev: Option<&str>, dest: &Path, cwd: &Path) -> Command {
     let mut args: Vec<OsString> = vec!["clone".into(), "--depth".into(), "1".into()];
     if let Some(rev) = rev {
         args.extend(["--branch".into(), rev.into()]);
     }
     args.extend(["--".into(), url.into(), dest.into()]);
-    args
-}
-
-/// R18: git runs from the staging folder, never from a repository. No credential prompt can
-/// wait on a terminal: a private repository fails with git's message.
-fn git_clone(url: &str, rev: Option<&str>, dest: &Path, cwd: &Path) -> Result<(), InstallError> {
-    let out = Command::new("git")
-        .args(git_clone_args(url, rev, dest))
+    let mut command = Command::new("git");
+    command
+        .args(args)
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
+        .env("GIT_LFS_SKIP_SMUDGE", "1")
+        .env("GIT_ALLOW_PROTOCOL", "https:ssh")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::null());
+    command
+}
+
+fn git_clone(url: &str, rev: Option<&str>, dest: &Path, cwd: &Path) -> Result<(), InstallError> {
+    let out = git_clone_command(url, rev, dest, cwd)
         .output()
         .map_err(|e| InstallError::Git(format!("cannot run git: {e}")))?;
     if out.status.success() {

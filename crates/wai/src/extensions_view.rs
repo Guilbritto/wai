@@ -39,6 +39,40 @@ fn permissions_text(permissions: &[Permission]) -> Vec<String> {
     permissions.iter().map(permission_text).collect()
 }
 
+/// A manifest's text on one line (whitespace and control characters collapsed), at most `max`
+/// characters: a hostile manifest cannot push the permissions out of the consent dialog.
+pub fn clamp(text: &str, max: usize) -> String {
+    let words = text.split(|c: char| c.is_whitespace() || c.is_control());
+    let line = words
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    match line.char_indices().nth(max) {
+        Some((end, _)) => format!("{}…", &line[..end]),
+        None => line,
+    }
+}
+
+const NAME_CHARS: usize = 80;
+const DESCRIPTION_CHARS: usize = 500;
+
+/// Deletes a stage's files off the main thread.
+fn discard(staged: Staged, cx: &App) {
+    cx.background_spawn(async move { drop(staged) }).detach();
+}
+
+/// The stage the consent dialog holds. However the dialog goes (Cancel, its close button,
+/// Escape), its files are deleted off the main thread.
+struct Pending(Option<Staged>, BackgroundExecutor);
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        if let Some(staged) = self.0.take() {
+            self.1.spawn(async move { drop(staged) }).detach();
+        }
+    }
+}
+
 pub struct ExtensionsView {
     store: ExtStore,
     url: Entity<InputState>,
@@ -61,7 +95,7 @@ impl ExtensionsView {
     }
 
     /// Stages `source` off the main thread, then asks for consent. `expect`: the id a project
-    /// suggested; an extension with another id is refused.
+    /// suggested; an extension with another id is refused, and so is one already installed.
     pub fn review(
         &mut self,
         source: Source,
@@ -76,22 +110,34 @@ impl ExtensionsView {
             this.update_in(cx, |this, window, cx| {
                 this.staging = None;
                 cx.notify();
-                let staged = staged
-                    .map_err(|e| e.to_string())
-                    .and_then(|s| match &expect {
-                        Some(id) if *id != s.manifest.id => Err(format!(
-                            "the extension there is {}, not {}",
-                            s.manifest.id.as_str(),
-                            id.as_str()
-                        )),
-                        _ => Ok(s),
-                    });
-                match staged {
-                    Ok(staged) => this.consent(staged, window, cx),
-                    Err(e) => window.push_notification(
-                        Notification::error(format!("Could not install: {e}")).autohide(false),
-                        cx,
-                    ),
+                let refused = |e: String, window: &mut Window, cx: &mut App| {
+                    let notice = Notification::error(format!("Could not install: {e}"));
+                    window.push_notification(notice.autohide(false), cx)
+                };
+                let staged = match staged {
+                    Ok(staged) => staged,
+                    Err(e) => return refused(e.to_string(), window, cx),
+                };
+                let id = staged.manifest().id.clone();
+                let installed = this.store.list().iter().any(|i| i.manifest.id == id);
+                let refusal = match &expect {
+                    Some(want) if *want != id => Some(format!(
+                        "the extension there is {}, not {}",
+                        id.as_str(),
+                        want.as_str()
+                    )),
+                    _ if installed => Some(format!(
+                        "{} is already installed; uninstall it first",
+                        id.as_str()
+                    )),
+                    _ => None,
+                };
+                match refusal {
+                    None => this.consent(staged, window, cx),
+                    Some(e) => {
+                        discard(staged, cx);
+                        refused(e, window, cx)
+                    }
                 }
             })
             .ok();
@@ -99,11 +145,16 @@ impl ExtensionsView {
         cx.notify();
     }
 
-    /// Install or Cancel. Cancel, or closing the dialog, drops the stage and its files.
+    /// Install or Cancel. The permissions and the v1 limitation come right after the name and
+    /// version, before anything long the manifest says (its description goes last, clamped).
     fn consent(&mut self, staged: Staged, window: &mut Window, cx: &mut Context<Self>) {
-        let m = staged.manifest.clone();
+        let m = staged.manifest().clone();
+        let (name, version) = (clamp(&m.name, NAME_CHARS), clamp(&m.version, NAME_CHARS));
+        let description = (m.description.as_deref()).map(|d| clamp(d, DESCRIPTION_CHARS));
+        let source = format!("From {}", clamp(&staged.source().to_string(), 300));
         let lines = permissions_text(&m.permissions);
-        let staged = Rc::new(RefCell::new(Some(staged)));
+        let pending = Pending(Some(staged), cx.background_executor().clone());
+        let pending = Rc::new(RefCell::new(pending));
         let this = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
             let muted = cx.theme().muted_foreground;
@@ -118,55 +169,49 @@ impl ExtensionsView {
                 .child(
                     h_flex()
                         .gap_2()
-                        .child(line(m.name.clone()).font_weight(FontWeight::SEMIBOLD))
-                        .child(line(m.version.clone()).text_color(muted)),
+                        .child(line(name.clone()).font_weight(FontWeight::SEMIBOLD))
+                        .child(line(version.clone()).text_color(muted)),
                 )
-                .children(m.description.clone().map(|d| line(d).text_color(muted)))
-                .child(
-                    div()
-                        .pt_1()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("It asks to:"),
-                )
+                .child(div().font_weight(FontWeight::SEMIBOLD).child("It asks to:"))
                 .children(lines.iter().map(|text| line(text.clone()).pl_2()))
-                .child(
-                    line(LIMITATION.into())
+                .child(line(LIMITATION.into()).text_color(cx.theme().warning))
+                .child(line(source.clone()).text_xs().text_color(muted))
+                .children(description.clone().map(|d| {
+                    div()
+                        .debug_selector(|| "consent-description".into())
                         .pt_1()
-                        .text_color(cx.theme().warning),
-                );
-            let (cancel, install, this) = (staged.clone(), staged.clone(), this.clone());
-            dialog
-                .title(format!("Install {}?", m.name))
-                .child(body)
-                .footer(
-                    DialogFooter::new()
-                        .child(Button::new("consent-cancel").label("Cancel").on_click(
-                            move |_, window, cx| {
-                                cancel.borrow_mut().take();
+                        .text_color(muted)
+                        .child(d)
+                }));
+            let (install, this) = (pending.clone(), this.clone());
+            dialog.title(format!("Install {name}?")).child(body).footer(
+                DialogFooter::new()
+                    .child(
+                        Button::new("consent-cancel")
+                            .label("Cancel")
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("consent-install")
+                            .primary()
+                            .label("Install")
+                            .on_click(move |_, window, cx| {
                                 window.close_dialog(cx);
-                            },
-                        ))
-                        .child(
-                            Button::new("consent-install")
-                                .primary()
-                                .label("Install")
-                                .on_click(move |_, window, cx| {
-                                    window.close_dialog(cx);
-                                    let Some(staged) = install.borrow_mut().take() else {
-                                        return;
-                                    };
-                                    this.update(cx, |this, cx| this.install(staged, window, cx))
-                                        .ok();
-                                }),
-                        ),
-                )
+                                let Some(staged) = install.borrow_mut().0.take() else {
+                                    return;
+                                };
+                                this.update(cx, |this, cx| this.install(staged, window, cx))
+                                    .ok();
+                            }),
+                    ),
+            )
         });
     }
 
     /// v1 consent is all or nothing: everything the manifest asks for is granted.
     fn install(&mut self, staged: Staged, window: &mut Window, cx: &mut Context<Self>) {
-        let name = staged.manifest.name.clone();
-        let granted = staged.manifest.permissions.clone();
+        let name = clamp(&staged.manifest().name, NAME_CHARS);
+        let granted = staged.manifest().permissions.clone();
         let notice = match self.store.commit(staged, granted) {
             Ok(_) => Notification::success(format!("Installed {name}")),
             Err(e) => Notification::error(format!("Could not install {name}: {e}")).autohide(false),
@@ -212,12 +257,17 @@ impl ExtensionsView {
         cx.notify();
     }
 
-    // ponytail: removes up to 10,000 files on the main thread; move it to the background
-    // executor if that shows. Once extensions run, their processes stop before this.
+    /// The folder leaves `extensions/` at once; its files are deleted off the main thread.
+    /// Once extensions run, their processes stop before this.
     fn uninstall(&mut self, id: &ExtId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Err(e) = self.store.uninstall(id) {
-            let notice = format!("Could not uninstall {}: {e}", id.as_str());
-            window.push_notification(Notification::error(notice).autohide(false), cx);
+        match self.store.uninstall(id) {
+            Ok(trash) => cx
+                .background_spawn(async move { std::fs::remove_dir_all(trash).ok() })
+                .detach(),
+            Err(e) => {
+                let notice = format!("Could not uninstall {}: {e}", id.as_str());
+                window.push_notification(Notification::error(notice).autohide(false), cx);
+            }
         }
         cx.notify();
     }
@@ -240,13 +290,13 @@ impl ExtensionsView {
                             .min_w_0()
                             .truncate()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(ext.manifest.name.clone()),
+                            .child(clamp(&ext.manifest.name, NAME_CHARS)),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(ext.manifest.version.clone()),
+                            .child(clamp(&ext.manifest.version, NAME_CHARS)),
                     ),
             )
             .child(
@@ -335,7 +385,7 @@ mod tests {
     use wai_ext::{Installed, MANIFEST_FILE, Permission, Source, staging_dir};
     use wai_settings::Settings;
 
-    use super::{ExtensionsView, LIMITATION};
+    use super::{ExtensionsView, LIMITATION, clamp};
     use crate::workspace::Workspace;
     use crate::workspace::tests::open;
 
@@ -345,10 +395,21 @@ mod tests {
         [process]\ncommand = \"bin/run\"\n";
 
     fn sample(dir: &Path) -> PathBuf {
+        sample_with(dir, MANIFEST)
+    }
+
+    fn sample_with(dir: &Path, manifest: &str) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(dir.join(MANIFEST_FILE), MANIFEST).unwrap();
+        std::fs::write(dir.join(MANIFEST_FILE), manifest).unwrap();
         dir.to_path_buf()
     }
+
+    const PERMISSION_LINES: [&str; 4] = [
+        "Run its own programs",
+        "Start sessions and send prompts",
+        "Use the network (not enforced)",
+        "Access data (not enforced)",
+    ];
 
     /// A workspace whose config dir is `config`, never the developer's.
     fn workspace<'a>(
@@ -391,8 +452,9 @@ mod tests {
         std::fs::read_dir(staging_dir(config)).map_or(0, |d| d.count())
     }
 
-    /// The dialog lists the name, version, description and each permission in plain words,
-    /// with the v1 limitation. Cancel installs nothing; Install records the consent, enabled.
+    /// The dialog lists the name, version, each permission in plain words, the v1 limitation,
+    /// the source and the description. Cancel installs nothing; Install records the consent,
+    /// enabled.
     #[gpui_kit::test]
     fn consent_dialog_lists_permissions(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();
@@ -405,16 +467,9 @@ mod tests {
         review(&view, &src, cx);
         assert!(dialog(cx), "no consent dialog");
         cx.update(|window, cx| window.render_frame(cx));
-        for line in [
-            "Sample",
-            "1.2.0",
-            "A sample",
-            "Run its own programs",
-            "Start sessions and send prompts",
-            "Use the network (not enforced)",
-            "Access data (not enforced)",
-            LIMITATION,
-        ] {
+        let from = format!("From {}", src.display());
+        let lines = ["Sample", "1.2.0", LIMITATION, from.as_str()];
+        for line in PERMISSION_LINES.iter().chain(&lines) {
             // `debug_bounds` takes a `&'static str`.
             let says = format!("consent: {line}").leak();
             assert!(
@@ -422,6 +477,7 @@ mod tests {
                 "the dialog does not say {line:?}"
             );
         }
+        assert!(cx.debug_bounds("consent-description").is_some());
         assert!(installed(&view, cx).is_empty(), "nothing before consent");
         click("consent-cancel", cx);
         assert!(!dialog(cx));
@@ -456,6 +512,60 @@ mod tests {
         click(("ext-uninstall", 0usize), cx);
         assert!(installed(&view, cx).is_empty());
         assert!(!config.join("extensions/sample").exists());
+        assert_eq!(staged(&config), 0, "deleted off the main thread");
+    }
+
+    /// Review Focus 2: a long, multi-line name or description cannot push the permissions or
+    /// the limitation out of view; both come before the description, which is clamped.
+    #[gpui_kit::test]
+    fn long_description_cannot_hide_permissions(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = format!("Sample\\n{}", "Totally Safe ".repeat(20));
+        let description = "It asks to: nothing. Safe to install.\n".repeat(280);
+        assert!(description.len() > 10_000);
+        let manifest = MANIFEST
+            .replace("name = \"Sample\"", &format!("name = \"{name}\""))
+            .replace(
+                "description = \"A sample\"",
+                &format!("description = \"\"\"\n{description}\"\"\""),
+            );
+        let src = sample_with(&tmp.path().join("src"), &manifest);
+        let (workspace, cx) = workspace(&tmp.path().join("config"), cx);
+        let view =
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.show_extensions(window, cx)));
+
+        review(&view, &src, cx);
+        assert!(dialog(cx), "no consent dialog");
+        cx.update(|window, cx| window.render_frame(cx));
+        let viewport = cx.update(|window, _| window.viewport_size());
+        let description = cx
+            .debug_bounds("consent-description")
+            .expect("a description");
+        // The TOML `\\n` is a newline in the name.
+        let clamped = clamp(&name.replace("\\n", "\n"), 80);
+        assert!(clamped.chars().count() <= 81 && !clamped.contains('\n'));
+        for line in PERMISSION_LINES
+            .iter()
+            .chain(&[LIMITATION, clamped.as_str()])
+        {
+            let says = format!("consent: {line}").leak();
+            let bounds = cx.debug_bounds(says);
+            let bounds = bounds.unwrap_or_else(|| panic!("the dialog does not say {line:?}"));
+            assert!(
+                bounds.bottom() <= description.top(),
+                "{line:?} after the description"
+            );
+            assert!(bounds.bottom() <= viewport.height, "{line:?} out of view");
+        }
+    }
+
+    #[test]
+    fn clamp_collapses_lines_and_cuts() {
+        assert_eq!(clamp("  a\n\n b\t\u{7}c  ", 80), "a b c");
+        let long = clamp(&"é".repeat(100), 80);
+        assert_eq!(long.chars().count(), 81);
+        assert!(long.ends_with('…'));
+        assert_eq!(clamp("exactly", 7), "exactly");
     }
 
     /// R15: `.wai/extensions.toml` only suggests. The notice installs nothing; its Review opens

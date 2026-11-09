@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::install::{self, InstallError, MANIFEST_FILE, Source, Staged, extensions_dir};
+use crate::install::{
+    self, InstallError, MANIFEST_FILE, Source, Staged, extensions_dir, staging_path,
+};
 use crate::{ExtId, Manifest, Permission, parse_manifest, parse_permission};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,7 +61,8 @@ impl ExtStore {
     }
 
     /// Copies or clones `source` into the staging area and parses its manifest. Nothing is
-    /// installed, recorded or enabled; dropping the stage removes it.
+    /// installed, recorded or enabled; dropping the stage removes it (drop it off the main
+    /// thread).
     pub fn stage(&self, source: &Source) -> Result<Staged, InstallError> {
         install::stage(&self.config_dir, source)
     }
@@ -72,12 +75,12 @@ impl ExtStore {
         staged: Staged,
         granted: Vec<Permission>,
     ) -> Result<ExtId, InstallError> {
-        let asked = &staged.manifest.permissions;
+        let asked = &staged.manifest().permissions;
         if !(granted.iter().all(|p| asked.contains(p)) && asked.iter().all(|p| granted.contains(p)))
         {
             return Err(InstallError::Consent);
         }
-        let id = staged.manifest.id.clone();
+        let id = staged.manifest().id.clone();
         if self.position(&id).is_ok() {
             return Err(InstallError::AlreadyInstalled(id.as_str().into()));
         }
@@ -86,7 +89,7 @@ impl ExtStore {
         remove_dir(&dir)?;
         std::fs::rename(staged.dir(), &dir)?;
         self.installed.push(Installed {
-            manifest: staged.manifest.clone(),
+            manifest: staged.manifest().clone(),
             dir: dir.clone(),
             enabled: true,
             granted,
@@ -113,16 +116,22 @@ impl ExtStore {
         saved
     }
 
-    /// Removes the record, then the files. Callers stop the extension's processes first
-    /// (Review Focus 3): nothing here knows about them.
-    pub fn uninstall(&mut self, id: &ExtId) -> std::io::Result<()> {
+    /// Removes the record and moves the folder into the staging area, both quick, and returns
+    /// where it went: the caller deletes it off the main thread (launch clears what a crash
+    /// leaves). Callers stop the extension's processes first (Review Focus 3): nothing here
+    /// knows about them.
+    pub fn uninstall(&mut self, id: &ExtId) -> std::io::Result<PathBuf> {
         let ix = self.position(id)?;
         let removed = self.installed.remove(ix);
         if let Err(e) = self.save() {
             self.installed.insert(ix, removed);
             return Err(e);
         }
-        remove_dir(&removed.dir)
+        let trash = staging_path(&self.config_dir)?;
+        match std::fs::rename(&removed.dir, &trash) {
+            Err(e) if e.kind() != ErrorKind::NotFound => Err(e),
+            _ => Ok(trash),
+        }
     }
 
     fn position(&self, id: &ExtId) -> std::io::Result<usize> {
