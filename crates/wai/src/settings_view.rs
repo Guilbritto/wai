@@ -4,11 +4,12 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::radio::Radio;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
-use wai_settings::{Change, Settings, ThemeChoice};
+use wai_settings::{Change, SeenModel, Settings, ThemeChoice, agent_label, builtin};
 
 use crate::aurora::{self, DISPLAY_FONT};
 
@@ -46,14 +47,61 @@ const ROWS: [(Section, &str); 4] = [
     (Section::Updates, "Repository"),
 ];
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum RowStatus {
+    CliNotFound,
+    NotChecked,
+    Starting,
+    Ready,
+    SignedOut,
+    Failed(String),
+}
+
+impl RowStatus {
+    pub fn text(&self, login: Option<&str>) -> String {
+        match self {
+            RowStatus::CliNotFound => "CLI not found".into(),
+            RowStatus::NotChecked => "Not checked".into(),
+            RowStatus::Starting => "Starting…".into(),
+            RowStatus::Ready => "Ready".into(),
+            RowStatus::SignedOut => match login {
+                Some(login) => format!("Not signed in · run {login}"),
+                None => "Not signed in".into(),
+            },
+            RowStatus::Failed(error) => {
+                format!("Failed: {}", error.lines().last().unwrap_or_default())
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // `command`, `models` and `default_model` are for the editors (Task 9)
+pub struct AgentRow {
+    pub id: String,
+    pub label: String,
+    pub extension: Option<String>,
+    pub status: RowStatus,
+    pub command: String,
+    pub models: Vec<SeenModel>,
+    pub default_model: Option<String>,
+    pub is_default: bool,
+}
+
+fn warning(row: &AgentRow) -> Option<&'static str> {
+    (row.id == "copilot").then_some("Copilot may edit files and run commands without asking.")
+}
+
 pub struct SettingsData {
     pub settings: Settings,
+    pub agents: Vec<AgentRow>,
+    /// The project's own default agent, when it is the one in force.
+    pub project_default: Option<String>,
     /// Why `settings.toml` cannot be read: the screen is read-only then.
     pub error: Option<String>,
     pub notice: Option<SharedString>,
 }
 
-#[allow(dead_code)] // `Test` is sent by the AI rows (Task 8)
 pub enum SettingsEvent {
     Change(Change),
     OpenFile,
@@ -231,6 +279,60 @@ impl SettingsView {
             .child(div().w(px(260.)).flex_none().child(control))
     }
 
+    fn agent_row(&self, row: &AgentRow, cx: &mut Context<Self>) -> Div {
+        let id = row.id.clone();
+        let test = row.id.clone();
+        let (off, muted) = (self.data.error.is_some(), cx.theme().muted_foreground);
+        let login = builtin(&row.id).map(|a| a.login);
+        let title = match &row.extension {
+            Some(ext) => format!("{} · {ext}", row.label),
+            None => row.label.clone(),
+        };
+        let install = builtin(&row.id)
+            .filter(|_| row.status == RowStatus::CliNotFound)
+            .map(|a| div().text_color(muted).child(a.install));
+        let warn = warning(row).map(|w| div().text_color(cx.theme().warning).child(w));
+        let selector = format!("settings-agent-{}", row.id);
+        let test_selector = format!("settings-test-{}", row.id);
+        v_flex()
+            .py_2()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .gap_4()
+                    .child(
+                        div().debug_selector(move || selector).child(
+                            Radio::new(SharedString::from(format!("agent-{}", row.id)))
+                                .label(title)
+                                .checked(row.is_default)
+                                .disabled(off)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.change(Change::DefaultAgent(id.clone()), cx)
+                                })),
+                        ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(div().text_color(muted).child(row.status.text(login)))
+                            .child(
+                                div().debug_selector(move || test_selector).child(
+                                    Button::new(SharedString::from(format!("test-{}", row.id)))
+                                        .small()
+                                        .label("Test")
+                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                            cx.emit(SettingsEvent::Test(test.clone()))
+                                        })),
+                                ),
+                            ),
+                    ),
+            )
+            .children(install)
+            .children(warn)
+    }
+
     fn rows(&self, label: &str, cx: &mut Context<Self>) -> Div {
         let off = self.data.error.is_some();
         match label {
@@ -286,10 +388,22 @@ impl Render for SettingsView {
             } else {
                 section == self.section
             };
-            shown.then_some((section, rows))
+            let agents: Vec<_> = if section == Section::Ai {
+                (self.data.agents.iter())
+                    .filter(|a| a.label.to_lowercase().contains(&query))
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            (shown || (searching && !agents.is_empty())).then_some((section, rows, agents))
         });
         let sections: Vec<_> = sections
-            .map(|(section, rows)| {
+            .map(|(section, rows, agents)| {
+                let project = (section == Section::Ai)
+                    .then(|| self.data.project_default.as_deref().map(agent_label))
+                    .flatten()
+                    .map(|a| div().child(format!("This project uses {a}.")));
                 let notice = (section == Section::Ai)
                     .then(|| self.notice())
                     .flatten()
@@ -304,6 +418,8 @@ impl Render for SettingsView {
                             .child(section.title()),
                     )
                     .children(notice)
+                    .children(project)
+                    .children(agents.iter().map(|a| self.agent_row(a, cx)))
                     .children(rows.into_iter().map(|label| self.rows(label, cx)))
             })
             .collect();
@@ -376,8 +492,8 @@ mod tests {
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
     use wai_settings::{Change, Settings, ThemeChoice};
 
-    use super::{Section, SettingsData, SettingsView};
-    use crate::workspace::tests::open;
+    use super::{RowStatus, Section, SettingsData, SettingsView};
+    use crate::workspace::tests::{fake_settings, open, wait_until};
     use crate::workspace::{Pane, Workspace};
 
     fn settings_ws(
@@ -405,7 +521,90 @@ mod tests {
             settings: Settings::default(),
             error: error.map(Into::into),
             notice: None,
+            agents: Vec::new(),
+            project_default: None,
         }
+    }
+
+    fn fake_ws<'a>(
+        cx: &'a mut TestAppContext,
+        flag: &str,
+    ) -> (
+        Entity<Workspace>,
+        &'a mut VisualTestContext,
+        tempfile::TempDir,
+    ) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let mut settings = Settings::default();
+        settings.agents.extend(fake_settings(flag).agents);
+        settings.default_agent = Some("fake".into());
+        let (workspace, cx) = open(cx, settings);
+        let dir = tempfile::tempdir().unwrap();
+        workspace.update(cx, |w, _| w.user_dir = dir.path().into());
+        (workspace, cx, dir)
+    }
+
+    fn row(workspace: &Entity<Workspace>, id: &str, cx: &mut VisualTestContext) -> super::AgentRow {
+        workspace.read_with(cx, |w, cx| {
+            w.agent_rows(cx).into_iter().find(|r| r.id == id).unwrap()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn rows_list_builtins_and_user_agents(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = fake_ws(cx, "");
+        let rows = workspace.read_with(cx, |w, cx| w.agent_rows(cx));
+        let ids: Vec<_> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["antigravity", "claude", "codex", "copilot", "fake"]);
+        assert!(rows[4].is_default && !rows[0].is_default);
+        assert_eq!(rows[4].status, RowStatus::NotChecked);
+        if wai_agent::program("agy acp").is_none() {
+            assert_eq!(rows[0].status, RowStatus::CliNotFound);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn test_learns_ready_and_models(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = fake_ws(cx, "--models");
+        workspace.update_in(cx, |w, window, cx| w.test_agent("fake", window, cx));
+        wait_until(cx, "the models", |cx| {
+            workspace.read_with(cx, |w, _| w.models_seen.contains_key("fake"))
+        });
+        assert_eq!(row(&workspace, "fake", cx).status, RowStatus::Ready);
+        let seen = workspace.read_with(cx, |w, _| w.models_seen["fake"].clone());
+        let ids: Vec<_> = seen.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["fake-small", "fake-large"]);
+    }
+
+    #[gpui_kit::test]
+    fn test_reports_signed_out(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = fake_ws(cx, "--require-auth");
+        workspace.update_in(cx, |w, window, cx| w.test_agent("fake", window, cx));
+        wait_until(cx, "SignedOut", |cx| {
+            row(&workspace, "fake", cx).status == RowStatus::SignedOut
+        });
+        assert_eq!(RowStatus::SignedOut.text(None), "Not signed in");
+        assert_eq!(
+            RowStatus::SignedOut.text(Some("agy login")),
+            "Not signed in · run agy login"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn copilot_row_warns(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = fake_ws(cx, "");
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Ai, None, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-agent-copilot").is_some());
+        assert!(cx.debug_bounds("settings-test-fake").is_some());
+        let copilot = row(&workspace, "copilot", cx);
+        assert_eq!(
+            super::warning(&copilot),
+            Some("Copilot may edit files and run commands without asking.")
+        );
+        assert_eq!(super::warning(&row(&workspace, "claude", cx)), None);
     }
 
     #[gpui_kit::test]

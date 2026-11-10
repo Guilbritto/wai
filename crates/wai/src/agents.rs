@@ -86,9 +86,9 @@ impl AgentRegistry {
         self.configs = configs;
     }
 
-    #[cfg(test)]
     pub fn command(&self, name: &str) -> Option<&str> {
-        (self.configs.get(name)).map(|c| c.command.as_str())
+        let config = self.configs.get(name).or_else(|| self.extension.get(name));
+        config.map(|c| c.command.as_str())
     }
 
     pub fn knows(&self, name: &str) -> bool {

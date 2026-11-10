@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gpui_kit::component::WindowExt as _;
@@ -19,8 +19,8 @@ use wai_agent::{
 use wai_ext::{CommandSpec, ExtEvent, ExtId, HostEvent, Reply};
 use wai_project::{FsChange, ProjectWatcher};
 use wai_settings::{
-    AppState, Change, OpenSession, Settings, Template, config_dir, load_templates, shown,
-    write_change,
+    AppState, Change, OpenSession, SeenModel, Settings, Template, config_dir, load_templates,
+    shown, write_change,
 };
 use wai_terminal::DEFAULT_BG;
 
@@ -39,7 +39,9 @@ use crate::files::{FileTree, OpenFile};
 use crate::layout::{self, Slot, Zone};
 use crate::notify::{self, should_notify};
 use crate::search_view::{OpenMatch, SearchView};
-use crate::settings_view::{Section, SettingsData, SettingsEvent, SettingsView};
+use crate::settings_view::{
+    AgentRow, RowStatus, Section, SettingsData, SettingsEvent, SettingsView,
+};
 use crate::sidebar::{SidebarTab, canonical};
 use crate::terminal_view::{self, TerminalView};
 use crate::topbar::BRAND;
@@ -194,6 +196,8 @@ pub struct Workspace {
     /// Where the open sessions, the project and the terminal's visibility are kept between runs;
     /// `None` keeps nothing (tests). Unsaved edits are kept beside it, in `recovery/`.
     state_path: Option<PathBuf>,
+    /// Agent id -> the models its last Test saw; kept in `state.json`.
+    pub models_seen: BTreeMap<String, Vec<SeenModel>>,
     /// The next recovery file number to try (`recovery::next_file`).
     next_recovery: u64,
     focus: FocusHandle,
@@ -330,6 +334,9 @@ impl Workspace {
             starting: HashMap::new(),
             early: HashMap::new(),
             ext_sessions: HashMap::new(),
+            models_seen: (state_path.as_deref())
+                .map(|path| AppState::load(path).models_seen)
+                .unwrap_or_default(),
             state_path,
             next_recovery: 0,
             settings_error: None,
@@ -586,7 +593,7 @@ impl Workspace {
             // ponytail: the sidebar does not resize yet; save its width once it does.
             sidebar_width: SIDEBAR_WIDTH,
             approved: None,
-            models_seen: Default::default(),
+            models_seen: self.models_seen.clone(),
         };
         // ponytail: a few hundred bytes on the UI thread; move to the background executor if
         // it ever shows in a frame.
@@ -1693,12 +1700,92 @@ impl Workspace {
         pane
     }
 
-    fn settings_data(&self, notice: Option<SharedString>) -> SettingsData {
+    fn settings_data(&self, notice: Option<SharedString>, cx: &App) -> SettingsData {
         SettingsData {
             settings: self.settings.clone(),
             error: self.settings_error.clone(),
             notice,
+            agents: self.agent_rows(cx),
+            project_default: wai_settings::project_default_agent(&self.project)
+                .filter(|p| Some(p) == self.settings.default_agent.as_ref()),
         }
+    }
+
+    pub fn agent_rows(&self, cx: &App) -> Vec<AgentRow> {
+        let registry = self.registry.read(cx);
+        registry
+            .names()
+            .into_iter()
+            .map(|id| {
+                let command = registry.command(&id).unwrap_or_default().to_string();
+                let status = if wai_agent::program(&command).is_none() {
+                    RowStatus::CliNotFound
+                } else {
+                    match registry.status(&id) {
+                        None => RowStatus::NotChecked,
+                        Some(AgentStatus::Starting) => RowStatus::Starting,
+                        Some(AgentStatus::Ready(_)) => RowStatus::Ready,
+                        Some(AgentStatus::SignedOut) => RowStatus::SignedOut,
+                        Some(AgentStatus::Failed(e)) => RowStatus::Failed(e.clone()),
+                    }
+                };
+                let (extension, label) = match id.split_once('/') {
+                    Some((ext, name)) => (Some(ext.to_string()), name.to_string()),
+                    None => (None, wai_settings::agent_label(&id)),
+                };
+                AgentRow {
+                    label,
+                    extension,
+                    status,
+                    command,
+                    models: self.models_seen.get(&id).cloned().unwrap_or_default(),
+                    default_model: self.settings.models.get(&id).cloned(),
+                    is_default: self.settings.default_agent.as_deref() == Some(&id),
+                    id,
+                }
+            })
+            .collect()
+    }
+
+    /// Starts the agent and a session in the scratch folder: that tells whether it runs and
+    /// whether the user is signed in, and which models it offers.
+    // ponytail: the agent stays running after Test. Stop it when idle if the memory matters.
+    pub fn test_agent(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(handle) = self.registry.update(cx, |r, cx| r.handle(id, cx)) else {
+            return;
+        };
+        self.sync_settings_view(cx);
+        let (id, dir) = (id.to_string(), self.user_dir.join("scratch"));
+        cx.spawn_in(window, async move |this, cx| {
+            let _ = std::fs::create_dir_all(&dir);
+            let started = handle.new_session(dir, vec![]).await;
+            this.update(cx, |this, cx| {
+                match started {
+                    Ok(started) => {
+                        this.registry.update(cx, |r, cx| r.mark_ready(&id, cx));
+                        let models = (started.config.iter())
+                            .filter(|o| o.category == wai_agent::ConfigCategory::Model)
+                            .flat_map(|o| o.values.iter())
+                            .map(|v| SeenModel {
+                                id: v.id.clone(),
+                                name: v.name.clone(),
+                            })
+                            .collect();
+                        this.models_seen.insert(id, models);
+                        this.save_state(cx);
+                    }
+                    Err(AgentError::AuthRequired) => this
+                        .registry
+                        .update(cx, |r, cx| r.set_status(&id, AgentStatus::SignedOut, cx)),
+                    Err(e) => this.registry.update(cx, |r, cx| {
+                        r.set_status(&id, AgentStatus::Failed(e.to_string()), cx)
+                    }),
+                }
+                this.sync_settings_view(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Shows the settings at `section`, with `notice` in it. Its pane is focused when there is
@@ -1716,7 +1803,7 @@ impl Workspace {
         let ix = match found {
             Some(ix) => ix,
             None => {
-                let data = self.settings_data(notice.clone());
+                let data = self.settings_data(notice.clone(), cx);
                 let view = cx.new(|cx| SettingsView::new(section, data, window, cx));
                 cx.subscribe_in(
                     &view,
@@ -1729,7 +1816,7 @@ impl Workspace {
                             let path = this.user_dir.join("settings.toml");
                             this.open_file(path, None, window, cx)
                         }
-                        SettingsEvent::Test(_) => {}
+                        SettingsEvent::Test(id) => this.test_agent(id, window, cx),
                     },
                 )
                 .detach();
@@ -1752,7 +1839,7 @@ impl Workspace {
             }
         };
         if let Pane::Settings(view) = &self.panes[ix] {
-            let data = self.settings_data(notice);
+            let data = self.settings_data(notice, cx);
             view.update(cx, |v, cx| {
                 v.show(section, cx);
                 v.set(data, cx);
@@ -1774,7 +1861,7 @@ impl Workspace {
         for pane in &self.panes {
             if let Pane::Settings(view) = pane {
                 let notice = view.read(cx).notice();
-                let data = self.settings_data(notice);
+                let data = self.settings_data(notice, cx);
                 view.update(cx, |v, cx| v.set(data, cx));
             }
         }
