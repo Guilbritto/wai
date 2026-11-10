@@ -96,9 +96,9 @@ impl ChatSession {
                     .ghost()
                     .xsmall()
                     .icon(IconName::Close)
-                    .tooltip("Close session")
-                    .accessibility_label("Close session")
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ChatEvent::Close))),
+                    .tooltip("Close pane (the session stays open)")
+                    .accessibility_label("Close pane")
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ChatEvent::Hide))),
             )
     }
 

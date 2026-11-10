@@ -16,7 +16,7 @@ actions!(
         Quit,
         NewSession,
         ToggleTerminal,
-        CloseSession,
+        ClosePane,
         FocusNextPane,
         OpenFolder,
         CancelTurn,
@@ -56,8 +56,8 @@ fn bind_keys(cx: &mut App) {
         ("secondary-q", Box::new(Quit), None),
         ("secondary-n", Box::new(NewSession), workspace),
         ("ctrl-`", Box::new(ToggleTerminal), workspace),
-        // R20: in an editor pane it closes the active tab.
-        ("secondary-w", Box::new(CloseSession), workspace),
+        // A session leaves the screen and stays open; R20: an editor closes its active tab.
+        ("secondary-w", Box::new(ClosePane), workspace),
         ("secondary-s", Box::new(Save), workspace),
         ("secondary-alt-right", Box::new(FocusNextPane), workspace),
         ("secondary-o", Box::new(OpenFolder), workspace),
@@ -94,7 +94,7 @@ fn terminal_ctrl_keymap() -> [(&'static str, Box<dyn Action>); 10] {
         ("ctrl-o", Box::new(NoAction)),
         ("ctrl-q", Box::new(NoAction)),
         ("ctrl-shift-n", Box::new(NewSession)),
-        ("ctrl-shift-w", Box::new(CloseSession)),
+        ("ctrl-shift-w", Box::new(ClosePane)),
         ("ctrl-shift-o", Box::new(OpenFolder)),
         ("ctrl-shift-q", Box::new(Quit)),
     ]
@@ -301,7 +301,7 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 /// `WAI_SHOT_PANEL=1`: the first extension panel's tab, an enabled extension having rendered it
 /// (fase-3-panel.png).
 /// `WAI_SHOT_PALETTE=1`: the command palette open (fase-3-palette.png).
-/// `WAI_SHOT_HISTORY=1`, with any of the above: the sidebar's History open.
+/// `WAI_SHOT_HISTORY=1`, with any of the above: the sidebar's History tab.
 /// `WAI_SHOT_DRAG=left|center|right`: see `drag_open_row`.
 #[cfg(feature = "screenshot")]
 fn screenshot(
@@ -407,7 +407,7 @@ fn screenshot(
         }
         if std::env::var("WAI_SHOT_HISTORY").is_ok() {
             workspace.update(cx, |w, cx| {
-                w.history_open = true;
+                w.sidebar_tab = crate::sidebar::SidebarTab::History;
                 cx.notify();
             });
         }
@@ -532,7 +532,7 @@ mod tests {
             ("ctrl-o", shell),
             ("ctrl-q", shell),
             ("ctrl-shift-n", "wai::NewSession"),
-            ("ctrl-shift-w", "wai::CloseSession"),
+            ("ctrl-shift-w", "wai::ClosePane"),
             ("ctrl-shift-o", "wai::OpenFolder"),
             ("ctrl-shift-q", "wai::Quit"),
         ];
