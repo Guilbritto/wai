@@ -700,7 +700,7 @@ mod tests {
     use wai_settings::{Change, Settings, ThemeChoice};
 
     use super::{RowStatus, Section, SettingsData, SettingsView};
-    use crate::workspace::tests::{fake_settings, open, wait_until};
+    use crate::workspace::tests::{click, fake_settings, open, question, wait_until};
     use crate::workspace::{Pane, Workspace};
 
     fn settings_ws(
@@ -836,7 +836,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn advanced_command_is_written_on_enter(cx: &mut TestAppContext) {
+    fn advanced_command_is_written_on_allow(cx: &mut TestAppContext) {
         let (workspace, cx, dir) = fake_ws(cx, "");
         workspace.update_in(cx, |w, window, cx| {
             w.open_settings(Section::Ai, None, window, cx)
@@ -853,6 +853,8 @@ mod tests {
         input.update_in(cx, |i, window, cx| i.focus(window, cx));
         cx.simulate_input("--reply other");
         cx.simulate_keystrokes("enter");
+        assert!(question(&workspace, cx).is_some());
+        click("approval-allow", cx);
         let (settings, _) = Settings::load(dir.path(), None).unwrap();
         let typed = fake_settings("--reply other").agents["fake"]
             .command

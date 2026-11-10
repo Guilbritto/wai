@@ -208,6 +208,10 @@ pub struct Workspace {
     pub shell: Option<String>,
     /// The values waiting for an answer, the first one's dialog open.
     pub(crate) asking: Vec<Approval>,
+    /// Those of `asking` the screen edited: Allow writes them to `settings.toml`.
+    edits: Vec<Approval>,
+    /// The values declined this run: a reload does not ask about them again.
+    declined: BTreeSet<String>,
     /// The next recovery file number to try (`recovery::next_file`).
     next_recovery: u64,
     focus: FocusHandle,
@@ -365,6 +369,8 @@ impl Workspace {
             approved,
             shell,
             asking: Vec::new(),
+            edits: Vec::new(),
+            declined: BTreeSet::new(),
             state_path,
             next_recovery: 0,
             settings_error: None,
@@ -485,10 +491,6 @@ impl Workspace {
             new.default_agent.is_some() && new.default_agent != self.settings.default_agent;
         self.settings = new;
         self.enforce(cx);
-        if chosen {
-            self.start_agent(cx);
-            self.refresh_history(cx);
-        }
         for notice in &notices {
             if !self.load_notices.contains(notice) {
                 let shown = Notification::warning(notice.clone()).autohide(false);
@@ -496,8 +498,22 @@ impl Workspace {
             }
         }
         self.load_notices = notices;
-        let pending = unapproved(&old, &self.settings, &self.approved);
+        if chosen {
+            // Picked again, its declined command is asked about again.
+            let agent = self.default_agent();
+            if let Some(config) = agent.and_then(|id| self.settings.agents.get(&id)) {
+                self.declined.remove(&config.command);
+            }
+        }
+        let declined = &self.declined;
+        let mut pending = unapproved(&old, &self.settings, &self.approved);
+        pending.retain(|a| !declined.contains(approval_value(a)));
         self.ask_approval(pending, window, cx);
+        // Asked first: a default whose command waits for an answer starts after it.
+        if chosen {
+            self.start_agent(cx);
+            self.refresh_history(cx);
+        }
         self.sync_settings_view(cx);
         cx.notify();
     }
@@ -584,8 +600,9 @@ impl Workspace {
         });
     }
 
-    /// Allow approves the value and puts it in force; Don't allow keeps what runs now. Neither
-    /// writes `settings.toml`.
+    /// Allow approves the value and puts it in force; Don't allow keeps what runs now, and a
+    /// reload does not ask about it again this run. Only Allow of the screen's edit writes
+    /// `settings.toml`. A default agent that waited for the answer starts then.
     fn answer(
         &mut self,
         approval: &Approval,
@@ -593,19 +610,45 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let waited = self.default_asked();
         self.asking.retain(|a| a != approval);
+        let value = approval_value(approval).clone();
         if allow {
-            self.approved.insert(approval_value(approval).clone());
+            self.approved.insert(value.clone());
             self.save_state(cx);
             self.enforce(cx);
-            if let Approval::Agent { id, .. } = approval
-                && self.default_agent().as_ref() == Some(id)
-            {
-                self.start_agent(cx);
+            // The reload of this write finds the value approved: no second question.
+            let (write, keep) = (std::mem::take(&mut self.edits).into_iter())
+                .partition::<Vec<_>, _>(|e| *approval_value(e) == value);
+            self.edits = keep;
+            for edit in write {
+                self.write_setting(&edit_change(edit), window, cx);
             }
-            self.sync_settings_view(cx);
+        } else if let Some(ix) = self.edits.iter().position(|e| e == approval) {
+            self.edits.remove(ix);
+        } else {
+            self.declined.insert(value);
         }
+        if waited && !self.default_asked() {
+            self.start_agent(cx);
+        }
+        // A declined edit's field shows the value in force again.
+        self.sync_settings_view(cx);
         self.ask_next(window, cx);
+    }
+
+    /// Whether a question about the default agent's command from the settings (not the screen,
+    /// whose edits apply at the next start) is open.
+    fn default_asked(&self) -> bool {
+        let Some(agent) = self.default_agent() else {
+            return false;
+        };
+        self.asking.iter().any(|a| match a {
+            Approval::Agent { id, new, .. } => {
+                *id == agent && !self.approved.contains(new) && !self.edits.contains(a)
+            }
+            Approval::Shell { .. } => false,
+        })
     }
 
     /// Hands a watcher batch to the open files it touches, and the project's settings file to
@@ -631,12 +674,15 @@ impl Workspace {
         self.settings.default_agent.clone()
     }
 
-    /// Starts the default agent, so the history fills in once it is ready.
+    /// Starts the default agent, so the history fills in once it is ready. Not while its command
+    /// waits for an answer: `answer` starts it then.
     pub fn start_agent(&mut self, cx: &mut Context<Self>) {
         let Some(agent) = self.default_agent() else {
             return;
         };
-        self.registry.update(cx, |r, cx| r.handle(&agent, cx));
+        if !self.default_asked() {
+            self.registry.update(cx, |r, cx| r.handle(&agent, cx));
+        }
     }
 
     /// Reopens the last run's sessions, which `load_session` replays, and its terminal. A session
@@ -1997,9 +2043,35 @@ impl Workspace {
         self.focus_pane(ix, window, cx);
     }
 
-    /// Writes `change` to the user's file; the watcher applies it.
+    /// Writes `change` to the user's file; the watcher applies it. A command or shell not
+    /// approved yet is asked about first, and written only on Allow.
     pub fn change_setting(&mut self, change: Change, window: &mut Window, cx: &mut Context<Self>) {
-        if let Err(e) = write_change(&self.user_dir, &change) {
+        let asked = match &change {
+            Change::AgentCommand { agent, command } if !is_approved(command, &self.approved) => {
+                let old = self.registry.read(cx).configs().get(agent);
+                Some(Approval::Agent {
+                    id: agent.clone(),
+                    old: old.map(|c| c.command.clone()),
+                    new: command.clone(),
+                })
+            }
+            Change::Shell(Some(shell)) if !self.approved.contains(shell) => Some(Approval::Shell {
+                old: self.shell.clone(),
+                new: shell.clone(),
+            }),
+            _ => None,
+        };
+        match asked {
+            Some(approval) => {
+                self.edits.push(approval.clone());
+                self.ask_approval(vec![approval], window, cx);
+            }
+            None => self.write_setting(&change, window, cx),
+        }
+    }
+
+    fn write_setting(&self, change: &Change, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(e) = write_change(&self.user_dir, change) {
             let text = format!("Could not save settings: {e}");
             window.push_notification(Notification::warning(text), cx);
         }
@@ -2247,6 +2319,17 @@ fn approval_value(approval: &Approval) -> &String {
 }
 
 /// Control characters show escaped: a value cannot hide its end behind line breaks.
+/// The screen's edit that `approval` asks about.
+fn edit_change(approval: Approval) -> Change {
+    match approval {
+        Approval::Agent { id, new, .. } => Change::AgentCommand {
+            agent: id,
+            command: new,
+        },
+        Approval::Shell { new, .. } => Change::Shell(Some(new)),
+    }
+}
+
 pub(crate) fn approval_text(approval: &Approval) -> String {
     let text = match approval {
         Approval::Agent {
@@ -3774,7 +3857,7 @@ pub(crate) mod tests {
     }
 
     /// A window whose settings watcher looks at a fresh user dir holding `file`.
-    fn live<'a>(
+    pub(crate) fn live<'a>(
         cx: &'a mut TestAppContext,
         settings: Settings,
         file: Option<&str>,
@@ -3952,7 +4035,7 @@ pub(crate) mod tests {
         assert_eq!(cx.update(|window, cx| window.notifications(cx).len()), 1);
     }
 
-    fn click(id: &'static str, cx: &mut VisualTestContext) {
+    pub(crate) fn click(id: &'static str, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             window.render_frame(cx);
             window.click(id, cx);
@@ -3961,7 +4044,10 @@ pub(crate) mod tests {
     }
 
     /// The approval dialog's text while it is open.
-    fn question(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
+    pub(crate) fn question(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Option<String> {
         let open = cx.update(|window, cx| {
             window.render_frame(cx);
             window.has_active_dialog(cx)
@@ -3995,13 +4081,13 @@ pub(crate) mod tests {
         cx.run_until_parked();
     }
 
-    /// A new `fake` session that sends "hi": the agent's reply.
-    fn reply(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> String {
+    /// A new `agent` session that sends "hi": the agent's reply.
+    fn reply(workspace: &Entity<Workspace>, agent: &str, cx: &mut VisualTestContext) -> String {
         let n = workspace.read_with(cx, |w, _| w.sessions.len());
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| {
                 let prompt = Some("hi".into());
-                w.start_session("fake".into(), prompt, true, None, window, cx)
+                w.start_session(agent.into(), prompt, true, None, window, cx)
             })
         });
         wait_until(cx, "the session", |cx| {
@@ -4046,7 +4132,7 @@ pub(crate) mod tests {
             question(&workspace, cx).unwrap(),
             format!("fake: {old} → {new}")
         );
-        assert_eq!(reply(&workspace, cx), "Hello from fake agent");
+        assert_eq!(reply(&workspace, "fake", cx), "Hello from fake agent");
     }
 
     #[gpui_kit::test]
@@ -4106,7 +4192,7 @@ pub(crate) mod tests {
         let (workspace, cx) = open_at(relaunch, settings, Some(state));
         launch(&workspace, cx);
         assert_eq!(question(&workspace, cx), None);
-        assert_eq!(reply(&workspace, cx), "other");
+        assert_eq!(reply(&workspace, "fake", cx), "other");
     }
 
     /// A launch whose `state.json` holds `text` (`None`: there is none) approves only the
@@ -4140,6 +4226,155 @@ pub(crate) mod tests {
     #[gpui_kit::test]
     fn corrupt_state_approves_nothing(cx: &mut TestAppContext) {
         asks_without_a_state(Some("{"), cx);
+    }
+
+    fn status(
+        workspace: &Entity<Workspace>,
+        agent: &str,
+        cx: &mut VisualTestContext,
+    ) -> Option<AgentStatus> {
+        workspace.read_with(cx, |w, cx| w.registry.read(cx).status(agent).cloned())
+    }
+
+    /// A launch whose default agent's command waits for an answer runs nothing before it, not
+    /// even the last approved command; Allow runs the new one.
+    #[gpui_kit::test]
+    fn launch_waits_for_the_default_agents_answer(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let none = AppState {
+            approved: Some(Default::default()),
+            ..AppState::default()
+        };
+        none.save(&state).unwrap();
+        let command = fake_settings("--reply other").agents["fake"]
+            .command
+            .clone();
+        let mut settings = Settings::default();
+        let config = AgentConfig {
+            command: command.clone(),
+        };
+        settings.agents.insert("antigravity".into(), config);
+        settings.default_agent = Some("antigravity".into());
+        let (workspace, cx) = open_at(cx, settings, Some(state));
+        launch(&workspace, cx);
+        assert_eq!(
+            question(&workspace, cx),
+            Some(format!("Antigravity: agy acp → {command}"))
+        );
+        assert_eq!(status(&workspace, "antigravity", cx), None);
+        click("approval-allow", cx);
+        assert!(status(&workspace, "antigravity", cx).is_some());
+        // The test's shell.
+        click("approval-allow", cx);
+        assert_eq!(reply(&workspace, "antigravity", cx), "other");
+    }
+
+    /// The same on a switch of the default; Don't allow runs the last approved command.
+    #[gpui_kit::test]
+    fn switch_waits_for_the_default_agents_answer(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let settings = Settings {
+            default_agent: None,
+            ..fake_settings("")
+        };
+        let (workspace, cx) = open(cx, settings);
+        let dir = tempfile::tempdir().unwrap();
+        let (_, file) = fake_file("--reply other");
+        edit_user_file(&workspace, dir.path(), &file, cx);
+        assert!(question(&workspace, cx).is_some());
+        assert_eq!(status(&workspace, "fake", cx), None);
+        click("approval-deny", cx);
+        assert!(status(&workspace, "fake", cx).is_some());
+        assert_eq!(reply(&workspace, "fake", cx), "Hello from fake agent");
+    }
+
+    /// A declined value is not asked about again this run, unless its agent becomes the default;
+    /// the next launch asks again.
+    #[gpui_kit::test]
+    fn declined_value_waits_for_the_next_launch(
+        cx: &mut TestAppContext,
+        relaunch: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        // From before approvals: the first launch approves today's command.
+        AppState::default().save(&state).unwrap();
+        let settings = Settings {
+            default_agent: None,
+            ..fake_settings("")
+        };
+        let (workspace, cx) = open_at(cx, settings, Some(state.clone()));
+        launch(&workspace, cx);
+        let (new, _) = fake_file("--reply other");
+        let file = format!("[agents.fake]\ncommand = '''{new}'''\n");
+        edit_user_file(&workspace, dir.path(), &file, cx);
+        assert!(question(&workspace, cx).is_some());
+        click("approval-deny", cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.change_setting(Change::Theme(ThemeChoice::Light), window, cx);
+                w.reload_settings(window, cx);
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(question(&workspace, cx), None);
+        let chosen = format!("default_agent = \"fake\"\n{file}");
+        edit_user_file(&workspace, dir.path(), &chosen, cx);
+        assert!(question(&workspace, cx).is_some());
+        click("approval-deny", cx);
+
+        relaunch.executor().allow_parking();
+        let (settings, _) = Settings::load(dir.path(), None).unwrap();
+        let (workspace, cx) = open_at(relaunch, settings, Some(state));
+        launch(&workspace, cx);
+        assert_eq!(question(&workspace, cx), Some(format!("fake (new): {new}")));
+    }
+
+    /// A command or shell edited on the screen is asked about before anything is written: Allow
+    /// writes it, once and with no second question; Don't allow writes nothing.
+    fn screen_edit_asks_first(change: Change, allow: bool, cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = live(cx, fake_settings(""), None);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.change_setting(change, window, cx)));
+        assert!(question(&workspace, cx).is_some());
+        let file = dir.path().join("settings.toml");
+        assert!(!file.exists(), "nothing is written before the answer");
+        click(
+            if allow {
+                "approval-allow"
+            } else {
+                "approval-deny"
+            },
+            cx,
+        );
+        if allow {
+            wait_until(cx, "the reload", |cx| {
+                workspace.read_with(cx, |w, _| w.applied == 1)
+            });
+        }
+        // Past the debounce: a second batch would show up as a second apply.
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(20));
+            cx.executor().advance_clock(Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        assert_eq!(question(&workspace, cx), None);
+        assert_eq!(file.exists(), allow);
+        workspace.read_with(cx, |w, _| assert_eq!(w.applied, usize::from(allow)));
+    }
+
+    #[gpui_kit::test]
+    fn allowed_screen_edit_is_written_once(cx: &mut TestAppContext) {
+        let (command, _) = fake_file("--reply other");
+        let agent = "fake".into();
+        screen_edit_asks_first(Change::AgentCommand { agent, command }, true, cx);
+    }
+
+    #[gpui_kit::test]
+    fn declined_screen_edit_writes_nothing(cx: &mut TestAppContext) {
+        screen_edit_asks_first(Change::Shell(Some("/bin/other".into())), false, cx);
     }
 
     #[gpui_kit::test]
