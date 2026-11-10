@@ -882,6 +882,7 @@ mod tests {
                 name: "Yes".into(),
                 kind: ChoiceKind::AllowOnce,
             }],
+            subagent: None,
         }
     }
 
@@ -918,6 +919,7 @@ mod tests {
             session: "s".into(),
             message: "Pick".into(),
             fields: vec![],
+            subagent: None,
         };
         m.on_question(question(7));
         assert_eq!(m.state, TurnState::NeedsYou);
@@ -951,6 +953,7 @@ mod tests {
             session: "s".into(),
             message: "Pick".into(),
             fields: vec![],
+            subagent: None,
         });
         m.on_question_answered(8, "Answered: Blue");
         assert_eq!(m.state, TurnState::NeedsYou);
@@ -965,6 +968,7 @@ mod tests {
             session: "s".into(),
             message: "Pick".into(),
             fields: vec![],
+            subagent: None,
         });
         m.on_permission_resolved(9);
         assert_eq!(m.state, TurnState::NeedsYou);

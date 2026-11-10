@@ -189,6 +189,7 @@ pub(crate) fn permission_request(
                 },
             })
             .collect(),
+        subagent: None,
     }
 }
 
@@ -228,6 +229,7 @@ pub(crate) fn question_request(
         session,
         message: req.message,
         fields,
+        subagent: None,
     })
 }
 

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::{ConnectionTo, Responder, schema as acp};
 use agent_client_protocol::{
-    AcpAgent, AcpAgentConfig, Agent, Client, Error, ErrorCode, JsonRpcRequest,
+    AcpAgent, AcpAgentConfig, Agent, Client, Error, ErrorCode, JsonRpcRequest, RequestCancellation,
     is_connection_terminated, is_incoming_transport_closed,
 };
 use async_channel::{Receiver, Sender};
@@ -244,12 +244,15 @@ struct Pending {
     parked: Parked,
 }
 
-/// A request of the agent waiting for the user.
+/// A request of the agent waiting for the user. `_watch` is dropped with the request: it ends
+/// the watch for the agent withdrawing it.
 enum Parked {
-    Permission(Responder<acp::RequestPermissionResponse>),
+    Permission {
+        responder: Responder<acp::RequestPermissionResponse>,
+        _watch: Sender<()>,
+    },
     Question {
         responder: Responder<acp::CreateElicitationResponse>,
-        /// Dropped with the question: ends the watch for the agent withdrawing it.
         _watch: Sender<()>,
     },
 }
@@ -259,7 +262,7 @@ impl Parked {
     fn cancel(self, id: u64) -> AgentEvent {
         // ponytail: a failed respond means the connection is closing; `Exited` reports it.
         match self {
-            Parked::Permission(responder) => {
+            Parked::Permission { responder, .. } => {
                 let _ = responder.respond(acp::RequestPermissionResponse::new(
                     acp::RequestPermissionOutcome::Cancelled,
                 ));
@@ -274,7 +277,8 @@ impl Parked {
 }
 
 /// Shared between the handle and the connection thread: the event sender and the
-/// permission requests and questions waiting for an answer (one id sequence for both).
+/// permission requests and questions waiting for an answer (one id sequence for both). A
+/// request is parked under the session that asked: a subagent's survives its root's Stop.
 struct Broker {
     agent: String,
     events: Sender<AgentEvent>,
@@ -310,16 +314,67 @@ impl Broker {
         self.emit(event);
     }
 
+    /// A subagent's request shows in its root session, tagged with the subagent. Returns the
+    /// session that asked, the one the request is parked under.
+    fn attribute(&self, session: &mut SessionId, subagent: &mut Option<SessionId>) -> SessionId {
+        let asked = session.clone();
+        let subagents = self.subagents.lock().expect("broker poisoned");
+        if let Some(root) = subagents.root(&asked) {
+            *session = root.clone();
+            *subagent = Some(asked.clone());
+        }
+        asked
+    }
+
+    /// Runs `cancel` if the agent withdraws the request (`$/cancel_request`) before `answered`
+    /// closes (the request left the broker another way).
+    fn watch_withdrawal(
+        self: &Arc<Self>,
+        cx: &ConnectionTo<Agent>,
+        withdrawn: RequestCancellation,
+        answered: Receiver<()>,
+        cancel: impl FnOnce(&Broker) + Send + 'static,
+    ) -> Result<(), Error> {
+        let broker = self.clone();
+        cx.spawn(async move {
+            let withdrawn = async {
+                withdrawn.cancelled().await;
+                true
+            };
+            let answered = async {
+                let _ = answered.recv().await;
+                false
+            };
+            if smol::future::or(withdrawn, answered).await {
+                cancel(&broker);
+            }
+            Ok(())
+        })
+    }
+
+    /// Parks a permission request until the user answers. If the agent withdraws it
+    /// (`$/cancel_request`, as it does for a foreground subagent it stops), it resolves as
+    /// cancelled.
     fn park_permission(
-        &self,
+        self: &Arc<Self>,
         request: acp::RequestPermissionRequest,
         responder: Responder<acp::RequestPermissionResponse>,
-    ) {
+        cx: &ConnectionTo<Agent>,
+    ) -> Result<(), Error> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let request = convert::permission_request(id, request);
-        let session = request.session.clone();
-        let event = AgentEvent::PermissionRequested(request);
-        self.park(id, session, Parked::Permission(responder), event);
+        let mut request = convert::permission_request(id, request);
+        let asked = self.attribute(&mut request.session, &mut request.subagent);
+        let withdrawn = responder.cancellation();
+        let (watch, answered) = async_channel::bounded::<()>(1);
+        let parked = Parked::Permission {
+            responder,
+            _watch: watch,
+        };
+        self.park(id, asked, parked, AgentEvent::PermissionRequested(request));
+        self.watch_withdrawal(cx, withdrawn, answered, move |broker| {
+            // ponytail: Stale means it was answered meanwhile.
+            let _ = broker.answer(id, None);
+        })
     }
 
     /// Parks a session's form until the user answers; anything else is declined at once (a
@@ -332,39 +387,27 @@ impl Broker {
         cx: &ConnectionTo<Agent>,
     ) -> Result<(), Error> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let question = match convert::question_request(id, request) {
+        let mut question = match convert::question_request(id, request) {
             Ok(question) => question,
             Err(session) => {
-                if let Some(session) = session {
+                if let Some(mut session) = session {
+                    self.attribute(&mut session, &mut None);
                     self.emit(AgentEvent::QuestionUnsupported { session });
                 }
                 return responder.respond(convert::question_response(QuestionAnswer::Decline));
             }
         };
+        let asked = self.attribute(&mut question.session, &mut question.subagent);
         let withdrawn = responder.cancellation();
         let (watch, answered) = async_channel::bounded::<()>(1);
-        let session = question.session.clone();
         let parked = Parked::Question {
             responder,
             _watch: watch,
         };
-        self.park(id, session, parked, AgentEvent::QuestionAsked(question));
-        let broker = self.clone();
-        cx.spawn(async move {
-            let withdrawn = async {
-                withdrawn.cancelled().await;
-                true
-            };
-            // Closes once the question left the broker another way.
-            let answered = async {
-                let _ = answered.recv().await;
-                false
-            };
-            if smol::future::or(withdrawn, answered).await {
-                // ponytail: Stale means it was answered meanwhile.
-                let _ = broker.answer_question(id, QuestionAnswer::Cancel);
-            }
-            Ok(())
+        self.park(id, asked, parked, AgentEvent::QuestionAsked(question));
+        self.watch_withdrawal(cx, withdrawn, answered, move |broker| {
+            // ponytail: Stale means it was answered meanwhile.
+            let _ = broker.answer_question(id, QuestionAnswer::Cancel);
         })
     }
 
@@ -379,7 +422,7 @@ impl Broker {
     }
 
     fn answer(&self, id: PermissionRequestId, choice: Option<String>) -> Result<(), BrokerError> {
-        let Some(Parked::Permission(responder)) = self.take(id, false) else {
+        let Some(Parked::Permission { responder, .. }) = self.take(id, false) else {
             return Err(BrokerError::Stale);
         };
         let outcome = match choice {
@@ -500,10 +543,9 @@ async fn connect(
             agent_client_protocol::on_receive_notification!(),
         )
         .on_receive_request(
-            async move |request: acp::RequestPermissionRequest, responder, _cx| {
+            async move |request: acp::RequestPermissionRequest, responder, cx| {
                 // Parked until the user answers; the dispatch loop moves on at once.
-                permissions.park_permission(request, responder);
-                Ok(())
+                permissions.park_permission(request, responder, &cx)
             },
             agent_client_protocol::on_receive_request!(),
         )

@@ -245,6 +245,9 @@ pub struct PermissionRequest {
     pub title: String,
     pub diff: Option<FileDiff>,
     pub options: Vec<PermissionChoice>,
+    /// The subagent session that asked; then `session` is its root, the open session the card
+    /// shows in.
+    pub subagent: Option<SessionId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -268,6 +271,8 @@ pub struct QuestionRequest {
     pub session: SessionId,
     pub message: String,
     pub fields: Vec<QuestionField>,
+    /// As `PermissionRequest::subagent`.
+    pub subagent: Option<SessionId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

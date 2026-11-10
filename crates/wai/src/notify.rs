@@ -210,6 +210,7 @@ mod tests {
                 title: "Run cargo test".into(),
                 diff: None,
                 options: Vec::new(),
+                subagent: None,
             },
             answered: None,
         });

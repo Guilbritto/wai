@@ -15,7 +15,6 @@ pub(crate) struct Subagents {
 
 impl Subagents {
     /// The open session a subagent session belongs to; `None` for a session of wai's own.
-    #[allow(dead_code)] // read by the broker's request parking (Task 2)
     pub(crate) fn root(&self, session: &str) -> Option<&SessionId> {
         self.roots.get(session)
     }
