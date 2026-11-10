@@ -10,6 +10,7 @@ use std::borrow::Cow;
 use std::rc::Rc;
 
 use gpui_kit::base::{ResizeHandleRenderer, ResizeHandleState};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeRegistry, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -258,6 +259,18 @@ pub(crate) fn tab(active: bool, cx: &App) -> Div {
     } else {
         base.text_color(nevoa()).hover(|el| el.bg(vidro()))
     }
+}
+
+/// `button` filled with `fill`, `hover` under the pointer and pressed, `text` for its label and
+/// icon. A gpui-component custom variant draws its color at 20% (`mix_oklab(transparent, 0.2)`),
+/// so the fill is also set over it; hover and press keep the variant's.
+pub(crate) fn filled(button: Button, fill: Hsla, hover: Hsla, text: Hsla, cx: &App) -> Button {
+    let colors = ButtonCustomVariant::new(cx)
+        .color(fill)
+        .foreground(text)
+        .hover(hover)
+        .active(hover);
+    button.custom(colors).bg(fill)
 }
 
 /// Resize handles draw nothing at rest (the gap between cards is the divider) and a

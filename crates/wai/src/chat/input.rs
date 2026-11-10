@@ -4,7 +4,7 @@ use std::path::Path;
 
 use base64::Engine as _;
 use gpui_kit::component::attachment::{Attachment as Chip, AttachmentContent, AttachmentTitle};
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -129,7 +129,11 @@ impl ChatSession {
         cx.notify();
     }
 
-    pub(super) fn render_prompt(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(super) fn render_prompt(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let busy = matches!(self.model.state, TurnState::Working | TurnState::NeedsYou);
         let chips = self.attachments.iter().enumerate().map(|(ix, attachment)| {
             Chip::new()
@@ -145,15 +149,6 @@ impl ChatSession {
         let theme = cx.theme();
         let dark = theme.is_dark();
         // Round 36 px buttons (`.chat-enviar`); light mode keeps the theme's primary and danger.
-        // A custom variant draws its color at 20%, so the fill is set over it.
-        let paint = |button: Button, fill: Hsla, hover: Hsla, text: Hsla| {
-            let colors = ButtonCustomVariant::new(cx)
-                .color(fill)
-                .foreground(text)
-                .hover(hover)
-                .active(hover);
-            button.custom(colors).bg(fill)
-        };
         let button = if busy {
             let stop = Button::new("stop")
                 .icon(IconName::Square)
@@ -161,11 +156,12 @@ impl ChatSession {
                 .accessibility_label("Stop")
                 .on_click(cx.listener(|this, _, window, cx| this.cancel(&CancelTurn, window, cx)));
             match dark {
-                true => paint(
+                true => aurora::filled(
                     stop,
                     aurora::erro().alpha(0.18),
                     aurora::erro().alpha(0.28),
                     aurora::erro(),
+                    cx,
                 )
                 .border_1()
                 .border_color(aurora::erro().alpha(0.5)),
@@ -182,17 +178,21 @@ impl ChatSession {
             match (dark, disabled) {
                 // A disabled button replays these over its own disabled colors.
                 (true, true) => send.bg(aurora::vidro()).text_color(aurora::nevoa()),
-                (true, false) => paint(
+                (true, false) => aurora::filled(
                     send,
                     aurora::boreal(),
                     aurora::boreal().blend(hsla(0., 0., 1., 0.2)),
                     rgb(0x0b1024).into(),
+                    cx,
                 ),
                 (false, _) => send.primary(),
             }
         }
         .size(px(36.))
         .rounded(px(18.));
+        // R83: the textarea draws no ring of its own, so the pill shows the focus, and a press
+        // anywhere on it, its padding included, puts the caret in the textarea.
+        let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let field = h_flex()
             .gap_2()
             .items_end()
@@ -201,12 +201,18 @@ impl ChatSession {
             .pt(px(6.))
             .pr(px(6.))
             .pb(px(6.))
-            .pl(px(14.));
-        let field = match dark {
-            true => field
+            .pl(px(14.))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.focus(window, cx)),
+            );
+        let field = match (dark, focused) {
+            (true, true) => field.bg(aurora::vidro()).border_color(aurora::boreal()),
+            (true, false) => field
                 .bg(aurora::vidro())
                 .border_color(aurora::borda_forte()),
-            false => field.bg(theme.background).border_color(theme.input),
+            (false, true) => field.bg(theme.background).border_color(theme.ring),
+            (false, false) => field.bg(theme.background).border_color(theme.input),
         };
         v_flex()
             .gap_2()

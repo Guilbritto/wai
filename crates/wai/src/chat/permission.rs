@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -205,15 +205,9 @@ fn choice(n: usize, choice: &PermissionChoice, highlighted: bool, cx: &App) -> B
         .font_weight(FontWeight::BOLD)
         .child((n + 1).to_string());
     let label = div().flex_1().min_w_0().child(choice.name.clone());
-    let colors = ButtonCustomVariant::new(cx)
-        .color(fill)
-        .foreground(text)
-        .hover(hover)
-        .active(hover);
-    Button::new(button_id(choice.kind))
-        .custom(colors)
-        // A custom variant draws its color at 20%; the hover keeps its own.
-        .bg(fill)
+    // The name is a child, not the label: it is the accessible name only when given as one.
+    let button = Button::new(button_id(choice.kind)).accessibility_label(choice.name.clone());
+    aurora::filled(button, fill, hover, text, cx)
         .rounded(px(12.))
         .w_full()
         .h_auto()

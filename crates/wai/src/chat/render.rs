@@ -334,14 +334,20 @@ impl Render for ChatSession {
                 .items_center()
                 .justify_center()
                 .child(aurora::pill(cx).child("No messages yet.")),
+            // The Central's bubbles sit 16 px apart, not the scroller's 32: the scroller's gap
+            // goes and each row but the last carries its own. The scroller remeasures the row
+            // before an append, whose "last" flips.
             false => messages.child(
                 MessageScroller::new(
                     "messages",
                     self.scroller.clone(),
-                    cx.processor(Self::render_item),
+                    cx.processor(|this, ix, window, cx| {
+                        let last = ix + 1 == this.model.items.len();
+                        let row = this.render_item(ix, window, cx);
+                        div().when(!last, |el| el.pb_4()).child(row)
+                    }),
                 )
-                // The Central's bubbles sit closer than the scroller's 32 px.
-                .with_row_style(StyleRefinement::default().pb_4()),
+                .with_row_style(StyleRefinement::default().pb_0()),
             ),
         };
         v_flex()
@@ -351,7 +357,7 @@ impl Render for ChatSession {
             .size_full()
             .child(self.render_header(cx))
             .child(messages)
-            .child(self.render_prompt(cx))
+            .child(self.render_prompt(window, cx))
     }
 }
 
