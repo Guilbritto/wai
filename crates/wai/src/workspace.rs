@@ -995,6 +995,18 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The workspace follows the user to a session in another folder, as Open folder does. Run
+    /// where the user moves the focus, not in `focus_pane`: `set_project` focuses too.
+    fn follow_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.panes[self.focused_pane].session() else {
+            return;
+        };
+        let cwd = session.read(cx).cwd.clone();
+        if cwd.is_dir() {
+            self.leave(Leave::Open(cwd), window, cx);
+        }
+    }
+
     /// Shows `session` in the focused pane (beside the editor pane, see `session_pane`), or with
     /// `side` in a new pane while there are fewer than `MAX_PANES` (an empty focused pane is used
     /// instead). A session already in a pane is focused there: one session is drawn once.
@@ -1024,6 +1036,7 @@ impl Workspace {
             }
         };
         self.focus_pane(ix, window, cx);
+        self.follow_session(window, cx);
         self.save_state(cx);
     }
 
@@ -1160,6 +1173,7 @@ impl Workspace {
         });
         if let Some(ix) = shown {
             self.focus_pane(ix, window, cx);
+            self.follow_session(window, cx);
         }
         if let (true, Some(session)) = (fresh, &session) {
             session.update(cx, |s, cx| s.load(false, window, cx));
@@ -1621,6 +1635,7 @@ impl Workspace {
             return pane.update(cx, |p, cx| p.close(p.active, window, cx));
         }
         self.drop_pane(ix, window, cx);
+        self.follow_session(window, cx);
     }
 
     /// An Open row's ×: drops `session` from the open list and from its pane, if one shows it
@@ -2127,13 +2142,21 @@ impl Workspace {
 
     fn focus_next_pane(&mut self, _: &FocusNextPane, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_pane((self.focused_pane + 1) % self.panes.len(), window, cx);
+        self.follow_session(window, cx);
     }
 
     /// Shows `project`, closing the old project's files: callers ask about unsaved edits first
     /// (`leave`).
     pub fn set_project(&mut self, project: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = self.panes.iter().position(|p| matches!(p, Pane::Editor(_))) {
+            // A focused session (the one `follow_session` came for) keeps the focus.
+            let focused = self.panes[self.focused_pane].session().cloned();
             self.drop_pane(ix, window, cx);
+            if let Some(ix) =
+                focused.and_then(|s| self.panes.iter().position(|p| p.session() == Some(&s)))
+            {
+                self.focus_pane(ix, window, cx);
+            }
         }
         window.set_window_title(&title(&project));
         self.project = canonical(&project);
@@ -2417,7 +2440,8 @@ impl Render for Workspace {
                     cx.defer_in(window, move |this, window, cx| {
                         let away = this.focused_pane != ix || this.focus.is_focused(window);
                         if ix < this.panes.len() && away {
-                            this.focus_pane(ix, window, cx)
+                            this.focus_pane(ix, window, cx);
+                            this.follow_session(window, cx);
                         }
                     });
                 }))
@@ -4617,5 +4641,118 @@ pub(crate) mod tests {
             w.terminal.as_ref().unwrap().read(cx).shell.clone()
         });
         assert_eq!(shell, Some(before));
+    }
+
+    /// The workspace follows the focused session's folder, as Open folder does: moving to a
+    /// session elsewhere switches the project and closes the editor pane; the focus stays put.
+    #[gpui_kit::test]
+    fn workspace_follows_the_focused_session(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(2));
+        let rows = load_history(&workspace, 2, cx);
+        for (row, side) in rows.iter().zip([false, true]) {
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(row, side, window, cx)));
+        }
+        let project =
+            |cx: &mut VisualTestContext| workspace.read_with(cx, |w, _| w.project.clone());
+        let here = project(cx);
+        let there = canonical(&tmp_project("follow"));
+        let elsewhere = pane_session(&workspace, 0, cx);
+        elsewhere.update(cx, |s, _| s.cwd = there.clone());
+        let file = there.join("a.txt");
+        std::fs::write(&file, "a").unwrap();
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.open_file(file, None, window, cx)));
+        cx.run_until_parked();
+        workspace.read_with(cx, |w, _| {
+            assert!(matches!(w.panes[2], Pane::Editor(_)));
+            assert_eq!(w.focused_pane, 2);
+        });
+
+        // A session in this project changes nothing: set_project would close the editor pane.
+        let pane = cx.debug_bounds("pane-1").expect("pane drawn");
+        cx.simulate_click(pane.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(project(cx), here);
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.focused_pane, 1);
+            assert!(
+                matches!(w.panes[2], Pane::Editor(_)),
+                "the editor pane stays"
+            );
+        });
+
+        let pane = cx.debug_bounds("pane-0").expect("pane drawn");
+        cx.simulate_click(pane.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(project(cx), there);
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 2, "the editor pane closed");
+            assert_eq!(w.panes[w.focused_pane].session(), Some(&elsewhere));
+        });
+
+        cx.simulate_keystrokes("secondary-alt-right");
+        assert_eq!(project(cx), here);
+
+        // Stop the project's watcher before its folder goes (see templates_reload_on_project_switch).
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.set_project("/nonexistent".into(), window, cx))
+        });
+        std::fs::remove_dir_all(there).ok();
+    }
+
+    /// Closing a pane follows the session that takes the focus, as the pane-hide branch intends.
+    #[gpui_kit::test]
+    fn closing_a_pane_follows_its_neighbour(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(2));
+        let rows = load_history(&workspace, 2, cx);
+        for (row, side) in rows.iter().zip([false, true]) {
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(row, side, window, cx)));
+        }
+        let here = workspace.read_with(cx, |w, _| w.project.clone());
+        let there = canonical(&tmp_project("close-follow"));
+        let elsewhere = pane_session(&workspace, 0, cx);
+        elsewhere.update(cx, |s, _| s.cwd = there.clone());
+        workspace.read_with(cx, |w, _| assert_eq!(w.focused_pane, 1));
+
+        cx.simulate_keystrokes("secondary-w");
+        cx.run_until_parked();
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 1, "the pane went");
+            assert_eq!(w.panes[0].session(), Some(&elsewhere));
+            assert_eq!(w.project, there);
+        });
+
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.set_project(here, window, cx)));
+        std::fs::remove_dir_all(there).ok();
+    }
+
+    /// Restore puts a session back in its pane without moving the workspace to its folder.
+    #[gpui_kit::test]
+    fn restore_never_follows_a_session(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let there = tmp_project("restore");
+        let mut away = saved("fake", "abc", 0);
+        away.cwd = there.clone();
+        let state = AppState {
+            open_sessions: vec![away],
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(path));
+
+        launch(&workspace, cx);
+
+        let session = pane_session(&workspace, 0, cx);
+        wait_until(cx, "the replay", |cx| {
+            session.read_with(cx, |s, _| s.model.state == TurnState::Idle)
+        });
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(session.read(cx).cwd, there);
+            assert_eq!(w.project, canonical(&std::env::temp_dir()));
+        });
+        std::fs::remove_dir_all(there).ok();
     }
 }

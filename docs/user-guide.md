@@ -80,6 +80,7 @@ Revert refuses in these cases:
 
 - **The Sessions tab** lists the open sessions. **The History tab** lists the default agent's past sessions for this project; its **All projects** switch shows every project's history. Choosing another default agent lists that agent's history instead.
 - **Opening a row:** a click shows the session in the focused pane. **Open to the side** adds a pane, while there are fewer than four.
+- **Following a session:** moving to a session from another folder (opening its row, clicking its pane, **⌘⌥→**, closing the pane beside it) opens that folder, as **⌘O** does: the editor pane closes, after asking about unsaved edits, and Files, Search, History and templates follow. Relaunching and sessions opened by extensions never move you; a session whose folder is gone just shows.
 - **Fork:** for agents that can load and fork sessions, **Fork** on an open or past session opens a copy with the same history beside it.
 - **Closing a pane:** **⌘W** in a session pane, or the **×** at the right of its header, takes the pane off the screen. The session keeps running and stays in the **Open** list; click it to show it again. In a split, an empty pane has its own **×**, which closes the pane.
 - **Ending a session:** the **×** on its **Open** row ends the session, cancels its turn and closes its pane. The agent keeps the session in its history.
