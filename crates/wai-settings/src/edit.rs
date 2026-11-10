@@ -25,7 +25,9 @@ fn table<'a>(parent: &'a mut Table, name: &str) -> &'a mut Table {
     let item = parent
         .entry(name)
         .or_insert_with(|| Item::Table(Table::new()));
-    if !item.is_table() {
+    if item.is_inline_table() {
+        *item = Item::Table(std::mem::take(item).into_table().expect("an inline table"));
+    } else if !item.is_table() {
         *item = Item::Table(Table::new());
     }
     let t = item.as_table_mut().expect("just made a table");
@@ -35,7 +37,11 @@ fn table<'a>(parent: &'a mut Table, name: &str) -> &'a mut Table {
 
 fn set(t: &mut Table, key: &str, v: Option<toml_edit::Item>) {
     match v {
-        Some(v) => {
+        Some(mut v) => {
+            if let (Some(old), Some(new)) = (t.get(key).and_then(Item::as_value), v.as_value_mut())
+            {
+                *new.decor_mut() = old.decor().clone();
+            }
             t.insert(key, v);
         }
         None => {
@@ -64,14 +70,14 @@ pub fn write_change(user_dir: &Path, change: &Change) -> Result<(), SettingsErro
     let root = doc.as_table_mut();
     match change {
         Change::DefaultAgent(id) => {
-            doc["default_agent"] = value(id.as_str());
+            set(root, "default_agent", Some(value(id.as_str())));
         }
         Change::Theme(theme) => {
             let name = match theme {
                 ThemeChoice::Dark => "dark",
                 ThemeChoice::Light => "light",
             };
-            doc["theme"] = value(name);
+            set(root, "theme", Some(value(name)));
         }
         Change::Shell(shell) => set(
             table(root, "terminal"),
@@ -80,13 +86,13 @@ pub fn write_change(user_dir: &Path, change: &Change) -> Result<(), SettingsErro
         ),
         Change::AgentCommand { agent, command } => {
             let agent = table(table(root, "agents"), agent);
-            agent.insert("command", value(command.as_str()));
+            set(agent, "command", Some(value(command.as_str())));
         }
         Change::Model { agent, model } => {
             set(table(root, "models"), agent, model.as_deref().map(value))
         }
         Change::UpdatesCheck(on) => {
-            table(root, "updates").insert("check", value(*on));
+            set(table(root, "updates"), "check", Some(value(*on)));
         }
         Change::UpdatesRepo(repo) => {
             set(table(root, "updates"), "repo", repo.as_deref().map(value))
@@ -147,6 +153,34 @@ mod tests {
         write_change(d.path(), &Change::Shell(None)).unwrap();
         let (s, _) = Settings::load(d.path(), None).unwrap();
         assert!(!s.models.contains_key("codex") && s.terminal.shell.is_none());
+    }
+
+    #[test]
+    fn write_keeps_comments_on_changed_keys_and_inline_tables() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.toml");
+        std::fs::write(
+            &p,
+            "theme = \"light\" # keep\nmodels = { codex = \"a\", other = \"y\" }\nterminal = { shell = \"a\", x = 1 }\n",
+        )
+        .unwrap();
+        write_change(d.path(), &Change::Theme(ThemeChoice::Dark)).unwrap();
+        write_change(
+            d.path(),
+            &Change::Model {
+                agent: "codex".into(),
+                model: Some("b".into()),
+            },
+        )
+        .unwrap();
+        write_change(d.path(), &Change::Shell(Some("z".into()))).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("theme = \"dark\" # keep"), "{text}");
+        let t: toml::Table = toml::from_str(&text).unwrap();
+        assert_eq!(t["models"]["codex"].as_str(), Some("b"));
+        assert_eq!(t["models"]["other"].as_str(), Some("y"));
+        assert_eq!(t["terminal"]["shell"].as_str(), Some("z"));
+        assert_eq!(t["terminal"]["x"].as_integer(), Some(1));
     }
 
     #[test]
