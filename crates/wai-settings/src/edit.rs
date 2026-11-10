@@ -2,7 +2,7 @@ use std::path::Path;
 
 use toml_edit::{DocumentMut, Item, Table, value};
 
-use crate::{SettingsError, ThemeChoice, read_config};
+use crate::{Processing, SettingsError, ThemeChoice, read_config};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Change {
@@ -19,6 +19,7 @@ pub enum Change {
     },
     UpdatesCheck(bool),
     UpdatesRepo(Option<String>),
+    Processing(Processing),
 }
 
 fn table<'a>(parent: &'a mut Table, name: &str) -> &'a mut Table {
@@ -101,6 +102,14 @@ pub fn write_change(user_dir: &Path, change: &Change) -> Result<(), SettingsErro
         Change::UpdatesRepo(repo) => {
             set(table(root, "updates"), "repo", repo.as_deref().map(value))
         }
+        Change::Processing(mode) => {
+            let name = match mode {
+                Processing::Steps => "steps",
+                Processing::Grouped => "grouped",
+                Processing::Hidden => "hidden",
+            };
+            set(table(root, "conversation"), "processing", Some(value(name)));
+        }
     }
     std::fs::create_dir_all(user_dir).map_err(io)?;
     let tmp = user_dir.join("settings.toml.tmp");
@@ -111,7 +120,7 @@ pub fn write_change(user_dir: &Path, change: &Change) -> Result<(), SettingsErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Settings;
+    use crate::{Processing, Settings};
 
     #[test]
     fn write_keeps_comments_and_creates_the_file() {
@@ -203,6 +212,26 @@ mod tests {
         assert_eq!(t["models"]["other"].as_str(), Some("y"));
         assert_eq!(t["terminal"]["shell"].as_str(), Some("z"));
         assert_eq!(t["terminal"]["x"].as_integer(), Some(1));
+    }
+
+    #[test]
+    fn write_sets_the_processing_mode() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.toml");
+        std::fs::write(&p, "# mine\ntheme = \"light\"\n").unwrap();
+        write_change(d.path(), &Change::Processing(Processing::Grouped)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "# mine\ntheme = \"light\"\n\n[conversation]\nprocessing = \"grouped\"\n"
+        );
+        write_change(d.path(), &Change::Processing(Processing::Hidden)).unwrap();
+        write_change(d.path(), &Change::Processing(Processing::Steps)).unwrap();
+        let (s, _) = Settings::load(d.path(), None).unwrap();
+        assert_eq!(s.conversation.processing, Processing::Steps);
+        assert_eq!(s.theme, ThemeChoice::Light);
+        write_change(d.path(), &Change::Processing(Processing::Hidden)).unwrap();
+        let (s, _) = Settings::load(d.path(), None).unwrap();
+        assert_eq!(s.conversation.processing, Processing::Hidden);
     }
 
     #[test]

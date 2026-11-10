@@ -480,6 +480,10 @@ impl Workspace {
             Theme::change(theme_mode(new.theme), Some(window), cx);
             window.refresh();
         }
+        let processing = new.conversation.processing;
+        for session in &self.sessions {
+            session.update(cx, |s, cx| s.set_processing(processing, cx));
+        }
         // What runs now: the old values the questions show.
         let mut old = Settings {
             agents: self.registry.read(cx).configs().clone(),
@@ -929,6 +933,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let processing = self.settings.conversation.processing;
+        session.update(cx, |s, cx| s.set_processing(processing, cx));
         cx.subscribe_in(&session, window, |this, session, event, window, cx| {
             match event {
                 // Its pane keeps the notice; the next launch does not try again.

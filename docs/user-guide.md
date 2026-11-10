@@ -32,6 +32,7 @@ While the agent prepares the session, its pane shows `Preparing <agent>…`. **�
 ### Chatting
 
 - **Sending:** **Enter** sends the prompt and **Shift+Enter** adds a new line. **Send** turns into **Stop** while the agent works, and **Esc** in a session also stops the turn.
+- **The status line:** while a turn runs, a line just above the prompt box says what the agent is doing (`Reading README.md…`, `Running git log…`, `Thinking…` between tool calls, `Waiting for you…` while a card waits), for how long, and `Esc to stop`. It updates once a second and goes away when the turn ends.
 - **Attaching files:** drop them on the prompt box. PNG, JPEG, GIF and WebP files up to 5 MB go as images; any other file goes as a reference to its path.
 - **The header** shows:
   - the session's title;
@@ -40,8 +41,17 @@ While the agent prepares the session, its pane shows `Preparing <agent>…`. **�
   - the context used, as `used / size`.
 - **Model pickers:** a change applies to that session only, from then on, and wai does not keep it across relaunches. A new session starts with the **Default model** from Settings, if you set one; if the agent no longer offers it, the session says `<agent> no longer offers the model <model>; using <current>.` and keeps the agent's own choice. Resumed, forked and restored sessions keep what the agent restores. An agent that offers no such option shows no picker.
 - **The transcript:**
-  - Replies stream in as Markdown, and thinking is folded.
-  - Tool calls show their output, up to 2,000 lines, with **Show all**.
+  - Replies stream in as Markdown.
+  - The agent's steps (its tool calls and its thinking) show as the **Processing** setting says:
+
+    | Processing | Steps |
+    |---|---|
+    | **Step by step** (the default) | Each step is one folded line with its title and ✓ or ✗. A click unfolds a tool call's output, or the thinking |
+    | **Grouped** | The steps between two replies fold into one block, such as `3 steps · Read README.md`. A click lists the step lines, each still folded |
+    | **Hidden** | No steps |
+
+  - **Always shown,** whatever the setting: your prompts, the replies, permission cards and questions, notices, and file edits. An edit that was written reads `✎ Edited <file>` (a click shows its diff), and the turn still ends with its **Edits** block (see [Reviewing edits](#reviewing-edits)).
+  - An unfolded tool call shows its output, up to 2,000 lines, with **Show all**.
   - A very large output offers **Open full output in editor**. That opens a read-only copy kept under `<config>/scratch/`, which is cleared at each launch.
 
 ### Status
@@ -271,6 +281,7 @@ Only your own settings file can turn it on; a project's `.wai/settings.toml` can
   - **Default model**, a picker once wai has seen the agent's models; before that it says `Start a session or press Test to see the models.`;
   - **Advanced**, folded, which shows the **Command**. Changing it asks `Run a new command?` (see [Agent commands](#agent-commands)).
 - **Appearance:** **Theme**, Dark or Light, applies at once.
+- **Conversation:** **Processing**, how a chat shows the agent's steps: Step by step, Grouped or Hidden (see [Chatting](#chatting)). It applies at once to every open session.
 - **Terminal:** **Shell**, a path; empty is the system default. It applies to terminals opened afterwards, and changing it asks `Run a new command?`.
 - **Updates:** **Check for updates** and **Repository**.
 
@@ -279,6 +290,7 @@ Only your own settings file can turn it on; a project's `.wai/settings.toml` can
 | Change | Takes effect |
 |---|---|
 | Theme | at once |
+| Processing | at once, in every open session |
 | Default agent | for the next sessions; open sessions keep their agent |
 | Default model | for the next sessions of that agent |
 | An agent's command | for the next start of that agent; running sessions are not killed |
@@ -294,6 +306,7 @@ Every setting and its default:
 | `agents.<name>.command` | the built-in's command (see below) | How to start the ACP agent `<name>` (see below) |
 | `models.<name>` | unset | The id of the model a new session of agent `<name>` starts with |
 | `terminal.shell` | unset | The terminal's program (no arguments); unset means `$SHELL`, then `/bin/sh` |
+| `conversation.processing` | `"steps"` | How a chat shows the agent's steps: `"steps"` (one folded line each), `"grouped"` (one folded block per run) or `"hidden"` |
 | `updates.check` | `false` | Turns on the update check |
 | `updates.repo` | unset | `owner/repo` on GitHub; unset means nothing is checked |
 
@@ -311,6 +324,9 @@ command = "MY_AGENT_LOG=debug /opt/my-agent/bin/my-agent --acp"
 
 [terminal]
 shell = "/bin/zsh"
+
+[conversation]
+processing = "grouped"
 ```
 
 ### Agent commands
@@ -375,7 +391,7 @@ A repository you open can carry a `.wai/` folder. Because opening a cloned repos
 
 | File | Allowed | Not allowed |
 |---|---|---|
-| `.wai/settings.toml` | `theme`; `default_agent`, when you have already chosen a default and it names that default, an agent with an `[agents.<id>]` entry in your file, or an agent of an installed extension | `agents` and `terminal` (commands, shells, environment); `models`; `updates`. These are ignored with a notice |
+| `.wai/settings.toml` | `theme`; `default_agent`, when you have already chosen a default and it names that default, an agent with an `[agents.<id>]` entry in your file, or an agent of an installed extension | `agents` and `terminal` (commands, shells, environment); `models`; `updates`; `conversation`. These are ignored with a notice |
 | `.wai/templates.toml` | Templates, as above | — |
 | `.wai/extensions.toml` | Suggesting extensions | Installing anything |
 

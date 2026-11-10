@@ -11,7 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::PromptBlock;
 
-use super::model::TurnState;
+use super::model::{TurnState, elapsed};
 use super::view::ChatSession;
 use crate::app::CancelTurn;
 use crate::aurora;
@@ -214,9 +214,35 @@ impl ChatSession {
             (false, true) => field.bg(theme.background).border_color(theme.ring),
             (false, false) => field.bg(theme.background).border_color(theme.input),
         };
+        // What the agent does, for how long, and how to stop it. Nothing animates: the mark
+        // turns with the clock's tick, so a quiet turn costs one frame a second.
+        let status = self.model.activity().map(|doing| {
+            let started = self.turn.as_ref().map(|(started, _)| started.elapsed());
+            let secs = started.map_or(0, |d| d.as_secs());
+            let color = match dark {
+                true => aurora::nevoa_2(),
+                false => theme.muted_foreground,
+            };
+            h_flex()
+                .id("turn-status")
+                .gap_2()
+                .px_3()
+                .text_size(px(12.))
+                .text_color(color)
+                .child(["◐", "◓", "◑", "◒"][secs as usize % 4])
+                .child(div().min_w_0().truncate().child(doing))
+                .child(
+                    div()
+                        .flex_none()
+                        .child(format!("{} · Esc to stop", elapsed(secs))),
+                )
+                // Registers the id so tests can find it.
+                .test_support()
+        });
         v_flex()
             .gap_2()
             .p_3()
+            .children(status)
             .when(!self.attachments.is_empty(), |el| {
                 el.child(h_flex().gap_2().flex_wrap().children(chips))
             })

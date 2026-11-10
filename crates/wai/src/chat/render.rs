@@ -10,6 +10,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::{PermissionChoice, ToolStatus};
+use wai_settings::Processing;
 
 use super::model::{ChatItem, NoticeKind, ToolItem, TurnState, UsageInfo, show_label};
 use super::view::{ChatEvent, ChatSession, Mode};
@@ -52,6 +53,26 @@ pub(super) fn glass(el: Div, cx: &App) -> Div {
         true => el.bg(aurora::vidro()).border_color(aurora::borda()),
         false => el.border_color(theme.border),
     }
+}
+
+/// A tool call's status mark and its color.
+fn status_icon(status: ToolStatus, cx: &App) -> Icon {
+    let theme = cx.theme();
+    let (icon, color) = match status {
+        ToolStatus::Pending => (IconName::Ellipsis, theme.muted_foreground),
+        ToolStatus::InProgress => (IconName::Loader, theme.foreground),
+        ToolStatus::Completed => (IconName::CircleCheck, theme.success),
+        ToolStatus::Failed => (IconName::CircleX, theme.danger),
+    };
+    Icon::new(icon).small().text_color(color)
+}
+
+fn chevron(open: bool) -> Icon {
+    let icon = match open {
+        true => IconName::ChevronDown,
+        false => IconName::ChevronRight,
+    };
+    Icon::new(icon).small()
 }
 
 impl ChatSession {
@@ -106,12 +127,85 @@ impl ChatSession {
             )
     }
 
+    /// Row `ix` as the processing mode shows it; none for a step that is hidden or sits in a
+    /// folded group. Grouped, a run of steps is headed by its first row.
     fn render_item(
         &mut self,
         ix: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Option<AnyElement> {
+        if !self.model.items[ix].is_step() || self.processing == Processing::Steps {
+            return Some(self.render_row(ix, window, cx));
+        }
+        if self.processing == Processing::Hidden {
+            return None;
+        }
+        let run = self.model.run(ix, ChatItem::is_step);
+        let open = self.open_groups.contains(&run.start);
+        let row = open.then(|| self.render_row(ix, window, cx));
+        if ix != run.start {
+            return row;
+        }
+        let head = self.render_group(run, open, cx);
+        Some(
+            v_flex()
+                .gap_4()
+                .child(head)
+                .children(row)
+                .into_any_element(),
+        )
+    }
+
+    /// The head of a run of steps: `3 steps · <the latest>`, with the run's status. A click
+    /// unfolds the run into its step lines.
+    fn render_group(
+        &self,
+        run: std::ops::Range<usize>,
+        open: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let head = run.start;
+        let has = |status: ToolStatus| {
+            let mut tools = self.model.items[run.clone()].iter();
+            tools.any(|item| matches!(item, ChatItem::Tool(t) if t.status == status))
+        };
+        let status = if has(ToolStatus::Failed) {
+            ToolStatus::Failed
+        } else if has(ToolStatus::Pending) || has(ToolStatus::InProgress) {
+            ToolStatus::InProgress
+        } else {
+            ToolStatus::Completed
+        };
+        glass(h_flex(), cx)
+            .id(("group", head))
+            .gap_2()
+            .px_3()
+            .py_2()
+            .rounded(px(12.))
+            .cursor_pointer()
+            .child(chevron(open))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(self.model.run_label(run)),
+            )
+            .child(status_icon(status, cx))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.open_groups.remove(&head) {
+                    this.open_groups.insert(head);
+                }
+                this.remeasure(this.model.run(head, ChatItem::is_step), cx);
+                cx.notify();
+            }))
+            // Registers the id so tests can find and click it.
+            .test_support()
+    }
+
+    fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (dark, muted) = (theme.is_dark(), theme.muted_foreground);
         match &self.model.items[ix] {
@@ -166,11 +260,6 @@ impl ChatSession {
             }
             ChatItem::Thought { .. } => {
                 let open = self.open_thoughts.contains(&ix);
-                let chevron = if open {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                };
                 v_flex()
                     .gap_1()
                     .text_color(muted)
@@ -179,14 +268,16 @@ impl ChatSession {
                             .id(("thought", ix))
                             .gap_1()
                             .cursor_pointer()
-                            .child(Icon::new(chevron).small())
+                            .child(chevron(open))
                             .child("Thinking…")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.open_thoughts.remove(&ix) {
                                     this.open_thoughts.insert(ix);
                                 }
                                 cx.notify();
-                            })),
+                            }))
+                            // Registers the id so tests can find it.
+                            .test_support(),
                     )
                     .when(open, |el| {
                         el.children(self.texts.get(&ix).map(|md| TextView::new(&md.state)))
@@ -260,6 +351,8 @@ impl ChatSession {
         }
     }
 
+    /// One folded line: the call's title and status; a click unfolds its output and diffs. An
+    /// edit that reached the disk reads `✎ Edited <file>`, in every processing mode.
     fn render_tool(
         &self,
         ix: usize,
@@ -267,73 +360,102 @@ impl ChatSession {
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme();
-        let (icon, color) = match tool.status {
-            ToolStatus::Pending => (IconName::Ellipsis, theme.muted_foreground),
-            ToolStatus::InProgress => (IconName::Loader, theme.foreground),
-            ToolStatus::Completed => (IconName::CircleCheck, theme.success),
-            ToolStatus::Failed => (IconName::CircleX, theme.danger),
+        let open = self.open_steps.contains(&ix);
+        let edit = self.model.items[ix].is_edit();
+        let (id, title) = match edit {
+            true => {
+                let mut files: Vec<String> = Vec::new();
+                for diff in &tool.diffs {
+                    let path = diff.path.strip_prefix(&self.cwd).unwrap_or(&diff.path);
+                    let name = wai_settings::shown(path);
+                    if !files.contains(&name) {
+                        files.push(name);
+                    }
+                }
+                ("edited", format!("✎ Edited {}", files.join(", ")))
+            }
+            false => ("step", tool.title.clone()),
         };
         let (output, hidden) = tool.visible_text();
         let on_open = Self::on_open(cx);
-        glass(v_flex(), cx)
+        let line = h_flex()
+            .id((id, ix))
+            .gap_2()
+            .cursor_pointer()
+            .child(chevron(open))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(title),
+            )
+            .child(status_icon(tool.status, cx))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.open_steps.remove(&ix) {
+                    this.open_steps.insert(ix);
+                }
+                this.remeasure(ix..ix + 1, cx);
+                cx.notify();
+            }))
+            // Registers the id so tests can find and click it.
+            .test_support();
+        let card = glass(v_flex(), cx)
             .id(("tool", ix))
             .gap_2()
             .px_3()
             .py_2()
             .rounded(px(12.))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(Icon::new(icon).small().text_color(color))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(tool.title.clone()),
-                    ),
+            .child(line);
+        if !open {
+            return card;
+        }
+        card.when(!output.is_empty(), |el| {
+            el.child(
+                div()
+                    .id(("step-output", ix))
+                    .font_family(theme.mono_font_family.clone())
+                    .text_size(theme.mono_font_size)
+                    .text_color(theme.muted_foreground)
+                    .child(output.to_string())
+                    .test_support(),
             )
-            .when(!output.is_empty(), |el| {
-                el.child(
-                    div()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_size(theme.mono_font_size)
-                        .text_color(theme.muted_foreground)
-                        .child(output.to_string()),
-                )
-            })
-            .children(hidden.map(|n| {
-                match tool.expanded {
-                    false => Button::new(("show-all", ix))
-                        .ghost()
-                        .small()
-                        .label(show_label(n))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(ChatItem::Tool(tool)) = this.model.items.get_mut(ix) {
-                                tool.expanded = true;
-                            }
-                            this.sync_rows(Some(ix), cx);
-                            cx.notify();
-                        })),
-                    // R21: past what "Show all" draws, the whole output opens in the editor.
-                    true => Button::new(("open-output", ix))
-                        .ghost()
-                        .small()
-                        .label("Open full output in editor")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(ChatItem::Tool(tool)) = this.model.items.get(ix) {
-                                let (tool, text) = (tool.id.clone(), tool.text.clone());
-                                cx.emit(ChatEvent::OpenOutput { tool, text });
-                            }
-                        })),
-                }
-            }))
-            .children(
-                self.diffs
-                    .get(&ix)
-                    .into_iter()
-                    .flatten()
-                    .enumerate()
-                    .map(|(k, d)| d.render(("diff", k).into(), &on_open, cx)),
-            )
+        })
+        .children(hidden.map(|n| {
+            match tool.expanded {
+                false => Button::new(("show-all", ix))
+                    .ghost()
+                    .small()
+                    .label(show_label(n))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(ChatItem::Tool(tool)) = this.model.items.get_mut(ix) {
+                            tool.expanded = true;
+                        }
+                        this.sync_rows(Some(ix), cx);
+                        cx.notify();
+                    })),
+                // R21: past what "Show all" draws, the whole output opens in the editor.
+                true => Button::new(("open-output", ix))
+                    .ghost()
+                    .small()
+                    .label("Open full output in editor")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(ChatItem::Tool(tool)) = this.model.items.get(ix) {
+                            let (tool, text) = (tool.id.clone(), tool.text.clone());
+                            cx.emit(ChatEvent::OpenOutput { tool, text });
+                        }
+                    })),
+            }
+        }))
+        .children(
+            self.diffs
+                .get(&ix)
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .map(|(k, d)| d.render(("diff", k).into(), &on_open, cx)),
+        )
     }
 
     /// The old mode picker, unless the agent offers `mode` as a config option.
@@ -378,7 +500,9 @@ impl Render for ChatSession {
                     cx.processor(|this, ix, window, cx| {
                         let last = ix + 1 == this.model.items.len();
                         let row = this.render_item(ix, window, cx);
-                        div().when(!last, |el| el.pb_4()).child(row)
+                        div()
+                            .when(!last && row.is_some(), |el| el.pb_4())
+                            .children(row)
                     }),
                 )
                 .with_row_style(StyleRefinement::default().pb_0()),
