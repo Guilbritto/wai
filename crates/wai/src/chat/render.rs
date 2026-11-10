@@ -54,7 +54,7 @@ pub(super) fn glass(el: Div, cx: &App) -> Div {
 }
 
 impl ChatSession {
-    fn render_header(&self, cx: &App) -> impl IntoElement + use<> {
+    fn render_header(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let title = self.model.title.clone().unwrap_or("New session".into());
         aurora::card_bar(cx)
             .gap_3()
@@ -79,6 +79,15 @@ impl ChatSession {
             .children(
                 (self.model.usage.as_ref())
                     .map(|usage| aurora::pill(cx).flex_none().child(usage_label(usage))),
+            )
+            .child(
+                Button::new("session-close")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .tooltip("Close session")
+                    .accessibility_label("Close session")
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ChatEvent::Close))),
             )
     }
 

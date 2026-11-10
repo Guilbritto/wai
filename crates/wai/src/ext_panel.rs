@@ -823,7 +823,7 @@ mod tests {
         assert!(!sync(ungranted, cx), "a tab without the grant");
         assert!(host.read_with(cx, |h, _| h.panels().is_empty()));
         assert_eq!(tab(cx), SidebarTab::Sessions);
-        assert!(shown("all-projects", cx));
+        assert!(shown("history-toggle", cx));
 
         let mut disabled = installed.clone();
         disabled[0].enabled = false;

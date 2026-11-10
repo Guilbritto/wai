@@ -5,7 +5,7 @@ use std::ops::Range;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::SessionSummary;
@@ -199,6 +199,32 @@ impl Workspace {
 
     fn render_sessions(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let rows = self.history_rows().len();
+        let open = self.history_open;
+        let ring = cx.theme().ring;
+        let chevron = match open {
+            true => IconName::ChevronDown,
+            false => IconName::ChevronRight,
+        };
+        let label = format!("History · {rows}");
+        // R88: the whole row, the switch aside, opens and closes the History.
+        let toggle = aurora::tab(false, cx)
+            .id("history-toggle")
+            .flex_1()
+            .rounded(px(8.))
+            .role(Role::Button)
+            .aria_label(label.clone())
+            .aria_expanded(open)
+            .focus_visible(move |el| el.border_color(ring))
+            // Focusable, and Enter or Space clicks it.
+            .tab_index(0)
+            .child(heading(&label, cx).pt_1().pr_1())
+            .child(Icon::new(chevron).xsmall())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.history_open = !this.history_open;
+                cx.notify();
+            }))
+            // Registers the id so tests can find and click it.
+            .test_support();
         v_flex()
             .size_full()
             .child(heading("Open", cx))
@@ -210,34 +236,39 @@ impl Workspace {
             )
             .child(
                 h_flex()
-                    .justify_between()
+                    .mt_2()
                     .pr_3()
-                    .child(heading("History", cx))
-                    .child(
-                        Switch::new("all-projects")
-                            .xsmall()
-                            .label("All projects")
-                            .checked(self.all_projects)
-                            .on_click(cx.listener(|this, all: &bool, _, cx| {
-                                this.all_projects = *all;
-                                cx.notify();
-                            })),
-                    ),
+                    .gap_2()
+                    .child(toggle)
+                    .when(open, |el| {
+                        el.child(
+                            Switch::new("all-projects")
+                                .xsmall()
+                                .label("All projects")
+                                .checked(self.all_projects)
+                                .on_click(cx.listener(|this, all: &bool, _, cx| {
+                                    this.all_projects = *all;
+                                    cx.notify();
+                                })),
+                        )
+                    }),
             )
             // Only the visible rows render: an agent can hold thousands of sessions.
-            .child(
-                uniform_list(
-                    "history",
-                    rows,
-                    cx.processor(|this, range: Range<usize>, _, cx| {
-                        let rows = this.history_rows();
-                        range
-                            .map(|ix| this.history_row(ix, rows[ix], cx))
-                            .collect::<Vec<_>>()
-                    }),
+            .when(open, |el| {
+                el.child(
+                    uniform_list(
+                        "history",
+                        rows,
+                        cx.processor(|this, range: Range<usize>, _, cx| {
+                            let rows = this.history_rows();
+                            range
+                                .map(|ix| this.history_row(ix, rows[ix], cx))
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .flex_1(),
                 )
-                .flex_1(),
-            )
+            })
     }
 
     fn open_row(
@@ -340,7 +371,7 @@ impl Workspace {
     }
 }
 
-fn heading(text: &'static str, cx: &App) -> impl IntoElement {
+fn heading(text: &str, cx: &App) -> Div {
     let theme = cx.theme();
     let color = if theme.is_dark() {
         aurora::nevoa_2()
@@ -386,12 +417,14 @@ fn fork_button(id: impl Into<ElementId>) -> Button {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::TestAppContext;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{ElementId, TestAppContext, VisualTestContext};
     use wai_settings::Settings;
 
     use gpui_kit::component::ActiveTheme as _;
 
     use super::{TurnState, status_color};
+    use crate::workspace::tests::{history_settings, load_history, open};
     use crate::{app, aurora};
 
     #[gpui_kit::test]
@@ -401,5 +434,32 @@ mod tests {
             let color = status_color(&TurnState::Working, cx.theme());
             assert_eq!(aurora::hex(color), aurora::hex(aurora::boreal()));
         });
+    }
+
+    /// R88: History starts collapsed, without its rows or the "All projects" switch; its header,
+    /// "HISTORY · N", opens it.
+    #[gpui_kit::test]
+    fn history_starts_collapsed_and_toggles(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(3));
+        load_history(&workspace, 3, cx);
+        let shown = |id: ElementId, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.try_find(id).is_some()
+            })
+        };
+        let row = || ElementId::from(("history-side", 0usize));
+        assert!(!shown(row(), cx), "no history rows");
+        assert!(!shown("all-projects".into(), cx));
+        let header = cx.update(|window, _| window.find("history-toggle"));
+        assert_eq!(header.label(), Some("History · 3"));
+        assert_eq!(header.expanded(), Some(false));
+
+        cx.update(|window, cx| window.click("history-toggle", cx));
+        assert!(shown(row(), cx));
+        assert!(shown("all-projects".into(), cx));
+        let header = cx.update(|window, _| window.find("history-toggle"));
+        assert_eq!(header.expanded(), Some(true));
     }
 }

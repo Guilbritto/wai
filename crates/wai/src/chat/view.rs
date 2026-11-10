@@ -45,6 +45,8 @@ pub enum ChatEvent {
         tool: String,
         text: String,
     },
+    /// R87: the header's ×, to close the pane showing this session.
+    Close,
 }
 
 /// A message's markdown and how many bytes of it the view already handed over.

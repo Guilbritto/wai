@@ -5,7 +5,10 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{ActiveTheme as _, h_resizable, resizable_panel, v_flex, v_resizable};
+use gpui_kit::component::{
+    ActiveTheme as _, IconName, Sizable as _, h_resizable, resizable_panel, v_flex, v_resizable,
+};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::json;
 use wai_agent::{
@@ -98,6 +101,8 @@ pub struct Workspace {
     /// The default agent's sessions, each with its cwd canonicalized for the project filter.
     pub history: Vec<(PathBuf, SessionSummary)>,
     pub all_projects: bool,
+    /// R88: the sidebar's History is open. Kept in memory only: each launch starts collapsed.
+    pub(crate) history_open: bool,
     pub(crate) history_task: Option<Task<()>>,
     pub sidebar_tab: SidebarTab,
     pub files: Entity<FileTree>,
@@ -244,6 +249,7 @@ impl Workspace {
             terminal: None,
             history: Vec::new(),
             all_projects: false,
+            history_open: false,
             history_task: None,
             sidebar_tab: SidebarTab::default(),
             files,
@@ -570,6 +576,13 @@ impl Workspace {
                 ChatEvent::OpenOutput { tool, text } => {
                     let session = session.read(cx).id.clone();
                     return this.open_output(&session, tool, text.clone(), window, cx);
+                }
+                ChatEvent::Close => {
+                    let pane = this.panes.iter().position(|p| p.session() == Some(session));
+                    if let Some(ix) = pane {
+                        this.close_pane(ix, window, cx);
+                    }
+                    return;
                 }
                 ChatEvent::StateChanged => {
                     let s = session.read(cx);
@@ -1083,12 +1096,16 @@ impl Workspace {
         }
     }
 
-    /// Drops the focused pane's session from the panes and the open list (the agent keeps it in
-    /// its history). With more than one pane, the pane goes too. A "Preparing…" pane's session
-    /// never opens. R20: in an editor pane it closes the active tab instead (the pane goes with
-    /// the last one).
+    /// ⌘W: `close_pane` on the focused pane.
     fn close_session(&mut self, _: &CloseSession, window: &mut Window, cx: &mut Context<Self>) {
-        let ix = self.focused_pane;
+        self.close_pane(self.focused_pane, window, cx);
+    }
+
+    /// Drops pane `ix`'s session from the panes and the open list (the agent keeps it in its
+    /// history). With more than one pane, the pane goes too. A "Preparing…" pane's session never
+    /// opens. R20: in an editor pane it closes the active tab instead (the pane goes with the last
+    /// one). R87: a pane's × runs it on its own pane, focused or not.
+    fn close_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         match &self.panes[ix] {
             Pane::Editor(pane) => return pane.update(cx, |p, cx| p.close(p.active, window, cx)),
             Pane::Session(session) => {
@@ -1573,6 +1590,23 @@ impl Workspace {
                     })),
             )
             .children(problem.map(|p| div().max_w(px(480.)).text_color(theme.danger).child(p)))
+            // In a split, its × drops it; a lone empty pane has nothing to close.
+            .when(self.panes.len() > 1, |el| {
+                let close = Button::new("pane-close")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .tooltip("Close pane")
+                    .accessibility_label("Close pane")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        // The panes may have changed since this frame drew.
+                        if matches!(this.panes.get(ix), Some(Pane::Empty(_))) {
+                            this.close_pane(ix, window, cx);
+                        }
+                    }));
+                el.relative()
+                    .child(div().absolute().top_2().right_2().child(close))
+            })
     }
 }
 
@@ -1733,7 +1767,8 @@ pub(crate) mod tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
-        AppContext as _, Entity, Pixels, Point, TestAppContext, VisualTestContext, point, px, size,
+        AppContext as _, ElementId, Entity, Pixels, Point, TestAppContext, VisualTestContext,
+        point, px, size,
     };
     use wai_agent::{AgentError, PromptBlock, SessionEvent, SessionSummary};
     use wai_settings::{AgentConfig, AppState, OpenSession, Settings, ThemeChoice};
@@ -1741,7 +1776,7 @@ pub(crate) mod tests {
     use super::{Pane, Workspace};
     use crate::agents::{AgentStatus, RegistryEvent};
     use crate::app;
-    use crate::chat::{ChatItem, NoticeKind, TurnState};
+    use crate::chat::{ChatEvent, ChatItem, NoticeKind, TurnState};
     use crate::notify;
     use crate::sidebar::canonical;
 
@@ -1917,6 +1952,75 @@ pub(crate) mod tests {
         });
     }
 
+    /// R87: a session pane's × does what ⌘W does there, focused or not: the session leaves the
+    /// open list and its pane goes.
+    #[gpui_kit::test]
+    fn close_button_closes_its_own_pane(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(2));
+        let rows = load_history(&workspace, 2, cx);
+        for (row, side) in rows.iter().zip([false, true]) {
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(row, side, window, cx)));
+        }
+        let first = pane_session(&workspace, 0, cx);
+        let second = pane_session(&workspace, 1, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.focus_pane(0, window, cx)));
+
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            let pane = ElementId::View(second.entity_id());
+            window.within(pane).click("session-close", cx);
+        });
+
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 1);
+            assert_eq!(w.panes[0].session(), Some(&first));
+            assert!(!w.sessions.contains(&second), "it left the open list");
+        });
+
+        // A click's mouse-down already focuses its pane; the × pressed from the keyboard does
+        // not, and still closes its own pane.
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.resume(&rows[1], true, window, cx);
+                w.focus_pane(0, window, cx);
+            })
+        });
+        let third = pane_session(&workspace, 1, cx);
+        third.update(cx, |_, cx| cx.emit(ChatEvent::Close));
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 1);
+            assert_eq!(w.panes[0].session(), Some(&first));
+        });
+    }
+
+    /// A lone empty pane has no ×; in a split, an empty pane's × drops that pane.
+    #[gpui_kit::test]
+    fn lone_empty_pane_has_no_close(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let close = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.try_find("pane-close").is_some()
+            })
+        };
+        assert!(!close(cx));
+
+        cx.simulate_keystrokes("secondary-n");
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
+        });
+        workspace.update(cx, |w, _| w.panes.push(Pane::Empty(None)));
+        assert!(close(cx));
+        cx.update(|window, cx| window.click("pane-close", cx));
+
+        workspace.read_with(cx, |w, _| {
+            assert!(matches!(w.panes[..], [Pane::Session(_)]));
+            assert_eq!(w.sessions.len(), 1, "the session stays open");
+        });
+    }
+
     fn template(name: &str, agent: Option<&str>, prompt: &str) -> wai_settings::Template {
         wai_settings::Template {
             name: name.into(),
@@ -2031,10 +2135,8 @@ pub(crate) mod tests {
         });
         assert_eq!(history_rows(&workspace, cx), 0);
 
-        cx.update(|window, cx| {
-            window.render_frame(cx);
-            window.click("all-projects", cx);
-        });
+        cx.update(|window, cx| window.click("history-toggle", cx));
+        cx.update(|window, cx| window.click("all-projects", cx));
         assert_eq!(history_rows(&workspace, cx), 25);
     }
 
@@ -2070,6 +2172,7 @@ pub(crate) mod tests {
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
 
         // The sidebar offers Fork on the history rows and on the open session.
+        cx.update(|window, cx| window.click("history-toggle", cx));
         cx.update(|window, cx| window.click(("history-fork", 1usize), cx));
         wait_until(cx, "the fork", |cx| {
             workspace.read_with(cx, |w, _| w.panes.len() == 2)
@@ -2119,6 +2222,7 @@ pub(crate) mod tests {
         let (workspace, cx) = open(cx, fake_settings(&flags));
         load_history(&workspace, 2, cx);
 
+        cx.update(|window, cx| window.click("history-toggle", cx));
         cx.update(|window, cx| window.click(("history-fork", 0usize), cx));
         wait_until(cx, "the notice", |cx| {
             cx.update(|window, cx| !window.notifications(cx).is_empty())

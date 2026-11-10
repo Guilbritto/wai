@@ -301,6 +301,7 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 /// `WAI_SHOT_PANEL=1`: the first extension panel's tab, an enabled extension having rendered it
 /// (fase-3-panel.png).
 /// `WAI_SHOT_PALETTE=1`: the command palette open (fase-3-palette.png).
+/// `WAI_SHOT_HISTORY=1`, with any of the above: the sidebar's History open.
 #[cfg(feature = "screenshot")]
 fn screenshot(
     (window, workspace): (AnyWindowHandle, Entity<Workspace>),
@@ -400,6 +401,12 @@ fn screenshot(
             });
         } else {
             run_in_terminal(window, "echo wai", cx).await;
+        }
+        if std::env::var("WAI_SHOT_HISTORY").is_ok() {
+            workspace.update(cx, |w, cx| {
+                w.history_open = true;
+                cx.notify();
+            });
         }
         // A resizable group settles its sizes in a notify deferred past the draw, so each
         // draw gets its own update.
