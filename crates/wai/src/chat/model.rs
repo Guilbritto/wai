@@ -276,6 +276,7 @@ impl ChatModel {
                 self.current_mode = Some(m.clone());
                 None
             }
+            SessionEvent::ConfigChanged(_) => None,
             SessionEvent::Commands(c) => {
                 self.commands = c.clone();
                 None

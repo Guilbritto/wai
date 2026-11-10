@@ -937,6 +937,7 @@ impl Workspace {
             id,
             modes: Vec::new(),
             current_mode: None,
+            config: Vec::new(),
         };
         let registry = self.registry.downgrade();
         let session =

@@ -5,8 +5,9 @@ use std::time::Duration;
 use async_channel::Receiver;
 use wai_agent::{
     AgentCaps, AgentError, AgentEvent, AgentHandle, AgentSpec, BrokerError, Choice, ChoiceKind,
-    FieldKind, McpServer, PermissionRequest, PromptBlock, QuestionAnswer, QuestionRequest,
-    SessionEvent, StopReason, ToolContent, quote,
+    ConfigCategory, ConfigOption, ConfigValue, FieldKind, McpServer, PermissionRequest,
+    PromptBlock, QuestionAnswer, QuestionRequest, SessionEvent, StopReason, ToolContent, program,
+    quote,
 };
 
 fn run(test: impl Future<Output = ()>) {
@@ -597,4 +598,60 @@ fn shutdown_kills_agent_process() {
 fn handle_is_clone_send_sync() {
     fn check<T: Clone + Send + Sync>() {}
     check::<AgentHandle>();
+}
+
+#[test]
+fn config_options_come_with_the_session() {
+    run(async {
+        let (agent, rx) = spawn(&["--models"]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        assert_eq!(session.config.len(), 2);
+        let value = |id: &str, name: &str| ConfigValue {
+            id: id.into(),
+            name: name.into(),
+        };
+        assert_eq!(
+            session.config[0],
+            ConfigOption {
+                id: "model".into(),
+                name: "Model".into(),
+                category: ConfigCategory::Model,
+                current: "fake-small".into(),
+                values: vec![
+                    value("fake-small", "Fake Small"),
+                    value("fake-large", "Fake Large")
+                ],
+            }
+        );
+        assert_eq!(session.config[1].category, ConfigCategory::ThoughtLevel);
+        assert_eq!(session.config[1].current, "low");
+    });
+}
+
+#[test]
+fn set_config_switches_the_model() {
+    run(async {
+        let (agent, rx) = spawn(&["--models"]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        let options = agent
+            .set_config(session.id.clone(), "model".into(), "fake-large".into())
+            .await
+            .unwrap();
+        assert_eq!(options[0].current, "fake-large");
+
+        agent.prompt(session.id, hello());
+        let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+        assert_eq!(agent_text(&events), "model:fake-large");
+    });
+}
+
+#[test]
+fn program_parses_like_the_spawn() {
+    if cfg!(unix) {
+        assert_eq!(program("'/bin/sh' -c x"), Some("/bin/sh".into()));
+    }
+    assert_eq!(program("no-such-program-xyz --acp"), None);
+    assert_eq!(program(""), None);
 }
