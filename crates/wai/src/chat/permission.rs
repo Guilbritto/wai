@@ -3,13 +3,14 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::{ChoiceKind, FileDiff, PermissionChoice, PermissionRequest};
 
 use super::edits::{DiffLine, bounded_diff};
+use crate::aurora::{self, DISPLAY_FONT};
 
 /// What a choice button calls.
 pub type OnChoose = Rc<dyn Fn(&PermissionChoice, &mut Window, &mut App)>;
@@ -85,8 +86,11 @@ impl DiffView {
             .child(
                 v_flex()
                     .p_2()
-                    .rounded_md()
-                    .bg(theme.muted)
+                    .rounded(px(12.))
+                    .bg(match theme.is_dark() {
+                        true => rgb(0x0a0e24).into(),
+                        false => theme.muted,
+                    })
                     .overflow_hidden()
                     .font_family(theme.mono_font_family.clone())
                     .text_size(theme.mono_font_size)
@@ -112,7 +116,122 @@ fn button_id(kind: ChoiceKind) -> &'static str {
     }
 }
 
-/// Title, diff preview and one button per choice; once answered, the answer instead.
+/// The frame the permission and question cards share (`.chat-escolha`): `accent` tints its
+/// border, fill and glow; then `eyebrow` and `title`. Light mode: a warning border.
+pub(super) fn frame(
+    accent: Hsla,
+    eyebrow: &'static str,
+    title: impl Into<SharedString>,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme();
+    let frame = v_flex().gap_3().p_4().rounded(px(18.)).border_1();
+    let (frame, eyebrow_color) = match theme.is_dark() {
+        // An opaque base, as the Central's: the glow would show through a clear fill.
+        true => (
+            frame
+                .border_color(accent.alpha(0.55))
+                .bg(linear_gradient(
+                    180.,
+                    linear_color_stop(aurora::noite_2().blend(accent.alpha(0.08)), 0.),
+                    linear_color_stop(aurora::noite_2(), 1.),
+                ))
+                // `0 0 40 -12`: GPUI's blur radius is the Gaussian's sigma, half the CSS one.
+                .shadow(vec![
+                    BoxShadow::new(px(0.), px(0.), accent.alpha(0.5))
+                        .blur_radius(px(20.))
+                        .spread_radius(px(-12.)),
+                ]),
+            aurora::brasa(),
+        ),
+        false => (frame.border_color(theme.warning), theme.warning),
+    };
+    let heading = v_flex()
+        .gap_1()
+        .child(
+            div()
+                .text_size(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(eyebrow_color)
+                .child(eyebrow),
+        )
+        .child(
+            div()
+                .font_family(DISPLAY_FONT)
+                .text_size(px(16.))
+                .font_weight(FontWeight::BOLD)
+                .child(title.into()),
+        );
+    frame.child(heading)
+}
+
+/// A choice (`.escolha-opcao`): a full-width row behind its number badge (`.opcao-n`).
+fn choice(n: usize, choice: &PermissionChoice, highlighted: bool, cx: &App) -> Button {
+    let theme = cx.theme();
+    let reject = matches!(
+        choice.kind,
+        ChoiceKind::RejectOnce | ChoiceKind::RejectAlways
+    );
+    let dark = theme.is_dark();
+    let (fill, hover, border) = match (dark, highlighted) {
+        (true, true) => (
+            aurora::lilas().alpha(0.16),
+            aurora::lilas().alpha(0.24),
+            aurora::lilas().alpha(0.45),
+        ),
+        (true, false) => (aurora::vidro(), aurora::vidro_forte(), aurora::borda()),
+        (false, true) => (theme.secondary, theme.secondary_hover, theme.ring),
+        (false, false) => (theme.secondary, theme.secondary_hover, theme.border),
+    };
+    let text = match (dark, reject) {
+        (true, true) => aurora::erro(),
+        (true, false) => aurora::tinta(),
+        (false, true) => theme.danger,
+        (false, false) => theme.foreground,
+    };
+    let (badge, badge_text) = match dark {
+        true => (aurora::brasa().alpha(0.18), rgb(0xffb68a).into()),
+        false => (theme.background, theme.muted_foreground),
+    };
+    let number = div()
+        .flex_none()
+        .size(px(26.))
+        .rounded(px(8.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(badge)
+        .text_color(badge_text)
+        .font_weight(FontWeight::BOLD)
+        .child((n + 1).to_string());
+    let label = div().flex_1().min_w_0().child(choice.name.clone());
+    let colors = ButtonCustomVariant::new(cx)
+        .color(fill)
+        .foreground(text)
+        .hover(hover)
+        .active(hover);
+    Button::new(button_id(choice.kind))
+        .custom(colors)
+        // A custom variant draws its color at 20%; the hover keeps its own.
+        .bg(fill)
+        .rounded(px(12.))
+        .w_full()
+        .h_auto()
+        .px_3()
+        .py_2()
+        .border_1()
+        .border_color(border)
+        .child(
+            h_flex()
+                .w_full()
+                .gap_3()
+                .whitespace_normal()
+                .child(number)
+                .child(label),
+        )
+}
+
+/// Title, diff preview and one row per choice; once answered, the answer instead.
 pub fn card(
     ix: usize,
     request: &PermissionRequest,
@@ -128,39 +247,30 @@ pub fn card(
         Some(answer) => div()
             .text_color(theme.muted_foreground)
             .child(format!("Answered: {answer}")),
-        None => h_flex()
-            .gap_2()
-            .flex_wrap()
-            .children(request.options.iter().map(|choice| {
-                let button = Button::new(button_id(choice.kind))
-                    .small()
-                    .label(choice.name.clone());
-                let button = match choice.kind {
-                    ChoiceKind::AllowOnce => button.primary(),
-                    ChoiceKind::RejectOnce | ChoiceKind::RejectAlways => button.danger(),
-                    ChoiceKind::AllowAlways => button,
-                };
-                let (on_choose, choice) = (on_choose.clone(), choice.clone());
-                button.on_click(move |_, window, cx| on_choose(&choice, window, cx))
-            })),
+        None => {
+            let allow = (request.options.iter())
+                .position(|c| matches!(c.kind, ChoiceKind::AllowOnce | ChoiceKind::AllowAlways));
+            v_flex()
+                .gap_2()
+                .children(request.options.iter().enumerate().map(|(n, c)| {
+                    let (on_choose, c) = (on_choose.clone(), c.clone());
+                    choice(n, &c, allow == Some(n), cx)
+                        .on_click(move |_, window, cx| on_choose(&c, window, cx))
+                }))
+        }
     };
-    v_flex()
-        .id(("permission", ix))
-        .gap_2()
-        .p_3()
-        .rounded_md()
-        .border_1()
-        .border_color(theme.warning)
-        .child(
-            div()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(request.title.clone()),
-        )
-        .children(
-            diffs
-                .iter()
-                .enumerate()
-                .map(|(k, diff)| diff.render(("diff", k).into(), on_open, cx)),
-        )
-        .child(footer)
+    frame(
+        aurora::boreal(),
+        "PERMISSION REQUESTED",
+        request.title.clone(),
+        cx,
+    )
+    .id(("permission", ix))
+    .children(
+        diffs
+            .iter()
+            .enumerate()
+            .map(|(k, diff)| diff.render(("diff", k).into(), on_open, cx)),
+    )
+    .child(footer)
 }

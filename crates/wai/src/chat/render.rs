@@ -14,6 +14,7 @@ use wai_agent::{PermissionChoice, ToolStatus};
 use super::model::{ChatItem, NoticeKind, ToolItem, TurnState, UsageInfo, show_label};
 use super::view::{ChatEvent, ChatSession};
 use super::{permission, question};
+use crate::aurora::{self, DISPLAY_FONT};
 
 /// `43k`, `1M`, `1.5M`.
 fn tokens(n: u64) -> String {
@@ -34,22 +35,39 @@ fn usage_label(usage: &UsageInfo) -> String {
     }
 }
 
+/// Whether row `ix` is the first agent message of its turn, which gets the "✦ agent" header.
+pub(crate) fn starts_reply(items: &[ChatItem], ix: usize) -> bool {
+    matches!(items.get(ix), Some(ChatItem::Agent { .. }))
+        && !(items[..ix].iter().rev())
+            .take_while(|item| !matches!(item, ChatItem::User { .. }))
+            .any(|item| matches!(item, ChatItem::Agent { .. }))
+}
+
+/// `el` as glass (`.msg.claude`): a `vidro` fill and a `borda` border. Light mode: a border.
+pub(super) fn glass(el: Div, cx: &App) -> Div {
+    let theme = cx.theme();
+    let el = el.border_1();
+    match theme.is_dark() {
+        true => el.bg(aurora::vidro()).border_color(aurora::borda()),
+        false => el.border_color(theme.border),
+    }
+}
+
 impl ChatSession {
     fn render_header(&self, cx: &App) -> impl IntoElement + use<> {
-        let theme = cx.theme();
         let title = self.model.title.clone().unwrap_or("New session".into());
-        h_flex()
+        aurora::card_bar(cx)
             .gap_3()
             .px_3()
             .py_2()
-            .border_b_1()
-            .border_color(theme.border)
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_family(DISPLAY_FONT)
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::BOLD)
                     .child(title),
             )
             .children(
@@ -58,12 +76,10 @@ impl ChatSession {
                     // The select's own view is `size_full`: the box sets its width.
                     .map(|modes| div().w(px(140.)).child(Select::new(modes).small())),
             )
-            .children(self.model.usage.as_ref().map(|usage| {
-                div()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(usage_label(usage))
-            }))
+            .children(
+                (self.model.usage.as_ref())
+                    .map(|usage| aurora::pill(cx).flex_none().child(usage_label(usage))),
+            )
     }
 
     fn render_item(
@@ -73,17 +89,57 @@ impl ChatSession {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
-        let muted = theme.muted_foreground;
+        let (dark, muted) = (theme.is_dark(), theme.muted_foreground);
         match &self.model.items[ix] {
-            ChatItem::User { text } => div()
-                .p_2()
-                .rounded_md()
-                .bg(theme.secondary)
-                .child(text.clone())
-                .into_any_element(),
-            ChatItem::Agent { .. } => div()
-                .children(self.texts.get(&ix).map(|md| TextView::new(&md.state)))
-                .into_any_element(),
+            // `.msg.voce`
+            ChatItem::User { text } => {
+                let bubble = div()
+                    .max_w(relative(0.88))
+                    .px_3()
+                    .py(px(9.))
+                    .rounded(px(16.))
+                    .rounded_br(px(6.))
+                    .border_1();
+                let bubble = match dark {
+                    true => bubble
+                        .bg(linear_gradient(
+                            160.,
+                            linear_color_stop(aurora::lilas().alpha(0.32), 0.),
+                            linear_color_stop(aurora::lilas().alpha(0.18), 1.),
+                        ))
+                        .border_color(aurora::lilas().alpha(0.35))
+                        .text_color(aurora::tinta()),
+                    false => bubble.bg(theme.secondary).border_color(theme.border),
+                };
+                h_flex()
+                    .w_full()
+                    .justify_end()
+                    .child(bubble.child(text.clone()))
+                    .into_any_element()
+            }
+            // `.msg.claude`, its turn's first one headed "✦ agent" (`.msg-quem`).
+            ChatItem::Agent { .. } => {
+                let header = starts_reply(&self.model.items, ix).then(|| {
+                    let (star, name) = match dark {
+                        true => (aurora::brasa(), rgb(0xffc6a3).into()),
+                        false => (theme.warning, muted),
+                    };
+                    h_flex()
+                        .gap_1()
+                        .text_size(px(11.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(div().text_color(star).child("✦"))
+                        .child(div().text_color(name).child(self.agent.clone()))
+                });
+                glass(v_flex(), cx)
+                    .gap_1()
+                    .p_3()
+                    .rounded(px(16.))
+                    .rounded_bl(px(6.))
+                    .children(header)
+                    .children(self.texts.get(&ix).map(|md| TextView::new(&md.state)))
+                    .into_any_element()
+            }
             ChatItem::Thought { .. } => {
                 let open = self.open_thoughts.contains(&ix);
                 let chevron = if open {
@@ -145,13 +201,28 @@ impl ChatSession {
                 let restart = *kind == NoticeKind::Error
                     && ix + 1 == self.model.items.len()
                     && matches!(self.model.state, TurnState::Error(_));
+                // A long notice wraps inside its pill.
+                let pill = aurora::pill(cx)
+                    .h_auto()
+                    .min_h(px(26.))
+                    .py_1()
+                    .max_w_full()
+                    .text_size(px(11.5))
+                    .child(div().min_w_0().child(text.clone()));
+                let pill = match (kind, dark) {
+                    (NoticeKind::Info, true) => pill.text_color(aurora::nevoa_2()),
+                    (NoticeKind::Error, true) => pill
+                        .text_color(aurora::erro())
+                        .bg(aurora::erro().alpha(0.12))
+                        .border_color(aurora::erro().alpha(0.4)),
+                    (NoticeKind::Info, false) => pill.text_color(muted),
+                    (NoticeKind::Error, false) => pill.text_color(theme.danger),
+                };
                 h_flex()
-                    .gap_3()
-                    .text_color(match kind {
-                        NoticeKind::Info => muted,
-                        NoticeKind::Error => theme.danger,
-                    })
-                    .child(text.clone())
+                    .w_full()
+                    .justify_center()
+                    .gap_2()
+                    .child(pill)
                     .when(restart, |el| {
                         el.child(Button::new("restart").small().label("Restart").on_click(
                             cx.listener(|this, _, window, cx| this.load(false, window, cx)),
@@ -180,13 +251,12 @@ impl ChatSession {
         };
         let (output, hidden) = tool.visible_text();
         let on_open = Self::on_open(cx);
-        v_flex()
+        glass(v_flex(), cx)
             .id(("tool", ix))
             .gap_2()
-            .p_2()
-            .rounded_md()
-            .border_1()
-            .border_color(theme.border)
+            .px_3()
+            .py_2()
+            .rounded(px(12.))
             .child(
                 h_flex()
                     .gap_2()
@@ -256,24 +326,41 @@ impl ChatSession {
 impl Render for ChatSession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_mode_select(window, cx);
+        let empty = self.model.items.is_empty() && self.model.state == TurnState::Idle;
+        let messages = div().flex_1().min_h_0();
+        let messages = match empty {
+            true => messages
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(aurora::pill(cx).child("No messages yet.")),
+            false => messages.child(
+                MessageScroller::new(
+                    "messages",
+                    self.scroller.clone(),
+                    cx.processor(Self::render_item),
+                )
+                // The Central's bubbles sit closer than the scroller's 32 px.
+                .with_row_style(StyleRefinement::default().pb_4()),
+            ),
+        };
         v_flex()
             .key_context("ChatSession")
             .on_action(cx.listener(Self::cancel))
             .on_drop(cx.listener(Self::attach))
             .size_full()
             .child(self.render_header(cx))
-            .child(div().flex_1().min_h_0().child(MessageScroller::new(
-                "messages",
-                self.scroller.clone(),
-                cx.processor(Self::render_item),
-            )))
+            .child(messages)
             .child(self.render_prompt(cx))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::tokens;
+    use wai_agent::ToolStatus;
+
+    use super::{starts_reply, tokens};
+    use crate::chat::model::{ChatItem, ToolItem};
 
     #[test]
     fn token_counts_are_short() {
@@ -281,5 +368,31 @@ mod tests {
             [999, 43_000, 1_000_000, 1_500_000].map(tokens),
             ["999", "43k", "1M", "1.5M"]
         );
+    }
+
+    #[test]
+    fn reply_header_once_per_turn() {
+        let text = String::new;
+        let user = || ChatItem::User { text: text() };
+        let agent = || ChatItem::Agent { text: text() };
+        let tool = ChatItem::Tool(ToolItem {
+            id: text(),
+            title: text(),
+            kind: text(),
+            status: ToolStatus::Completed,
+            text: text(),
+            diffs: Vec::new(),
+            locations: Vec::new(),
+            first_sight: Vec::new(),
+            expanded: false,
+        });
+        let items = [user(), agent(), tool, agent()];
+        assert!(starts_reply(&items, 1));
+        assert!(!starts_reply(&items, 3));
+        assert!(starts_reply(&[agent()], 0));
+        let items = [user(), ChatItem::Thought { text: text() }, agent()];
+        assert!(starts_reply(&items, 2));
+        assert!(!starts_reply(&items, 1));
+        assert!(starts_reply(&[user(), agent(), user(), agent()], 3));
     }
 }

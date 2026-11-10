@@ -320,13 +320,12 @@ impl ChatSession {
             1 => "1 file".to_string(),
             n => format!("{n} files"),
         };
-        v_flex()
+        super::render::glass(v_flex(), cx)
             .id(("edits", ix))
             .gap_2()
-            .p_2()
-            .rounded_md()
-            .border_1()
-            .border_color(theme.border)
+            .px_3()
+            .py_2()
+            .rounded(px(12.))
             .child(
                 div()
                     .font_weight(FontWeight::MEDIUM)
