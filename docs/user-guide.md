@@ -4,9 +4,12 @@ This guide describes wai 0.1.0. On Windows, read **ctrl** where it says **⌘**,
 
 ## The window
 
-- **Sidebar.** It shows the project's name with three buttons: **New from template** (▾, shown when templates exist), **Extensions** and **New session** (+). Below them are the tabs **Sessions**, **Files**, **Search** and **Agents**, plus one tab per extension panel.
+- **Top bar.** It shows the project's name and how many agents are working or need you, and holds the buttons **New from template** (shown when templates exist), **Extensions**, the command palette, the terminal and **New session**. On macOS it is the title bar: drag it to move the window, double-click it to zoom.
+- **Sidebar.** The tabs **Sessions**, **Files**, **Search** and **Agents**, plus one tab per extension panel.
 - **Panes.** Up to four sit side by side. Each holds a chat session, or the editor (one editor pane at most). **⌘⌥→** moves the focus to the next pane.
 - **Terminal.** It sits at the bottom, toggled with **ctrl-`**.
+
+**The look:** the default dark theme is Aurora: an indigo night with a soft, still aurora behind floating glass cards. Set `theme = "light"` for the light one, which keeps plain panels and no aurora (see [Settings](#settings)).
 
 **On relaunch** wai restores the project, the open sessions with their history, which pane each was in, whether the terminal was open, and the sidebar width. Editor tabs are not restored, except unsaved ones (see [Unsaved edits after a quit](#unsaved-edits-after-a-quit)).
 
@@ -253,7 +256,7 @@ Every setting and its default:
 | Key | Default | Meaning |
 |---|---|---|
 | `default_agent` | `"claude"` | The agent ⌘N starts, whose history the sidebar lists, and that templates without `agent` use |
-| `theme` | `"dark"` | `"dark"` or `"light"` |
+| `theme` | `"dark"` | `"dark"` (Aurora) or `"light"` |
 | `agents.<name>.command` | `agents.claude.command = "npx -y @agentclientprotocol/claude-agent-acp@0.101.0"` | How to start the ACP agent `<name>` (see below) |
 | `terminal.shell` | unset | The terminal's program (no arguments); unset means `$SHELL`, then `/bin/sh` |
 | `updates.check` | `false` | Turns on the update check |

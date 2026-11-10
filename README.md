@@ -11,8 +11,8 @@ A native, AI-first IDE for macOS and Windows, written in Rust with GPUI.
 
 |  |  |
 |---|---|
-| ![A permission card and the Agents tab](docs/screens/fase-2-agents.png) | ![The Edits review at the end of a turn](docs/screens/fase-2-edits.png) |
-| ![The command palette](docs/screens/fase-3-palette.png) | ![An extension's panel](docs/screens/fase-3-waycarbon.png) |
+| ![A session asking for permission](docs/screens/aurora-chat.png) | ![Two files in the editor and the terminal](docs/screens/aurora-editor.png) |
+| ![The command palette](docs/screens/aurora-palette.png) | ![An extension's panel](docs/screens/aurora-panel.png) |
 
 **Status:** 0.1.0.
 - macOS on Apple silicon is the primary platform.
