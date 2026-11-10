@@ -322,3 +322,82 @@ A new `topbar.rs` draws the top bar. Each view's render function then adopts the
 - [ ] **Step 5: Docs.** Add one user-guide paragraph: "the default dark theme is Aurora; set `theme = "light"` for the light one". Add the RELATORIO "Revisão visual" section (pt-BR), with rulings from R73 on.
 - [ ] **Step 6: Run** `cargo test --workspace` and `go test ./...` in both Go extensions. Expected: all pass.
 - [ ] **Step 7: Commit:** `docs: add aurora screenshots and measurements`.
+
+### Task 6: Close button on session panes and a collapsible History
+
+Owner request (2026-11-09): "Quando splitamos as sessões não tem como fechar elas, deveria ter como; as sessões na lateral deveria ter uma separação pois fica muito poluído com várias sessões (histórico) — coloque uma aba colapsável chamada histórico e deixa isso dentro dela."
+
+**Files:**
+- Modify: `crates/wai/src/chat/render.rs` (`render_header`), `crates/wai/src/workspace.rs` (`close_session`/`drop_pane`, `empty_pane`, and whatever wiring the close needs), `crates/wai/src/sidebar.rs` (`render_sessions`, history section).
+- Tests next to the existing ones (workspace/chat view tests, sidebar tests).
+
+**Behaviour:**
+1. **Close a session pane.**
+   - Every session pane's header (the `card_bar` in `render_header`) gets a ghost xsmall icon button, id `session-close`, `IconName::Close`, tooltip and accessibility label "Close session".
+   - Clicking it does exactly what ⌘W (`CloseSession`) does today, for the pane it sits in. That pane need not be focused: the session stops and leaves the Open list (it stays in the agent's history, resumable), and the pane is removed. If it is the only pane, the pane becomes the empty pane.
+   - It must close the clicked pane, not the focused one. Test this with 2 panes, clicking × on the unfocused one.
+   - An empty pane in a split (more than one pane) gets a small × at its top-right, id `pane-close`, tooltip and accessibility label "Close pane", which drops that pane. A lone empty pane shows no ×.
+   - The editor tabs keep their own per-tab ×. No change there.
+2. **Collapsible History.**
+   - In the Sessions tab, the History section becomes collapsible, and it starts collapsed.
+   - Its header row has a chevron (right when collapsed, down when open) and the uppercase "HISTORY" heading followed by the count of history rows, e.g. "HISTORY · 12". The whole row toggles. It is keyboard reachable (tab_index plus role/label like the sidebar tabs).
+   - Collapsed: no history rows, and the "All projects" switch is hidden.
+   - Expanded: exactly as today (switch plus rows).
+   - The Open section is unchanged and always visible.
+   - The collapsed/expanded state lives in the Workspace in memory, is not persisted, and starts collapsed at every launch.
+   - Keep the history row ids. Tests that click history rows must expand History first; the behaviour change is intentional.
+
+**Copy:** only "Close session", "Close pane" and the count. "History" already exists. The UI stays English.
+
+**Style:** use the existing aurora helpers (`aurora::tab`, `heading`, `card_bar`, `pill`). Light mode uses theme tokens only. No animation.
+
+**Tests (TDD):**
+- `close_button_closes_its_own_pane`: 2 session panes, focus pane 0, click `session-close` in pane 1. Expected: 1 pane left, holding pane 0's session, and pane 1's session no longer in the Open list.
+- `lone_empty_pane_has_no_close`: no `pane-close` in a single empty pane; after a split with an empty pane, `pane-close` drops it.
+- `history_starts_collapsed_and_toggles`: with history rows, collapsed shows no history rows (debug selector or id lookup) and no "All projects" switch; clicking the header shows them.
+
+**Commit:** `feat: close session panes and collapse history`.
+
+### Task 7: Drag sessions to arrange the panes
+
+Owner request (2026-11-09): "poder arrastar as sessões e organizar elas na tela da forma que eu achar melhor, inclusive arrastar ela do menu lateral para a tela de sessão."
+
+**Files:**
+- Modify: `crates/wai/src/workspace.rs` (pane layout, drop handling, save_state), `crates/wai/src/sidebar.rs` (drag sources on rows), `crates/wai/src/chat/render.rs` (drag handle on the session header).
+- A new small module is allowed for the pure placement logic, e.g. `crates/wai/src/layout.rs`.
+
+**Behaviour:**
+1. **Drag sources.** Use GPUI drag and drop (`on_drag` with a typed payload, `on_drop`/`drag_over`). Three kinds:
+   - a sidebar **Open** row (an open session, whether shown in a pane or not);
+   - a sidebar **History** row (a session not open);
+   - a session pane's **header** (the title area of its `card_bar`; buttons such as `session-close` and the mode select keep their clicks).
+
+   The drag preview is a small `aurora::pill` with the session title.
+2. **Drop targets.** Each pane has three zones:
+   - **left 25%:** insert a new pane to the left of it;
+   - **right 25%:** insert a new pane to the right of it;
+   - **center:** show the session in this pane.
+
+   While a drag hovers a zone, highlight it: a lilas 16% fill with a lilas 45% border in dark mode, theme `accent` and `ring` in light mode. No animation.
+3. **Placement rules.** Keep these in a pure function and unit-test them.
+   - **Open session already shown in pane A, dropped on pane B:**
+     - center: swap the panes' contents, so B's previous content goes to A;
+     - left/right: move it to a new pane beside B, and remove A if A is left empty and more than one pane remains.
+   - **Open session not shown in any pane, or a History row:**
+     - center: it replaces B's content. A session B was showing stays in the Open list with no pane, never stopped.
+     - left/right: a new pane beside B.
+     - A History row resumes, exactly like clicking it today, but into the chosen place.
+   - **Limits:**
+     - With 4 panes already (the current maximum), a left/right drop acts as center.
+     - Dropping a session on its own pane's center is a no-op.
+     - Editor panes are valid targets; a center drop replaces the editor pane's content only if it has no unsaved tabs. Otherwise act as a right drop (or left if right is impossible).
+4. After any change, save the layout (`save_state`) and focus the pane that received the session.
+5. The panes stay a single horizontal row (no vertical splits).
+
+**Copy:** none new.
+
+**Tests (TDD):**
+- **Unit tests on the pure placement function:** swap, move-to-edge with source removal, the 4-pane cap, a self-drop no-op, a History drop into the center keeping the displaced session open, and an editor with unsaved tabs never replaced.
+- **Drag integration:** if GPUI's test context can simulate a drag (mouse down, move with button pressed, mouse up over a target), add `drag_open_row_to_right_edge_splits`. If it can't, say so in the report and rely on the unit tests plus a screenshot.
+
+**Commit:** `feat: drag sessions to arrange panes`.
