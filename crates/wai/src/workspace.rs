@@ -770,7 +770,7 @@ impl Workspace {
         Some((session, true))
     }
 
-    /// R89: `dragged` lands on pane `ix`'s `zone` (`layout::place`) and its pane takes the
+    /// R89–R92: `dragged` lands on pane `ix`'s `zone` (`layout::place`) and its pane takes the
     /// focus. A session it replaces stays open, in no pane; a History row resumes as a click on
     /// it does.
     fn drop_session(
@@ -797,8 +797,9 @@ impl Workspace {
             .panes
             .iter()
             .position(|p| p.session() == Some(&session));
+        let empty = matches!(self.panes[ix], Pane::Empty(_));
         let locked = matches!(self.panes[ix], Pane::Editor(_)) && !self.dirty_tabs(cx).is_empty();
-        if let Some(slots) = layout::place(self.panes.len(), from, ix, zone, locked) {
+        if let Some(slots) = layout::place(self.panes.len(), from, ix, zone, empty, locked) {
             let mut old: Vec<_> = self.panes.drain(..).map(Some).collect();
             self.panes = (slots.into_iter())
                 .map(|slot| match slot {
@@ -820,22 +821,45 @@ impl Workspace {
         }
     }
 
-    /// R89: while something is dragged, pane `ix`'s left and right quarters and its middle,
-    /// each lit while a session is over it.
+    /// R92: what a session dragged over pane `ix` lights: the whole pane when each of its zones
+    /// acts as the center (`Some(true)`), else the zone under the pointer (`Some(false)`); nothing
+    /// over its own pane, where a drop changes nothing.
+    fn lit(&self, dragged: &DraggedSession, ix: usize, cx: &App) -> Option<bool> {
+        let session = match &dragged.source {
+            Dragged::Open(session) => Some(session.clone()),
+            Dragged::History(row) => self.session(&self.settings.default_agent, &row.id, cx),
+        };
+        let from = session.and_then(|s| self.panes.iter().position(|p| p.session() == Some(&s)));
+        let empty = matches!(self.panes.get(ix)?, Pane::Empty(_));
+        (from != Some(ix)).then(|| layout::only_center(self.panes.len(), from, empty))
+    }
+
+    /// R89: while something is dragged, pane `ix`'s left and right quarters and its middle, each
+    /// lit while a session is over it; or the whole pane, when every zone acts as the center (R92).
     fn drop_zones(ix: usize, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let this = cx.weak_entity();
+        let light = move |whole: bool| {
+            let this = this.clone();
+            move |style, dragged: &DraggedSession, _: &mut Window, cx: &mut App| {
+                let lit = this.upgrade().and_then(|w| w.read(cx).lit(dragged, ix, cx));
+                if lit == Some(whole) {
+                    aurora::drop_target(style, cx)
+                } else {
+                    style
+                }
+            }
+        };
         let zone = |zone: Zone| {
-            div()
-                .h_full()
-                .drag_over::<DraggedSession>(|style, _, _, cx| aurora::drop_target(style, cx))
-                .on_drop(
-                    cx.listener(move |this, dragged: &DraggedSession, window, cx| {
-                        this.drop_session(dragged, ix, zone, window, cx)
-                    }),
-                )
+            div().h_full().drag_over(light(false)).on_drop(cx.listener(
+                move |this, dragged: &DraggedSession, window, cx| {
+                    this.drop_session(dragged, ix, zone, window, cx)
+                },
+            ))
         };
         h_flex()
             .absolute()
             .inset_0()
+            .drag_over(light(true))
             .child(zone(Zone::Left).w(relative(0.25)))
             .child(zone(Zone::Center).flex_1())
             .child(zone(Zone::Right).w(relative(0.25)))
@@ -2251,6 +2275,50 @@ pub(crate) mod tests {
             assert_eq!(w.panes[1].session(), Some(&first));
             assert_eq!(w.focused_pane, 0);
         });
+    }
+
+    /// R89: a center drop never replaces an editor with unsaved edits: the session opens beside.
+    #[gpui_kit::test]
+    fn center_drop_keeps_an_unsaved_editor(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "a").unwrap();
+        let (workspace, cx) = open(cx, history_settings(1));
+        let rows = load_history(&workspace, 1, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
+        let session = pane_session(&workspace, 0, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.open_file(path, None, window, cx)));
+        cx.run_until_parked();
+        // The session stays open, in no pane; the editor holds an unsaved tab.
+        let editor = workspace.update(cx, |w, _| {
+            w.panes.remove(0);
+            w.focused_pane = 0;
+            match &w.panes[..] {
+                [Pane::Editor(editor)] => editor.clone(),
+                _ => panic!("the editor pane alone"),
+            }
+        });
+        let tab = editor.read_with(cx, |e, _| e.tabs[0].clone());
+        tab.update(cx, |t, _| t.dirty = true);
+
+        let dragged = super::DraggedSession {
+            title: "Session".into(),
+            source: super::Dragged::Open(session.clone()),
+        };
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.drop_session(&dragged, 0, super::Zone::Center, window, cx)
+            })
+        });
+
+        workspace.read_with(cx, |w, _| {
+            assert!(matches!(&w.panes[0], Pane::Editor(e) if *e == editor));
+            assert_eq!(w.panes.len(), 2);
+            assert_eq!(w.panes[1].session(), Some(&session));
+            assert_eq!(w.focused_pane, 1);
+        });
+        assert!(tab.read_with(cx, |t, _| t.dirty), "the edits stay");
     }
 
     fn template(name: &str, agent: Option<&str>, prompt: &str) -> wai_settings::Template {

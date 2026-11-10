@@ -253,14 +253,14 @@ pub(crate) fn tab(active: bool, cx: &App) -> Div {
 }
 
 /// R89: a pane's drop zone while a session is dragged over it, lit like a selected tab: lilas
-/// at 16% in a lilas 45% border. Light mode: the theme's `accent` in its `ring`. Rounded like
-/// the card inside its border.
+/// at 16% in a lilas 45% border. Light mode: the theme's translucent `drop_target` in its
+/// `ring`. Rounded like the card inside its border.
 pub(crate) fn drop_target(style: StyleRefinement, cx: &App) -> StyleRefinement {
     let theme = cx.theme();
     let (fill, border, radius) = if theme.is_dark() {
         (lilas().alpha(0.16), lilas().alpha(0.45), 15.)
     } else {
-        (theme.accent, theme.ring, 11.)
+        (theme.drop_target, theme.ring, 11.)
     };
     style
         .bg(fill)

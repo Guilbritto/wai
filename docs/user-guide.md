@@ -23,7 +23,7 @@ There are four ways to start a session:
 - **⌘N** or the **+** button starts one with the default agent (`default_agent`, `claude` unless you change it).
 - **New from template** (the file icon in the top bar) starts one from a template.
 - The palette's **New session with &lt;agent&gt;** picks the agent.
-- A **History** row reopens a past session.
+- A **History** row reopens a past session (open **History** first; it starts closed).
 
 While the agent prepares the session, its pane shows `Preparing <agent>…`. **⌘W** there cancels it.
 
@@ -76,10 +76,11 @@ Revert refuses in these cases:
 
 ### History, side by side, and forks
 
-- **The Sessions tab** lists the open sessions, then the default agent's **History** for this project. The **All projects** switch shows every project's history.
+- **The Sessions tab** lists the open sessions, then the default agent's **History** for this project, folded under **HISTORY · N**. Click the heading, or focus it and press Enter or Space, to open it; it starts closed at each launch. Once it is open, the **All projects** switch shows every project's history.
 - **Opening a row:** a click shows the session in the focused pane. **Open to the side** adds a pane, while there are fewer than four.
 - **Fork:** for agents that can load and fork sessions, **Fork** on an open or past session opens a copy with the same history beside it.
-- **Closing:** **⌘W** in a session pane closes that session and cancels its turn. The agent keeps the session in its history.
+- **Closing:** **⌘W** in a session pane, or the **×** at the right of its header, closes that session and cancels its turn. The agent keeps the session in its history. In a split, an empty pane has its own **×**, which closes the pane.
+- **Arranging panes:** drag a session by its pane's title, or drag an **Open** or **History** row, onto a pane. Drop it on the pane's left or right quarter to open it in a new pane on that side, or on the middle to show it there. A session from another pane swaps places; any other takes the pane, and the session it showed stays open in the sidebar. An empty pane is filled wherever you drop. With four panes, a row from the sidebar always takes the pane it is dropped on, while a pane can still be moved to either side. An editor with unsaved edits is never replaced: the session opens beside it. The layout is kept on relaunch.
 
 ### Templates
 
@@ -198,7 +199,7 @@ Clicking a card shows that session in the focused pane.
 |---|---|---|---|
 | Quit | ⌘Q | ctrl-q (ctrl-shift-q in the terminal) | anywhere |
 | New session | ⌘N | ctrl-n (ctrl-shift-n in the terminal) | window |
-| Close session, or the editor's active tab | ⌘W | ctrl-w (ctrl-shift-w in the terminal) | window |
+| Close session (or the × in its header), or the editor's active tab | ⌘W | ctrl-w (ctrl-shift-w in the terminal) | window |
 | Save | ⌘S | ctrl-s | window |
 | Open folder | ⌘O | ctrl-o (ctrl-shift-o in the terminal) | window |
 | Command palette | ⌘⇧P | ctrl-shift-p | window |

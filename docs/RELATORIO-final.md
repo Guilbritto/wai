@@ -161,6 +161,10 @@ Commits:
 
 Depois da revisão: 293 testes em Rust passando (eram 283), mais os 15 em Go (8 em `wai-rotinas`, 7 em `wai-waycarbon`), com `clippy -D warnings` e `cargo fmt --check` limpos.
 
+**Dois pedidos a mais seus**, feitos depois das telas (as regras estão como R87–R92 na tabela):
+- **Fechar sessões e recolher o histórico** (64f26d6): cada painel de sessão ganhou um **×** no cabeçalho, que faz o mesmo que o ⌘W, e um painel vazio num split ganhou o seu **×**. O **History** da barra lateral virou uma seção recolhível, "HISTORY · N", que começa fechada.
+- **Arrastar sessões** (eab2aa8 e a leva de correções final): dá para arrastar uma sessão pelo título do painel, ou uma linha do Open ou do History, e soltar num painel. Os quartos da esquerda e da direita abrem um painel novo daquele lado; o meio mostra a sessão ali. O layout é salvo.
+
 ### Telas
 
 Em `docs/screens/`, com um projeto de demonstração (`acme-api`), o agente falso e cards EC-9001..9004 inventados. Não aparece nome de usuário, nome da máquina nem caminho pessoal.
@@ -274,6 +278,12 @@ Todas as metas foram batidas, e o fundo estático de reserva da Tarefa 2 (um PNG
 | R84 | Ids de sessão repetidos (os eventos vão para a 1ª sessão com o mesmo agente e id) ficaram fora da revisão visual, como lacuna conhecida. O problema é anterior; só afeta agentes que repetem ids entre execuções, e o `claude-agent-acp` usa ids únicos | Um agente real que repita ids misturaria uma sessão retomada com uma nova |
 | R85 | A redução das PNGs (`sips -Z 1400`) e as correções do doc de medições entraram no próprio commit 632560a (`--amend`, local, sem remoto), para que os 6,8 MB nunca entrem no histórico | Nenhum além de um SHA local reescrito |
 | R86 | O `OFL.txt` passa a ir dentro do `.app`, pelos `resources` do packager. Substitui a R78 | Um arquivo a mais no app |
+| R87 | O **×** do painel de sessão faz o mesmo que o ⌘W: para a sessão, que sai do Open e continua no History, pronta para retomar | Uma sessão que você queria deixar rodando é parada (dá para retomar) |
+| R88 | O History começa recolhido a cada abertura; aberto ou fechado fica só na memória, não é salvo | Um clique para abrir |
+| R89 | Zonas de soltar: os 25% da esquerda e os 25% da direita abrem um painel novo ao lado; o meio mostra a sessão ali. No meio, uma sessão vinda de outro painel troca de lugar com a do alvo; qualquer outra substitui, e a sessão que saiu continua aberta no Open. Os painéis ficam numa linha só. Um editor com edições não salvas nunca é substituído: a sessão abre ao lado | Um arranjo diferente do que você esperava; ajuste numa função pura com testes |
+| R90 | Soltar na borda de um painel vazio preenche o painel, em vez de abrir outro ao lado | Quem queria um painel novo ao lado do vazio precisa fechar o vazio antes |
+| R91 | Soltar no meio de um painel vazio uma sessão vinda de outro painel move a sessão para lá e fecha o painel antigo, em vez de trocar e deixar um vazio para trás | Se você preferia a troca, o painel antigo some; é uma linha em `layout::place` |
+| R92 | Com 4 painéis, um painel ainda pode ser movido para o lado (o número de painéis não muda); só as linhas da barra lateral viram um soltar no meio. O realce mostra só as zonas que agem: quando todo soltar naquele painel seria no meio, acende o painel inteiro | Se você esperava a troca de antes, o painel vai para o lado em vez de trocar; é uma linha em `layout::only_center` |
 
 ## Lacunas conhecidas (atuais)
 
