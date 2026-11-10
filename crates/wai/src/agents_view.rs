@@ -5,7 +5,7 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
-use wai_agent::PlanEntry;
+use wai_agent::{PlanEntry, SubagentState};
 
 use crate::app::ToggleAgents;
 use crate::aurora::{self, DISPLAY_FONT};
@@ -37,8 +37,28 @@ pub fn status_label(state: &TurnState, done: bool) -> Option<&'static str> {
     }
 }
 
-/// What the card says, as the screen-reader name of the card: title, status, plan, tool.
-fn summary(title: &str, label: Option<&str>, plan: &[PlanEntry], tool: Option<&str>) -> String {
+/// A live subagent's line: `{title} · Working` or `{title} · Needs you`, then ` · {tool}`; none
+/// once it finished (or the agent lost it).
+pub fn subagent_line(title: &str, state: SubagentState, tool: Option<&str>) -> Option<String> {
+    let status = match state {
+        SubagentState::Running => "Working",
+        SubagentState::NeedsYou => "Needs you",
+        _ => return None,
+    };
+    let mut line = format!("{title} · {status}");
+    line.extend(tool.map(|t| format!(" · {t}")));
+    Some(line)
+}
+
+/// What the card says, as the screen-reader name of the card: title, status, plan, subagents,
+/// tool.
+fn summary(
+    title: &str,
+    label: Option<&str>,
+    plan: &[PlanEntry],
+    subagents: &[String],
+    tool: Option<&str>,
+) -> String {
     let mut text = title.to_string();
     text.extend(label.map(|l| format!(", {l}")));
     for e in plan.iter().take(MAX_PLAN_ROWS) {
@@ -46,6 +66,9 @@ fn summary(title: &str, label: Option<&str>, plan: &[PlanEntry], tool: Option<&s
     }
     if plan.len() > MAX_PLAN_ROWS {
         text.push_str(&format!("; +{} more", plan.len() - MAX_PLAN_ROWS));
+    }
+    for line in subagents {
+        text.push_str(&format!("; {line}"));
     }
     text.extend(tool.map(|t| format!("; running {t}")));
     text
@@ -93,7 +116,21 @@ impl AgentsView {
         let label = status_label(&m.state, m.done);
         let title = m.shown_title().unwrap_or("New session").to_string();
         let open = session.clone();
-        let summary = summary(&title, label, &m.plan, m.current_tool());
+        // ponytail: no cap; live subagents are as many as the agent runs at once.
+        let subagents: Vec<(TurnState, String)> = m
+            .subagents
+            .iter()
+            .filter_map(|s| {
+                let line = subagent_line(&s.title, s.state, m.subagent_tool(&s.id))?;
+                let state = match s.state {
+                    SubagentState::NeedsYou => TurnState::NeedsYou,
+                    _ => TurnState::Working,
+                };
+                Some((state, line))
+            })
+            .collect();
+        let lines: Vec<String> = subagents.iter().map(|(_, l)| l.clone()).collect();
+        let summary = summary(&title, label, &m.plan, &lines, m.current_tool());
         let dragged = DraggedSession {
             title: title.clone().into(),
             source: Dragged::Open(session.clone()),
@@ -124,6 +161,20 @@ impl AgentsView {
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .child(format!("+{more} more"))
+            }))
+            .children(subagents.iter().map(|(state, line)| {
+                h_flex()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(theme.foreground)
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(crate::sidebar::status_color(state, theme)),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(line.clone()))
             }))
             .children(m.current_tool().map(|t| {
                 div()
@@ -289,9 +340,10 @@ mod tests {
     use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
     use wai_settings::{AppState, Settings};
 
-    use super::{PlanEntry, status_label, summary, usage_text};
+    use super::{PlanEntry, status_label, subagent_line, summary, usage_text};
     use crate::chat::TurnState;
     use crate::sidebar::SidebarTab;
+    use wai_agent::SubagentState;
 
     use crate::workspace::Workspace;
     use crate::workspace::tests::{click, fake_settings, open, open_at, wait_until};
@@ -303,13 +355,38 @@ mod tests {
             status: "pending".into(),
         };
         let plan: Vec<_> = (0..11).map(entry).collect();
-        let text = summary("t", None, &plan, None);
+        let text = summary("t", None, &plan, &[], None);
         assert!(
             text.contains("step 7") && !text.contains("step 8"),
             "{text}"
         );
         assert!(text.ends_with("; +3 more"), "{text}");
-        assert!(!summary("t", None, &plan[..8], None).contains("more"));
+        assert!(!summary("t", None, &plan[..8], &[], None).contains("more"));
+    }
+
+    /// Only a running subagent, or one that needs the user, has a line.
+    #[test]
+    fn subagent_lines_show_only_live_ones() {
+        use SubagentState as S;
+        assert_eq!(
+            subagent_line("Explore", S::Running, Some("Read lib.rs")).as_deref(),
+            Some("Explore · Working · Read lib.rs")
+        );
+        assert_eq!(
+            subagent_line("Explore", S::NeedsYou, None).as_deref(),
+            Some("Explore · Needs you")
+        );
+        for state in [S::Done, S::Stopped, S::Failed, S::Ended, S::Unknown] {
+            assert_eq!(
+                subagent_line("Explore", state, Some("Read")),
+                None,
+                "{state:?}"
+            );
+        }
+        assert_eq!(
+            summary("t", None, &[], &["a · Working".into()], None),
+            "t; a · Working"
+        );
     }
 
     #[test]
@@ -377,6 +454,58 @@ mod tests {
         workspace.read_with(cx, |w, _| {
             assert_eq!(w.panes[w.focused_pane].session(), Some(&first));
         });
+    }
+
+    /// A background subagent waiting on its card, after the turn, has a line under the session's
+    /// card; the line goes once it finishes.
+    #[gpui_kit::test]
+    fn agents_tab_lists_running_subagents(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(
+            cx,
+            fake_settings("--subagent --background --ask-permission"),
+        );
+        new_session(&workspace, 1, cx);
+        let session = workspace.read_with(cx, |w, _| w.sessions[0].clone());
+        cx.simulate_input("edit");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "the subagent to need the user after the turn", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.done
+                    && s.model
+                        .subagents
+                        .iter()
+                        .any(|a| a.state == SubagentState::NeedsYou)
+            })
+        });
+        let label = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                let card = window.find(("agent-card", 0usize));
+                card.label().unwrap_or_default().to_string()
+            })
+        };
+        click("tab-agents", cx);
+        let text = label(cx);
+        assert!(
+            text.contains("; Explore the code · Needs you · Write notes.md"),
+            "{text:?}"
+        );
+
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.click("perm-allow_once", cx);
+        });
+        wait_until(cx, "the subagent to finish", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model
+                    .subagents
+                    .iter()
+                    .any(|a| a.state == SubagentState::Done)
+            })
+        });
+        let text = label(cx);
+        assert!(!text.contains("Explore the code"), "{text:?}");
     }
 
     fn found(id: &'static str, cx: &mut VisualTestContext) -> bool {

@@ -649,7 +649,6 @@ impl ChatModel {
     }
 
     /// The title of subagent `id`'s latest tool call still running, while it is live.
-    #[allow(dead_code)] // read by the Agents tab (Task 4)
     pub fn subagent_tool(&self, id: &str) -> Option<&str> {
         let live = self.subagents.iter().any(|s| {
             s.id == id && matches!(s.state, SubagentState::Running | SubagentState::NeedsYou)
