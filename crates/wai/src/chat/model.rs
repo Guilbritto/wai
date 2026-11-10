@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use wai_agent::{
     CommandInfo, ConfigOption, FileDiff, Location, ModeInfo, PermissionRequest, PlanEntry,
-    QuestionRequest, SessionEvent, StopReason, ToolCallPatch, ToolContent, ToolStatus,
+    QuestionRequest, SessionEvent, StopReason, SubagentPatch, SubagentState, ToolCallPatch,
+    ToolContent, ToolStatus,
 };
 
 pub const TOOL_OUTPUT_MAX_LINES: usize = 2000;
@@ -134,6 +135,8 @@ pub struct ToolItem {
     /// by it.
     pub first_sight: Vec<(PathBuf, bool)>,
     pub expanded: bool,
+    /// The subagent that made the call; `None` for the session's own, and for a subagent's card.
+    pub subagent: Option<String>,
 }
 
 impl ToolItem {
@@ -186,6 +189,28 @@ fn grouped(n: usize) -> String {
     out
 }
 
+/// A subagent of the session, in the order announced; its card in the transcript has its id.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Subagent {
+    pub id: String,
+    pub title: String,
+    pub state: SubagentState,
+}
+
+fn is_running(status: ToolStatus) -> bool {
+    matches!(status, ToolStatus::Pending | ToolStatus::InProgress)
+}
+
+/// The card's status for a subagent's state.
+fn subagent_status(state: SubagentState) -> ToolStatus {
+    match state {
+        SubagentState::Running | SubagentState::NeedsYou => ToolStatus::InProgress,
+        SubagentState::Done | SubagentState::Ended => ToolStatus::Completed,
+        SubagentState::Stopped | SubagentState::Failed => ToolStatus::Failed,
+        SubagentState::Unknown => ToolStatus::Pending,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageInfo {
     pub used: u64,
@@ -210,6 +235,9 @@ pub struct ChatModel {
     pub current_mode: Option<String>,
     pub config: Vec<ConfigOption>,
     pub commands: Vec<CommandInfo>,
+    pub subagents: Vec<Subagent>,
+    /// A turn is running: a card answered meanwhile leaves the session `Working`, not `Idle`.
+    pub in_turn: bool,
 }
 
 impl Default for ChatModel {
@@ -226,6 +254,8 @@ impl Default for ChatModel {
             current_mode: None,
             config: Vec::new(),
             commands: Vec::new(),
+            subagents: Vec::new(),
+            in_turn: false,
         }
     }
 }
@@ -259,6 +289,7 @@ impl ChatModel {
 
     pub fn push_user(&mut self, text: &str) -> usize {
         self.state = TurnState::Working;
+        self.in_turn = true;
         self.done = false;
         self.push(ChatItem::User {
             text: text.to_string(),
@@ -300,6 +331,7 @@ impl ChatModel {
                     locations: v.locations.clone(),
                     first_sight: Vec::new(),
                     expanded: false,
+                    subagent: v.subagent.clone(),
                 })))
             }
             SessionEvent::ToolCallUpdate(p) => self.patch_tool(p),
@@ -341,8 +373,75 @@ impl ChatModel {
                 self.plan = entries.clone();
                 None
             }
-            SessionEvent::Subagent(_) | SessionEvent::SubagentReply { .. } => None,
+            SessionEvent::Subagent(patch) => Some(self.patch_subagent(patch)),
+            SessionEvent::SubagentReply { id, text } => {
+                let ix = self.tool_index(id)?;
+                if let ChatItem::Tool(t) = &mut self.items[ix] {
+                    t.text = text.clone();
+                }
+                Some(ix)
+            }
         }
+    }
+
+    fn tool_index(&self, id: &str) -> Option<usize> {
+        self.items
+            .iter()
+            .rposition(|i| matches!(i, ChatItem::Tool(t) if t.id == id))
+    }
+
+    /// A subagent's line and card: made at first sight, then kept to its title and state.
+    fn patch_subagent(&mut self, patch: &SubagentPatch) -> usize {
+        let (title, state) = match self.subagents.iter_mut().find(|s| s.id == patch.id) {
+            Some(line) => {
+                line.title = patch
+                    .title
+                    .clone()
+                    .unwrap_or(std::mem::take(&mut line.title));
+                line.state = patch.state.unwrap_or(line.state);
+                (line.title.clone(), line.state)
+            }
+            None => {
+                let line = Subagent {
+                    id: patch.id.clone(),
+                    title: patch.title.clone().unwrap_or_else(|| "Subagent".into()),
+                    state: patch.state.unwrap_or(SubagentState::Unknown),
+                };
+                let seen = (line.title.clone(), line.state);
+                self.subagents.push(line);
+                seen
+            }
+        };
+        match self.tool_index(&patch.id) {
+            Some(ix) => {
+                if let ChatItem::Tool(t) = &mut self.items[ix] {
+                    t.title = title;
+                    t.status = subagent_status(state);
+                }
+                ix
+            }
+            None => self.push(ChatItem::Tool(ToolItem {
+                id: patch.id.clone(),
+                title,
+                kind: "subagent".into(),
+                status: subagent_status(state),
+                text: String::new(),
+                diffs: Vec::new(),
+                locations: Vec::new(),
+                first_sight: Vec::new(),
+                expanded: false,
+                subagent: None,
+            })),
+        }
+    }
+
+    /// `{subagent title}: ` for a request a known subagent made.
+    fn subagent_prefix(&self, subagent: Option<&str>) -> Option<String> {
+        let line = self
+            .subagents
+            .iter()
+            .find(|s| Some(s.id.as_str()) == subagent)?;
+        Some(format!("{}: ", line.title))
     }
 
     fn patch_tool(&mut self, p: &ToolCallPatch) -> Option<usize> {
@@ -368,7 +467,10 @@ impl ChatModel {
         Some(idx)
     }
 
-    pub fn on_permission(&mut self, req: PermissionRequest) -> usize {
+    pub fn on_permission(&mut self, mut req: PermissionRequest) -> usize {
+        if let Some(prefix) = self.subagent_prefix(req.subagent.as_deref()) {
+            req.title.insert_str(0, &prefix);
+        }
         self.state = TurnState::NeedsYou;
         self.push(ChatItem::Permission {
             request: req,
@@ -398,7 +500,8 @@ impl ChatModel {
     }
 
     /// `NeedsYou` while any permission or question card is unanswered (parallel tool calls can
-    /// open several), else `Working`.
+    /// open several), else `Working` during a turn, else `Idle` (a background subagent's card
+    /// can be answered after the turn).
     fn after_answer(&self) -> TurnState {
         let open = self.items.iter().any(|item| {
             matches!(
@@ -409,8 +512,10 @@ impl ChatModel {
         });
         if open {
             TurnState::NeedsYou
-        } else {
+        } else if self.in_turn {
             TurnState::Working
+        } else {
+            TurnState::Idle
         }
     }
 
@@ -427,7 +532,10 @@ impl ChatModel {
         }
     }
 
-    pub fn on_question(&mut self, req: QuestionRequest) -> usize {
+    pub fn on_question(&mut self, mut req: QuestionRequest) -> usize {
+        if let Some(prefix) = self.subagent_prefix(req.subagent.as_deref()) {
+            req.message.insert_str(0, &prefix);
+        }
         self.state = TurnState::NeedsYou;
         self.push(ChatItem::Question {
             request: req,
@@ -523,17 +631,14 @@ impl ChatModel {
         }
     }
 
-    /// The latest tool call still running; none when idle.
+    /// The latest tool call still running, of the session's own (a subagent's card is one, as
+    /// the Agent call was); none when idle.
     fn running_tool(&self) -> Option<&ToolItem> {
         if !matches!(self.state, TurnState::Working | TurnState::NeedsYou) {
             return None;
         }
         self.items.iter().rev().find_map(|item| match item {
-            ChatItem::Tool(t)
-                if matches!(t.status, ToolStatus::Pending | ToolStatus::InProgress) =>
-            {
-                Some(t)
-            }
+            ChatItem::Tool(t) if t.subagent.is_none() && is_running(t.status) => Some(t),
             _ => None,
         })
     }
@@ -541,6 +646,23 @@ impl ChatModel {
     /// The title of the latest tool call still running; none when idle.
     pub fn current_tool(&self) -> Option<&str> {
         self.running_tool().map(|t| t.title.as_str())
+    }
+
+    /// The title of subagent `id`'s latest tool call still running, while it is live.
+    #[allow(dead_code)] // read by the Agents tab (Task 4)
+    pub fn subagent_tool(&self, id: &str) -> Option<&str> {
+        let live = self.subagents.iter().any(|s| {
+            s.id == id && matches!(s.state, SubagentState::Running | SubagentState::NeedsYou)
+        });
+        if !live {
+            return None;
+        }
+        self.items.iter().rev().find_map(|item| match item {
+            ChatItem::Tool(t) if t.subagent.as_deref() == Some(id) && is_running(t.status) => {
+                Some(t.title.as_str())
+            }
+            _ => None,
+        })
     }
 
     /// The status line's text while a turn runs; none when idle.
@@ -574,27 +696,30 @@ impl ChatModel {
         format!("{steps} · {latest}")
     }
 
+    /// The session's own cards were resolved before this: one still open is a background
+    /// subagent's, and keeps the session `NeedsYou`.
     pub fn on_turn_ended(&mut self, reason: &StopReason) {
+        self.in_turn = false;
         self.push_edits();
         self.done = matches!(reason, StopReason::EndTurn);
         match reason {
-            StopReason::EndTurn => self.state = TurnState::Idle,
+            StopReason::EndTurn => self.state = self.after_answer(),
             StopReason::Cancelled => {
-                self.state = TurnState::Idle;
+                self.state = self.after_answer();
                 self.notice("Cancelled".into(), NoticeKind::Info);
             }
             StopReason::MaxTokens => {
-                self.state = TurnState::Idle;
+                self.state = self.after_answer();
                 self.notice("Stopped: token limit reached".into(), NoticeKind::Error);
             }
             StopReason::Refusal => {
-                self.state = TurnState::Idle;
+                self.state = self.after_answer();
                 self.notice("The agent refused to continue".into(), NoticeKind::Error);
             }
             // handled by on_auth_required
             StopReason::Other(r) if r == "auth_required" => {}
             StopReason::Other(r) => {
-                self.state = TurnState::Idle;
+                self.state = self.after_answer();
                 self.notice(format!("Turn ended: {r}"), NoticeKind::Info);
             }
         }
@@ -606,9 +731,24 @@ impl ChatModel {
         self.notice(text, NoticeKind::Error);
     }
 
+    /// A subagent last seen live is not: nothing says what became of it.
     pub fn on_exited(&mut self, error: Option<&str>) {
+        self.in_turn = false;
         let msg = error.unwrap_or("The agent exited");
         self.state = TurnState::Error(msg.to_string());
+        let live: Vec<String> = self
+            .subagents
+            .iter()
+            .filter(|s| matches!(s.state, SubagentState::Running | SubagentState::NeedsYou))
+            .map(|s| s.id.clone())
+            .collect();
+        for id in live {
+            self.patch_subagent(&SubagentPatch {
+                id,
+                title: None,
+                state: Some(SubagentState::Unknown),
+            });
+        }
         self.notice(format!("Agent exited: {msg}"), NoticeKind::Error);
     }
 }
@@ -616,18 +756,181 @@ impl ChatModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wai_agent::{ChoiceKind, PermissionChoice, ToolCallView};
+    use wai_agent::{ChoiceKind, PermissionChoice, SubagentPatch, SubagentState, ToolCallView};
 
     fn tool(id: &str, status: ToolStatus) -> SessionEvent {
+        call(id, "t", status, None)
+    }
+
+    fn call(id: &str, title: &str, status: ToolStatus, subagent: Option<&str>) -> SessionEvent {
         SessionEvent::ToolCall(ToolCallView {
             id: id.into(),
-            title: "t".into(),
+            title: title.into(),
             kind: "execute".into(),
             status,
             content: vec![],
             locations: vec![],
-            subagent: None,
+            subagent: subagent.map(str::to_string),
         })
+    }
+
+    fn subagent(id: &str, title: Option<&str>, state: Option<SubagentState>) -> SessionEvent {
+        SessionEvent::Subagent(SubagentPatch {
+            id: id.into(),
+            title: title.map(str::to_string),
+            state,
+        })
+    }
+
+    fn card(m: &ChatModel, id: &str) -> ToolItem {
+        m.items
+            .iter()
+            .find_map(|item| match item {
+                ChatItem::Tool(t) if t.id == id => Some(t.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no card {id}"))
+    }
+
+    #[test]
+    fn subagent_gets_a_card_and_a_line() {
+        let mut m = ChatModel::default();
+        let ix = m.apply(&subagent(
+            "c",
+            Some("Explore"),
+            Some(SubagentState::Running),
+        ));
+        assert_eq!(ix, Some(0));
+        let c = card(&m, "c");
+        assert_eq!(
+            (c.title.as_str(), c.status),
+            ("Explore", ToolStatus::InProgress)
+        );
+        assert_eq!(
+            m.subagents,
+            [Subagent {
+                id: "c".into(),
+                title: "Explore".into(),
+                state: SubagentState::Running,
+            }]
+        );
+        let reply = SessionEvent::SubagentReply {
+            id: "c".into(),
+            text: "found it".into(),
+        };
+        assert_eq!(m.apply(&reply), Some(0));
+        assert_eq!(card(&m, "c").text, "found it");
+        assert_eq!(
+            m.apply(&subagent("c", None, Some(SubagentState::Done))),
+            Some(0)
+        );
+        let c = card(&m, "c");
+        assert_eq!(
+            (c.title.as_str(), c.status),
+            ("Explore", ToolStatus::Completed)
+        );
+        assert_eq!(m.subagents[0].state, SubagentState::Done);
+        assert_eq!(m.items.len(), 1);
+    }
+
+    /// Review focus 3: the main card's tool in progress is the main agent's.
+    #[test]
+    fn subagent_tools_stay_off_the_main_card() {
+        let mut m = ChatModel::default();
+        m.push_user("go");
+        m.apply(&subagent(
+            "c",
+            Some("Explore"),
+            Some(SubagentState::Running),
+        ));
+        m.apply(&call("1", "Own", ToolStatus::InProgress, None));
+        m.apply(&call("2", "Sub", ToolStatus::InProgress, Some("c")));
+        assert_eq!(m.current_tool(), Some("Own"));
+        assert_eq!(m.subagent_tool("c"), Some("Sub"));
+        assert_eq!(m.subagent_tool("d"), None);
+        m.apply(&subagent("c", None, Some(SubagentState::Done)));
+        assert_eq!(m.subagent_tool("c"), None);
+    }
+
+    /// Review focus 1: a background subagent's card can be asked, and answered, after the turn.
+    #[test]
+    fn answer_after_the_turn_returns_to_idle() {
+        let sub = |id| PermissionRequest {
+            id,
+            subagent: Some("c".into()),
+            ..perm()
+        };
+        // Asked after the turn.
+        let mut m = ChatModel::default();
+        m.push_user("go");
+        m.on_turn_ended(&StopReason::EndTurn);
+        m.on_permission(sub(7));
+        assert_eq!(m.state, TurnState::NeedsYou);
+        m.on_permission_answered(7, "Yes");
+        assert_eq!(m.state, TurnState::Idle);
+
+        // Asked during the turn, answered after it.
+        for reason in [StopReason::EndTurn, StopReason::Cancelled] {
+            let mut m = ChatModel::default();
+            m.push_user("go");
+            m.on_permission(sub(8));
+            m.on_turn_ended(&reason);
+            assert_eq!(m.state, TurnState::NeedsYou, "{reason:?}");
+            m.on_permission_answered(8, "Yes");
+            assert_eq!(m.state, TurnState::Idle, "{reason:?}");
+        }
+
+        // Answered during the turn.
+        let mut m = ChatModel::default();
+        m.push_user("go");
+        m.on_permission(sub(9));
+        m.on_permission_answered(9, "Yes");
+        assert_eq!(m.state, TurnState::Working);
+    }
+
+    #[test]
+    fn subagent_permission_names_the_subagent() {
+        let mut m = ChatModel::default();
+        m.apply(&subagent(
+            "c",
+            Some("Explore"),
+            Some(SubagentState::Running),
+        ));
+        m.on_permission(PermissionRequest {
+            title: "Write notes.md".into(),
+            subagent: Some("c".into()),
+            ..perm()
+        });
+        m.on_question(QuestionRequest {
+            id: 8,
+            session: "s".into(),
+            message: "Pick".into(),
+            fields: vec![],
+            subagent: Some("c".into()),
+        });
+        let titles: Vec<&str> = m
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ChatItem::Permission { request, .. } => Some(request.title.as_str()),
+                ChatItem::Question { request, .. } => Some(request.message.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(titles, ["Explore: Write notes.md", "Explore: Pick"]);
+    }
+
+    /// Review focus 5: after the agent exits, no subagent reads as live.
+    #[test]
+    fn exit_marks_live_subagents_unknown() {
+        let mut m = ChatModel::default();
+        m.apply(&subagent("a", Some("A"), Some(SubagentState::Running)));
+        m.apply(&subagent("b", Some("B"), Some(SubagentState::Done)));
+        m.on_exited(None);
+        let states: Vec<_> = m.subagents.iter().map(|s| s.state).collect();
+        assert_eq!(states, [SubagentState::Unknown, SubagentState::Done]);
+        assert_eq!(card(&m, "a").status, ToolStatus::Pending);
+        assert_eq!(card(&m, "b").status, ToolStatus::Completed);
     }
 
     fn text(s: &str) -> SessionEvent {
@@ -825,6 +1128,7 @@ mod tests {
             locations: vec![],
             first_sight: vec![],
             expanded: false,
+            subagent: None,
         };
         let (v, hidden) = item.visible_text();
         assert_eq!(v.lines().count(), 2000);
@@ -848,6 +1152,7 @@ mod tests {
             locations: vec![],
             first_sight: vec![],
             expanded: true,
+            subagent: None,
         };
         let (v, hidden) = item.visible_text();
         assert_eq!(v.lines().count(), 20_000);
@@ -888,7 +1193,10 @@ mod tests {
 
     #[test]
     fn permission_sets_needs_you_then_working() {
-        let mut m = ChatModel::default();
+        let mut m = ChatModel {
+            in_turn: true,
+            ..Default::default()
+        };
         m.on_permission(perm());
         assert_eq!(m.state, TurnState::NeedsYou);
         m.on_permission_answered(7, "Yes");
@@ -900,7 +1208,10 @@ mod tests {
 
     #[test]
     fn resolution_of_another_sessions_request_is_ignored() {
-        let mut m = ChatModel::default();
+        let mut m = ChatModel {
+            in_turn: true,
+            ..Default::default()
+        };
         m.on_permission(perm());
         m.on_permission_resolved(8);
         assert_eq!(m.state, TurnState::NeedsYou);
@@ -913,7 +1224,10 @@ mod tests {
 
     #[test]
     fn question_sets_needs_you_until_resolved() {
-        let mut m = ChatModel::default();
+        let mut m = ChatModel {
+            in_turn: true,
+            ..Default::default()
+        };
         let question = |id| QuestionRequest {
             id,
             session: "s".into(),
@@ -946,7 +1260,10 @@ mod tests {
     /// last one is answered.
     #[test]
     fn needs_you_until_every_card_is_answered() {
-        let mut m = ChatModel::default();
+        let mut m = ChatModel {
+            in_turn: true,
+            ..Default::default()
+        };
         m.on_permission(perm()); // id 7
         m.on_question(QuestionRequest {
             id: 8,
