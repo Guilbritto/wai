@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use gpui_kit::component::input::CursorBlink;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{Theme, ThemeMode, WindowExt as _};
+use gpui_kit::component::{Theme, ThemeMode, TitleBar, WindowExt as _};
 use gpui_kit::*;
 use wai_settings::{Settings, Template, ThemeChoice};
 
@@ -30,6 +30,7 @@ actions!(
 /// Everything a window needs before it opens: components, theme, caret blink, keymap.
 pub fn init(settings: &Settings, cx: &mut App) {
     gpui_kit::init(cx);
+    crate::aurora::register(cx);
     let mode = match settings.theme {
         ThemeChoice::Dark => ThemeMode::Dark,
         ThemeChoice::Light => ThemeMode::Light,
@@ -121,13 +122,20 @@ pub fn run(
         })
         .detach();
 
+        // macOS: the top bar is the title bar (transparent, traffic lights inline). It moves and
+        // zooms the window itself, so AppKit must not as well (`app_owns_titlebar_drag`).
+        let base = if cfg!(target_os = "macos") {
+            TitleBar::window_options()
+        } else {
+            WindowOptions::default()
+        };
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
                 size(px(1400.), px(900.)),
                 cx,
             ))),
-            ..Default::default()
+            ..base
         };
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
             cx.new(|cx| Workspace::new(project, settings, Some(state_path), true, window, cx))
@@ -293,6 +301,8 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 /// `WAI_SHOT_PANEL=1`: the first extension panel's tab, an enabled extension having rendered it
 /// (fase-3-panel.png).
 /// `WAI_SHOT_PALETTE=1`: the command palette open (fase-3-palette.png).
+/// `WAI_SHOT_HISTORY=1`, with any of the above: the sidebar's History open.
+/// `WAI_SHOT_DRAG=left|center|right`: see `drag_open_row`.
 #[cfg(feature = "screenshot")]
 fn screenshot(
     (window, workspace): (AnyWindowHandle, Entity<Workspace>),
@@ -380,6 +390,8 @@ fn screenshot(
                 w.files.update(cx, |files, cx| files.toggle(dir, cx));
             });
             executor.timer(Duration::from_millis(500)).await;
+        } else if let Ok(zone) = std::env::var("WAI_SHOT_DRAG") {
+            drag_open_row((window, workspace.clone()), &zone, cx).await;
         } else if let Ok(command) = std::env::var("WAI_SHOT_SCROLLBACK") {
             // `WAI_SHOT_SCROLLBACK=<command>`: its output scrolled back 20 lines, one row
             // selected (fase-2-terminal.png).
@@ -392,6 +404,12 @@ fn screenshot(
             });
         } else {
             run_in_terminal(window, "echo wai", cx).await;
+        }
+        if std::env::var("WAI_SHOT_HISTORY").is_ok() {
+            workspace.update(cx, |w, cx| {
+                w.history_open = true;
+                cx.notify();
+            });
         }
         // A resizable group settles its sizes in a notify deferred past the draw, so each
         // draw gets its own update.
@@ -409,6 +427,90 @@ fn screenshot(
         cx.update(|cx| cx.quit());
     })
     .detach();
+}
+
+/// R89, scripted: the last Open row dragged over the first pane's `zone` (`left`, `center` or
+/// `right`) and held, the zone lit under the preview; with `WAI_SHOT_DROP=1`, dropped there.
+/// Each pointer event gets its own update, as a real pointer's do.
+#[cfg(feature = "screenshot")]
+async fn drag_open_row(
+    (window, workspace): (AnyWindowHandle, Entity<Workspace>),
+    zone: &str,
+    cx: &mut AsyncApp,
+) {
+    use gpui_kit::test::TestWindowExt as _;
+    let x = match zone {
+        "left" => 0.1,
+        "right" => 0.9,
+        _ => 0.5,
+    };
+    let points = window.update(cx, |_, window, cx| {
+        window.draw(cx).clear(cx);
+        let w = workspace.read(cx);
+        let row = w.sessions.len().checked_sub(1)?;
+        let first = w.panes[0].session()?.entity_id();
+        let from = window.try_find(("open", row))?.bounds().center();
+        let (title, close) = {
+            let pane = window.within(ElementId::View(first));
+            (
+                pane.find("session-title").bounds(),
+                pane.find("session-close").bounds(),
+            )
+        };
+        // The header's 12 px padding on each side.
+        let (left, right) = (title.left() - px(12.), close.right() + px(12.));
+        let to = point(
+            left + (right - left) * x,
+            window.viewport_size().height / 2.,
+        );
+        Some((from, to))
+    });
+    let Ok(Some((from, to))) = points else {
+        return eprintln!("wai: no Open row or session pane to drag");
+    };
+    let (none, left) = (Modifiers::none(), Some(MouseButton::Left));
+    let mouse_move = |position, pressed_button| {
+        let modifiers = none;
+        MouseMoveEvent {
+            position,
+            pressed_button,
+            modifiers,
+        }
+        .to_platform_input()
+    };
+    let mut events = vec![
+        mouse_move(from, None),
+        MouseDownEvent {
+            button: MouseButton::Left,
+            position: from,
+            modifiers: none,
+            click_count: 1,
+            first_mouse: false,
+        }
+        .to_platform_input(),
+        mouse_move(from + point(px(8.), px(0.)), left),
+        mouse_move(to, left),
+    ];
+    if std::env::var("WAI_SHOT_DROP").is_ok() {
+        let up = MouseUpEvent {
+            button: MouseButton::Left,
+            position: to,
+            modifiers: none,
+            click_count: 1,
+        };
+        events.push(up.to_platform_input());
+    }
+    for event in events {
+        window
+            .update(cx, |_, window, cx| {
+                window.dispatch_event(event, cx);
+                window.draw(cx).clear(cx);
+            })
+            .ok();
+        cx.background_executor()
+            .timer(Duration::from_millis(50))
+            .await;
+    }
 }
 
 #[cfg(test)]

@@ -337,10 +337,13 @@ fn row(
         .text_sm()
         .truncate()
         .child(SharedString::from(&item.title));
-    row.id(("panel-item", ix))
-        .rounded(theme.radius)
-        .cursor_pointer()
-        .hover(|el| el.bg(theme.sidebar_accent))
+    // The sidebar's row (radius, hover), at this list's height; the title keeps the text color.
+    crate::sidebar::row(false, cx)
+        .h(px(height))
+        .px_1()
+        .gap_2()
+        .text_color(theme.foreground)
+        .id(("panel-item", ix))
         .child(v_flex().flex_1().min_w_0().child(title).children(subtitle))
         .children(
             item.badge
@@ -820,7 +823,7 @@ mod tests {
         assert!(!sync(ungranted, cx), "a tab without the grant");
         assert!(host.read_with(cx, |h, _| h.panels().is_empty()));
         assert_eq!(tab(cx), SidebarTab::Sessions);
-        assert!(shown("all-projects", cx));
+        assert!(shown("history-toggle", cx));
 
         let mut disabled = installed.clone();
         disabled[0].enabled = false;

@@ -1,12 +1,14 @@
 mod agents;
 mod agents_view;
 mod app;
+mod aurora;
 mod chat;
 mod editor;
 mod ext_host;
 mod ext_panel;
 mod extensions_view;
 mod files;
+mod layout;
 mod notify;
 mod palette;
 mod search_view;
@@ -14,6 +16,7 @@ mod search_view;
 mod shell_path;
 mod sidebar;
 mod terminal_view;
+mod topbar;
 mod update;
 #[cfg(all(test, unix))]
 mod waycarbon;

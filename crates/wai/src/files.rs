@@ -232,7 +232,7 @@ mod tests {
     use std::fs;
 
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{ElementId, Entity, TestAppContext, VisualTestContext};
+    use gpui_kit::{ElementId, Entity, Role, TestAppContext, VisualTestContext};
     use wai_settings::Settings;
 
     use crate::sidebar::canonical;
@@ -281,6 +281,16 @@ mod tests {
         set_project(&workspace, root.clone(), cx);
 
         click("tab-files", cx);
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            let tab = |id| {
+                let tab = window.find(id);
+                (tab.role(), tab.label().map(str::to_owned), tab.selected())
+            };
+            let files = (Some(Role::Tab), Some("Files".into()), Some(true));
+            assert_eq!(tab("tab-files"), files);
+            assert_eq!(tab("tab-sessions").2, Some(false));
+        });
         assert_eq!(names(&workspace, cx), ["src", ".gitignore", "README.md"]);
 
         // A folder toggles; only then is it listed.

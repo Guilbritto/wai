@@ -134,6 +134,77 @@ A re-revisão de 23ef679 deu **pronto para merge e tag `v0.1.0`**. Verificaçõe
 - o pacote gerado de um checkout limpo;
 - o teste de estresse da trava passou 720 de 720 vezes, e mais 48 de 48 na re-revisão.
 
+## Revisão visual: "Aurora"
+
+> 2026-11-09 · branch `feat/visual-aurora` (de `development`, a9e4d54) · desenho em `docs/superpowers/specs/2026-11-09-wai-visual-aurora-design.md`
+
+Você pediu uma revisão do visual da IDE com a Central de IA como base ("esse design é bonito") e pulou as perguntas de design. Então as escolhas foram minhas: estão como R73–R86 na tabela de decisões.
+
+### O que mudou
+
+- **Tema "wai Aurora"** (`crates/wai/assets/theme/aurora.json`): a paleta da Central (noite, boreal, lilás, magenta, céu, brasa, âmbar) virou o tema escuro padrão, e toda tela que já lia o tema herdou as cores. O modo claro (`theme = "light"`) continua o "Default Light" do gpui-component, sem aurora e com cartões simples (R73).
+- **Fundo:** uma aurora parada atrás de tudo, feita de um gradiente escuro e três manchas (boreal, lilás e magenta) pintadas só com sombra borrada. Não há animação (R76).
+- **Cartões:** a barra lateral, cada painel e o terminal flutuam como cartões de vidro escuro, com raio de 16 px, brilho lilás e 8 px entre eles. A alça de redimensionar não aparece em repouso e fica lilás com o mouse em cima ou arrastando.
+- **Barra do topo:** marca (ícone + "wai" em Nunito), projeto, uma pílula de status ("No agent working", "1 agent working", "N agents working", mais " · 1 needs you" em âmbar) e as ações globais (modelos, extensões, paleta, terminal, nova sessão). Essas ações saíram do cabeçalho da barra lateral e mantêm os mesmos ids. No macOS a barra do topo é a própria barra de título, com os semáforos na mesma linha (R74).
+- **Barra lateral e editor:** abas segmentadas numa linha só (R81), alcançáveis pelo teclado (R82). Linhas e pontos de status seguem o estilo da Central, e as abas do editor viraram pílulas. O painel vazio mostra "Start a session" e o atalho (R80).
+- **Chat:** balão lilás para você e balão de vidro para o agente, com o cabeçalho "✦ <agente>". Os avisos viraram pílulas. Os cartões de permissão e de pergunta seguem o estilo da Central ("PERMISSION REQUESTED", "QUESTION", opções numeradas), e o prompt é uma pílula com botão redondo e borda boreal no foco (R83).
+- **Fonte de títulos:** Nunito Bold embutida (R75, R86). O terminal e o realce de sintaxe usam a paleta.
+- **Varredura final:** passei pela paleta, consentimento, painel de extensão, Agents, Search, Files, menu de modelos e notificação, nos dois temas. Nada ignorava o tema. Só as linhas do painel de extensão destoavam, porque o hover usava o lilás da seleção, e agora usam a mesma linha da barra lateral (0d1f43b).
+
+Commits:
+- 479a589: tema, fonte e terminal;
+- 2b12ea5 e 71ed5da: fundo, cartões e barra do topo;
+- adb15a2 e f20ba91: barra lateral, abas e painel vazio;
+- 7099b86 e 43ac310: chat;
+- 0d1f43b: varredura;
+- mais o commit destas telas e medições.
+
+Depois da revisão: 293 testes em Rust passando (eram 283), mais os 15 em Go (8 em `wai-rotinas`, 7 em `wai-waycarbon`), com `clippy -D warnings` e `cargo fmt --check` limpos.
+
+**Dois pedidos a mais seus**, feitos depois das telas (as regras estão como R87–R92 na tabela):
+- **Fechar sessões e recolher o histórico** (64f26d6): cada painel de sessão ganhou um **×** no cabeçalho, que faz o mesmo que o ⌘W, e um painel vazio num split ganhou o seu **×**. O **History** da barra lateral virou uma seção recolhível, "HISTORY · N", que começa fechada.
+- **Arrastar sessões** (eab2aa8 e a leva de correções final): dá para arrastar uma sessão pelo título do painel, ou uma linha do Open ou do History, e soltar num painel. Os quartos da esquerda e da direita abrem um painel novo daquele lado; o meio mostra a sessão ali. O layout é salvo.
+
+### Telas
+
+Em `docs/screens/`, com um projeto de demonstração (`acme-api`), o agente falso e cards EC-9001..9004 inventados. Não aparece nome de usuário, nome da máquina nem caminho pessoal.
+
+| Arquivo | O que mostra |
+|---|---|
+| `aurora-chat.png` | Uma sessão pedindo permissão, com "1 needs you" na barra do topo. É a imagem principal do README |
+| `aurora-editor.png` | Dois arquivos no editor e o terminal |
+| `aurora-panel.png` | O painel "My cards" da `wai-waycarbon` |
+| `aurora-palette.png` | A paleta de comandos, com os modelos da extensão |
+| `aurora-light.png` | O mesmo chat com `theme = "light"` |
+
+### Medições
+
+Detalhe, método e amostras brutas em `docs/spikes/aurora-medicoes.md`. Para o parado e a janela, o `.app` do commit 0d1f43b (`CI=true cargo packager --release`) foi aberto como pela Fase 4. Para o streaming, o build com `demo`, como nas Fases 1 e 2. O Mac estava em uso, então cada execução registrou se a janela ficou visível, quantos prompts o agente recebeu e se o processo chegou vivo ao fim. Só contam as execuções limpas, e as outras estão listadas no arquivo.
+
+| Métrica | Meta | Aurora | Fase 4 (`.app`) | Fase 2 |
+|---|---|---|---|---|
+| CPU parado (30 s), janela visível | < 0,5% | **0,20%** com `env -i` (0,17–0,23%); **0,12%** por `open -n` | 0,16% / 0,12% | 0,15% |
+| RAM do wai (`top`) | < 300 MB | **78–80 MB** (RSS 98–114 MB) | 73–74 MB | 72 MB |
+| CPU com streaming a 40 tokens/s | < 10% | **5,1%** (médias 4,98–5,32%) | não remedido | 7,5% |
+| Janela visível, 1ª abertura / com cache | < 1 s | **301–365 ms** / **270–352 ms** | 261–297 / 251–264 ms | 244–293 ms |
+| Janela visível por `open -n` | < 1 s | **325–375 ms** | 326–362 ms | — |
+| `wai.app` / DMG | — | 45 MB / 14,2 MB | 44 MB / 14,0 MB | — |
+
+Todas as metas foram batidas, e o fundo estático de reserva da Tarefa 2 (um PNG parado) não foi preciso.
+- O streaming não ficou mais caro (5,1% contra 6,4–7,5% nas Fases 1 e 2), provavelmente porque a aurora e as sombras são trabalho da GPU. Não investiguei isso nem por que caiu.
+- O parado subiu um pouco (0,20% contra 0,16%), provavelmente porque cada piscada do cursor repinta a aurora.
+- A janela aparece ~50 ms mais tarde. A causa não foi separada: o tema e a fonte carregam na abertura, e o Mac estava ocupado.
+- Coberta por outra janela, a janela do wai não é pintada: o parado dá 0,0% e o streaming ~1,5%.
+
+### Barra de título no macOS
+
+- **Você conferiu à mão** no preview de 7099b86: arrastar pela barra do topo move a janela, e o duplo clique maximiza. A barra não mudou desde então (`topbar.rs`, `app.rs` e `workspace.rs` estão iguais em 0d1f43b).
+- **Eu conferi**, sem permissão de Acessibilidade nem de Gravação de Tela:
+  - o `.app` abre uma janela só (1400 × 883, colada na barra de menus);
+  - a marca começa em x = 82 pt, depois dos 80 pt que a `TitleBar` reserva. Os semáforos começam em x = 9 pt e, com o tamanho padrão, acabam em ~63 pt. Isso é conta, não pixel da tela.
+- **Não deu para conferir daqui:** a foto da janela real (`screencapture` recusado) e a tela cheia (`osascript` sem acesso de Acessibilidade, -1719).
+- **Falta você conferir à mão:** que os semáforos não encostam na marca e que a tela cheia não deixa faixa vazia no topo.
+
 ## Decisões que eu tomei sem você (confira)
 
 | # | Decisão | Custo se estiver errada |
@@ -193,6 +264,26 @@ A re-revisão de 23ef679 deu **pronto para merge e tag `v0.1.0`**. Verificaçõe
 | R70 | Revisão final: corrigidos o `npx` do `wai-navegador` (agora `--prefix=/`, para um repositório não plantar `node_modules`/`.npmrc`) e a corrida de pipes entre processos iniciados ao mesmo tempo (trava só nos inícios de extensão). Uma trava única para todo processo que o wai inicia fica para depois da v0.1.0 | Raramente, o fim de uma extensão que caiu demora a ser notado |
 | R71 | No Windows, `--prefix=/` é a raiz do disco, que outros usuários da máquina costumam poder escrever. Aceito na v0.1.0 (ainda melhor que a pasta do projeto) | Em máquina Windows compartilhada, outro usuário poderia plantar um pacote MCP |
 | R72 | Merge local da Fase 4 e tags `fase-4` e `v0.1.0`, só locais (a `v0.1.0` só é empurrada por você no passo 8) | Um `git reset` / `git tag -d` |
+| R73 | Revisão visual: o Aurora substitui o tema escuro padrão, sem seletor de tema; o modo claro continua o "Default Light" do gpui-component | Trocar um ajuste ou um JSON |
+| R74 | No macOS, a barra do topo é a `TitleBar` do gpui-component (barra de título transparente, semáforos na mesma linha); Windows e Linux mantêm a barra de título nativa, porque o Windows nunca rodou e assim não há botões de janela desenhados à mão | No Windows, a barra do topo fica embaixo de uma barra de título nativa |
+| R75 | Fonte de títulos: Nunito Bold (OFL 1.1) embutida; o texto continua com a fonte do sistema e o mono não muda | ~130 KB e uma linha de licença |
+| R76 | Nenhuma animação: a aurora é parada, para manter a CPU parada < 0,5% | Fica menos viva que a Central |
+| R77 | O GPUI de teste não carrega fontes, então o teste da fonte confere o arquivo embutido (família "Nunito") em vez da lista de fontes; o app de verdade lista a Nunito | Um teste mais fraco |
+| R78 | O `OFL.txt` fica no repositório, ao lado do TTF, e não vai para o `.app`; o TTF embutido traz o aviso da OFL na tabela `name`, o que a OFL 1.1 §2 aceita. **Substituída pela R86** | Pôr o `OFL.txt` no pacote depois |
+| R79 | O teste da barra do topo numa janela estreita ganhou uma checagem de verdade (o status termina antes das ações; o nome do projeto fica mais estreito a 900 px do que a 1400 px). A do plano nunca falhava | Um teste a mais |
+| R80 | O painel vazio mostra o título "Start a session" e só o atalho numa pílula (⌘N), em vez de repetir a frase da dica | Dica um pouco mais curta |
+| R81 | As 4 abas fixas da barra lateral cabem numa linha na largura padrão; as abas de painel de extensão podem quebrar a linha | Texto das abas menor |
+| R82 | As abas da barra lateral voltaram a ser alcançáveis pelo teclado (Tab, depois Enter ou Espaço) | Algumas linhas |
+| R83 | A leva de correções do chat incluiu o foco visível no prompt (borda boreal; clicar na pílula foca o texto; sem `InputGroup`, que anima) e uma função única para preencher botões | Algumas linhas |
+| R84 | Ids de sessão repetidos (os eventos vão para a 1ª sessão com o mesmo agente e id) ficaram fora da revisão visual, como lacuna conhecida. O problema é anterior; só afeta agentes que repetem ids entre execuções, e o `claude-agent-acp` usa ids únicos | Um agente real que repita ids misturaria uma sessão retomada com uma nova |
+| R85 | A redução das PNGs (`sips -Z 1400`) e as correções do doc de medições entraram no próprio commit 632560a (`--amend`, local, sem remoto), para que os 6,8 MB nunca entrem no histórico | Nenhum além de um SHA local reescrito |
+| R86 | O `OFL.txt` passa a ir dentro do `.app`, pelos `resources` do packager. Substitui a R78 | Um arquivo a mais no app |
+| R87 | O **×** do painel de sessão faz o mesmo que o ⌘W: para a sessão, que sai do Open e continua no History, pronta para retomar | Uma sessão que você queria deixar rodando é parada (dá para retomar) |
+| R88 | O History começa recolhido a cada abertura; aberto ou fechado fica só na memória, não é salvo | Um clique para abrir |
+| R89 | Zonas de soltar: os 25% da esquerda e os 25% da direita abrem um painel novo ao lado; o meio mostra a sessão ali. No meio, uma sessão vinda de outro painel troca de lugar com a do alvo; qualquer outra substitui, e a sessão que saiu continua aberta no Open. Os painéis ficam numa linha só. Um editor com edições não salvas nunca é substituído: a sessão abre ao lado | Um arranjo diferente do que você esperava; ajuste numa função pura com testes |
+| R90 | Soltar na borda de um painel vazio preenche o painel, em vez de abrir outro ao lado | Quem queria um painel novo ao lado do vazio precisa fechar o vazio antes |
+| R91 | Soltar no meio de um painel vazio uma sessão vinda de outro painel move a sessão para lá e fecha o painel antigo, em vez de trocar e deixar um vazio para trás | Se você preferia a troca, o painel antigo some; é uma linha em `layout::place` |
+| R92 | Com 4 painéis, um painel ainda pode ser movido para o lado (o número de painéis não muda); só as linhas da barra lateral viram um soltar no meio. O realce mostra só as zonas que agem: quando todo soltar naquele painel seria no meio, acende o painel inteiro | Se você esperava a troca de antes, o painel vai para o lado em vez de trocar; é uma linha em `layout::only_center` |
 
 ## Lacunas conhecidas (atuais)
 
@@ -230,6 +321,7 @@ A re-revisão de 23ef679 deu **pronto para merge e tag `v0.1.0`**. Verificaçõe
   - árvore e busca só respeitam `.gitignore` dentro de repositório git;
   - o terminal não rola com a roda do mouse dentro de `less`/`vim`.
 - **Permissão com o Claude real** nunca apareceu nesta máquina, porque as suas configurações usam `bypassPermissions`. O fluxo foi testado com o agente falso.
+- **Ids de sessão repetidos (R84).** `Workspace::session` (`crates/wai/src/workspace.rs`, ~linha 427) entrega cada evento à 1ª sessão aberta com o mesmo agente e id. Um agente que repete ids entre execuções mistura uma sessão retomada com uma nova: o texto do turno novo cola na sessão antiga e o prompt novo não aparece. Só o agente falso faz isso (um contador `fake-{n}` por processo); o `claude-agent-acp` usa ids únicos.
 
 **Extensões próprias**
 - **"My cards"** só foi testado com um `jira` falso.

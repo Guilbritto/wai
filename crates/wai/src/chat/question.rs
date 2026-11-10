@@ -15,6 +15,7 @@ use wai_agent::{Choice, FieldKind, QuestionAnswer, QuestionField, QuestionReques
 
 use super::model::ChatItem;
 use super::view::ChatSession;
+use crate::aurora;
 
 /// What the user entered so far in an open question's form, per field.
 pub struct QuestionForm {
@@ -151,19 +152,9 @@ pub fn card(
     window: &mut Window,
     cx: &mut Context<ChatSession>,
 ) -> AnyElement {
-    let (border, muted) = (cx.theme().warning, cx.theme().muted_foreground);
-    let card = v_flex()
-        .id(("question", ix))
-        .gap_3()
-        .p_3()
-        .rounded_md()
-        .border_1()
-        .border_color(border)
-        .child(
-            div()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(request.message.clone()),
-        );
+    let muted = cx.theme().muted_foreground;
+    let card = super::permission::frame(aurora::lilas(), "QUESTION", request.message.clone(), cx)
+        .id(("question", ix));
     if let Some(answered) = answered {
         return card
             .child(div().text_color(muted).child(answered.to_string()))

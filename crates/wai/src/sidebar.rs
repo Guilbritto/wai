@@ -1,13 +1,11 @@
-//! The sidebar: the project, then tabs: its open sessions with their status and the agent's
-//! history, its files, search, the agents, then each running extension's panels.
+//! The sidebar: tabs for the open sessions with their status and the agent's history, the
+//! project's files, search, the agents, then each running extension's panels.
 
 use std::ops::Range;
 
-use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::SessionSummary;
@@ -15,9 +13,9 @@ use wai_ext::panel::clamp;
 pub use wai_settings::canonical;
 
 use crate::agents::AgentStatus;
-use crate::app::NewSession;
+use crate::aurora;
 use crate::chat::{ChatSession, TurnState};
-use crate::workspace::{MAX_PANES, Workspace, folder_name};
+use crate::workspace::{Dragged, DraggedSession, MAX_PANES, Workspace};
 
 pub(crate) const ROW_HEIGHT: f32 = 28.;
 
@@ -28,7 +26,7 @@ pub enum SidebarTab {
     Files,
     Search,
     Agents,
-    /// Opened from the header's Extensions button; it has no tab.
+    /// Opened from the top bar's Extensions button; it has no tab.
     Extensions,
     /// An extension's panel, by its view. When the panel goes, the sessions show again.
     Panel(EntityId),
@@ -48,7 +46,7 @@ const TABS: [(SidebarTab, &str, &str); 4] = [
 /// The status dot's colour, shared by the open list and the agent cards.
 pub(crate) fn status_color(state: &TurnState, theme: &gpui_kit::component::Theme) -> Hsla {
     match state {
-        TurnState::Working => theme.blue,
+        TurnState::Working => theme.cyan,
         TurnState::NeedsYou => theme.warning,
         TurnState::Idle => theme.muted_foreground,
         TurnState::Error(_) => theme.danger,
@@ -114,7 +112,6 @@ impl Workspace {
 
     pub(crate) fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
-        let templates = self.all_templates(cx);
         let panels = self.ext_host.read(cx).panels();
         let shown = panels
             .iter()
@@ -146,15 +143,25 @@ impl Workspace {
                 SharedString::from(title),
             )
         });
+        let ring = theme.ring;
         let tabs = built_in
             .into_iter()
             .chain(extension)
             .map(|(tab, id, label)| {
-                Button::new(id)
-                    .ghost()
-                    .xsmall()
-                    .label(label)
-                    .selected(self.sidebar_tab == tab)
+                aurora::tab(self.sidebar_tab == tab, cx)
+                    .id(id)
+                    .role(Role::Tab)
+                    .aria_label(label.clone())
+                    .aria_selected(self.sidebar_tab == tab)
+                    .focus_visible(move |el| el.border_color(ring))
+                    // Focusable, and Enter or Space clicks it.
+                    .tab_index(0)
+                    .h(px(26.))
+                    .px(px(5.))
+                    .rounded(px(9.))
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(label)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.sidebar_tab = tab;
                         if tab == SidebarTab::Search {
@@ -163,87 +170,61 @@ impl Workspace {
                         }
                         cx.notify();
                     }))
+                    // Registers the id so tests can find and click it (a Button does it itself).
+                    .test_support()
             });
         v_flex()
-            .debug_selector(|| "sidebar".into())
             .size_full()
-            .pb_2()
-            .bg(theme.sidebar)
+            .py_2()
             .text_color(theme.sidebar_foreground)
             .child(
                 h_flex()
-                    .px_3()
-                    .pt_3()
-                    .pb_2()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(folder_name(&self.project)),
-                    )
-                    .when(!templates.is_empty(), |el| {
-                        let (workspace, names) = (
-                            cx.entity().downgrade(),
-                            // An extension's names too: one line each.
-                            (templates.iter())
-                                .map(|t| clamp(&t.name, crate::palette::TITLE_CHARS))
-                                .collect::<Vec<_>>(),
-                        );
-                        el.child(
-                            div().debug_selector(|| "sidebar-templates".into()).child(
-                                Button::new("sidebar-templates")
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::ChevronDown)
-                                    .tooltip("New from template")
-                                    .dropdown_menu(move |menu, _, _| {
-                                        names.iter().enumerate().fold(menu, |menu, (ix, name)| {
-                                            let workspace = workspace.clone();
-                                            menu.item(PopupMenuItem::new(name.clone()).on_click(
-                                                move |_, window, cx| {
-                                                    workspace
-                                                        .update(cx, |w, cx| {
-                                                            w.start_template(ix, window, cx)
-                                                        })
-                                                        .ok();
-                                                },
-                                            ))
-                                        })
-                                    }),
-                            ),
-                        )
+                    .mx_1()
+                    .p(px(2.))
+                    .gap(px(2.))
+                    .flex_wrap()
+                    .rounded(px(12.))
+                    .border_1()
+                    .map(|el| {
+                        if theme.is_dark() {
+                            el.bg(aurora::vidro()).border_color(aurora::borda())
+                        } else {
+                            el.border_color(theme.border)
+                        }
                     })
-                    .child(
-                        Button::new("sidebar-extensions")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::LayoutDashboard)
-                            .tooltip("Extensions")
-                            .selected(self.sidebar_tab == SidebarTab::Extensions)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.show_extensions(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("sidebar-new")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Plus)
-                            .tooltip("New session")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.new_session(&NewSession, window, cx)
-                            })),
-                    ),
+                    .children(tabs),
             )
-            .child(h_flex().px_2().gap_1().flex_wrap().children(tabs))
             .child(v_flex().flex_1().min_h_0().child(content))
     }
 
     fn render_sessions(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let rows = self.history_rows().len();
+        let open = self.history_open;
+        let ring = cx.theme().ring;
+        let chevron = match open {
+            true => IconName::ChevronDown,
+            false => IconName::ChevronRight,
+        };
+        let label = format!("History · {rows}");
+        // R88: the whole row, the switch aside, opens and closes the History.
+        let toggle = aurora::tab(false, cx)
+            .id("history-toggle")
+            .flex_1()
+            .rounded(px(8.))
+            .role(Role::Button)
+            .aria_label(label.clone())
+            .aria_expanded(open)
+            .focus_visible(move |el| el.border_color(ring))
+            // Focusable, and Enter or Space clicks it.
+            .tab_index(0)
+            .child(heading(&label, cx).pt_1().pr_1())
+            .child(Icon::new(chevron).xsmall())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.history_open = !this.history_open;
+                cx.notify();
+            }))
+            // Registers the id so tests can find and click it.
+            .test_support();
         v_flex()
             .size_full()
             .child(heading("Open", cx))
@@ -255,34 +236,39 @@ impl Workspace {
             )
             .child(
                 h_flex()
-                    .justify_between()
+                    .mt_2()
                     .pr_3()
-                    .child(heading("History", cx))
-                    .child(
-                        Switch::new("all-projects")
-                            .xsmall()
-                            .label("All projects")
-                            .checked(self.all_projects)
-                            .on_click(cx.listener(|this, all: &bool, _, cx| {
-                                this.all_projects = *all;
-                                cx.notify();
-                            })),
-                    ),
+                    .gap_2()
+                    .child(toggle)
+                    .when(open, |el| {
+                        el.child(
+                            Switch::new("all-projects")
+                                .xsmall()
+                                .label("All projects")
+                                .checked(self.all_projects)
+                                .on_click(cx.listener(|this, all: &bool, _, cx| {
+                                    this.all_projects = *all;
+                                    cx.notify();
+                                })),
+                        )
+                    }),
             )
             // Only the visible rows render: an agent can hold thousands of sessions.
-            .child(
-                uniform_list(
-                    "history",
-                    rows,
-                    cx.processor(|this, range: Range<usize>, _, cx| {
-                        let rows = this.history_rows();
-                        range
-                            .map(|ix| this.history_row(ix, rows[ix], cx))
-                            .collect::<Vec<_>>()
-                    }),
+            .when(open, |el| {
+                el.child(
+                    uniform_list(
+                        "history",
+                        rows,
+                        cx.processor(|this, range: Range<usize>, _, cx| {
+                            let rows = this.history_rows();
+                            range
+                                .map(|ix| this.history_row(ix, rows[ix], cx))
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .flex_1(),
                 )
-                .flex_1(),
-            )
+            })
     }
 
     fn open_row(
@@ -298,6 +284,10 @@ impl Workspace {
         let title = s.model.title.clone().unwrap_or("New session".into());
         let active = self.panes[self.focused_pane].session() == Some(session);
         let (open, side) = (session.clone(), session.clone());
+        let dragged = DraggedSession {
+            title: title.clone().into(),
+            source: Dragged::Open(session.clone()),
+        };
         let (agent, id, cwd) = (s.agent.clone(), s.id.clone(), s.cwd.clone());
         let forkable = self.can_fork(&agent, cx);
         let fork_title = s.model.title.clone();
@@ -309,12 +299,24 @@ impl Workspace {
                     .min_w_0()
                     .h_full()
                     .gap_2()
-                    .child(div().flex_none().size(px(8.)).rounded_full().bg(dot))
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(8.))
+                            .rounded_full()
+                            .bg(dot)
+                            .shadow(vec![
+                                BoxShadow::new(px(0.), px(0.), dot.alpha(0.7)).blur_radius(px(4.)),
+                            ]),
+                    )
                     .child(div().flex_1().min_w_0().truncate().child(title))
                     .children(label.map(|l| div().text_xs().text_color(dot).child(l)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.show(open.clone(), false, window, cx)
-                    })),
+                    }))
+                    .on_drag(dragged, DraggedSession::preview)
+                    // Registers the id so tests can find and drag it.
+                    .test_support(),
             )
             .when(self.panes.len() < MAX_PANES, |el| {
                 el.child(side_button(("open-side", ix)).on_click(cx.listener(
@@ -345,6 +347,10 @@ impl Workspace {
     ) -> impl IntoElement + use<> {
         let title = summary.title.clone().unwrap_or_else(|| summary.id.clone());
         let (open, side, source) = (summary.clone(), summary.clone(), summary.clone());
+        let dragged = DraggedSession {
+            title: title.clone().into(),
+            source: Dragged::History(summary.clone()),
+        };
         let forkable = self.can_fork(&self.settings.default_agent, cx);
         row(false, cx)
             .child(
@@ -354,9 +360,14 @@ impl Workspace {
                     .min_w_0()
                     .truncate()
                     .child(title)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.resume(&open, false, window, cx)
-                    })),
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            this.resume(&open, false, window, cx)
+                        }),
+                    )
+                    .on_drag(dragged, DraggedSession::preview)
+                    // Registers the id so tests can find and drag it.
+                    .test_support(),
             )
             .when(self.panes.len() < MAX_PANES, |el| {
                 el.child(side_button(("history-side", ix)).on_click(
@@ -376,32 +387,32 @@ impl Workspace {
     }
 }
 
-fn heading(text: &'static str, cx: &App) -> impl IntoElement {
+fn heading(text: &str, cx: &App) -> Div {
+    let theme = cx.theme();
+    let color = if theme.is_dark() {
+        aurora::nevoa_2()
+    } else {
+        theme.muted_foreground
+    };
     div()
         .px_3()
         .pt_3()
         .pb_1()
-        .text_xs()
+        .text_size(px(11.))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(cx.theme().muted_foreground)
-        .child(text)
+        .text_color(color)
+        .child(text.to_uppercase())
 }
 
 pub(crate) fn row(active: bool, cx: &App) -> Div {
-    let theme = cx.theme();
-    h_flex()
+    aurora::tab(active, cx)
         .w_full()
         .h(px(ROW_HEIGHT))
         .pl_3()
         .pr_1()
         .gap_1()
+        .rounded(px(10.))
         .text_sm()
-        .cursor_pointer()
-        .hover(|el| el.bg(theme.sidebar_accent))
-        .when(active, |el| {
-            el.bg(theme.sidebar_accent)
-                .text_color(theme.sidebar_accent_foreground)
-        })
 }
 
 fn side_button(id: impl Into<ElementId>) -> Button {
@@ -418,4 +429,53 @@ fn fork_button(id: impl Into<ElementId>) -> Button {
         .xsmall()
         .icon(IconName::Copy)
         .tooltip("Fork")
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{ElementId, TestAppContext, VisualTestContext};
+    use wai_settings::Settings;
+
+    use gpui_kit::component::ActiveTheme as _;
+
+    use super::{TurnState, status_color};
+    use crate::workspace::tests::{history_settings, load_history, open};
+    use crate::{app, aurora};
+
+    #[gpui_kit::test]
+    fn working_dot_is_boreal(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            app::init(&Settings::default(), cx);
+            let color = status_color(&TurnState::Working, cx.theme());
+            assert_eq!(aurora::hex(color), aurora::hex(aurora::boreal()));
+        });
+    }
+
+    /// R88: History starts collapsed, without its rows or the "All projects" switch; its header,
+    /// "HISTORY · N", opens it.
+    #[gpui_kit::test]
+    fn history_starts_collapsed_and_toggles(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(3));
+        load_history(&workspace, 3, cx);
+        let shown = |id: ElementId, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.try_find(id).is_some()
+            })
+        };
+        let row = || ElementId::from(("history-side", 0usize));
+        assert!(!shown(row(), cx), "no history rows");
+        assert!(!shown("all-projects".into(), cx));
+        let header = cx.update(|window, _| window.find("history-toggle"));
+        assert_eq!(header.label(), Some("History · 3"));
+        assert_eq!(header.expanded(), Some(false));
+
+        cx.update(|window, cx| window.click("history-toggle", cx));
+        assert!(shown(row(), cx));
+        assert!(shown("all-projects".into(), cx));
+        let header = cx.update(|window, _| window.find("history-toggle"));
+        assert_eq!(header.expanded(), Some(true));
+    }
 }

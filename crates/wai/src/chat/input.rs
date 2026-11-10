@@ -6,7 +6,7 @@ use base64::Engine as _;
 use gpui_kit::component::attachment::{Attachment as Chip, AttachmentContent, AttachmentTitle};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::PromptBlock;
@@ -14,6 +14,7 @@ use wai_agent::PromptBlock;
 use super::model::TurnState;
 use super::view::ChatSession;
 use crate::app::CancelTurn;
+use crate::aurora;
 
 const IMAGE_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
@@ -128,7 +129,11 @@ impl ChatSession {
         cx.notify();
     }
 
-    pub(super) fn render_prompt(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(super) fn render_prompt(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let busy = matches!(self.model.state, TurnState::Working | TurnState::NeedsYou);
         let chips = self.attachments.iter().enumerate().map(|(ix, attachment)| {
             Chip::new()
@@ -141,31 +146,87 @@ impl ChatSession {
                     cx.notify();
                 }))
         });
+        let theme = cx.theme();
+        let dark = theme.is_dark();
+        // Round 36 px buttons (`.chat-enviar`); light mode keeps the theme's primary and danger.
         let button = if busy {
-            Button::new("stop")
-                .danger()
-                .label("Stop")
-                .on_click(cx.listener(|this, _, window, cx| this.cancel(&CancelTurn, window, cx)))
+            let stop = Button::new("stop")
+                .icon(IconName::Square)
+                .tooltip("Stop")
+                .accessibility_label("Stop")
+                .on_click(cx.listener(|this, _, window, cx| this.cancel(&CancelTurn, window, cx)));
+            match dark {
+                true => aurora::filled(
+                    stop,
+                    aurora::erro().alpha(0.18),
+                    aurora::erro().alpha(0.28),
+                    aurora::erro(),
+                    cx,
+                )
+                .border_1()
+                .border_color(aurora::erro().alpha(0.5)),
+                false => stop.danger(),
+            }
         } else {
-            Button::new("send")
-                .primary()
-                .label("Send")
-                .disabled(self.model.state != TurnState::Idle)
-                .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
+            let disabled = self.model.state != TurnState::Idle;
+            let send = Button::new("send")
+                .icon(IconName::ArrowUp)
+                .tooltip("Send")
+                .accessibility_label("Send")
+                .disabled(disabled)
+                .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)));
+            match (dark, disabled) {
+                // A disabled button replays these over its own disabled colors.
+                (true, true) => send.bg(aurora::vidro()).text_color(aurora::nevoa()),
+                (true, false) => aurora::filled(
+                    send,
+                    aurora::boreal(),
+                    aurora::boreal().blend(hsla(0., 0., 1., 0.2)),
+                    rgb(0x0b1024).into(),
+                    cx,
+                ),
+                (false, _) => send.primary(),
+            }
+        }
+        .size(px(36.))
+        .rounded(px(18.));
+        // R83: the textarea draws no ring of its own, so the pill shows the focus, and a press
+        // anywhere on it, its padding included, puts the caret in the textarea.
+        let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
+        let field = h_flex()
+            .gap_2()
+            .items_end()
+            .rounded(px(24.))
+            .border_1()
+            .pt(px(6.))
+            .pr(px(6.))
+            .pb(px(6.))
+            .pl(px(14.))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.focus(window, cx)),
+            );
+        let field = match (dark, focused) {
+            (true, true) => field.bg(aurora::vidro()).border_color(aurora::boreal()),
+            (true, false) => field
+                .bg(aurora::vidro())
+                .border_color(aurora::borda_forte()),
+            (false, true) => field.bg(theme.background).border_color(theme.ring),
+            (false, false) => field.bg(theme.background).border_color(theme.input),
         };
         v_flex()
             .gap_2()
             .p_3()
-            .border_t_1()
-            .border_color(cx.theme().border)
             .when(!self.attachments.is_empty(), |el| {
                 el.child(h_flex().gap_2().flex_wrap().children(chips))
             })
             .child(
-                h_flex()
-                    .gap_2()
-                    .items_end()
-                    .child(div().flex_1().child(Textarea::new(&self.input)))
+                field
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(Textarea::new(&self.input).appearance(false)),
+                    )
                     .child(button),
             )
     }

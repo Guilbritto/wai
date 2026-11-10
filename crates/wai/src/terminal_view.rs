@@ -215,7 +215,7 @@ impl TerminalView {
     }
 }
 
-fn color(Rgb(r, g, b): Rgb) -> Hsla {
+pub(crate) fn color(Rgb(r, g, b): Rgb) -> Hsla {
     rgb(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)).into()
 }
 

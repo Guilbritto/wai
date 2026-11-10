@@ -45,6 +45,8 @@ pub enum ChatEvent {
         tool: String,
         text: String,
     },
+    /// R87: the header's ×, to close the pane showing this session.
+    Close,
 }
 
 /// A message's markdown and how many bytes of it the view already handed over.
@@ -480,7 +482,7 @@ mod tests {
 
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{ElementId, Entity, Modifiers, TestAppContext, VisualTestContext};
+    use gpui_kit::{ElementId, Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
     use wai_agent::StopReason;
 
     use super::ChatSession;
@@ -582,6 +584,27 @@ mod tests {
         cx.update(|window, cx| {
             window.render_frame(cx);
             assert!(window.try_find("perm-allow_once").is_none(), "buttons stay");
+        });
+    }
+
+    /// The choice rows and the icon-only Stop are named for assistive tech: the rows' text is a
+    /// child, not a button label.
+    #[gpui_kit::test]
+    fn permission_choices_have_names(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--ask-permission"));
+        let session = start_session(&workspace, cx);
+
+        send("edit", cx);
+        wait_until(cx, "the permission card", |cx| {
+            state(&session, cx) == TurnState::NeedsYou
+        });
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            let label = |id: &'static str| window.find(id).label().map(str::to_owned);
+            assert_eq!(label("perm-allow_once").as_deref(), Some("Yes"));
+            assert_eq!(label("perm-reject_once").as_deref(), Some("No"));
+            assert_eq!(label("stop").as_deref(), Some("Stop"));
         });
     }
 
@@ -977,6 +1000,39 @@ mod tests {
         assert_eq!(workspace.read_with(cx, |w, _| w.focused_pane), 1);
         assert_eq!(typed(&side, cx), "typed");
         assert_eq!(typed(&landed, cx), "");
+    }
+
+    /// R83: a press anywhere on the prompt pill, its padding included, puts the caret in it, even
+    /// from another field of the same pane (the question card's note here).
+    #[gpui_kit::test]
+    fn press_on_prompt_pill_focuses_input(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--ask-question"));
+        let session = start_session(&workspace, cx);
+        send("ask", cx);
+        wait_until(cx, "the question card", |cx| {
+            state(&session, cx) == TurnState::NeedsYou
+        });
+
+        cx.run_until_parked();
+        let (inputs, stop) = cx.update(|window, cx| {
+            window.render_frame(cx);
+            let inputs: Vec<_> = (window.find_all("input-state").iter())
+                .map(|input| input.bounds())
+                .collect();
+            (inputs, window.find("stop").bounds())
+        });
+        assert_eq!(inputs.len(), 2, "the note and the prompt");
+        cx.simulate_click(inputs[0].center(), Modifiers::none());
+        cx.simulate_input("n");
+        assert_eq!(typed(&session, cx), "", "the note has the caret");
+
+        // The pill's right padding, past the stop button.
+        let padding = point(stop.right() + px(3.), stop.center().y);
+        cx.simulate_click(padding, Modifiers::none());
+        cx.simulate_input("typed");
+
+        assert_eq!(typed(&session, cx), "typed");
     }
 
     /// Clicking into a pane moves the caret there, so typing and ⌘W/⌘N act on the same pane.

@@ -5,7 +5,10 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{ActiveTheme as _, h_resizable, resizable_panel, v_flex, v_resizable};
+use gpui_kit::component::{
+    ActiveTheme as _, IconName, Sizable as _, h_flex, h_resizable, resizable_panel, v_flex,
+    v_resizable,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::json;
@@ -16,29 +19,33 @@ use wai_agent::{
 use wai_ext::{CommandSpec, ExtEvent, ExtId, HostEvent, Reply};
 use wai_project::{FsChange, ProjectWatcher};
 use wai_settings::{AppState, OpenSession, Settings, Template, config_dir, load_templates, shown};
+use wai_terminal::DEFAULT_BG;
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::agents_view::{AgentsView, ShowSession};
 use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, Quit, Save, ToggleTerminal};
+use crate::aurora;
 use crate::chat::{ChatEvent, ChatSession, TurnState, signed_out};
 use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved, recovery};
 use crate::ext_host::{ExtHost, SessionCall};
 use crate::extensions_view::{ExtensionsView, InstallPlugin};
 use crate::files::{FileTree, OpenFile};
+use crate::layout::{self, Slot, Zone};
 use crate::notify::{self, should_notify};
 use crate::search_view::{OpenMatch, SearchView};
 use crate::sidebar::{SidebarTab, canonical};
-use crate::terminal_view::TerminalView;
+use crate::terminal_view::{self, TerminalView};
+use crate::topbar::BRAND;
 
 const SIDEBAR_WIDTH: f32 = 260.;
 const TERMINAL_HEIGHT: f32 = 260.;
 pub const MAX_PANES: usize = 4;
 /// Events kept per session id that is not open yet (see `Workspace::early`).
 const EARLY_EVENTS: usize = 1_000;
-const START_HINT: &str = if cfg!(target_os = "macos") {
-    "Start a session (⌘N)"
+const START_KEY: &str = if cfg!(target_os = "macos") {
+    "⌘N"
 } else {
-    "Start a session (Ctrl+N)"
+    "Ctrl+N"
 };
 
 pub enum Pane {
@@ -66,6 +73,43 @@ impl Pane {
     }
 }
 
+/// R89: a session dragged from an Open row, a pane's header or a History row onto a pane.
+#[derive(Clone)]
+pub(crate) struct DraggedSession {
+    pub(crate) title: SharedString,
+    pub(crate) source: Dragged,
+}
+
+#[derive(Clone)]
+pub(crate) enum Dragged {
+    Open(Entity<ChatSession>),
+    /// Resumed where it drops, as a click on its row resumes it.
+    History(SessionSummary),
+}
+
+impl DraggedSession {
+    /// The `on_drag` preview: a pill with the title.
+    pub(crate) fn preview(
+        &self,
+        offset: Point<Pixels>,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> Entity<Preview> {
+        cx.new(|_| Preview(self.title.clone(), offset))
+    }
+}
+
+/// GPUI draws a drag's view where its source was grabbed: the padding brings the pill under
+/// the pointer.
+pub(crate) struct Preview(SharedString, Point<Pixels>);
+
+impl Render for Preview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pill = aurora::pill(cx).child(self.0.clone());
+        div().pl(self.1.x).pt(self.1.y).child(pill)
+    }
+}
+
 /// What waits on the question about unsaved edits.
 #[derive(Clone)]
 pub(crate) enum Leave {
@@ -74,7 +118,8 @@ pub(crate) enum Leave {
     Open(PathBuf),
 }
 
-/// The window's root view: sidebar | chat panes over the terminal panel.
+/// The window's root view: the top bar over sidebar | chat panes over the terminal panel, each a
+/// card on the aurora.
 pub struct Workspace {
     /// Canonical, so history cwds compare with it (R3).
     pub project: PathBuf,
@@ -95,6 +140,8 @@ pub struct Workspace {
     /// The default agent's sessions, each with its cwd canonicalized for the project filter.
     pub history: Vec<(PathBuf, SessionSummary)>,
     pub all_projects: bool,
+    /// R88: the sidebar's History is open. Kept in memory only: each launch starts collapsed.
+    pub(crate) history_open: bool,
     pub(crate) history_task: Option<Task<()>>,
     pub sidebar_tab: SidebarTab,
     pub files: Entity<FileTree>,
@@ -241,6 +288,7 @@ impl Workspace {
             terminal: None,
             history: Vec::new(),
             all_projects: false,
+            history_open: false,
             history_task: None,
             sidebar_tab: SidebarTab::default(),
             files,
@@ -568,6 +616,13 @@ impl Workspace {
                     let session = session.read(cx).id.clone();
                     return this.open_output(&session, tool, text.clone(), window, cx);
                 }
+                ChatEvent::Close => {
+                    let pane = this.panes.iter().position(|p| p.session() == Some(session));
+                    if let Some(ix) = pane {
+                        this.close_pane(ix, window, cx);
+                    }
+                    return;
+                }
                 ChatEvent::StateChanged => {
                     let s = session.read(cx);
                     this.ext_host.read(cx).broadcast(HostEvent::SessionState {
@@ -688,17 +743,126 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let agent = self.settings.default_agent.clone();
-        if let Some(session) = self.session(&agent, &summary.id, cx) {
-            return self.show(session, side, window, cx);
-        }
-        let (id, cwd) = (summary.id.clone(), summary.cwd.clone());
-        let Some(session) = self.loading_session(agent, id, cwd, window, cx) else {
+        let Some((session, fresh)) = self.resumed(summary, window, cx) else {
             return;
         };
-        session.update(cx, |s, _| s.model.title = summary.title.clone());
         self.show(session.clone(), side, window, cx);
-        session.update(cx, |s, cx| s.load(false, window, cx));
+        if fresh {
+            session.update(cx, |s, cx| s.load(false, window, cx));
+        }
+    }
+
+    /// A history row's session: the open one with its id, else a new one titled like the row,
+    /// which is `fresh`: it loads once its caller has put it in a pane.
+    fn resumed(
+        &mut self,
+        summary: &SessionSummary,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<(Entity<ChatSession>, bool)> {
+        let agent = self.settings.default_agent.clone();
+        if let Some(session) = self.session(&agent, &summary.id, cx) {
+            return Some((session, false));
+        }
+        let (id, cwd) = (summary.id.clone(), summary.cwd.clone());
+        let session = self.loading_session(agent, id, cwd, window, cx)?;
+        session.update(cx, |s, _| s.model.title = summary.title.clone());
+        Some((session, true))
+    }
+
+    /// R89–R92: `dragged` lands on pane `ix`'s `zone` (`layout::place`) and its pane takes the
+    /// focus. A session it replaces stays open, in no pane; a History row resumes as a click on
+    /// it does.
+    fn drop_session(
+        &mut self,
+        dragged: &DraggedSession,
+        ix: usize,
+        zone: Zone,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The panes may have changed since the zones drew.
+        if ix >= self.panes.len() {
+            return;
+        }
+        let (session, fresh) = match &dragged.source {
+            Dragged::Open(session) if self.sessions.contains(session) => (session.clone(), false),
+            Dragged::Open(_) => return,
+            Dragged::History(row) => match self.resumed(row, window, cx) {
+                Some(resumed) => resumed,
+                None => return,
+            },
+        };
+        let from = self
+            .panes
+            .iter()
+            .position(|p| p.session() == Some(&session));
+        let empty = matches!(self.panes[ix], Pane::Empty(_));
+        let locked = matches!(self.panes[ix], Pane::Editor(_)) && !self.dirty_tabs(cx).is_empty();
+        if let Some(slots) = layout::place(self.panes.len(), from, ix, zone, empty, locked) {
+            let mut old: Vec<_> = self.panes.drain(..).map(Some).collect();
+            self.panes = (slots.into_iter())
+                .map(|slot| match slot {
+                    Slot::Old(ix) => old[ix].take().expect("each pane lands once"),
+                    Slot::Dropped => Pane::Session(session.clone()),
+                })
+                .collect();
+            self.save_state(cx);
+        }
+        if let Some(ix) = self
+            .panes
+            .iter()
+            .position(|p| p.session() == Some(&session))
+        {
+            self.focus_pane(ix, window, cx);
+        }
+        if fresh {
+            session.update(cx, |s, cx| s.load(false, window, cx));
+        }
+    }
+
+    /// R92: what a session dragged over pane `ix` lights: the whole pane when each of its zones
+    /// acts as the center (`Some(true)`), else the zone under the pointer (`Some(false)`); nothing
+    /// over its own pane, where a drop changes nothing.
+    fn lit(&self, dragged: &DraggedSession, ix: usize, cx: &App) -> Option<bool> {
+        let session = match &dragged.source {
+            Dragged::Open(session) => Some(session.clone()),
+            Dragged::History(row) => self.session(&self.settings.default_agent, &row.id, cx),
+        };
+        let from = session.and_then(|s| self.panes.iter().position(|p| p.session() == Some(&s)));
+        let empty = matches!(self.panes.get(ix)?, Pane::Empty(_));
+        (from != Some(ix)).then(|| layout::only_center(self.panes.len(), from, empty))
+    }
+
+    /// R89: while something is dragged, pane `ix`'s left and right quarters and its middle, each
+    /// lit while a session is over it; or the whole pane, when every zone acts as the center (R92).
+    fn drop_zones(ix: usize, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let this = cx.weak_entity();
+        let light = move |whole: bool| {
+            let this = this.clone();
+            move |style, dragged: &DraggedSession, _: &mut Window, cx: &mut App| {
+                let lit = this.upgrade().and_then(|w| w.read(cx).lit(dragged, ix, cx));
+                if lit == Some(whole) {
+                    aurora::drop_target(style, cx)
+                } else {
+                    style
+                }
+            }
+        };
+        let zone = |zone: Zone| {
+            div().h_full().drag_over(light(false)).on_drop(cx.listener(
+                move |this, dragged: &DraggedSession, window, cx| {
+                    this.drop_session(dragged, ix, zone, window, cx)
+                },
+            ))
+        };
+        h_flex()
+            .absolute()
+            .inset_0()
+            .drag_over(light(true))
+            .child(zone(Zone::Left).w(relative(0.25)))
+            .child(zone(Zone::Center).flex_1())
+            .child(zone(Zone::Right).w(relative(0.25)))
     }
 
     /// Whether `agent` advertised `session/fork` and `session/load` (a fork loads to replay).
@@ -1080,12 +1244,16 @@ impl Workspace {
         }
     }
 
-    /// Drops the focused pane's session from the panes and the open list (the agent keeps it in
-    /// its history). With more than one pane, the pane goes too. A "Preparing…" pane's session
-    /// never opens. R20: in an editor pane it closes the active tab instead (the pane goes with
-    /// the last one).
+    /// ⌘W: `close_pane` on the focused pane.
     fn close_session(&mut self, _: &CloseSession, window: &mut Window, cx: &mut Context<Self>) {
-        let ix = self.focused_pane;
+        self.close_pane(self.focused_pane, window, cx);
+    }
+
+    /// Drops pane `ix`'s session from the panes and the open list (the agent keeps it in its
+    /// history). With more than one pane, the pane goes too. A "Preparing…" pane's session never
+    /// opens. R20: in an editor pane it closes the active tab instead (the pane goes with the last
+    /// one). R87: a pane's × runs it on its own pane, focused or not.
+    fn close_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         match &self.panes[ix] {
             Pane::Editor(pane) => return pane.update(cx, |p, cx| p.close(p.active, window, cx)),
             Pane::Session(session) => {
@@ -1551,7 +1719,15 @@ impl Workspace {
             .items_center()
             .justify_center()
             .gap_3()
-            .child(div().text_color(theme.muted_foreground).child(START_HINT))
+            .child(img(BRAND.clone()).size(px(48.)).rounded(px(12.)))
+            .child(
+                div()
+                    .font_family(aurora::DISPLAY_FONT)
+                    .text_size(px(20.))
+                    .font_weight(FontWeight::BOLD)
+                    .child("Start a session"),
+            )
+            .child(aurora::pill(cx).child(START_KEY))
             .child(
                 Button::new(("new-session", ix))
                     .primary()
@@ -1562,6 +1738,23 @@ impl Workspace {
                     })),
             )
             .children(problem.map(|p| div().max_w(px(480.)).text_color(theme.danger).child(p)))
+            // In a split, its × drops it; a lone empty pane has nothing to close.
+            .when(self.panes.len() > 1, |el| {
+                let close = Button::new("pane-close")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .tooltip("Close pane")
+                    .accessibility_label("Close pane")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        // The panes may have changed since this frame drew.
+                        if matches!(this.panes.get(ix), Some(Pane::Empty(_))) {
+                            this.close_pane(ix, window, cx);
+                        }
+                    }));
+                el.relative()
+                    .child(div().absolute().top_2().right_2().child(close))
+            })
     }
 }
 
@@ -1576,56 +1769,66 @@ fn title(project: &Path) -> String {
     format!("wai — {}", folder_name(project))
 }
 
+/// A resizable panel's content on `card`, inset 4 px: the cards sit 8 px apart.
+fn on_card(card: Div, content: impl IntoElement) -> Div {
+    div()
+        .size_full()
+        .p_1()
+        .child(card.size_full().child(content))
+}
+
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let top_bar = self.render_top_bar(window, cx);
         let sidebar = self.render_sidebar(cx);
         let theme = cx.theme();
         let split = self.panes.len() > 1;
+        let dragging = cx.has_active_drag();
         let panes = self.panes.iter().enumerate().map(|(ix, pane)| {
             let focused = split && ix == self.focused_pane;
-            resizable_panel().child(
-                v_flex()
-                    .debug_selector(move || format!("pane-{ix}"))
-                    .size_full()
-                    .when(split, |el| {
-                        el.border_t_2().border_color(if focused {
-                            theme.blue
-                        } else {
-                            transparent_black()
-                        })
-                    })
-                    // Clicking into a pane focuses it, caret included, whatever the click lands
-                    // on; in the focused pane, a click on nothing focusable (the workspace root
-                    // took the focus) gives the caret back too. Deferred past the click, which
-                    // may also close a pane.
-                    .capture_any_mouse_down(cx.listener(move |_, _, window, cx| {
-                        cx.defer_in(window, move |this, window, cx| {
-                            let away = this.focused_pane != ix || this.focus.is_focused(window);
-                            if ix < this.panes.len() && away {
-                                this.focus_pane(ix, window, cx)
-                            }
-                        });
-                    }))
-                    .child(match pane {
-                        Pane::Session(session) => session.clone().into_any_element(),
-                        Pane::Editor(pane) => pane.clone().into_any_element(),
-                        Pane::Preparing { agent, .. } => v_flex()
-                            .size_full()
-                            .items_center()
-                            .justify_center()
-                            .text_color(theme.muted_foreground)
-                            .child(format!("Preparing {agent}…"))
-                            .into_any_element(),
-                        Pane::Empty(error) => {
-                            self.empty_pane(ix, error.as_ref(), cx).into_any_element()
+            let content = v_flex()
+                .debug_selector(move || format!("pane-{ix}"))
+                .size_full()
+                // Clicking into a pane focuses it, caret included, whatever the click lands
+                // on; in the focused pane, a click on nothing focusable (the workspace root
+                // took the focus) gives the caret back too. Deferred past the click, which
+                // may also close a pane.
+                .capture_any_mouse_down(cx.listener(move |_, _, window, cx| {
+                    cx.defer_in(window, move |this, window, cx| {
+                        let away = this.focused_pane != ix || this.focus.is_focused(window);
+                        if ix < this.panes.len() && away {
+                            this.focus_pane(ix, window, cx)
                         }
-                    }),
-            )
+                    });
+                }))
+                .child(match pane {
+                    Pane::Session(session) => session.clone().into_any_element(),
+                    Pane::Editor(pane) => pane.clone().into_any_element(),
+                    Pane::Preparing { agent, .. } => v_flex()
+                        .size_full()
+                        .items_center()
+                        .justify_center()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("Preparing {agent}…"))
+                        .into_any_element(),
+                    Pane::Empty(error) => {
+                        self.empty_pane(ix, error.as_ref(), cx).into_any_element()
+                    }
+                })
+                .when(dragging, |el| el.relative().child(Self::drop_zones(ix, cx)));
+            resizable_panel().child(on_card(aurora::card(focused, cx), content))
         });
-        let terminal = div()
-            .debug_selector(|| "terminal".into())
-            .size_full()
-            .children(self.terminal.clone());
+        let sidebar = on_card(aurora::card(false, cx), sidebar).debug_selector(|| "sidebar".into());
+        // The terminal paints its own square background: 5 px in, on a card of its colour, it
+        // leaves the card's corners round.
+        let terminal_card = aurora::card(false, cx)
+            .bg(terminal_view::color(DEFAULT_BG))
+            .p(px(5.));
+        let terminal = on_card(
+            terminal_card,
+            div().size_full().children(self.terminal.clone()),
+        )
+        .debug_selector(|| "terminal".into());
 
         div()
             .key_context("Workspace")
@@ -1637,33 +1840,46 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::focus_next_pane))
             .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::open_palette))
+            .relative()
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .children(aurora::backdrop(cx))
             .child(
-                h_resizable("workspace")
-                    .child(
-                        resizable_panel()
-                            .size(px(SIDEBAR_WIDTH))
-                            .fixed()
-                            .child(sidebar),
-                    )
-                    .child(
-                        resizable_panel().child(
-                            v_resizable("center")
-                                .child(resizable_panel().child(
-                                    // Keyed by count: each split starts with equal widths.
-                                    h_resizable(("panes", self.panes.len())).children(panes),
-                                ))
-                                .child(
-                                    resizable_panel()
-                                        .size(px(TERMINAL_HEIGHT))
-                                        .fixed()
-                                        .visible(self.terminal_visible)
-                                        .child(terminal),
+                v_flex().size_full().child(top_bar).child(
+                    div().flex_1().min_h_0().p_1().child(
+                        h_resizable("workspace")
+                            .with_handle_appearance(aurora::handle())
+                            .child(
+                                resizable_panel()
+                                    .size(px(SIDEBAR_WIDTH))
+                                    .fixed()
+                                    .child(sidebar),
+                            )
+                            .child(
+                                resizable_panel().child(
+                                    v_resizable("center")
+                                        .with_handle_appearance(aurora::handle())
+                                        .child(
+                                            resizable_panel().child(
+                                                // Keyed by count: each split starts with equal
+                                                // widths.
+                                                h_resizable(("panes", self.panes.len()))
+                                                    .with_handle_appearance(aurora::handle())
+                                                    .children(panes),
+                                            ),
+                                        )
+                                        .child(
+                                            resizable_panel()
+                                                .size(px(TERMINAL_HEIGHT))
+                                                .fixed()
+                                                .visible(self.terminal_visible)
+                                                .child(terminal),
+                                        ),
                                 ),
-                        ),
+                            ),
                     ),
+                ),
             )
     }
 }
@@ -1700,14 +1916,17 @@ pub(crate) mod tests {
 
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
+    use gpui_kit::{
+        AppContext as _, ElementId, Entity, Modifiers, MouseButton, Pixels, Point, TestAppContext,
+        VisualTestContext, point, px, size,
+    };
     use wai_agent::{AgentError, PromptBlock, SessionEvent, SessionSummary};
-    use wai_settings::{AgentConfig, AppState, OpenSession, Settings};
+    use wai_settings::{AgentConfig, AppState, OpenSession, Settings, ThemeChoice};
 
     use super::{Pane, Workspace};
     use crate::agents::{AgentStatus, RegistryEvent};
     use crate::app;
-    use crate::chat::{ChatItem, NoticeKind, TurnState};
+    use crate::chat::{ChatEvent, ChatItem, NoticeKind, TurnState};
     use crate::notify;
     use crate::sidebar::canonical;
 
@@ -1883,6 +2102,225 @@ pub(crate) mod tests {
         });
     }
 
+    /// R87: a session pane's × does what ⌘W does there, focused or not: the session leaves the
+    /// open list and its pane goes.
+    #[gpui_kit::test]
+    fn close_button_closes_its_own_pane(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(2));
+        let rows = load_history(&workspace, 2, cx);
+        for (row, side) in rows.iter().zip([false, true]) {
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(row, side, window, cx)));
+        }
+        let first = pane_session(&workspace, 0, cx);
+        let second = pane_session(&workspace, 1, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.focus_pane(0, window, cx)));
+
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            let pane = ElementId::View(second.entity_id());
+            window.within(pane).click("session-close", cx);
+        });
+
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 1);
+            assert_eq!(w.panes[0].session(), Some(&first));
+            assert!(!w.sessions.contains(&second), "it left the open list");
+        });
+
+        // A click's mouse-down already focuses its pane; the × pressed from the keyboard does
+        // not, and still closes its own pane.
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.resume(&rows[1], true, window, cx);
+                w.focus_pane(0, window, cx);
+            })
+        });
+        let third = pane_session(&workspace, 1, cx);
+        third.update(cx, |_, cx| cx.emit(ChatEvent::Close));
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 1);
+            assert_eq!(w.panes[0].session(), Some(&first));
+        });
+    }
+
+    /// A lone empty pane has no ×; in a split, an empty pane's × drops that pane.
+    #[gpui_kit::test]
+    fn lone_empty_pane_has_no_close(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let close = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.try_find("pane-close").is_some()
+            })
+        };
+        assert!(!close(cx));
+
+        cx.simulate_keystrokes("secondary-n");
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
+        });
+        workspace.update(cx, |w, _| w.panes.push(Pane::Empty(None)));
+        assert!(close(cx));
+        cx.update(|window, cx| window.click("pane-close", cx));
+
+        workspace.read_with(cx, |w, _| {
+            assert!(matches!(w.panes[..], [Pane::Session(_)]));
+            assert_eq!(w.sessions.len(), 1, "the session stays open");
+        });
+    }
+
+    fn center_of(id: impl Into<ElementId>, cx: &mut VisualTestContext) -> Point<Pixels> {
+        let id = id.into();
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find(id).bounds().center()
+        })
+    }
+
+    /// Drags from `from` to `x` of the way across pane `ix`, at its middle. Each event has its
+    /// own update, as on a real window (`window.drag` sends them all in one): a pane's
+    /// mouse-down focus, deferred, lands before the drop.
+    fn drag_to_pane(from: Point<Pixels>, ix: usize, x: f32, cx: &mut VisualTestContext) {
+        let pane = cx
+            .debug_bounds(format!("pane-{ix}").leak())
+            .expect("pane drawn");
+        let to = point(pane.left() + pane.size.width * x, pane.center().y);
+        let none = Modifiers::none();
+        cx.simulate_mouse_move(from, None, none);
+        cx.simulate_mouse_down(from, MouseButton::Left, none);
+        for at in [from + point(px(8.), px(0.)), to] {
+            cx.simulate_mouse_move(at, MouseButton::Left, none);
+            cx.update(|window, cx| window.render_frame(cx));
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, none);
+    }
+
+    /// R89: an Open row dropped on a pane's right quarter opens in a new pane there, focused.
+    #[gpui_kit::test]
+    fn drag_open_row_to_right_edge_splits(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(2));
+        let rows = load_history(&workspace, 2, cx);
+        for row in &rows {
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(row, false, window, cx)));
+        }
+        // The second took the only pane: the first is open in none.
+        let (first, second) =
+            workspace.read_with(cx, |w, _| (w.sessions[0].clone(), w.sessions[1].clone()));
+        assert_eq!(pane_session(&workspace, 0, cx), second);
+
+        let from = center_of(("open", 0usize), cx);
+        drag_to_pane(from, 0, 0.9, cx);
+
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 2);
+            assert_eq!(w.panes[0].session(), Some(&second));
+            assert_eq!(w.panes[1].session(), Some(&first));
+            assert_eq!(w.focused_pane, 1);
+        });
+    }
+
+    /// R89: a History row dropped on a pane's center resumes there; the session it replaced
+    /// stays open, in no pane.
+    #[gpui_kit::test]
+    fn history_drop_on_center_keeps_the_replaced_session_open(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(2));
+        let rows = load_history(&workspace, 2, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
+        let first = pane_session(&workspace, 0, cx);
+        cx.update(|window, cx| window.click("history-toggle", cx));
+
+        let from = center_of(("history", 1usize), cx);
+        drag_to_pane(from, 0, 0.5, cx);
+
+        let shown = pane_session(&workspace, 0, cx);
+        assert_eq!(shown.read_with(cx, |s, _| s.id.clone()), rows[1].id);
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 1);
+            assert_eq!(w.sessions.len(), 2);
+            assert!(
+                w.sessions.contains(&first),
+                "the replaced session stays open"
+            );
+        });
+    }
+
+    /// R89: a pane's header dropped on another pane's center swaps the two.
+    #[gpui_kit::test]
+    fn drag_header_onto_pane_swaps(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(2));
+        let rows = load_history(&workspace, 2, cx);
+        for (row, side) in rows.iter().zip([false, true]) {
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(row, side, window, cx)));
+        }
+        let (first, second) = (
+            pane_session(&workspace, 0, cx),
+            pane_session(&workspace, 1, cx),
+        );
+
+        let from = cx.update(|window, cx| {
+            window.render_frame(cx);
+            let header = window.within(ElementId::View(second.entity_id()));
+            header.find("session-title").bounds().center()
+        });
+        drag_to_pane(from, 0, 0.5, cx);
+
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 2);
+            assert_eq!(w.panes[0].session(), Some(&second));
+            assert_eq!(w.panes[1].session(), Some(&first));
+            assert_eq!(w.focused_pane, 0);
+        });
+    }
+
+    /// R89: a center drop never replaces an editor with unsaved edits: the session opens beside.
+    #[gpui_kit::test]
+    fn center_drop_keeps_an_unsaved_editor(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "a").unwrap();
+        let (workspace, cx) = open(cx, history_settings(1));
+        let rows = load_history(&workspace, 1, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
+        let session = pane_session(&workspace, 0, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.open_file(path, None, window, cx)));
+        cx.run_until_parked();
+        // The session stays open, in no pane; the editor holds an unsaved tab.
+        let editor = workspace.update(cx, |w, _| {
+            w.panes.remove(0);
+            w.focused_pane = 0;
+            match &w.panes[..] {
+                [Pane::Editor(editor)] => editor.clone(),
+                _ => panic!("the editor pane alone"),
+            }
+        });
+        let tab = editor.read_with(cx, |e, _| e.tabs[0].clone());
+        tab.update(cx, |t, _| t.dirty = true);
+
+        let dragged = super::DraggedSession {
+            title: "Session".into(),
+            source: super::Dragged::Open(session.clone()),
+        };
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.drop_session(&dragged, 0, super::Zone::Center, window, cx)
+            })
+        });
+
+        workspace.read_with(cx, |w, _| {
+            assert!(matches!(&w.panes[0], Pane::Editor(e) if *e == editor));
+            assert_eq!(w.panes.len(), 2);
+            assert_eq!(w.panes[1].session(), Some(&session));
+            assert_eq!(w.focused_pane, 1);
+        });
+        assert!(tab.read_with(cx, |t, _| t.dirty), "the edits stay");
+    }
+
     fn template(name: &str, agent: Option<&str>, prompt: &str) -> wai_settings::Template {
         wai_settings::Template {
             name: name.into(),
@@ -1997,10 +2435,8 @@ pub(crate) mod tests {
         });
         assert_eq!(history_rows(&workspace, cx), 0);
 
-        cx.update(|window, cx| {
-            window.render_frame(cx);
-            window.click("all-projects", cx);
-        });
+        cx.update(|window, cx| window.click("history-toggle", cx));
+        cx.update(|window, cx| window.click("all-projects", cx));
         assert_eq!(history_rows(&workspace, cx), 25);
     }
 
@@ -2036,6 +2472,7 @@ pub(crate) mod tests {
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
 
         // The sidebar offers Fork on the history rows and on the open session.
+        cx.update(|window, cx| window.click("history-toggle", cx));
         cx.update(|window, cx| window.click(("history-fork", 1usize), cx));
         wait_until(cx, "the fork", |cx| {
             workspace.read_with(cx, |w, _| w.panes.len() == 2)
@@ -2085,6 +2522,7 @@ pub(crate) mod tests {
         let (workspace, cx) = open(cx, fake_settings(&flags));
         load_history(&workspace, 2, cx);
 
+        cx.update(|window, cx| window.click("history-toggle", cx));
         cx.update(|window, cx| window.click(("history-fork", 0usize), cx));
         wait_until(cx, "the notice", |cx| {
             cx.update(|window, cx| !window.notifications(cx).is_empty())
@@ -2164,6 +2602,94 @@ pub(crate) mod tests {
                 "window {window:?}"
             );
         }
+    }
+
+    #[gpui_kit::test]
+    fn light_mode_has_no_backdrop(light: &mut TestAppContext, dark: &mut TestAppContext) {
+        let settings = Settings {
+            theme: ThemeChoice::Light,
+            ..Default::default()
+        };
+        let (_, light) = open(light, settings);
+        light.run_until_parked();
+        assert!(light.debug_bounds("aurora-backdrop").is_none());
+
+        let (_, dark) = open(dark, Settings::default());
+        dark.run_until_parked();
+        assert!(dark.debug_bounds("aurora-backdrop").is_some());
+    }
+
+    /// At 900 px, with a 60-character project name and 4 panes, the project name gives way and
+    /// every action stays inside the window, clear of the status.
+    #[gpui_kit::test]
+    fn top_bar_fits_narrow_window(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, Settings::default());
+        workspace.update(cx, |w, cx| {
+            // Only its name shows: no folder, no watcher.
+            w.project = std::env::temp_dir().join("x".repeat(60));
+            w.panes = (0..4).map(|_| Pane::Empty(None)).collect();
+            cx.notify();
+        });
+        let chip_width = |window, cx: &mut VisualTestContext| {
+            cx.simulate_resize(window);
+            cx.run_until_parked();
+            let chip = cx.debug_bounds("topbar-project").expect("project drawn");
+            chip.size.width
+        };
+        let wide = chip_width(size(px(1400.), px(900.)), cx);
+        let narrow = chip_width(size(px(900.), px(700.)), cx);
+
+        assert!(
+            narrow < wide,
+            "the name truncates: {narrow:?} at 900 px, {wide:?} at 1400 px"
+        );
+        let new = cx.debug_bounds("sidebar-new").expect("new session drawn");
+        assert!(new.right() <= px(900.), "{new:?}");
+        let status = cx.debug_bounds("topbar-status").expect("status drawn");
+        let actions = cx.debug_bounds("topbar-actions").expect("actions drawn");
+        assert!(status.right() < actions.left(), "{status:?} {actions:?}");
+    }
+
+    /// Presses at `from` and moves 1 px: on the macOS title bar, a window move. The test
+    /// window's `start_window_move` is `unimplemented!`, so a move panics.
+    fn press_and_nudge(from: Point<Pixels>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.drag(from, from + point(px(1.), px(0.)), cx));
+    }
+
+    /// The title bar moves the window on any press inside it; a top-bar action stops that.
+    #[gpui_kit::test]
+    fn top_bar_actions_do_not_move_the_window(cx: &mut TestAppContext) {
+        let (_, cx) = open(cx, Settings::default());
+        let palette = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find("topbar-palette").bounds().center()
+        });
+        press_and_nudge(palette, cx);
+    }
+
+    /// The control: the rest of the bar still moves the window.
+    #[cfg(target_os = "macos")]
+    #[gpui_kit::test]
+    #[should_panic(expected = "not implemented")]
+    fn top_bar_project_moves_the_window(cx: &mut TestAppContext) {
+        let (_, cx) = open(cx, Settings::default());
+        cx.update(|window, cx| window.render_frame(cx));
+        let project = cx.debug_bounds("topbar-project").expect("project drawn");
+        press_and_nudge(project.center(), cx);
+    }
+
+    /// In full screen the traffic lights leave, and so does the title bar's 80 pt gap.
+    #[cfg(target_os = "macos")]
+    #[gpui_kit::test]
+    fn top_bar_drops_the_gap_in_full_screen(cx: &mut TestAppContext) {
+        let (_, cx) = open(cx, Settings::default());
+        let left = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| window.render_frame(cx));
+            cx.debug_bounds("topbar").expect("top bar drawn").left()
+        };
+        assert_eq!(left(cx), px(80.));
+        cx.update(|window, _| window.toggle_fullscreen());
+        assert_eq!(left(cx), px(12.));
     }
 
     #[gpui_kit::test]
