@@ -6,9 +6,10 @@ use gpui_kit::component::input::CursorBlink;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{Theme, ThemeMode, TitleBar, WindowExt as _};
 use gpui_kit::*;
-use wai_settings::{Settings, Template, ThemeChoice};
+use wai_settings::{Settings, Template, ThemeChoice, unapproved};
 
-use crate::workspace::Workspace;
+use crate::settings_view::Section;
+use crate::workspace::{CHOOSE_AI, Workspace};
 
 actions!(
     wai,
@@ -23,19 +24,23 @@ actions!(
         Paste,
         CopySelection,
         Save,
-        OpenPalette
+        OpenPalette,
+        OpenSettings
     ]
 );
+
+pub fn theme_mode(theme: ThemeChoice) -> ThemeMode {
+    match theme {
+        ThemeChoice::Dark => ThemeMode::Dark,
+        ThemeChoice::Light => ThemeMode::Light,
+    }
+}
 
 /// Everything a window needs before it opens: components, theme, caret blink, keymap.
 pub fn init(settings: &Settings, cx: &mut App) {
     gpui_kit::init(cx);
     crate::aurora::register(cx);
-    let mode = match settings.theme {
-        ThemeChoice::Dark => ThemeMode::Dark,
-        ThemeChoice::Light => ThemeMode::Light,
-    };
-    Theme::change(mode, None, cx);
+    Theme::change(theme_mode(settings.theme), None, cx);
     // A focused editor otherwise blinks its caret forever (~0.9% CPU while idle).
     Theme::update(cx, |theme| {
         theme.cursor_blink = CursorBlink::default().with_idle_timeout(Duration::from_secs(5))
@@ -62,6 +67,7 @@ fn bind_keys(cx: &mut App) {
         ("secondary-alt-right", Box::new(FocusNextPane), workspace),
         ("secondary-o", Box::new(OpenFolder), workspace),
         ("secondary-shift-p", Box::new(OpenPalette), workspace),
+        ("secondary-,", Box::new(OpenSettings), workspace),
         // The prompt box lets Escape through (it has nothing to clear).
         ("escape", Box::new(CancelTurn), Some("ChatSession")),
         (paste, Box::new(Paste), Some("Terminal")),
@@ -100,13 +106,16 @@ fn terminal_ctrl_keymap() -> [(&'static str, Box<dyn Action>); 10] {
     ]
 }
 
-/// `notices`: what the settings left out, shown once in the window.
+/// `notices`: what the settings left out, shown once in the window (a reload shows only new
+/// ones); `template_notices`, what the templates did.
 /// `state_path`: where the open sessions, the project and the terminal's visibility are kept.
 pub fn run(
     project: PathBuf,
     settings: Settings,
     templates: Vec<Template>,
     notices: Vec<String>,
+    template_notices: Vec<String>,
+    settings_error: Option<String>,
     state_path: PathBuf,
 ) {
     // Without the asset source every component icon (status, chevrons) renders blank.
@@ -146,14 +155,26 @@ pub fn run(
             .update(cx, |_, window, cx| {
                 workspace.update(cx, |w, cx| {
                     w.templates = templates;
-                    w.start_agent(cx);
+                    w.settings_error = settings_error;
+                    w.show_load_notices(notices, window, cx);
+                    let pending = unapproved(&Settings::default(), &w.settings, &w.approved);
+                    w.ask_approval(pending, window, cx);
+                    if w.settings_error.is_none() {
+                        w.start_agent(cx);
+                    }
                     w.watch_project(window, cx);
+                    w.watch_settings(window, cx);
                     // Before `restore`: a saved session may be an extension agent's.
                     w.start_extensions(cx);
                     w.restore(window, cx);
                     w.suggest_extensions(window, cx);
+                    if w.settings_error.is_some() {
+                        w.open_settings(Section::Ai, None, window, cx);
+                    } else if w.default_agent().is_none() {
+                        w.open_settings(Section::Ai, Some(CHOOSE_AI), window, cx);
+                    }
                 });
-                for notice in notices {
+                for notice in template_notices {
                     window.push_notification(Notification::warning(notice).autohide(false), cx);
                 }
             })

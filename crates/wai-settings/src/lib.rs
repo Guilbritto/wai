@@ -1,15 +1,71 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_CLAUDE_COMMAND: &str = "npx -y @agentclientprotocol/claude-agent-acp@0.101.0";
+mod approve;
+mod edit;
+pub use approve::{Approval, is_approved, seed_approved, unapproved};
+pub use edit::{Change, write_change};
+
+/// An agent wai knows how to start, with the hints Settings shows when it is not ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinAgent {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub command: &'static str,
+    pub install: &'static str,
+    pub login: &'static str,
+}
+
+pub const BUILTIN_AGENTS: [BuiltinAgent; 4] = [
+    BuiltinAgent {
+        id: "claude",
+        name: "Claude",
+        command: "npx -y @agentclientprotocol/claude-agent-acp@0.101.0",
+        install: "Install Node.js (it provides npx)",
+        login: "claude /login",
+    },
+    BuiltinAgent {
+        id: "codex",
+        name: "Codex",
+        command: "npx -y @agentclientprotocol/codex-acp@2.6.0",
+        install: "Install Node.js (it provides npx)",
+        login: "npx @openai/codex login",
+    },
+    BuiltinAgent {
+        id: "antigravity",
+        name: "Antigravity",
+        command: "agy acp",
+        install: "https://antigravity.google/docs/cli",
+        login: "agy login",
+    },
+    BuiltinAgent {
+        id: "copilot",
+        name: "Copilot",
+        command: "copilot --acp --stdio",
+        install: "npm install -g @github/copilot",
+        login: "copilot, then /login",
+    },
+];
+
+pub fn builtin(id: &str) -> Option<&'static BuiltinAgent> {
+    BUILTIN_AGENTS.iter().find(|a| a.id == id)
+}
+
+/// The built-in's name, else the id as given (an extension agent's id is its own label).
+pub fn agent_label(id: &str) -> String {
+    builtin(id).map_or(id, |a| a.name).to_string()
+}
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Settings {
-    pub default_agent: String,
+    /// `None` until the user chooses one: wai never picks an AI for them.
+    pub default_agent: Option<String>,
     pub agents: BTreeMap<String, AgentConfig>,
+    /// Agent id -> the id of the model (config value) it starts with; user settings only.
+    pub models: BTreeMap<String, String>,
     pub terminal: TerminalSettings,
     pub theme: ThemeChoice,
     pub updates: UpdateSettings,
@@ -59,13 +115,15 @@ pub enum SettingsError {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            default_agent: "claude".into(),
-            agents: BTreeMap::from([(
-                "claude".to_string(),
-                AgentConfig {
-                    command: DEFAULT_CLAUDE_COMMAND.into(),
-                },
-            )]),
+            default_agent: None,
+            agents: BUILTIN_AGENTS
+                .iter()
+                .map(|a| {
+                    let command = a.command.into();
+                    (a.id.to_string(), AgentConfig { command })
+                })
+                .collect(),
+            models: BTreeMap::new(),
             terminal: TerminalSettings::default(),
             theme: ThemeChoice::default(),
             updates: UpdateSettings::default(),
@@ -147,8 +205,9 @@ fn parse(merged: toml::Value, path: &Path) -> Result<Settings, SettingsError> {
 impl Settings {
     /// Merges defaults, then `<user_dir>/settings.toml`, then `<project_dir>/.wai/settings.toml`.
     /// An error in the user's file fails the load. The project file may not set `agents` or
-    /// `terminal` (R15: opening a cloned repository must not choose what wai runs), so its
-    /// `default_agent` can only name an agent the defaults or the user define; nor `updates`. Those
+    /// `terminal` (R15: opening a cloned repository must not choose what wai runs), nor `updates`
+    /// or `models`; its `default_agent` counts only when the user already chose one, and names it,
+    /// an agent in the user's own `[agents]`, or an extension agent (an id with a `/`). Those
     /// tables, or a project file that does not load, are left out; the returned notices say so.
     pub fn load(
         user_dir: &Path,
@@ -156,7 +215,11 @@ impl Settings {
     ) -> Result<(Settings, Vec<String>), SettingsError> {
         let user_path = user_dir.join("settings.toml");
         let mut merged = toml::Value::try_from(Settings::default()).expect("defaults serialize");
+        let mut user_agents = Vec::new();
         if let Some(layer) = read_layer(&user_path)? {
+            if let Some(toml::Value::Table(agents)) = layer.get("agents") {
+                user_agents = agents.keys().cloned().collect();
+            }
             merge(&mut merged, toml::Value::Table(layer));
         }
         let user = parse(merged.clone(), &user_path)?;
@@ -182,6 +245,24 @@ impl Settings {
                     path.display()
                 ));
             }
+            if layer.remove("models").is_some() {
+                notices.push(format!(
+                    "Ignored models settings from {}: only user settings can choose default models.",
+                    path.display()
+                ));
+            }
+            if let Some(name) = layer.get("default_agent").and_then(toml::Value::as_str) {
+                let kept = user.default_agent.as_deref().is_some_and(|chosen| {
+                    name == chosen || user_agents.iter().any(|a| a == name) || name.contains('/')
+                });
+                if !kept {
+                    notices.push(format!(
+                        "Ignored default_agent \"{name}\" from {}: a project can only pick an AI you already chose or set up.",
+                        path.display()
+                    ));
+                    layer.remove("default_agent");
+                }
+            }
             merge(&mut merged, toml::Value::Table(layer));
             parse(merged, &path).map(Some)
         });
@@ -193,6 +274,13 @@ impl Settings {
             }
         }
     }
+}
+
+/// The `default_agent` of `<project_dir>/.wai/settings.toml` as written, whether or not `load`
+/// honours it. `None` when there is none or the file does not load.
+pub fn project_default_agent(project_dir: &Path) -> Option<String> {
+    let layer = read_layer(&project_dir.join(".wai").join("settings.toml")).ok()??;
+    layer.get("default_agent")?.as_str().map(str::to_string)
 }
 
 /// A named starting point for a conversation: which agent, and a first prompt that is
@@ -352,6 +440,16 @@ pub struct AppState {
     pub open_sessions: Vec<OpenSession>,
     pub terminal_visible: bool,
     pub sidebar_width: f32,
+    /// Agent commands and shells the user approved; `None` for a state from before approvals.
+    pub approved: Option<BTreeSet<String>>,
+    /// Agent id -> the models its last session offered.
+    pub models_seen: BTreeMap<String, Vec<SeenModel>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SeenModel {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -369,17 +467,22 @@ impl Default for AppState {
             open_sessions: Vec::new(),
             terminal_visible: false,
             sidebar_width: 260.0,
+            approved: None,
+            models_seen: BTreeMap::new(),
         }
     }
 }
 
 impl AppState {
+    /// `None` when the file is missing or does not parse.
+    pub fn read(path: &Path) -> Option<AppState> {
+        let text = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+
     /// Missing or corrupt files yield the default state.
     pub fn load(path: &Path) -> AppState {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
+        Self::read(path).unwrap_or_default()
     }
 
     /// Creates the folder on a first run.
@@ -404,14 +507,19 @@ mod tests {
     }
 
     #[test]
-    fn defaults_when_no_files() {
+    fn defaults_have_four_agents_and_no_default() {
         let d = tempfile::tempdir().unwrap();
         let (s, _) = Settings::load(d.path(), None).unwrap();
-        assert_eq!(s.default_agent, "claude");
+        assert_eq!(s.default_agent, None);
+        let ids: Vec<_> = s.agents.keys().map(String::as_str).collect();
+        assert_eq!(ids, ["antigravity", "claude", "codex", "copilot"]);
         assert_eq!(
-            s.agents["claude"].command,
-            "npx -y @agentclientprotocol/claude-agent-acp@0.101.0"
+            s.agents["codex"].command,
+            "npx -y @agentclientprotocol/codex-acp@2.6.0"
         );
+        assert_eq!(s.agents["copilot"].command, "copilot --acp --stdio");
+        assert_eq!(agent_label("copilot"), "Copilot");
+        assert_eq!(agent_label("my/agent"), "my/agent");
     }
 
     #[test]
@@ -487,23 +595,70 @@ mod tests {
     }
 
     #[test]
-    fn project_overrides_theme_and_default_agent() {
-        let u = tempfile::tempdir().unwrap();
-        let p = tempfile::tempdir().unwrap();
-        write(
-            u.path(),
-            "settings.toml",
-            "theme = \"dark\"\n[agents.other]\ncommand = \"other-acp\"\n",
-        );
+    fn project_default_needs_a_user_choice() {
+        let (u, p) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         write(
             p.path(),
             ".wai/settings.toml",
-            "theme = \"light\"\ndefault_agent = \"other\"\n",
+            "default_agent = \"copilot\"\n",
         );
         let (s, notices) = Settings::load(u.path(), Some(p.path())).unwrap();
-        assert_eq!(s.theme, ThemeChoice::Light);
-        assert_eq!(s.default_agent, "other");
-        assert_eq!(notices, Vec::<String>::new());
+        assert_eq!(s.default_agent, None);
+        let path = p.path().join(".wai").join("settings.toml");
+        assert_eq!(
+            notices,
+            [format!(
+                "Ignored default_agent \"copilot\" from {}: a project can only pick an AI you already chose or set up.",
+                path.display()
+            )]
+        );
+    }
+
+    #[test]
+    fn project_default_may_name_the_users_agents_or_an_extension_agent() {
+        let (u, p) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        write(
+            u.path(),
+            "settings.toml",
+            "default_agent = \"claude\"\n[agents.other]\ncommand = \"other-acp\"\n",
+        );
+        for (name, honoured) in [
+            ("claude", true),
+            ("other", true),
+            ("ext/agent", true),
+            ("copilot", false),
+        ] {
+            write(
+                p.path(),
+                ".wai/settings.toml",
+                &format!("default_agent = \"{name}\"\n"),
+            );
+            let (s, _) = Settings::load(u.path(), Some(p.path())).unwrap();
+            let want = if honoured { name } else { "claude" };
+            assert_eq!(s.default_agent.as_deref(), Some(want), "{name}");
+            assert_eq!(project_default_agent(p.path()).as_deref(), Some(name));
+        }
+    }
+
+    #[test]
+    fn project_cannot_set_models() {
+        let (u, p) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        write(u.path(), "settings.toml", "[models]\nclaude = \"opus\"\n");
+        write(
+            p.path(),
+            ".wai/settings.toml",
+            "[models]\nclaude = \"haiku\"\n",
+        );
+        let (s, notices) = Settings::load(u.path(), Some(p.path())).unwrap();
+        assert_eq!(s.models["claude"], "opus");
+        let path = p.path().join(".wai").join("settings.toml");
+        assert_eq!(
+            notices,
+            [format!(
+                "Ignored models settings from {}: only user settings can choose default models.",
+                path.display()
+            )]
+        );
     }
 
     /// A broken project file costs the project its settings, not the launch.
@@ -552,11 +707,24 @@ mod tests {
             }],
             terminal_visible: true,
             sidebar_width: 300.0,
+            approved: Some(["x".into()].into()),
+            models_seen: [(
+                "codex".to_string(),
+                vec![SeenModel {
+                    id: "gpt-5".into(),
+                    name: "GPT-5".into(),
+                }],
+            )]
+            .into(),
         };
         state.save(&path).unwrap();
         assert_eq!(AppState::load(&path), state);
+        assert_eq!(AppState::read(&d.path().join("missing.json")), None);
         std::fs::write(&path, "{").unwrap();
+        assert_eq!(AppState::read(&path), None);
         assert_eq!(AppState::load(&path), AppState::default());
+        std::fs::write(&path, r#"{"terminal_visible":true}"#).unwrap();
+        assert_eq!(AppState::load(&path).approved, None);
     }
 
     #[test]

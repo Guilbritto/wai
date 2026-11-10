@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::message_scroller::MessageScroller;
-use gpui_kit::component::select::Select;
+use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -12,7 +12,7 @@ use gpui_kit::*;
 use wai_agent::{PermissionChoice, ToolStatus};
 
 use super::model::{ChatItem, NoticeKind, ToolItem, TurnState, UsageInfo, show_label};
-use super::view::{ChatEvent, ChatSession};
+use super::view::{ChatEvent, ChatSession, Mode};
 use super::{permission, question};
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::workspace::{Dragged, DraggedSession};
@@ -82,8 +82,12 @@ impl ChatSession {
                     .test_support(),
             )
             .children(
-                self.modes
-                    .as_ref()
+                self.pickers
+                    .iter()
+                    .map(|(_, select)| div().w(px(140.)).child(Select::new(select).small())),
+            )
+            .children(
+                self.legacy_mode_picker()
                     // The select's own view is `size_full`: the box sets its width.
                     .map(|modes| div().w(px(140.)).child(Select::new(modes).small())),
             )
@@ -332,6 +336,15 @@ impl ChatSession {
             )
     }
 
+    /// The old mode picker, unless the agent offers `mode` as a config option.
+    pub(super) fn legacy_mode_picker(&self) -> Option<&Entity<SelectState<Vec<Mode>>>> {
+        self.modes.as_ref().filter(|_| !self.has_mode_option())
+    }
+
+    fn has_mode_option(&self) -> bool {
+        (self.model.config.iter()).any(|o| o.category == wai_agent::ConfigCategory::Mode)
+    }
+
     /// Follows a mode the agent switched to on its own.
     fn sync_mode_select(&self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(select), Some(mode)) = (&self.modes, &self.model.current_mode) else {
@@ -346,6 +359,7 @@ impl ChatSession {
 impl Render for ChatSession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_mode_select(window, cx);
+        self.sync_pickers(window, cx);
         let empty = self.model.items.is_empty() && self.model.state == TurnState::Idle;
         let messages = div().flex_1().min_h_0();
         let messages = match empty {

@@ -12,6 +12,7 @@ mod layout;
 mod notify;
 mod palette;
 mod search_view;
+mod settings_view;
 #[cfg(target_os = "macos")]
 mod shell_path;
 mod sidebar;
@@ -40,18 +41,34 @@ fn main() -> anyhow::Result<()> {
     let project = resolve_project(std::env::args_os().nth(1).map(PathBuf::from), state.project)?;
     // Everything relative is resolved by now; agents spawn from a neutral dir, not a repo.
     wai_agent::enter_neutral_dir(&config_dir()).context("cannot enter the config dir")?;
-    let (settings, notices) = Settings::load(&config_dir(), Some(&project))?;
+    let (settings, notices, settings_error) = load_or_default(&config_dir(), &project);
     let (templates, template_notices) = load_templates(&config_dir(), Some(&project));
     // R21: the last run's tool outputs.
     std::fs::remove_dir_all(config_dir().join("scratch")).ok();
     // Stages a closed run never committed or dropped.
     std::fs::remove_dir_all(wai_ext::staging_dir(&config_dir())).ok();
-    let notices: Vec<String> = notices.into_iter().chain(template_notices).collect();
-    for notice in &notices {
+    for notice in notices.iter().chain(&template_notices) {
         eprintln!("wai: {notice}");
     }
-    app::run(project, settings, templates, notices, state_path);
+    app::run(
+        project,
+        settings,
+        templates,
+        notices,
+        template_notices,
+        settings_error,
+        state_path,
+    );
     Ok(())
+}
+
+/// A `settings.toml` that does not parse must not stop wai: it opens with the defaults and shows
+/// the error in Settings.
+fn load_or_default(user_dir: &Path, project: &Path) -> (Settings, Vec<String>, Option<String>) {
+    match Settings::load(user_dir, Some(project)) {
+        Ok((settings, notices)) => (settings, notices, None),
+        Err(e) => (Settings::default(), Vec::new(), Some(e.to_string())),
+    }
 }
 
 /// `wai [PATH]`: the argument, else the last project while it exists, else the current dir (see
@@ -88,6 +105,18 @@ fn fallback_project(cwd: PathBuf, exe_dir: Option<&Path>, home: Option<PathBuf>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broken_user_file_opens_with_defaults() {
+        let dir = std::env::temp_dir().join(format!("wai-broken-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.toml"), "theme = [").unwrap();
+        let (settings, notices, error) = load_or_default(&dir, &dir);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(settings.default_agent, None);
+        assert!(notices.is_empty());
+        assert!(error.unwrap().starts_with("invalid settings in"));
+    }
 
     #[test]
     fn project_comes_from_arg_then_last_then_cwd() {

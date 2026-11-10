@@ -55,9 +55,9 @@ To build the app bundle and DMG yourself, see [docs/building.md](docs/building.m
 ## First run
 
 - **Which folder opens:** `wai [FOLDER]` opens FOLDER. Otherwise it opens the last project, else the current directory. Launched from Finder or the Dock with no last project, it opens your home folder.
-- **The agent:** the default agent, `claude`, starts in the background. On the very first run, `npx` downloads the adapter, which takes a few seconds.
-- **Starting:** press **⌘N** for a session, or **⌘⇧P** for the command palette.
-- **Not signed in:** if Claude Code is not signed in, wai says so and does nothing else:
+- **The agent:** there is no default agent. On the first run wai opens **Settings** on the **AI** section (`Choose an AI to start a session.`); pick Claude, Codex, Antigravity or Copilot there and it starts in the background. With `npx` agents, the first start downloads the adapter, which takes a few seconds.
+- **Starting:** press **⌘N** for a session, **⌘,** for Settings, or **⌘⇧P** for the command palette.
+- **Not signed in:** if the agent is not signed in, wai says so and does nothing else:
 
   > claude is not signed in. Open a terminal and run its login (for Claude: claude /login).
 
@@ -71,7 +71,6 @@ To build the app bundle and DMG yourself, see [docs/building.md](docs/building.m
 
 - **Signing:** builds are unsigned, and the Windows build is verified only by CI.
 - **Extensions are not sandboxed:** they run with your user's rights. Install only those you trust.
-- **When settings apply:** settings are read at launch, so restart wai after editing them. A project's `.wai/settings.toml` applies only to the folder wai was launched with.
 - **What reopens:** editor tabs do not reopen at launch, though unsaved edits are recovered.
 - **Revert:** it refuses tab-indented and CRLF files.
 - **`.gitignore`:** the file tree and search honour it only inside git repositories.

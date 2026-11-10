@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gpui_kit::component::WindowExt as _;
@@ -6,24 +6,32 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, Sizable as _, h_flex, h_resizable, resizable_panel, v_flex,
+    ActiveTheme as _, IconName, Sizable as _, Theme, h_flex, h_resizable, resizable_panel, v_flex,
     v_resizable,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::json;
+use unicode_properties::{GeneralCategory, UnicodeGeneralCategory as _};
 use wai_agent::{
     AgentError, AgentHandle, BrokerError, QuestionAnswer, SessionEvent, SessionStarted,
     SessionSummary, StopReason,
 };
 use wai_ext::{CommandSpec, ExtEvent, ExtId, HostEvent, Reply};
 use wai_project::{FsChange, ProjectWatcher};
-use wai_settings::{AppState, OpenSession, Settings, Template, config_dir, load_templates, shown};
+use wai_settings::{
+    AgentConfig, AppState, Approval, Change, OpenSession, SeenModel, Settings, Template,
+    agent_label, config_dir, is_approved, load_templates, seed_approved, shown, unapproved,
+    write_change,
+};
 use wai_terminal::DEFAULT_BG;
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::agents_view::{AgentsView, ShowSession};
-use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, Quit, Save, ToggleTerminal};
+use crate::app::{
+    CloseSession, FocusNextPane, NewSession, OpenFolder, OpenSettings, Quit, Save, ToggleTerminal,
+    theme_mode,
+};
 use crate::aurora;
 use crate::chat::{ChatEvent, ChatSession, TurnState, signed_out};
 use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved, recovery};
@@ -33,10 +41,14 @@ use crate::files::{FileTree, OpenFile};
 use crate::layout::{self, Slot, Zone};
 use crate::notify::{self, should_notify};
 use crate::search_view::{OpenMatch, SearchView};
+use crate::settings_view::{
+    AgentRow, RowStatus, Section, SettingsData, SettingsEvent, SettingsView,
+};
 use crate::sidebar::{SidebarTab, canonical};
 use crate::terminal_view::{self, TerminalView};
 use crate::topbar::BRAND;
 
+pub(crate) const CHOOSE_AI: &str = "Choose an AI to start a session.";
 const SIDEBAR_WIDTH: f32 = 260.;
 const TERMINAL_HEIGHT: f32 = 260.;
 pub const MAX_PANES: usize = 4;
@@ -62,6 +74,8 @@ pub enum Pane {
     Session(Entity<ChatSession>),
     /// Open files in tabs; one pane at most. Not kept between runs.
     Editor(Entity<EditorPane>),
+    /// The settings screen; one at most. Not kept between runs.
+    Settings(Entity<SettingsView>),
 }
 
 impl Pane {
@@ -85,6 +99,8 @@ pub(crate) enum Dragged {
     Open(Entity<ChatSession>),
     /// Resumed where it drops, as a click on its row resumes it.
     History(SessionSummary),
+    /// The Settings pane, moved as an open session is.
+    Settings,
 }
 
 impl DraggedSession {
@@ -118,12 +134,22 @@ pub(crate) enum Leave {
     Open(PathBuf),
 }
 
+/// Whether the batch names `path`, or lost track of what changed.
+fn touches(batch: &[FsChange], path: &Path) -> bool {
+    batch.iter().any(|change| match change {
+        FsChange::Rescan => true,
+        FsChange::Changed(paths) => paths.iter().any(|p| p == path),
+    })
+}
+
 /// The window's root view: the top bar over sidebar | chat panes over the terminal panel, each a
 /// card on the aurora.
 pub struct Workspace {
     /// Canonical, so history cwds compare with it (R3).
     pub project: PathBuf,
     pub settings: Settings,
+    /// Why `settings.toml` did not load; Settings shows it and stays read-only.
+    pub settings_error: Option<String>,
     /// The "New from template" menu's entries; empty hides the menu.
     pub templates: Vec<Template>,
     /// The config dir: the user's `templates.toml` (re-read on a project switch) and `scratch/`,
@@ -155,6 +181,14 @@ pub struct Workspace {
     /// The project's one watcher and the task that hands its changes out; `None` when the
     /// project cannot be watched.
     watch: Option<(ProjectWatcher, Task<()>)>,
+    settings_watch: Option<(ProjectWatcher, Task<()>)>,
+    /// The load notices already shown: a reload pushes only new ones.
+    load_notices: Vec<String>,
+    /// The last run's sessions `restore` could not reopen (their agent is not in the settings, or
+    /// its command waits for an answer): saved again, for a launch that can.
+    unrestored: Vec<OpenSession>,
+    #[cfg(test)]
+    pub(crate) applied: usize,
     next_ticket: u64,
     /// Tickets whose "Preparing…" pane ⌘W closed: their session never opens.
     cancelled: HashSet<u64>,
@@ -169,6 +203,19 @@ pub struct Workspace {
     /// Where the open sessions, the project and the terminal's visibility are kept between runs;
     /// `None` keeps nothing (tests). Unsaved edits are kept beside it, in `recovery/`.
     state_path: Option<PathBuf>,
+    /// Agent id -> the models its last Test saw; kept in `state.json`.
+    pub models_seen: BTreeMap<String, Vec<SeenModel>>,
+    /// The agent commands and shells the user allowed; kept in `state.json`, never in
+    /// `settings.toml`.
+    pub approved: BTreeSet<String>,
+    /// The shell the terminal runs: the settings' once approved, else the last approved one.
+    pub shell: Option<String>,
+    /// The values waiting for an answer, the first one's dialog open.
+    pub(crate) asking: Vec<Approval>,
+    /// Those of `asking` the screen edited: Allow writes them to `settings.toml`.
+    edits: Vec<Approval>,
+    /// The values declined this run: a reload does not ask about them again.
+    declined: BTreeSet<String>,
     /// The next recovery file number to try (`recovery::next_file`).
     next_recovery: u64,
     focus: FocusHandle,
@@ -184,7 +231,24 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let registry = cx.new(|_| AgentRegistry::new(&settings));
+        let state = state_path.as_deref().map(AppState::read);
+        let approved = match &state {
+            // Missing or corrupt: breaking the file must not approve what settings.toml says.
+            Some(None) => BTreeSet::new(),
+            Some(Some(AppState {
+                approved: Some(approved),
+                ..
+            })) => approved.clone(),
+            // A state from before approvals, or none kept (tests): today's values are approved.
+            _ => seed_approved(&settings),
+        };
+        let configs = approved_configs(&Settings::default().agents, &settings, &approved);
+        let registry = cx.new(|_| AgentRegistry::new(configs));
+        let shell = settings
+            .terminal
+            .shell
+            .clone()
+            .filter(|s| approved.contains(s));
         let routing = cx.subscribe(&registry, |this, _, event, cx| this.route(event, cx));
         // The process ends ~200 ms after the quit hooks: nothing it started may outlive it. The
         // agents are signalled and the extensions killed first: stopping a shell that ignores
@@ -296,13 +360,25 @@ impl Workspace {
             extensions: None,
             ext_host,
             watch: None,
+            settings_watch: None,
+            load_notices: Vec::new(),
+            unrestored: Vec::new(),
+            #[cfg(test)]
+            applied: 0,
             next_ticket: 0,
             cancelled: HashSet::new(),
             starting: HashMap::new(),
             early: HashMap::new(),
             ext_sessions: HashMap::new(),
+            models_seen: state.flatten().map(|s| s.models_seen).unwrap_or_default(),
+            approved,
+            shell,
+            asking: Vec::new(),
+            edits: Vec::new(),
+            declined: BTreeSet::new(),
             state_path,
             next_recovery: 0,
+            settings_error: None,
             focus,
             _subscriptions: vec![
                 routing,
@@ -348,14 +424,262 @@ impl Workspace {
         self.watch = Some((watcher, task));
     }
 
-    /// Hands a watcher batch to the open files it touches.
-    fn disk_changed(&self, batch: &[FsChange], window: &mut Window, cx: &mut Context<Self>) {
-        let touched = |path: &Path| {
-            batch.iter().any(|change| match change {
-                FsChange::Rescan => true,
-                FsChange::Changed(paths) => paths.iter().any(|p| p == path),
-            })
+    /// Watches the user's settings folder; `settings.toml` changing (the screen's write or a
+    /// hand edit) reloads the settings. `state.json` shares the folder and never reloads.
+    pub fn watch_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = std::fs::create_dir_all(&self.user_dir);
+        let file = canonical(&self.user_dir).join("settings.toml");
+        let (watcher, changes) = match ProjectWatcher::start(&canonical(&self.user_dir)) {
+            Ok(started) => started,
+            Err(e) => {
+                self.settings_watch = None;
+                return eprintln!("wai: cannot watch {}: {e}", self.user_dir.display());
+            }
         };
+        let task = cx.spawn_in(window, async move |this, cx| {
+            while let Ok(change) = changes.recv().await {
+                let mut batch = vec![change];
+                while let Ok(more) = changes.try_recv() {
+                    batch.push(more);
+                }
+                if !touches(&batch, &file) {
+                    continue;
+                }
+                let reloaded = this.update_in(cx, |this, window, cx| {
+                    this.reload_settings(window, cx);
+                });
+                if reloaded.is_err() {
+                    break;
+                }
+            }
+        });
+        self.settings_watch = Some((watcher, task));
+    }
+
+    /// Reads the layers again. A file that does not load keeps the settings in force.
+    pub fn reload_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match Settings::load(&self.user_dir, Some(&self.project)) {
+            Ok((new, notices)) => self.apply_settings(new, notices, window, cx),
+            Err(e) => {
+                let text = e.to_string();
+                window.push_notification(Notification::warning(text.clone()), cx);
+                self.settings_error = Some(text);
+                self.sync_settings_view(cx);
+            }
+        }
+    }
+
+    /// Every reload ends here. Running sessions keep their agent: only the next start differs.
+    pub fn apply_settings(
+        &mut self,
+        new: Settings,
+        notices: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(test)]
+        {
+            self.applied += 1;
+        }
+        self.settings_error = None;
+        if new.theme != self.settings.theme {
+            Theme::change(theme_mode(new.theme), Some(window), cx);
+            window.refresh();
+        }
+        // What runs now: the old values the questions show.
+        let mut old = Settings {
+            agents: self.registry.read(cx).configs().clone(),
+            ..Settings::default()
+        };
+        old.terminal.shell = self.shell.clone();
+        let chosen =
+            new.default_agent.is_some() && new.default_agent != self.settings.default_agent;
+        self.settings = new;
+        self.enforce(cx);
+        for notice in &notices {
+            if !self.load_notices.contains(notice) {
+                let shown = Notification::warning(notice.clone()).autohide(false);
+                window.push_notification(shown, cx);
+            }
+        }
+        self.load_notices = notices;
+        if chosen {
+            // Picked again, its declined command is asked about again.
+            let agent = self.default_agent();
+            if let Some(config) = agent.and_then(|id| self.settings.agents.get(&id)) {
+                self.declined.remove(&config.command);
+            }
+        }
+        let declined = &self.declined;
+        let mut pending = unapproved(&old, &self.settings, &self.approved);
+        pending.retain(|a| !declined.contains(approval_value(a)));
+        self.ask_approval(pending, window, cx);
+        // Asked first: a default whose command waits for an answer starts after it.
+        if chosen {
+            // The old default's history: its rows would resume with the new one.
+            self.history.clear();
+            self.history_task = None;
+            self.start_agent(cx);
+            self.refresh_history(cx);
+        }
+        self.sync_settings_view(cx);
+        cx.notify();
+    }
+
+    /// Shows the launch's load notices (R15) and records them: a reload pushes only new ones.
+    pub fn show_load_notices(
+        &mut self,
+        notices: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for notice in &notices {
+            let shown = Notification::warning(notice.clone()).autohide(false);
+            window.push_notification(shown, cx);
+        }
+        self.load_notices = notices;
+    }
+
+    /// The registry and the terminal get approved values only: an agent or the shell whose
+    /// value is not approved keeps the last approved one (an agent never approved, none).
+    fn enforce(&mut self, cx: &mut Context<Self>) {
+        let (settings, approved) = (&self.settings, &self.approved);
+        self.registry.update(cx, |r, _| {
+            let configs = approved_configs(r.configs(), settings, approved);
+            r.set_configs(configs)
+        });
+        let shell = &self.settings.terminal.shell;
+        if shell.as_ref().is_none_or(|s| self.approved.contains(s)) {
+            self.shell = shell.clone();
+        }
+        if let Some(terminal) = &self.terminal {
+            let shell = self.shell.clone();
+            terminal.update(cx, |t, _| t.shell = shell);
+        }
+    }
+
+    /// Asks whether to run each value, one dialog at a time and in order; a value already
+    /// waiting is asked once.
+    pub fn ask_approval(
+        &mut self,
+        pending: Vec<Approval>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let idle = self.asking.is_empty();
+        for approval in pending {
+            if !self.asking.contains(&approval) {
+                self.asking.push(approval);
+            }
+        }
+        if idle {
+            self.ask_next(window, cx);
+        }
+    }
+
+    /// Opens the dialog for the first value still waiting. Only its buttons close it.
+    fn ask_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let approved = &self.approved;
+        self.asking
+            .retain(|a| !approved.contains(approval_value(a)));
+        let Some(approval) = self.asking.first().cloned() else {
+            return;
+        };
+        let text = approval_text(&approval);
+        let this = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let answer = |allow: bool| {
+                let (this, approval) = (this.clone(), approval.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    window.close_dialog(cx);
+                    this.update(cx, |this, cx| this.answer(&approval, allow, window, cx))
+                        .ok();
+                }
+            };
+            let title = div()
+                .debug_selector(|| "approval-title".into())
+                .child("Run a new command?");
+            dialog
+                .close_button(false)
+                .overlay_closable(false)
+                .keyboard(false)
+                .title(title)
+                .child(text.clone())
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("approval-deny")
+                                .label("Don't allow")
+                                .on_click(answer(false)),
+                        )
+                        .child(
+                            Button::new("approval-allow")
+                                .primary()
+                                .label("Allow")
+                                .on_click(answer(true)),
+                        ),
+                )
+        });
+    }
+
+    /// Allow approves the value and puts it in force; Don't allow keeps what runs now, and a
+    /// reload does not ask about it again this run. Only Allow of the screen's edit writes
+    /// `settings.toml`. A default agent that waited for the answer starts then.
+    fn answer(
+        &mut self,
+        approval: &Approval,
+        allow: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let waited = self.default_asked();
+        self.asking.retain(|a| a != approval);
+        let value = approval_value(approval).clone();
+        if allow {
+            self.approved.insert(value.clone());
+            self.save_state(cx);
+            self.enforce(cx);
+            // The reload of this write finds the value approved: no second question.
+            let (write, keep) = (std::mem::take(&mut self.edits).into_iter())
+                .partition::<Vec<_>, _>(|e| *approval_value(e) == value);
+            self.edits = keep;
+            for edit in write {
+                self.write_setting(&edit_change(edit), window, cx);
+            }
+        } else if let Some(ix) = self.edits.iter().position(|e| e == approval) {
+            self.edits.remove(ix);
+        } else {
+            self.declined.insert(value);
+        }
+        if waited && !self.default_asked() {
+            self.start_agent(cx);
+        }
+        // A declined edit's field shows the value in force again.
+        self.sync_settings_view(cx);
+        self.ask_next(window, cx);
+    }
+
+    /// Whether a question about the default agent's command from the settings (not the screen,
+    /// whose edits apply at the next start) is open.
+    fn default_asked(&self) -> bool {
+        let Some(agent) = self.default_agent() else {
+            return false;
+        };
+        self.asking.iter().any(|a| match a {
+            Approval::Agent { id, new, .. } => {
+                *id == agent && !self.approved.contains(new) && !self.edits.contains(a)
+            }
+            Approval::Shell { .. } => false,
+        })
+    }
+
+    /// Hands a watcher batch to the open files it touches, and the project's settings file to
+    /// `reload_settings`.
+    fn disk_changed(&mut self, batch: &[FsChange], window: &mut Window, cx: &mut Context<Self>) {
+        if touches(batch, &self.project.join(".wai").join("settings.toml")) {
+            self.reload_settings(window, cx);
+        }
+        let touched = |path: &Path| touches(batch, path);
         for pane in &self.panes {
             if let Pane::Editor(pane) = pane {
                 for tab in pane.read(cx).tabs.clone() {
@@ -367,16 +691,26 @@ impl Workspace {
         }
     }
 
-    /// Starts the default agent, so the history fills in once it is ready.
+    /// The agent a new session uses; `None` until the user chooses one.
+    pub fn default_agent(&self) -> Option<String> {
+        self.settings.default_agent.clone()
+    }
+
+    /// Starts the default agent, so the history fills in once it is ready. Not while its command
+    /// waits for an answer: `answer` starts it then.
     pub fn start_agent(&mut self, cx: &mut Context<Self>) {
-        let agent = self.settings.default_agent.clone();
-        self.registry.update(cx, |r, cx| r.handle(&agent, cx));
+        let Some(agent) = self.default_agent() else {
+            return;
+        };
+        if !self.default_asked() {
+            self.registry.update(cx, |r, cx| r.handle(&agent, cx));
+        }
     }
 
     /// Reopens the last run's sessions, which `load_session` replays, and its terminal. A session
     /// goes back to its pane: the first one saved for a pane takes it, panes left empty close, and
-    /// one saved in no pane only joins the open list. Sessions of agents the settings no longer
-    /// have are dropped.
+    /// one saved in no pane only joins the open list. Sessions of agents the settings do not have
+    /// (or whose command waits for an answer) stay in the state for a launch that has them.
     pub fn restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = &self.state_path else {
             return;
@@ -384,8 +718,10 @@ impl Workspace {
         let state = AppState::load(path);
         let mut panes: [Option<Entity<ChatSession>>; MAX_PANES] = Default::default();
         for saved in state.open_sessions {
-            let (agent, id, cwd) = (saved.agent, saved.session_id, saved.cwd);
-            let Some(session) = self.loading_session(agent, id, cwd, window, cx) else {
+            let (agent, id, cwd) = (&saved.agent, &saved.session_id, &saved.cwd);
+            let loading = self.loading_session(agent.clone(), id.clone(), cwd.clone(), window, cx);
+            let Some(session) = loading else {
+                self.unrestored.push(saved);
                 continue;
             };
             if let Some(slot @ None) = panes.get_mut(saved.pane) {
@@ -455,12 +791,15 @@ impl Workspace {
                 pane: pane(session).unwrap_or(MAX_PANES),
             }
         });
+        let unrestored = self.unrestored.iter().cloned();
         let state = AppState {
             project: Some(self.project.clone()),
-            open_sessions: open_sessions.collect(),
+            open_sessions: open_sessions.chain(unrestored).collect(),
             terminal_visible: self.terminal_visible,
             // ponytail: the sidebar does not resize yet; save its width once it does.
             sidebar_width: SIDEBAR_WIDTH,
+            approved: Some(self.approved.clone()),
+            models_seen: self.models_seen.clone(),
         };
         // ponytail: a few hundred bytes on the UI thread; move to the background executor if
         // it ever shows in a frame.
@@ -562,7 +901,8 @@ impl Workspace {
                     Some(AgentStatus::Ready(_)) => self.refresh_history(cx),
                     _ => {}
                 }
-                // Empty panes show the default agent's problem, if any.
+                // The AI rows show the status; empty panes, the default agent's problem.
+                self.sync_settings_view(cx);
                 cx.notify();
             }
         }
@@ -760,7 +1100,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<(Entity<ChatSession>, bool)> {
-        let agent = self.settings.default_agent.clone();
+        let agent = self.default_agent()?;
         if let Some(session) = self.session(&agent, &summary.id, cx) {
             return Some((session, false));
         }
@@ -786,17 +1126,26 @@ impl Workspace {
             return;
         }
         let (session, fresh) = match &dragged.source {
-            Dragged::Open(session) if self.sessions.contains(session) => (session.clone(), false),
+            Dragged::Open(session) if self.sessions.contains(session) => {
+                (Some(session.clone()), false)
+            }
             Dragged::Open(_) => return,
             Dragged::History(row) => match self.resumed(row, window, cx) {
-                Some(resumed) => resumed,
+                Some((resumed, fresh)) => (Some(resumed), fresh),
                 None => return,
             },
+            Dragged::Settings => (None, false),
         };
-        let from = self
-            .panes
-            .iter()
-            .position(|p| p.session() == Some(&session));
+        let from = match &session {
+            Some(session) => self.panes.iter().position(|p| p.session() == Some(session)),
+            None => self
+                .panes
+                .iter()
+                .position(|p| matches!(p, Pane::Settings(_))),
+        };
+        if session.is_none() && from.is_none() {
+            return;
+        }
         let empty = matches!(self.panes[ix], Pane::Empty(_));
         let locked = matches!(self.panes[ix], Pane::Editor(_)) && !self.dirty_tabs(cx).is_empty();
         if let Some(slots) = layout::place(self.panes.len(), from, ix, zone, empty, locked) {
@@ -804,19 +1153,21 @@ impl Workspace {
             self.panes = (slots.into_iter())
                 .map(|slot| match slot {
                     Slot::Old(ix) => old[ix].take().expect("each pane lands once"),
-                    Slot::Dropped => Pane::Session(session.clone()),
+                    Slot::Dropped => {
+                        Pane::Session(session.clone().expect("a dropped session is a session"))
+                    }
                 })
                 .collect();
             self.save_state(cx);
         }
-        if let Some(ix) = self
-            .panes
-            .iter()
-            .position(|p| p.session() == Some(&session))
-        {
+        let shown = self.panes.iter().position(|p| match &session {
+            Some(session) => p.session() == Some(session),
+            None => matches!(p, Pane::Settings(_)),
+        });
+        if let Some(ix) = shown {
             self.focus_pane(ix, window, cx);
         }
-        if fresh {
+        if let (true, Some(session)) = (fresh, &session) {
             session.update(cx, |s, cx| s.load(false, window, cx));
         }
     }
@@ -827,9 +1178,15 @@ impl Workspace {
     fn lit(&self, dragged: &DraggedSession, ix: usize, cx: &App) -> Option<bool> {
         let session = match &dragged.source {
             Dragged::Open(session) => Some(session.clone()),
-            Dragged::History(row) => self.session(&self.settings.default_agent, &row.id, cx),
+            Dragged::History(row) => self
+                .default_agent()
+                .and_then(|agent| self.session(&agent, &row.id, cx)),
+            Dragged::Settings => None,
         };
-        let from = session.and_then(|s| self.panes.iter().position(|p| p.session() == Some(&s)));
+        let from = match &dragged.source {
+            Dragged::Settings => (self.panes.iter()).position(|p| matches!(p, Pane::Settings(_))),
+            _ => session.and_then(|s| self.panes.iter().position(|p| p.session() == Some(&s))),
+        };
         let empty = matches!(self.panes.get(ix)?, Pane::Empty(_));
         (from != Some(ix)).then(|| layout::only_center(self.panes.len(), from, empty))
     }
@@ -926,6 +1283,7 @@ impl Workspace {
             id,
             modes: Vec::new(),
             current_mode: None,
+            config: Vec::new(),
         };
         let registry = self.registry.downgrade();
         let session =
@@ -943,7 +1301,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let agent = self.settings.default_agent.clone();
+        let Some(agent) = self.default_agent() else {
+            return self.open_settings(Section::Ai, Some(CHOOSE_AI), window, cx);
+        };
         self.start_session(agent, None, false, None, window, cx)
     }
 
@@ -964,10 +1324,9 @@ impl Workspace {
         let Some(template) = self.all_templates(cx).get(ix).cloned() else {
             return;
         };
-        let agent = template
-            .agent
-            .clone()
-            .unwrap_or_else(|| self.settings.default_agent.clone());
+        let Some(agent) = template.agent.clone().or_else(|| self.default_agent()) else {
+            return self.open_settings(Section::Ai, Some(CHOOSE_AI), window, cx);
+        };
         if !self.registry.read(cx).knows(&agent) {
             let pane = self.session_pane();
             if matches!(self.panes[pane], Pane::Preparing { .. }) {
@@ -993,7 +1352,9 @@ impl Workspace {
     ) {
         match command.prompt {
             Some(prompt) => {
-                let agent = self.settings.default_agent.clone();
+                let Some(agent) = self.default_agent() else {
+                    return self.open_settings(Section::Ai, Some(CHOOSE_AI), window, cx);
+                };
                 self.start_session(agent, Some(prompt), false, None, window, cx)
             }
             None => self.ext_host.read(cx).run_command(ext, &command.id),
@@ -1035,7 +1396,9 @@ impl Workspace {
                 send,
                 reply,
             } => {
-                let agent = agent.unwrap_or_else(|| self.settings.default_agent.clone());
+                let Some(agent) = agent.or_else(|| self.default_agent()) else {
+                    return reply.send(Err("No default AI is chosen".into()));
+                };
                 if !self.registry.read(cx).knows(&agent) {
                     return reply.send(Err(format!("No agent named {agent}")));
                 }
@@ -1139,6 +1502,11 @@ impl Workspace {
                         // A session that starts proves the agent works (signed in again, say).
                         this.registry.update(cx, |r, cx| r.mark_ready(&agent, cx));
                         let id = started.id.clone();
+                        let seen = seen_models(&started.config);
+                        if !seen.is_empty() {
+                            this.models_seen.insert(agent.clone(), seen);
+                            this.sync_settings_view(cx);
+                        }
                         let session = cx.new(|cx| {
                             ChatSession::new(
                                 agent.clone(),
@@ -1152,6 +1520,9 @@ impl Workspace {
                         });
                         session
                             .update(cx, |s, cx| early.iter().for_each(|e| s.handle_event(e, cx)));
+                        if let Some(model) = this.settings.models.get(&agent) {
+                            session.update(cx, |s, cx| s.apply_default_model(model, cx));
+                        }
                         // Routed and followed before a sent prompt changes its state.
                         this.add_session(session.clone(), window, cx);
                         if let Some(text) = prompt {
@@ -1215,7 +1586,7 @@ impl Workspace {
         let terminal = match &self.terminal {
             Some(terminal) => terminal.clone(),
             None => {
-                let (shell, cwd) = (self.settings.terminal.shell.clone(), self.project.clone());
+                let (shell, cwd) = (self.shell.clone(), self.project.clone());
                 let terminal = cx.new(|cx| TerminalView::new(shell, cwd, cx));
                 self.terminal = Some(terminal.clone());
                 terminal
@@ -1264,7 +1635,7 @@ impl Workspace {
             Pane::Preparing { ticket, .. } => {
                 self.cancelled.insert(*ticket);
             }
-            Pane::Empty(_) => {}
+            Pane::Empty(_) | Pane::Settings(_) => {}
         }
         self.drop_pane(ix, window, cx);
     }
@@ -1559,6 +1930,198 @@ impl Workspace {
         pane
     }
 
+    fn settings_data(&self, notice: Option<SharedString>, cx: &App) -> SettingsData {
+        SettingsData {
+            settings: self.settings.clone(),
+            error: self.settings_error.clone(),
+            notice,
+            agents: self.agent_rows(cx),
+            project_default: wai_settings::project_default_agent(&self.project)
+                .filter(|p| Some(p) == self.settings.default_agent.as_ref()),
+        }
+    }
+
+    pub fn agent_rows(&self, cx: &App) -> Vec<AgentRow> {
+        let registry = self.registry.read(cx);
+        registry
+            .names()
+            .into_iter()
+            .map(|id| {
+                let command = registry.command(&id).unwrap_or_default().to_string();
+                let status = if wai_agent::program(&command).is_none() {
+                    RowStatus::CliNotFound
+                } else {
+                    match registry.status(&id) {
+                        None => RowStatus::NotChecked,
+                        Some(AgentStatus::Starting) => RowStatus::Starting,
+                        Some(AgentStatus::Ready(_)) => RowStatus::Ready,
+                        Some(AgentStatus::SignedOut) => RowStatus::SignedOut,
+                        Some(AgentStatus::Failed(e)) => RowStatus::Failed(e.clone()),
+                    }
+                };
+                let (extension, label) = match id.split_once('/') {
+                    Some((ext, name)) => (Some(ext.to_string()), name.to_string()),
+                    None => (None, wai_settings::agent_label(&id)),
+                };
+                AgentRow {
+                    label,
+                    extension,
+                    status,
+                    command,
+                    models: self.models_seen.get(&id).cloned().unwrap_or_default(),
+                    default_model: self.settings.models.get(&id).cloned(),
+                    is_default: self.settings.default_agent.as_deref() == Some(&id),
+                    id,
+                }
+            })
+            .collect()
+    }
+
+    /// Starts the agent and a session in the scratch folder: that tells whether it runs and
+    /// whether the user is signed in, and which models it offers.
+    // ponytail: the agent stays running after Test. Stop it when idle if the memory matters.
+    pub fn test_agent(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(handle) = self.registry.update(cx, |r, cx| r.handle(id, cx)) else {
+            return;
+        };
+        self.sync_settings_view(cx);
+        let (id, dir) = (id.to_string(), self.user_dir.join("scratch"));
+        cx.spawn_in(window, async move |this, cx| {
+            let _ = std::fs::create_dir_all(&dir);
+            let started = handle.new_session(dir, vec![]).await;
+            this.update(cx, |this, cx| {
+                match started {
+                    Ok(started) => {
+                        this.registry.update(cx, |r, cx| r.mark_ready(&id, cx));
+                        this.models_seen.insert(id, seen_models(&started.config));
+                        this.save_state(cx);
+                    }
+                    Err(AgentError::AuthRequired) => this
+                        .registry
+                        .update(cx, |r, cx| r.set_status(&id, AgentStatus::SignedOut, cx)),
+                    Err(e) => this.registry.update(cx, |r, cx| {
+                        r.set_status(&id, AgentStatus::Failed(e.to_string()), cx)
+                    }),
+                }
+                this.sync_settings_view(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Shows the settings at `section`, with `notice` in it. Its pane is focused when there is
+    /// one; else the focused pane takes it when empty, else a new pane to the right, else (at
+    /// `MAX_PANES`) the next pane that is not the editor, whose session stays in the open list.
+    pub fn open_settings(
+        &mut self,
+        section: Section,
+        notice: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let notice = notice.map(|n| SharedString::from(n.to_string()));
+        let found = (self.panes.iter()).position(|p| matches!(p, Pane::Settings(_)));
+        let ix = match found {
+            Some(ix) => ix,
+            None => {
+                let data = self.settings_data(notice.clone(), cx);
+                let view = cx.new(|cx| SettingsView::new(section, data, window, cx));
+                cx.subscribe_in(
+                    &view,
+                    window,
+                    |this, _, event: &SettingsEvent, window, cx| match event {
+                        SettingsEvent::Change(change) => {
+                            this.change_setting(change.clone(), window, cx)
+                        }
+                        SettingsEvent::OpenFile => {
+                            let path = this.user_dir.join("settings.toml");
+                            // Created when missing (a first run): the editor opens only files
+                            // that exist. If this fails, `open_file` reports why.
+                            std::fs::create_dir_all(&this.user_dir).ok();
+                            (std::fs::OpenOptions::new().create(true).append(true))
+                                .open(&path)
+                                .ok();
+                            this.open_file(path, None, window, cx)
+                        }
+                        SettingsEvent::Test(id) => this.test_agent(id, window, cx),
+                    },
+                )
+                .detach();
+                let focused = self.focused_pane;
+                let ix = if matches!(self.panes[focused], Pane::Empty(_)) {
+                    focused
+                } else if self.panes.len() < MAX_PANES {
+                    self.panes.push(Pane::Empty(None));
+                    self.panes.len() - 1
+                } else {
+                    let len = self.panes.len();
+                    (1..len)
+                        .map(|n| (focused + n) % len)
+                        .find(|&ix| !matches!(self.panes[ix], Pane::Editor(_)))
+                        .unwrap_or(focused)
+                };
+                self.panes[ix] = Pane::Settings(view);
+                self.save_state(cx);
+                ix
+            }
+        };
+        if let Pane::Settings(view) = &self.panes[ix] {
+            let data = self.settings_data(notice, cx);
+            view.update(cx, |v, cx| {
+                v.show(section, cx);
+                v.set(data, cx);
+            });
+        }
+        self.focus_pane(ix, window, cx);
+    }
+
+    /// Writes `change` to the user's file; the watcher applies it. A command or shell not
+    /// approved yet is asked about first, and written only on Allow.
+    pub fn change_setting(&mut self, change: Change, window: &mut Window, cx: &mut Context<Self>) {
+        let asked = match &change {
+            Change::AgentCommand { agent, command } if !is_approved(command, &self.approved) => {
+                let old = self.registry.read(cx).configs().get(agent);
+                Some(Approval::Agent {
+                    id: agent.clone(),
+                    old: old.map(|c| c.command.clone()),
+                    new: command.clone(),
+                })
+            }
+            Change::Shell(Some(shell)) if !self.approved.contains(shell) => Some(Approval::Shell {
+                old: self.shell.clone(),
+                new: shell.clone(),
+            }),
+            _ => None,
+        };
+        match asked {
+            Some(approval) => {
+                self.edits.push(approval.clone());
+                self.ask_approval(vec![approval], window, cx);
+            }
+            None => self.write_setting(&change, window, cx),
+        }
+    }
+
+    fn write_setting(&self, change: &Change, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(e) = write_change(&self.user_dir, change) {
+            let text = format!("Could not save settings: {e}");
+            window.push_notification(Notification::warning(text), cx);
+        }
+    }
+
+    /// The settings screen follows `self.settings`. Its "Choose an AI" notice goes once one is
+    /// chosen.
+    pub fn sync_settings_view(&self, cx: &mut Context<Self>) {
+        for pane in &self.panes {
+            if let Pane::Settings(view) = pane {
+                let notice = (view.read(cx).notice()).filter(|_| self.default_agent().is_none());
+                let data = self.settings_data(notice, cx);
+                view.update(cx, |v, cx| v.set(data, cx));
+            }
+        }
+    }
+
     fn focus_next_pane(&mut self, _: &FocusNextPane, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_pane((self.focused_pane + 1) % self.panes.len(), window, cx);
     }
@@ -1585,6 +2148,7 @@ impl Workspace {
         for notice in notices {
             window.push_notification(Notification::warning(notice).autohide(false), cx);
         }
+        self.reload_settings(window, cx);
         self.suggest_extensions(window, cx);
         let project = self.project.clone();
         self.ext_host
@@ -1698,9 +2262,9 @@ impl Workspace {
 
     /// What an empty pane says is wrong with the default agent, if anything.
     fn agent_problem(&self, cx: &App) -> Option<String> {
-        let agent = &self.settings.default_agent;
-        match self.registry.read(cx).status(agent)? {
-            AgentStatus::SignedOut => Some(signed_out(agent)),
+        let agent = self.default_agent()?;
+        match self.registry.read(cx).status(&agent)? {
+            AgentStatus::SignedOut => Some(signed_out(&agent)),
             AgentStatus::Failed(error) => Some(error.clone()),
             _ => None,
         }
@@ -1769,6 +2333,59 @@ fn title(project: &Path) -> String {
     format!("wai — {}", folder_name(project))
 }
 
+/// Each agent's config while its command is approved, else its `last` one while that is, else
+/// none.
+fn approved_configs(
+    last: &BTreeMap<String, AgentConfig>,
+    settings: &Settings,
+    approved: &BTreeSet<String>,
+) -> BTreeMap<String, AgentConfig> {
+    let ok = |c: &&AgentConfig| is_approved(&c.command, approved);
+    let config = |id: &String, c| Some(c).filter(ok).or_else(|| last.get(id).filter(ok));
+    (settings.agents.iter())
+        .filter_map(|(id, c)| Some((id.clone(), config(id, c)?.clone())))
+        .collect()
+}
+
+fn approval_value(approval: &Approval) -> &String {
+    let (Approval::Agent { new, .. } | Approval::Shell { new, .. }) = approval;
+    new
+}
+
+/// The screen's edit that `approval` asks about.
+fn edit_change(approval: Approval) -> Change {
+    match approval {
+        Approval::Agent { id, new, .. } => Change::AgentCommand {
+            agent: id,
+            command: new,
+        },
+        Approval::Shell { new, .. } => Change::Shell(Some(new)),
+    }
+}
+
+/// Control and format characters show escaped: a value cannot hide its end behind line breaks,
+/// bidi overrides or zero-width characters.
+pub(crate) fn approval_text(approval: &Approval) -> String {
+    let text = match approval {
+        Approval::Agent {
+            id,
+            old: Some(old),
+            new,
+        } => format!("{}: {old} → {new}", agent_label(id)),
+        Approval::Agent { id, old: None, new } => format!("{} (new): {new}", agent_label(id)),
+        Approval::Shell { old, new } => {
+            let old = old.as_deref().unwrap_or("system default");
+            format!("Terminal shell: {old} → {new}")
+        }
+    };
+    let hidden = |c: char| c.is_control() || c.general_category() == GeneralCategory::Format;
+    let visible = |c: char| match hidden(c) {
+        true => c.escape_default().to_string(),
+        false => c.into(),
+    };
+    text.chars().map(visible).collect()
+}
+
 /// A resizable panel's content on `card`, inset 4 px: the cards sit 8 px apart.
 fn on_card(card: Div, content: impl IntoElement) -> Div {
     div()
@@ -1804,6 +2421,7 @@ impl Render for Workspace {
                 .child(match pane {
                     Pane::Session(session) => session.clone().into_any_element(),
                     Pane::Editor(pane) => pane.clone().into_any_element(),
+                    Pane::Settings(view) => view.clone().into_any_element(),
                     Pane::Preparing { agent, .. } => v_flex()
                         .size_full()
                         .items_center()
@@ -1840,6 +2458,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::focus_next_pane))
             .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::open_palette))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.open_settings(Section::Ai, None, window, cx)
+            }))
             .relative()
             .size_full()
             .bg(theme.background)
@@ -1884,6 +2505,17 @@ impl Render for Workspace {
     }
 }
 
+fn seen_models(config: &[wai_agent::ConfigOption]) -> Vec<SeenModel> {
+    (config.iter())
+        .filter(|o| o.category == wai_agent::ConfigCategory::Model)
+        .flat_map(|o| o.values.iter())
+        .map(|v| SeenModel {
+            id: v.id.clone(),
+            name: v.name.clone(),
+        })
+        .collect()
+}
+
 fn fork_failure(error: &AgentError) -> String {
     format!("Could not fork session: {error}")
 }
@@ -1911,21 +2543,23 @@ fn stop_reason(reason: &StopReason) -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    use gpui_kit::component::WindowExt as _;
+    use gpui_kit::component::{ActiveTheme as _, WindowExt as _};
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
         AppContext as _, ElementId, Entity, Modifiers, MouseButton, Pixels, Point, TestAppContext,
         VisualTestContext, point, px, size,
     };
     use wai_agent::{AgentError, PromptBlock, SessionEvent, SessionSummary};
-    use wai_settings::{AgentConfig, AppState, OpenSession, Settings, ThemeChoice};
+    use wai_settings::{
+        AgentConfig, AppState, Change, OpenSession, Settings, ThemeChoice, unapproved,
+    };
 
     use super::{Pane, Workspace};
     use crate::agents::{AgentStatus, RegistryEvent};
-    use crate::app;
+    use crate::app::{self, ToggleTerminal};
     use crate::chat::{ChatEvent, ChatItem, NoticeKind, TurnState};
     use crate::notify;
     use crate::sidebar::canonical;
@@ -1978,7 +2612,7 @@ pub(crate) mod tests {
             .expect("run `cargo build -p wai-agent --bin wai-fake-agent` first");
         let command = format!("{} {flag}", wai_agent::quote(&fake));
         Settings {
-            default_agent: "fake".into(),
+            default_agent: Some("fake".into()),
             agents: [("fake".into(), AgentConfig { command })].into(),
             ..Default::default()
         }
@@ -2022,6 +2656,83 @@ pub(crate) mod tests {
         workspace.update(cx, |w, cx| w.start_agent(cx));
         wait_until(cx, "the history", |cx| history_rows(workspace, cx) == n);
         workspace.read_with(cx, |w, _| w.history_rows().into_iter().cloned().collect())
+    }
+
+    #[gpui_kit::test]
+    fn no_default_opens_settings_on_new_session(cx: &mut TestAppContext) {
+        let settings = Settings {
+            default_agent: None,
+            ..fake_settings("")
+        };
+        let (workspace, cx) = open(cx, settings);
+        cx.simulate_keystrokes("secondary-n");
+        workspace.read_with(cx, |w, cx| {
+            let Pane::Settings(view) = &w.panes[0] else {
+                panic!("expected the Settings pane");
+            };
+            assert_eq!(view.read(cx).section(), crate::settings_view::Section::Ai);
+            assert_eq!(view.read(cx).notice().as_deref(), Some(super::CHOOSE_AI));
+            assert_eq!(
+                w.panes
+                    .iter()
+                    .filter(|p| matches!(p, Pane::Settings(_)))
+                    .count(),
+                1
+            );
+            assert!(w.registry.read(cx).status("fake").is_none());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn choosing_a_default_clears_the_notice(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let settings = Settings {
+            default_agent: None,
+            ..fake_settings("")
+        };
+        let (workspace, cx) = open(cx, settings);
+        cx.simulate_keystrokes("secondary-n");
+        let view = workspace.read_with(cx, |w, _| match &w.panes[0] {
+            Pane::Settings(view) => view.clone(),
+            _ => panic!("expected the Settings pane"),
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.apply_settings(fake_settings(""), vec![], window, cx)
+            })
+        });
+        assert_eq!(view.read_with(cx, |v, _| v.notice()), None);
+    }
+
+    #[gpui_kit::test]
+    fn choosing_a_default_starts_it(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let fake = Settings {
+            default_agent: None,
+            ..fake_settings("")
+        };
+        let file = format!(
+            "[agents.fake]\ncommand = \'\'\'{}\'\'\'\n",
+            fake.agents["fake"].command
+        );
+        let (workspace, cx, _dir) = live(cx, fake, Some(&file));
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.change_setting(Change::DefaultAgent("fake".into()), window, cx)
+            })
+        });
+        wait_until(cx, "the agent", |cx| {
+            workspace.read_with(cx, |w, cx| {
+                matches!(
+                    w.registry.read(cx).status("fake"),
+                    Some(AgentStatus::Ready(_))
+                )
+            })
+        });
+        cx.simulate_keystrokes("secondary-n");
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.sessions.len() == 1)
+        });
     }
 
     #[gpui_kit::test]
@@ -2218,6 +2929,38 @@ pub(crate) mod tests {
             assert_eq!(w.panes.len(), 2);
             assert_eq!(w.panes[0].session(), Some(&second));
             assert_eq!(w.panes[1].session(), Some(&first));
+            assert_eq!(w.focused_pane, 1);
+        });
+    }
+
+    /// The Settings title drags like a session header: dropped on a pane's right quarter, it
+    /// moves there and the panes reorder.
+    #[gpui_kit::test]
+    fn drag_settings_to_right_edge_splits(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(1));
+        let rows = load_history(&workspace, 1, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.open_settings(super::Section::Ai, None, window, cx);
+                w.panes.swap(0, 1);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |w, _| {
+            assert!(matches!(w.panes[0], Pane::Settings(_)));
+            assert!(w.panes[1].session().is_some());
+        });
+
+        let from = center_of("settings-title", cx);
+        drag_to_pane(from, 1, 0.9, cx);
+
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 2);
+            assert!(w.panes[0].session().is_some());
+            assert!(matches!(w.panes[1], Pane::Settings(_)));
             assert_eq!(w.focused_pane, 1);
         });
     }
@@ -2438,6 +3181,25 @@ pub(crate) mod tests {
         cx.update(|window, cx| window.click("history-toggle", cx));
         cx.update(|window, cx| window.click("all-projects", cx));
         assert_eq!(history_rows(&workspace, cx), 25);
+    }
+
+    /// The old default's rows would resume with the new agent: they go until it lists its own.
+    #[gpui_kit::test]
+    fn switching_the_default_clears_the_old_history(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(2));
+        load_history(&workspace, 2, cx);
+        let mut settings = workspace.read_with(cx, |w, _| w.settings.clone());
+        let other = settings.agents["fake"].clone();
+        settings.agents.insert("other".into(), other);
+        settings.default_agent = Some("other".into());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.apply_settings(settings, vec![], window, cx))
+        });
+        assert_eq!(history_rows(&workspace, cx), 0);
+        wait_until(cx, "the new default's history", |cx| {
+            history_rows(&workspace, cx) == 2
+        });
     }
 
     #[gpui_kit::test]
@@ -2830,7 +3592,7 @@ pub(crate) mod tests {
         let mut settings = fake_settings(flag);
         let fake = settings.agents.remove("fake").unwrap();
         settings.agents = [("a".into(), fake.clone()), ("b".into(), fake)].into();
-        settings.default_agent = "a".into();
+        settings.default_agent = Some("a".into());
         let (workspace, cx) = open(cx, settings);
         let registry = workspace.read_with(cx, |w, _| w.registry.clone());
         let mut sessions = Vec::new();
@@ -2900,6 +3662,8 @@ pub(crate) mod tests {
     fn launch(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| {
+                let pending = unapproved(&Settings::default(), &w.settings, &w.approved);
+                w.ask_approval(pending, window, cx);
                 w.start_agent(cx);
                 w.restore(window, cx);
             })
@@ -2932,6 +3696,11 @@ pub(crate) mod tests {
         // The config dir does not exist yet on a first run.
         let path = dir.path().join("wai").join("state.json");
         let (workspace, cx) = open_at(cx, fake_settings(""), Some(path.clone()));
+        // Nothing but the built-ins is approved yet: the agent and the shell are asked for.
+        launch(&workspace, cx);
+        while question(&workspace, cx).is_some() {
+            click("approval-allow", cx);
+        }
 
         cx.simulate_keystrokes("secondary-n");
         wait_until(cx, "the session", |cx| {
@@ -2997,13 +3766,69 @@ pub(crate) mod tests {
         assert_eq!(ids, ["abc", "def"]);
         assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 3);
         assert!(workspace.read_with(cx, |w, _| w.terminal_visible && w.terminal.is_some()));
+        // The ghost's stays for a launch whose settings have its agent.
         let kept = AppState::load(&path).open_sessions;
         let hidden = saved("fake", "ghi", super::MAX_PANES);
+        let ghost = saved("ghost", "gone", 1);
         assert_eq!(
             kept,
-            [saved("fake", "abc", 0), saved("fake", "def", 1), hidden]
+            [
+                saved("fake", "abc", 0),
+                saved("fake", "def", 1),
+                hidden,
+                ghost
+            ]
         );
         assert_eq!(notify::sent(), []);
+    }
+
+    /// A session of an agent the settings do not have (a broken file at launch, a pending
+    /// command) is not lost: the state keeps it for a launch that can restore it.
+    #[gpui_kit::test]
+    fn unrestored_sessions_stay_in_the_state(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = AppState {
+            open_sessions: vec![saved("x", "1", 0)],
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        let (workspace, cx) = open_at(cx, Settings::default(), Some(path.clone()));
+        launch(&workspace, cx);
+        assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
+        assert_eq!(AppState::load(&path).open_sessions, [saved("x", "1", 0)]);
+    }
+
+    #[gpui_kit::test]
+    fn restored_session_keeps_the_agents_model(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = AppState {
+            open_sessions: vec![saved("fake", "abc", 0)],
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        let mut settings = fake_settings("--models");
+        settings.models.insert("fake".into(), "fake-large".into());
+        let (workspace, cx) = open_at(cx, settings, Some(path));
+        cx.deactivate_window();
+        launch(&workspace, cx);
+        let session = pane_session(&workspace, 0, cx);
+        wait_until(cx, "the replay", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.state == TurnState::Idle && !s.model.items.is_empty()
+            })
+        });
+        session.update(cx, |s, cx| s.send_text("which?", cx));
+        wait_until(cx, "the reply", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.state == TurnState::Idle
+                    && s.model.items.iter().any(
+                        |i| matches!(i, ChatItem::Agent { text } if text == "model:fake-small"),
+                    )
+            })
+        });
     }
 
     /// R14: the state keeps no titles; a restored session takes its title from the history.
@@ -3129,5 +3954,588 @@ pub(crate) mod tests {
             assert!(matches!(&w.panes[3], Pane::Empty(Some(why)) if why == "Could not start"));
             assert!(w.sessions.contains(&fourth), "in the open list only");
         });
+    }
+
+    /// A window whose settings watcher looks at a fresh user dir holding `file`.
+    pub(crate) fn live<'a>(
+        cx: &'a mut TestAppContext,
+        settings: Settings,
+        file: Option<&str>,
+    ) -> (
+        Entity<Workspace>,
+        &'a mut VisualTestContext,
+        tempfile::TempDir,
+    ) {
+        cx.executor().allow_parking(); // the watcher thread is real
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(file) = file {
+            std::fs::write(dir.path().join("settings.toml"), file).unwrap();
+        }
+        let (workspace, cx) = open(cx, settings);
+        let user = dir.path().to_path_buf();
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.user_dir = user;
+                w.watch_settings(window, cx);
+            })
+        });
+        (workspace, cx, dir)
+    }
+
+    #[gpui_kit::test]
+    fn editing_the_file_applies_the_theme(cx: &mut TestAppContext) {
+        let (_workspace, cx, dir) = live(cx, Settings::default(), None);
+        assert!(cx.update(|_, cx| cx.theme().is_dark()));
+        std::fs::write(dir.path().join("settings.toml"), "theme = \"light\"\n").unwrap();
+        wait_until(cx, "the light theme", |cx| {
+            cx.update(|_, cx| !cx.theme().is_dark())
+        });
+    }
+
+    #[gpui_kit::test]
+    fn broken_edit_keeps_the_last_good_settings(cx: &mut TestAppContext) {
+        let light = Settings {
+            theme: ThemeChoice::Light,
+            ..Default::default()
+        };
+        let (workspace, cx, dir) = live(cx, light, Some("theme = \"light\"\n"));
+        std::fs::write(dir.path().join("settings.toml"), "theme = [").unwrap();
+        wait_until(cx, "the error", |cx| {
+            workspace.read_with(cx, |w, _| w.settings_error.is_some())
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |w, _| assert_eq!(w.settings.theme, ThemeChoice::Light));
+        assert!(cx.update(|_, cx| !cx.theme().is_dark()));
+        assert!(cx.update(|window, cx| !window.notifications(cx).is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn own_write_reloads_once_without_a_second_dialog(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = live(cx, Settings::default(), None);
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.change_setting(Change::Theme(ThemeChoice::Light), window, cx)
+            })
+        });
+        wait_until(cx, "the light theme", |cx| {
+            cx.update(|_, cx| !cx.theme().is_dark())
+        });
+        // Past the debounce: a second batch would show up as a second apply.
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(20));
+            cx.executor().advance_clock(Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        workspace.read_with(cx, |w, _| assert_eq!(w.applied, 1));
+        assert!(cx.update(|window, cx| !window.has_active_dialog(cx)));
+    }
+
+    #[gpui_kit::test]
+    fn deleted_user_file_falls_back_to_first_run(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let settings = history_settings(1);
+        let file = format!(
+            "default_agent = \"fake\"\n[agents.fake]\ncommand = \'\'\'{}\'\'\'\n",
+            settings.agents["fake"].command
+        );
+        let (workspace, cx, dir) = live(cx, settings, Some(&file));
+        let rows = load_history(&workspace, 1, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
+        });
+        std::fs::remove_file(dir.path().join("settings.toml")).unwrap();
+        wait_until(cx, "the first-run settings", |cx| {
+            workspace.read_with(cx, |w, _| w.default_agent().is_none())
+        });
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(w.sessions.len(), 1);
+            let status = w.registry.read(cx).status("fake").cloned();
+            assert!(matches!(status, Some(AgentStatus::Ready(_))), "{status:?}");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn project_switch_reloads_settings(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = live(cx, Settings::default(), None);
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".wai")).unwrap();
+        std::fs::write(
+            project.path().join(".wai/settings.toml"),
+            "theme = \"light\"\n",
+        )
+        .unwrap();
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.set_project(project.path().to_path_buf(), window, cx)
+            })
+        });
+        assert!(cx.update(|_, cx| !cx.theme().is_dark()));
+    }
+
+    #[gpui_kit::test]
+    fn changed_command_applies_to_the_next_start(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let settings = history_settings(1);
+        let (workspace, cx, dir) = live(cx, settings.clone(), None);
+        load_history(&workspace, 1, cx);
+        std::fs::write(
+            dir.path().join("settings.toml"),
+            "default_agent = \"fake\"\n[agents.fake]\ncommand = \"/bin/true\"\n",
+        )
+        .unwrap();
+        wait_until(cx, "the question", |cx| question(&workspace, cx).is_some());
+        click("approval-allow", cx);
+        workspace.read_with(cx, |w, cx| {
+            let status = w.registry.read(cx).status("fake").cloned();
+            assert!(matches!(status, Some(AgentStatus::Ready(_))), "{status:?}");
+            assert_eq!(w.registry.read(cx).command("fake"), Some("/bin/true"));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn shell_change_reaches_the_next_spawn_only(cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = live(cx, Settings::default(), None);
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.toggle_terminal(&ToggleTerminal, window, cx));
+        });
+        let shell = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, cx| {
+                w.terminal.as_ref().unwrap().read(cx).shell.clone()
+            })
+        };
+        let before = shell(cx);
+        std::fs::write(
+            dir.path().join("settings.toml"),
+            "[terminal]\nshell = \"/bin/other\"\n",
+        )
+        .unwrap();
+        wait_until(cx, "the question", |cx| question(&workspace, cx).is_some());
+        click("approval-allow", cx);
+        assert_eq!(shell(cx).as_deref(), Some("/bin/other"));
+        assert_ne!(before.as_deref(), Some("/bin/other"));
+    }
+
+    #[gpui_kit::test]
+    fn reloads_push_a_load_notice_once(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = live(cx, Settings::default(), None);
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".wai")).unwrap();
+        std::fs::write(
+            project.path().join(".wai/settings.toml"),
+            "[agents.x]\ncommand = \"x\"\n",
+        )
+        .unwrap();
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.set_project(project.path().to_path_buf(), window, cx);
+                w.reload_settings(window, cx);
+            })
+        });
+        assert_eq!(cx.update(|window, cx| window.notifications(cx).len()), 1);
+    }
+
+    /// The launch's notices count as shown: the first reload does not push them again.
+    #[gpui_kit::test]
+    fn launch_notices_are_not_pushed_again(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.show_load_notices(vec!["x".into()], window, cx);
+                let settings = w.settings.clone();
+                w.apply_settings(settings, vec!["x".into()], window, cx);
+            })
+        });
+        assert_eq!(cx.update(|window, cx| window.notifications(cx).len()), 1);
+    }
+
+    pub(crate) fn click(id: &'static str, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.click(id, cx);
+        });
+        cx.run_until_parked();
+    }
+
+    /// The approval dialog's text while it is open.
+    pub(crate) fn question(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Option<String> {
+        let open = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.has_active_dialog(cx)
+        });
+        let titled = cx.debug_bounds("approval-title").is_some();
+        let text = workspace.read_with(cx, |w, _| w.asking.first().map(super::approval_text));
+        text.filter(|_| open && titled)
+    }
+
+    /// `fake` run with `flag`, and a user settings.toml choosing it.
+    fn fake_file(flag: &str) -> (String, String) {
+        let command = fake_settings(flag).agents["fake"].command.clone();
+        let file = format!("default_agent = \"fake\"\n[agents.fake]\ncommand = '''{command}'''\n");
+        (command, file)
+    }
+
+    /// Writes the user's settings.toml in `dir` and reloads, as the watcher does.
+    fn edit_user_file(
+        workspace: &Entity<Workspace>,
+        dir: &Path,
+        file: &str,
+        cx: &mut VisualTestContext,
+    ) {
+        std::fs::write(dir.join("settings.toml"), file).unwrap();
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.user_dir = dir.into();
+                w.reload_settings(window, cx)
+            })
+        });
+        cx.run_until_parked();
+    }
+
+    /// A new `agent` session that sends "hi": the agent's reply.
+    fn reply(workspace: &Entity<Workspace>, agent: &str, cx: &mut VisualTestContext) -> String {
+        let n = workspace.read_with(cx, |w, _| w.sessions.len());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                let prompt = Some("hi".into());
+                w.start_session(agent.into(), prompt, true, None, window, cx)
+            })
+        });
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.sessions.len() > n)
+        });
+        let session = workspace.read_with(cx, |w, _| w.sessions[n].clone());
+        let text = |cx: &mut VisualTestContext| {
+            session.read_with(cx, |s, _| {
+                let idle = s.model.state == TurnState::Idle;
+                let agent = s.model.items.iter().rev().find_map(|item| match item {
+                    ChatItem::Agent { text } => Some(text.clone()),
+                    _ => None,
+                });
+                agent.filter(|_| idle)
+            })
+        };
+        wait_until(cx, "the reply", |cx| text(cx).is_some());
+        text(cx).unwrap()
+    }
+
+    #[test]
+    fn question_shows_line_breaks_escaped() {
+        let hidden = wai_settings::Approval::Agent {
+            id: "a\nb".into(),
+            old: None,
+            new: "ok\n\n\nevil".into(),
+        };
+        assert_eq!(
+            super::approval_text(&hidden),
+            "a\\nb (new): ok\\n\\n\\nevil"
+        );
+    }
+
+    #[test]
+    fn question_shows_format_characters_escaped() {
+        let hidden = wai_settings::Approval::Shell {
+            old: None,
+            new: "/bin/sh\u{202e}\u{200b}x".into(),
+        };
+        assert_eq!(
+            super::approval_text(&hidden),
+            "Terminal shell: system default → /bin/sh\\u{202e}\\u{200b}x"
+        );
+    }
+
+    fn status(
+        workspace: &Entity<Workspace>,
+        agent: &str,
+        cx: &mut VisualTestContext,
+    ) -> Option<AgentStatus> {
+        workspace.read_with(cx, |w, cx| w.registry.read(cx).status(agent).cloned())
+    }
+
+    /// A launch whose default agent's command waits for an answer runs nothing before it, not
+    /// even the last approved command; Allow runs the new one.
+    #[gpui_kit::test]
+    fn launch_waits_for_the_default_agents_answer(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let none = AppState {
+            approved: Some(Default::default()),
+            ..AppState::default()
+        };
+        none.save(&state).unwrap();
+        let command = fake_settings("--reply other").agents["fake"]
+            .command
+            .clone();
+        let mut settings = Settings::default();
+        let config = AgentConfig {
+            command: command.clone(),
+        };
+        settings.agents.insert("antigravity".into(), config);
+        settings.default_agent = Some("antigravity".into());
+        let (workspace, cx) = open_at(cx, settings, Some(state));
+        launch(&workspace, cx);
+        assert_eq!(
+            question(&workspace, cx),
+            Some(format!("Antigravity: agy acp → {command}"))
+        );
+        assert_eq!(status(&workspace, "antigravity", cx), None);
+        click("approval-allow", cx);
+        assert!(status(&workspace, "antigravity", cx).is_some());
+        // The test's shell.
+        click("approval-allow", cx);
+        assert_eq!(reply(&workspace, "antigravity", cx), "other");
+    }
+
+    /// The same on a switch of the default; Don't allow runs the last approved command.
+    #[gpui_kit::test]
+    fn switch_waits_for_the_default_agents_answer(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let settings = Settings {
+            default_agent: None,
+            ..fake_settings("")
+        };
+        let (workspace, cx) = open(cx, settings);
+        let dir = tempfile::tempdir().unwrap();
+        let (_, file) = fake_file("--reply other");
+        edit_user_file(&workspace, dir.path(), &file, cx);
+        assert!(question(&workspace, cx).is_some());
+        assert_eq!(status(&workspace, "fake", cx), None);
+        click("approval-deny", cx);
+        assert!(status(&workspace, "fake", cx).is_some());
+        assert_eq!(reply(&workspace, "fake", cx), "Hello from fake agent");
+    }
+
+    /// A declined value is not asked about again this run, unless its agent becomes the default;
+    /// the next launch asks again.
+    #[gpui_kit::test]
+    fn declined_value_waits_for_the_next_launch(
+        cx: &mut TestAppContext,
+        relaunch: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        // From before approvals: the first launch approves today's command.
+        AppState::default().save(&state).unwrap();
+        let settings = Settings {
+            default_agent: None,
+            ..fake_settings("")
+        };
+        let (workspace, cx) = open_at(cx, settings, Some(state.clone()));
+        launch(&workspace, cx);
+        let (new, _) = fake_file("--reply other");
+        let file = format!("[agents.fake]\ncommand = '''{new}'''\n");
+        edit_user_file(&workspace, dir.path(), &file, cx);
+        assert!(question(&workspace, cx).is_some());
+        click("approval-deny", cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.change_setting(Change::Theme(ThemeChoice::Light), window, cx);
+                w.reload_settings(window, cx);
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(question(&workspace, cx), None);
+        let chosen = format!("default_agent = \"fake\"\n{file}");
+        edit_user_file(&workspace, dir.path(), &chosen, cx);
+        assert!(question(&workspace, cx).is_some());
+        click("approval-deny", cx);
+
+        relaunch.executor().allow_parking();
+        let (settings, _) = Settings::load(dir.path(), None).unwrap();
+        let (workspace, cx) = open_at(relaunch, settings, Some(state));
+        launch(&workspace, cx);
+        assert_eq!(question(&workspace, cx), Some(format!("fake (new): {new}")));
+    }
+
+    /// A command or shell edited on the screen is asked about before anything is written: Allow
+    /// writes it, once and with no second question; Don't allow writes nothing.
+    fn screen_edit_asks_first(change: Change, allow: bool, cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = live(cx, fake_settings(""), None);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.change_setting(change, window, cx)));
+        assert!(question(&workspace, cx).is_some());
+        let file = dir.path().join("settings.toml");
+        assert!(!file.exists(), "nothing is written before the answer");
+        click(
+            if allow {
+                "approval-allow"
+            } else {
+                "approval-deny"
+            },
+            cx,
+        );
+        if allow {
+            wait_until(cx, "the reload", |cx| {
+                workspace.read_with(cx, |w, _| w.applied == 1)
+            });
+        }
+        // Past the debounce: a second batch would show up as a second apply.
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(20));
+            cx.executor().advance_clock(Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        assert_eq!(question(&workspace, cx), None);
+        assert_eq!(file.exists(), allow);
+        workspace.read_with(cx, |w, _| assert_eq!(w.applied, usize::from(allow)));
+    }
+
+    #[gpui_kit::test]
+    fn allowed_screen_edit_is_written_once(cx: &mut TestAppContext) {
+        let (command, _) = fake_file("--reply other");
+        let agent = "fake".into();
+        screen_edit_asks_first(Change::AgentCommand { agent, command }, true, cx);
+    }
+
+    #[gpui_kit::test]
+    fn declined_screen_edit_writes_nothing(cx: &mut TestAppContext) {
+        screen_edit_asks_first(Change::Shell(Some("/bin/other".into())), false, cx);
+    }
+
+    #[gpui_kit::test]
+    fn hand_edited_command_asks_before_running(cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = live(cx, fake_settings(""), None);
+        let old = fake_settings("").agents["fake"].command.clone();
+        let (new, file) = fake_file("--reply other");
+        std::fs::write(dir.path().join("settings.toml"), file).unwrap();
+        wait_until(cx, "the question", |cx| question(&workspace, cx).is_some());
+        assert_eq!(
+            question(&workspace, cx).unwrap(),
+            format!("fake: {old} → {new}")
+        );
+        assert_eq!(reply(&workspace, "fake", cx), "Hello from fake agent");
+    }
+
+    #[gpui_kit::test]
+    fn declined_command_never_runs(cx: &mut TestAppContext, relaunch: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        // From before approvals: the first launch approves today's command.
+        AppState::default().save(&state).unwrap();
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(state.clone()));
+        launch(&workspace, cx);
+        let (new, file) = fake_file("--reply other");
+        edit_user_file(&workspace, dir.path(), &file, cx);
+        assert!(question(&workspace, cx).is_some());
+        click("approval-deny", cx);
+        assert_eq!(question(&workspace, cx), None);
+        let file_text = std::fs::read_to_string(dir.path().join("settings.toml")).unwrap();
+        assert_eq!(file_text, file, "nothing is written");
+        let old = fake_settings("").agents["fake"].command.clone();
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(w.registry.read(cx).command("fake"), Some(old.as_str()))
+        });
+        assert!(!AppState::load(&state).approved.unwrap().contains(&new));
+
+        relaunch.executor().allow_parking();
+        let (settings, _) = Settings::load(dir.path(), None).unwrap();
+        let (workspace, cx) = open_at(relaunch, settings, Some(state.clone()));
+        launch(&workspace, cx);
+        assert_eq!(question(&workspace, cx), Some(format!("fake (new): {new}")));
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(w.registry.read(cx).command("fake"), None);
+            assert_eq!(w.registry.read(cx).status("fake"), None, "never started");
+        });
+        assert!(!AppState::load(&state).approved.unwrap().contains(&new));
+    }
+
+    #[gpui_kit::test]
+    fn allowed_command_is_remembered(cx: &mut TestAppContext, relaunch: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        // From before approvals: the first launch approves today's command.
+        AppState::default().save(&state).unwrap();
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(state.clone()));
+        launch(&workspace, cx);
+        let (new, file) = fake_file("--reply other");
+        edit_user_file(&workspace, dir.path(), &file, cx);
+        click("approval-allow", cx);
+        assert_eq!(question(&workspace, cx), None);
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(w.registry.read(cx).command("fake"), Some(new.as_str()))
+        });
+        assert!(AppState::load(&state).approved.unwrap().contains(&new));
+
+        relaunch.executor().allow_parking();
+        let (settings, _) = Settings::load(dir.path(), None).unwrap();
+        let (workspace, cx) = open_at(relaunch, settings, Some(state));
+        launch(&workspace, cx);
+        assert_eq!(question(&workspace, cx), None);
+        assert_eq!(reply(&workspace, "fake", cx), "other");
+    }
+
+    /// A launch whose `state.json` holds `text` (`None`: there is none) approves only the
+    /// built-ins: it asks for the user's own command.
+    fn asks_without_a_state(text: Option<&str>, cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        if let Some(text) = text {
+            std::fs::write(&state, text).unwrap();
+        }
+        let settings = fake_settings("--reply mine");
+        let command = settings.agents["fake"].command.clone();
+        let (workspace, cx) = open_at(cx, settings, Some(state.clone()));
+        launch(&workspace, cx);
+        assert_eq!(
+            question(&workspace, cx),
+            Some(format!("fake (new): {command}"))
+        );
+        workspace.read_with(cx, |w, cx| {
+            assert!(!w.approved.contains(&command));
+            assert_eq!(w.registry.read(cx).command("fake"), None);
+        });
+        assert!(!AppState::load(&state).approved.unwrap().contains(&command));
+    }
+
+    #[gpui_kit::test]
+    fn missing_state_approves_nothing(cx: &mut TestAppContext) {
+        asks_without_a_state(None, cx);
+    }
+
+    #[gpui_kit::test]
+    fn corrupt_state_approves_nothing(cx: &mut TestAppContext) {
+        asks_without_a_state(Some("{"), cx);
+    }
+
+    #[gpui_kit::test]
+    fn existing_setup_is_seeded(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        AppState::default().save(&state).unwrap();
+        let settings = fake_settings("--reply mine");
+        let command = settings.agents["fake"].command.clone();
+        let (workspace, cx) = open_at(cx, settings, Some(state.clone()));
+        launch(&workspace, cx);
+        assert_eq!(question(&workspace, cx), None);
+        workspace.read_with(cx, |w, _| assert!(w.approved.contains(&command)));
+        assert!(AppState::load(&state).approved.unwrap().contains(&command));
+    }
+
+    #[gpui_kit::test]
+    fn unapproved_shell_is_not_used(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the shell is a real process
+        let (workspace, cx) = open(cx, Settings::default());
+        let before = workspace.read_with(cx, |w, _| w.settings.terminal.shell.clone().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let file = "[terminal]\nshell = \"/bin/other\"\n";
+        edit_user_file(&workspace, dir.path(), file, cx);
+        assert_eq!(
+            question(&workspace, cx),
+            Some(format!("Terminal shell: {before} → /bin/other"))
+        );
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.toggle_terminal(&ToggleTerminal, window, cx));
+        });
+        let shell = workspace.read_with(cx, |w, cx| {
+            w.terminal.as_ref().unwrap().read(cx).shell.clone()
+        });
+        assert_eq!(shell, Some(before));
     }
 }

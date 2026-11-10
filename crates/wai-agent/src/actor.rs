@@ -47,6 +47,12 @@ enum Command {
         mode: String,
         reply: Reply<()>,
     },
+    SetConfig {
+        session: SessionId,
+        option: String,
+        value: String,
+        reply: Reply<Vec<ConfigOption>>,
+    },
     Prompt {
         session: SessionId,
         blocks: Vec<PromptBlock>,
@@ -157,6 +163,21 @@ impl AgentHandle {
         self.request(|reply| Command::SetMode {
             session,
             mode,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn set_config(
+        &self,
+        session: SessionId,
+        option: String,
+        value: String,
+    ) -> Result<Vec<ConfigOption>, AgentError> {
+        self.request(|reply| Command::SetConfig {
+            session,
+            option,
+            value,
             reply,
         })
         .await
@@ -422,6 +443,15 @@ async fn run(
     broker.emit(AgentEvent::Exited { error });
 }
 
+fn find(config: &AcpAgentConfig) -> Option<PathBuf> {
+    wai_settings::find_program(config.command())
+}
+
+/// The program `connect` would spawn for `command`; `None` when it does not parse or is not on `PATH`.
+pub fn program(command: &str) -> Option<PathBuf> {
+    find(&AcpAgent::from_str(command).ok()?.into_config())
+}
+
 /// Runs the connection; `Ok(true)` means wai asked it to stop.
 async fn connect(
     spec: &AgentSpec,
@@ -431,9 +461,8 @@ async fn connect(
     // ponytail: the SDK spawns and kills the agent; on Windows it kills only that process (no
     // job object), so what an `npx` agent started outlives it until its stdin closes.
     let config = AcpAgent::from_str(&spec.command)?.into_config();
-    let program = config.command();
-    let Some(found) = wai_settings::find_program(program) else {
-        let missing = format!("{} is not on PATH", program.display());
+    let Some(found) = find(&config) else {
+        let missing = format!("{} is not on PATH", config.command().display());
         return Err(Error::into_internal_error(std::io::Error::other(missing)));
     };
     let agent = AcpAgent::new(
@@ -534,7 +563,7 @@ async fn actor_loop(
                 broker,
                 acp::NewSessionRequest::new(cwd).mcp_servers(convert::mcp_servers(mcp)),
                 reply,
-                |r| convert::session_started(r.session_id.to_string(), r.modes),
+                |r| convert::session_started(r.session_id.to_string(), r.modes, r.config_options),
             )?,
             Command::LoadSession {
                 id,
@@ -547,7 +576,7 @@ async fn actor_loop(
                 acp::LoadSessionRequest::new(id.clone(), cwd)
                     .mcp_servers(convert::mcp_servers(mcp)),
                 reply,
-                |r| convert::session_started(id, r.modes),
+                |r| convert::session_started(id, r.modes, r.config_options),
             )?,
             Command::ForkSession {
                 id,
@@ -559,7 +588,7 @@ async fn actor_loop(
                 broker,
                 acp::ForkSessionRequest::new(id, cwd).mcp_servers(convert::mcp_servers(mcp)),
                 reply,
-                |r| convert::session_started(r.session_id.to_string(), r.modes),
+                |r| convert::session_started(r.session_id.to_string(), r.modes, r.config_options),
             )?,
             Command::ListSessions { cursor, reply } => request(
                 &cx,
@@ -581,6 +610,22 @@ async fn actor_loop(
                 acp::SetSessionModeRequest::new(session, mode),
                 reply,
                 |_| (),
+            )?,
+            Command::SetConfig {
+                session,
+                option,
+                value,
+                reply,
+            } => request(
+                &cx,
+                broker,
+                acp::SetSessionConfigOptionRequest::new(
+                    session,
+                    option,
+                    acp::SessionConfigValueId::new(value),
+                ),
+                reply,
+                |r| convert::config_options(r.config_options),
             )?,
             Command::Prompt { session, blocks } => {
                 let blocks = blocks.into_iter().map(convert::content_block).collect();

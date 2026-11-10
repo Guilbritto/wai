@@ -39,6 +39,12 @@
 //! - `--echo-mcp`: each turn answers with the MCP servers its session got at `session/new`,
 //!   `session/load` or `session/fork`: `mcp:<name>=<command>,…` (`mcp:` when none).
 //!
+//! - `--models`: `session/new`, `load` and `fork` return a `model` option (`fake-small`,
+//!   `fake-large`) and an `effort` option (`low`, `high`); `session/set_config_option` stores the
+//!   value per session, and each turn answers `model:<current model id>`.
+//! - `--config-mode`: with `--models`, a `mode` option (`ask`, `code`) joins them.
+//! - `--reject-config`: `session/set_config_option` fails.
+//!
 //! `session/load` replays `previous prompt` and `previous answer`; for an id starting with
 //! `missing` it fails with the ACP session-not-found error instead.
 
@@ -81,6 +87,9 @@ struct Opts {
     pid_file: Option<PathBuf>,
     cwd_file: Option<PathBuf>,
     echo_mcp: bool,
+    models: bool,
+    config_mode: bool,
+    reject_config: bool,
 }
 
 fn parse_args() -> Opts {
@@ -105,6 +114,9 @@ fn parse_args() -> Opts {
         pid_file: None,
         cwd_file: None,
         echo_mcp: false,
+        models: false,
+        config_mode: false,
+        reject_config: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -147,6 +159,9 @@ fn parse_args() -> Opts {
             "--pid-file" => opts.pid_file = Some(value().into()),
             "--cwd-file" => opts.cwd_file = Some(value().into()),
             "--echo-mcp" => opts.echo_mcp = true,
+            "--models" => opts.models = true,
+            "--config-mode" => opts.config_mode = true,
+            "--reject-config" => opts.reject_config = true,
             other => panic!("unknown flag {other}"),
         }
     }
@@ -161,6 +176,8 @@ struct Fake {
     forms: AtomicBool,
     /// Per session: the MCP servers it got, as `--echo-mcp` reports them.
     mcp: Mutex<HashMap<String, String>>,
+    /// `--models`: per session, the chosen value of each config option.
+    config: Mutex<HashMap<String, HashMap<String, String>>>,
 }
 
 impl Fake {
@@ -175,6 +192,57 @@ impl Fake {
             .collect();
         let mut mcp = self.mcp.lock().expect("mcp poisoned");
         mcp.insert(session.to_string(), names.join(","));
+    }
+
+    /// `--models`: the config options of `session`, holding what it chose.
+    fn config_options(&self, session: &acp::SessionId) -> Option<Vec<acp::SessionConfigOption>> {
+        use acp::SessionConfigOptionCategory as C;
+        if !self.opts.models {
+            return None;
+        }
+        let chosen = self.config.lock().expect("config poisoned");
+        let current = |id: &str, default: &str| {
+            let value = chosen.get(&*session.0).and_then(|c| c.get(id));
+            value.map_or(default, String::as_str).to_string()
+        };
+        let select = |id, name, category, default, values: [(&'static str, &'static str); 2]| {
+            let values: Vec<_> = values
+                .into_iter()
+                .map(|(v, n)| acp::SessionConfigSelectOption::new(v, n))
+                .collect();
+            acp::SessionConfigOption::select(id, name, current(id, default), values)
+                .category(category)
+        };
+        let mode = self.opts.config_mode.then(|| {
+            select(
+                "mode",
+                "Mode",
+                C::Mode,
+                "ask",
+                [("ask", "Ask"), ("code", "Code")],
+            )
+        });
+        Some(
+            vec![
+                select(
+                    "model",
+                    "Model",
+                    C::Model,
+                    "fake-small",
+                    [("fake-small", "Fake Small"), ("fake-large", "Fake Large")],
+                ),
+                select(
+                    "effort",
+                    "Effort",
+                    C::ThoughtLevel,
+                    "low",
+                    [("low", "Low"), ("high", "High")],
+                ),
+            ]
+            .into_iter()
+            .chain(mode)
+            .collect(),
+        )
     }
 
     fn is_cancelled(&self, session: &acp::SessionId) -> bool {
@@ -225,7 +293,14 @@ impl Fake {
                 return Ok(reason);
             }
         }
-        let reply = if self.opts.echo_mcp {
+        let reply = if self.opts.models {
+            let options = self.config_options(session).unwrap_or_default();
+            let model = options.into_iter().next().and_then(|o| match o.kind {
+                acp::SessionConfigKind::Select(s) => Some(s.current_value.to_string()),
+                _ => None,
+            });
+            format!("model:{}", model.unwrap_or_default())
+        } else if self.opts.echo_mcp {
             let mcp = self.mcp.lock().expect("mcp poisoned");
             format!("mcp:{}", mcp.get(&*session.0).map_or("", String::as_str))
         } else if self.opts.ask_permission {
@@ -479,6 +554,7 @@ fn main() -> Result<(), Error> {
         cancelled: Mutex::default(),
         forms: AtomicBool::new(false),
         mcp: Mutex::default(),
+        config: Mutex::default(),
     });
     smol::block_on(serve(fake))
 }
@@ -525,7 +601,12 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                     }
                     let id = format!("fake-{}", fake.next_session.fetch_add(1, Ordering::Relaxed));
                     fake.record_mcp(&id.clone().into(), &request.mcp_servers);
-                    responder.respond(acp::NewSessionResponse::new(id).modes(modes()))
+                    let options = fake.config_options(&id.clone().into());
+                    responder.respond(
+                        acp::NewSessionResponse::new(id)
+                            .modes(modes())
+                            .config_options(options),
+                    )
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -553,7 +634,11 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                         session,
                         acp::SessionUpdate::AgentMessageChunk(chunk("previous answer")),
                     )?;
-                    responder.respond(acp::LoadSessionResponse::new().modes(modes()))
+                    responder.respond(
+                        acp::LoadSessionResponse::new()
+                            .modes(modes())
+                            .config_options(fake.config_options(session)),
+                    )
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -572,7 +657,12 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                     }
                     let id = format!("fork-{}", fake.next_session.fetch_add(1, Ordering::Relaxed));
                     fake.record_mcp(&id.clone().into(), &request.mcp_servers);
-                    responder.respond(acp::ForkSessionResponse::new(id).modes(modes()))
+                    let options = fake.config_options(&id.clone().into());
+                    responder.respond(
+                        acp::ForkSessionResponse::new(id)
+                            .modes(modes())
+                            .config_options(options),
+                    )
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -598,6 +688,26 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                         .collect();
                     let next = (end < total).then(|| end.to_string());
                     responder.respond(acp::ListSessionsResponse::new(sessions).next_cursor(next))
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let fake = fake.clone();
+                async move |request: acp::SetSessionConfigOptionRequest, responder, _cx| {
+                    if fake.opts.reject_config {
+                        return responder.respond_with_error(Error::internal_error());
+                    }
+                    if let acp::SessionConfigOptionValue::ValueId { value } = request.value {
+                        let mut config = fake.config.lock().expect("config poisoned");
+                        let session = config.entry(request.session_id.to_string()).or_default();
+                        session.insert(request.config_id.to_string(), value.to_string());
+                    }
+                    let options = fake.config_options(&request.session_id);
+                    responder.respond(acp::SetSessionConfigOptionResponse::new(
+                        options.unwrap_or_default(),
+                    ))
                 }
             },
             agent_client_protocol::on_receive_request!(),

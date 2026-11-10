@@ -9,8 +9,8 @@ use gpui_kit::component::select::{SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::text::TextViewState;
 use gpui_kit::*;
 use wai_agent::{
-    AgentError, AgentHandle, FileDiff, Location, ModeInfo, PermissionChoice, PermissionRequest,
-    QuestionRequest, SessionEvent, SessionStarted, StopReason,
+    AgentError, AgentHandle, ConfigCategory, ConfigValue, FileDiff, Location, ModeInfo,
+    PermissionChoice, PermissionRequest, QuestionRequest, SessionEvent, SessionStarted, StopReason,
 };
 
 use super::edits::open_line;
@@ -70,6 +70,21 @@ impl SelectItem for Mode {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct Choice(ConfigValue);
+
+impl SelectItem for Choice {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.0.name.clone().into()
+    }
+
+    fn value(&self) -> &String {
+        &self.0.id
+    }
+}
+
 /// One conversation with an agent: the message list, the header and the prompt box.
 pub struct ChatSession {
     pub agent: String,
@@ -89,6 +104,9 @@ pub struct ChatSession {
     pub(super) questions: HashMap<usize, QuestionForm>,
     pub(super) scroller: Entity<MessageScrollerState>,
     pub(super) modes: Option<Entity<SelectState<Vec<Mode>>>>,
+    /// The header's pickers of the model, effort and mode options, in that order.
+    pub(super) pickers: Vec<(String, Entity<SelectState<Vec<Choice>>>)>,
+    pickers_stale: bool,
     /// Pending while streamed text waits for `STREAM_FLUSH`.
     flush: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -138,11 +156,121 @@ impl ChatSession {
             questions: HashMap::new(),
             scroller: cx.new(|cx| MessageScrollerState::new(0, cx)),
             modes: None,
+            pickers: Vec::new(),
+            pickers_stale: false,
             flush: None,
             _subscriptions: subscriptions,
         };
         this.set_modes(started.modes, started.current_mode, window, cx);
+        this.model.config = started.config;
+        this.sync_pickers(window, cx);
         this
+    }
+
+    /// One picker per model, effort and mode option; reused while the option stays.
+    pub(super) fn sync_pickers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let stale = std::mem::take(&mut self.pickers_stale);
+        let mut options: Vec<_> = (self.model.config.iter())
+            .filter(|o| o.category != ConfigCategory::Other)
+            .cloned()
+            .collect();
+        options.sort_by_key(|o| match o.category {
+            ConfigCategory::Model => 0,
+            ConfigCategory::ThoughtLevel => 1,
+            _ => 2,
+        });
+        let mut old = std::mem::take(&mut self.pickers);
+        for option in options {
+            let items: Vec<Choice> = option.values.iter().cloned().map(Choice).collect();
+            let select = match old.iter().position(|(id, _)| *id == option.id) {
+                Some(ix) => {
+                    let select = old.remove(ix).1;
+                    if stale {
+                        select.update(cx, |s, cx| s.set_items(items, window, cx));
+                    }
+                    select
+                }
+                None => {
+                    let selected = items
+                        .iter()
+                        .position(|c| c.0.id == option.current)
+                        .map(IndexPath::new);
+                    let select = cx.new(|cx| SelectState::new(items, selected, window, cx));
+                    let id = option.id.clone();
+                    self._subscriptions.push(cx.subscribe(
+                        &select,
+                        move |this, _, event: &SelectEvent<Vec<Choice>>, cx| {
+                            if let SelectEvent::Confirm(Some(value)) = event {
+                                this.set_option(&id, value.clone(), cx);
+                            }
+                        },
+                    ));
+                    select
+                }
+            };
+            if select.read(cx).selected_value() != Some(&option.current) {
+                select.update(cx, |s, cx| {
+                    s.set_selected_value(&option.current, window, cx)
+                });
+            }
+            self.pickers.push((option.id, select));
+        }
+    }
+
+    /// Sets a config option of this session only; an error puts the old value back.
+    pub(crate) fn set_option(&mut self, option: &str, value: String, cx: &mut Context<Self>) {
+        let Some(found) = self.model.config.iter_mut().find(|o| o.id == option) else {
+            return;
+        };
+        if found.current == value {
+            return;
+        }
+        let previous = std::mem::replace(&mut found.current, value.clone());
+        let name = found.name.clone();
+        let (handle, id, option) = (self.handle.clone(), self.id.clone(), option.to_string());
+        cx.spawn(async move |this, cx| {
+            let set = handle.set_config(id, option.clone(), value).await;
+            this.update(cx, |this, cx| {
+                match set {
+                    Ok(options) => this.model.config = options,
+                    Err(e) => {
+                        if let Some(o) = this.model.config.iter_mut().find(|o| o.id == option) {
+                            o.current = previous;
+                        }
+                        this.model
+                            .notice(format!("Could not switch {name}: {e}"), NoticeKind::Error);
+                        this.sync_rows(None, cx);
+                    }
+                }
+                this.pickers_stale = true;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The default model of a brand-new session: the agent's own when it no longer offers it.
+    pub fn apply_default_model(&mut self, model: &str, cx: &mut Context<Self>) {
+        let Some(option) = (self.model.config.iter())
+            .find(|o| o.category == ConfigCategory::Model)
+            .cloned()
+        else {
+            return;
+        };
+        if option.values.iter().any(|v| v.id == model) {
+            return self.set_option(&option.id, model.to_string(), cx);
+        }
+        let current = (option.values.iter())
+            .find(|v| v.id == option.current)
+            .map_or(&option.current, |v| &v.name);
+        let label = wai_settings::agent_label(&self.agent);
+        self.model.notice(
+            format!("{label} no longer offers the model {model}; using {current}."),
+            NoticeKind::Info,
+        );
+        self.sync_rows(None, cx);
     }
 
     /// The agent's modes and the header's mode picker, when it has modes.
@@ -193,6 +321,7 @@ impl ChatSession {
 
     pub fn handle_event(&mut self, ev: &SessionEvent, cx: &mut Context<Self>) {
         let rows = self.model.items.len();
+        self.pickers_stale |= matches!(ev, SessionEvent::ConfigChanged(_));
         let Some(ix) = self.update_model(cx, |m| m.apply(ev)) else {
             return cx.notify(); // header: title, usage, mode
         };
@@ -431,6 +560,10 @@ impl ChatSession {
                         // A history row learns its modes here.
                         if this.modes.is_none() {
                             this.set_modes(started.modes, started.current_mode, window, cx);
+                        }
+                        if this.model.config.is_empty() {
+                            this.model.config = started.config;
+                            this.pickers_stale = true;
                         }
                         this.update_model(cx, |m| m.state = TurnState::Idle);
                     }
@@ -1267,5 +1400,114 @@ mod tests {
             })
         });
         assert_eq!(notify::sent(), []);
+    }
+
+    fn models_settings(default: Option<&str>) -> wai_settings::Settings {
+        let mut settings = fake_settings("--models");
+        if let Some(model) = default {
+            settings.models.insert("fake".into(), model.into());
+        }
+        settings
+    }
+
+    fn reply(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> String {
+        send("which?", cx);
+        wait_until(cx, "the reply", |cx| {
+            state(session, cx) == TurnState::Idle
+                && last_agent_text(session, cx).is_some_and(|t| t.starts_with("model:"))
+        });
+        last_agent_text(session, cx).unwrap()
+    }
+
+    #[gpui_kit::test]
+    fn header_shows_model_and_effort_pickers(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, models_settings(None));
+        let session = start_session(&workspace, cx);
+        let pickers = session.read_with(cx, |s, _| {
+            s.pickers
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(pickers, ["model", "effort"]);
+        assert!(session.read_with(cx, |s, _| s.legacy_mode_picker().is_some()));
+    }
+
+    #[gpui_kit::test]
+    fn switching_model_applies_to_this_session(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, models_settings(None));
+        let session = start_session(&workspace, cx);
+        session.update(cx, |s, cx| s.set_option("model", "fake-large".into(), cx));
+        assert_eq!(reply(&session, cx), "model:fake-large");
+
+        workspace.update_in(cx, |w, window, cx| {
+            w.start_session("fake".into(), None, false, None, window, cx)
+        });
+        wait_until(cx, "a second session", |cx| {
+            workspace.read_with(cx, |w, _| w.sessions.len() == 2)
+        });
+        let second = workspace.read_with(cx, |w, _| w.sessions.last().cloned().unwrap());
+        assert_eq!(reply(&second, cx), "model:fake-small");
+    }
+
+    #[gpui_kit::test]
+    fn default_model_applies_to_new_sessions_only(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, models_settings(Some("fake-large")));
+        let session = start_session(&workspace, cx);
+        assert_eq!(reply(&session, cx), "model:fake-large");
+    }
+
+    #[gpui_kit::test]
+    fn missing_default_model_shows_a_notice(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, models_settings(Some("gone")));
+        let session = start_session(&workspace, cx);
+        let notice = ChatItem::Notice {
+            text: "fake no longer offers the model gone; using Fake Small.".into(),
+            kind: NoticeKind::Info,
+        };
+        assert!(session.read_with(cx, |s, _| s.model.items.contains(&notice)));
+    }
+
+    #[gpui_kit::test]
+    fn mode_option_replaces_the_legacy_picker(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--models --config-mode"));
+        let session = start_session(&workspace, cx);
+        let pickers = session.read_with(cx, |s, _| {
+            s.pickers
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(pickers, ["model", "effort", "mode"]);
+        assert!(session.read_with(cx, |s, _| s.modes.is_some()
+            && s.legacy_mode_picker().is_none()));
+    }
+
+    #[gpui_kit::test]
+    fn failed_switch_reverts_and_says_so(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--models --reject-config"));
+        let session = start_session(&workspace, cx);
+        session.update(cx, |s, cx| s.set_option("model", "fake-large".into(), cx));
+        wait_until(cx, "the notice", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.items.iter().any(|i| {
+                    matches!(i, ChatItem::Notice { text, kind: NoticeKind::Error }
+                        if text.starts_with("Could not switch Model: "))
+                })
+            })
+        });
+        cx.run_until_parked();
+        let current = session.read_with(cx, |s, _| s.model.config[0].current.clone());
+        assert_eq!(current, "fake-small");
+        let picked = session.read_with(cx, |s, cx| {
+            s.pickers[0].1.read(cx).selected_value().cloned()
+        });
+        assert_eq!(picked.as_deref(), Some("fake-small"));
     }
 }

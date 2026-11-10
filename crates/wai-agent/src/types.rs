@@ -35,6 +35,30 @@ pub struct SessionStarted {
     pub id: SessionId,
     pub modes: Vec<ModeInfo>,
     pub current_mode: Option<String>,
+    pub config: Vec<ConfigOption>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigValue {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigCategory {
+    Mode,
+    Model,
+    ThoughtLevel,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigOption {
+    pub id: String,
+    pub name: String,
+    pub category: ConfigCategory,
+    pub current: String,
+    pub values: Vec<ConfigValue>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,6 +143,7 @@ pub enum SessionEvent {
     },
     Title(String),
     ModeChanged(String),
+    ConfigChanged(Vec<ConfigOption>),
     Commands(Vec<CommandInfo>),
 }
 

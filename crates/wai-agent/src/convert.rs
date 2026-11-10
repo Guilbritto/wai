@@ -62,6 +62,7 @@ pub(crate) fn session_event(update: acp::SessionUpdate) -> Option<SessionEvent> 
             _ => return None,
         },
         U::CurrentModeUpdate(m) => SessionEvent::ModeChanged(m.current_mode_id.to_string()),
+        U::ConfigOptionUpdate(u) => SessionEvent::ConfigChanged(config_options(u.config_options)),
         U::AvailableCommandsUpdate(c) => SessionEvent::Commands(
             c.available_commands
                 .into_iter()
@@ -296,6 +297,7 @@ pub(crate) fn mcp_servers(servers: Vec<McpServer>) -> Vec<acp::McpServer> {
 pub(crate) fn session_started(
     id: SessionId,
     modes: Option<acp::SessionModeState>,
+    config: Option<Vec<acp::SessionConfigOption>>,
 ) -> SessionStarted {
     let (modes, current_mode) = match modes {
         Some(m) => (
@@ -314,7 +316,44 @@ pub(crate) fn session_started(
         id,
         modes,
         current_mode,
+        config: config_options(config.unwrap_or_default()),
     }
+}
+
+/// Select options only, grouped values flattened in order; booleans are dropped.
+pub(crate) fn config_options(options: Vec<acp::SessionConfigOption>) -> Vec<ConfigOption> {
+    use acp::SessionConfigOptionCategory as C;
+    let option = |o: acp::SessionConfigOption| {
+        let acp::SessionConfigKind::Select(select) = o.kind else {
+            return None;
+        };
+        let values = match select.options {
+            acp::SessionConfigSelectOptions::Ungrouped(values) => values,
+            acp::SessionConfigSelectOptions::Grouped(groups) => {
+                groups.into_iter().flat_map(|g| g.options).collect()
+            }
+            _ => return None,
+        };
+        Some(ConfigOption {
+            id: o.id.to_string(),
+            name: o.name,
+            category: match o.category {
+                Some(C::Mode) => ConfigCategory::Mode,
+                Some(C::Model) => ConfigCategory::Model,
+                Some(C::ThoughtLevel) => ConfigCategory::ThoughtLevel,
+                _ => ConfigCategory::Other,
+            },
+            current: select.current_value.to_string(),
+            values: values
+                .into_iter()
+                .map(|v| ConfigValue {
+                    id: v.value.to_string(),
+                    name: v.name,
+                })
+                .collect(),
+        })
+    };
+    options.into_iter().filter_map(option).collect()
 }
 
 pub(crate) fn session_summary(info: acp::SessionInfo) -> SessionSummary {

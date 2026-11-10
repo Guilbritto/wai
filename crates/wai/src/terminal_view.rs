@@ -17,7 +17,8 @@ const EXITED: &str = "[process exited] Click to restart.";
 // ponytail: the wheel scrolls wai's history only; in the alternate screen (less, vim) it does
 // nothing, where alacritty sends arrow keys. A drag that leaves the panel stops extending.
 pub struct TerminalView {
-    shell: Option<String>,
+    /// The next shell; a running one stays.
+    pub shell: Option<String>,
     /// Where the next shell starts: the project folder.
     pub cwd: PathBuf,
     /// `None` until the first `activate` and after the shell exits.

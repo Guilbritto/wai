@@ -5,7 +5,7 @@ use wai_agent::{
     AgentCaps, AgentEvent, AgentHandle, AgentSpec, McpServer, PermissionRequest, QuestionRequest,
     SessionEvent, StopReason,
 };
-use wai_settings::{AgentConfig, Settings};
+use wai_settings::AgentConfig;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentStatus {
@@ -72,13 +72,28 @@ pub struct AgentRegistry {
 impl EventEmitter<RegistryEvent> for AgentRegistry {}
 
 impl AgentRegistry {
-    pub fn new(settings: &Settings) -> Self {
+    /// `configs`: only approved commands (see `Workspace::enforce`).
+    pub fn new(configs: BTreeMap<String, AgentConfig>) -> Self {
         Self {
-            configs: settings.agents.clone(),
+            configs,
             extension: BTreeMap::new(),
             mcp: Vec::new(),
             agents: HashMap::new(),
         }
+    }
+
+    /// Running agents keep their process: the next spawn uses the new command.
+    pub fn set_configs(&mut self, configs: BTreeMap<String, AgentConfig>) {
+        self.configs = configs;
+    }
+
+    pub fn configs(&self) -> &BTreeMap<String, AgentConfig> {
+        &self.configs
+    }
+
+    pub fn command(&self, name: &str) -> Option<&str> {
+        let config = self.configs.get(name).or_else(|| self.extension.get(name));
+        config.map(|c| c.command.as_str())
     }
 
     pub fn knows(&self, name: &str) -> bool {

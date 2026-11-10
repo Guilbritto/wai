@@ -2,8 +2,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use wai_agent::{
-    CommandInfo, FileDiff, Location, ModeInfo, PermissionRequest, PlanEntry, QuestionRequest,
-    SessionEvent, StopReason, ToolCallPatch, ToolContent, ToolStatus,
+    CommandInfo, ConfigOption, FileDiff, Location, ModeInfo, PermissionRequest, PlanEntry,
+    QuestionRequest, SessionEvent, StopReason, ToolCallPatch, ToolContent, ToolStatus,
 };
 
 pub const TOOL_OUTPUT_MAX_LINES: usize = 2000;
@@ -163,6 +163,7 @@ pub struct ChatModel {
     pub done: bool,
     pub modes: Vec<ModeInfo>,
     pub current_mode: Option<String>,
+    pub config: Vec<ConfigOption>,
     pub commands: Vec<CommandInfo>,
 }
 
@@ -177,6 +178,7 @@ impl Default for ChatModel {
             done: false,
             modes: Vec::new(),
             current_mode: None,
+            config: Vec::new(),
             commands: Vec::new(),
         }
     }
@@ -274,6 +276,10 @@ impl ChatModel {
             }
             SessionEvent::ModeChanged(m) => {
                 self.current_mode = Some(m.clone());
+                None
+            }
+            SessionEvent::ConfigChanged(c) => {
+                self.config = c.clone();
                 None
             }
             SessionEvent::Commands(c) => {

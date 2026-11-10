@@ -8,8 +8,10 @@ use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandSt
 use gpui_kit::*;
 use wai_ext::panel::clamp;
 use wai_ext::{CommandSpec, ExtId};
+use wai_settings::agent_label;
 
 use crate::app::{NewSession, OpenFolder, OpenPalette, ToggleTerminal};
+use crate::settings_view::Section;
 use crate::sidebar::SidebarTab;
 use crate::workspace::Workspace;
 
@@ -23,6 +25,7 @@ pub(crate) enum Entry {
     OpenFolder,
     Tab(SidebarTab),
     Extensions,
+    Settings,
     Template(usize),
     Command(ExtId, CommandSpec),
     NewSessionWith(String),
@@ -42,6 +45,7 @@ impl Workspace {
             ("Files".into(), Entry::Tab(SidebarTab::Files)),
             ("Agents".into(), Entry::Tab(SidebarTab::Agents)),
             ("Extensions".into(), Entry::Extensions),
+            ("Settings".into(), Entry::Settings),
         ];
         let templates = (self.all_templates(cx).into_iter().enumerate())
             .map(|(ix, t)| (clamp(&t.name, TITLE_CHARS).into(), Entry::Template(ix)));
@@ -50,7 +54,11 @@ impl Workspace {
             (label, Entry::Command(ext, command))
         });
         let agents = (self.registry.read(cx).names().into_iter()).map(|a| {
-            let label = clamp(&format!("New session with {a}"), TITLE_CHARS).into();
+            let label = clamp(
+                &format!("New session with {}", agent_label(&a)),
+                TITLE_CHARS,
+            )
+            .into();
             (label, Entry::NewSessionWith(a))
         });
         let groups = [
@@ -121,6 +129,7 @@ impl Workspace {
             Entry::Extensions => {
                 self.show_extensions(window, cx);
             }
+            Entry::Settings => self.open_settings(Section::Ai, None, window, cx),
             Entry::Template(ix) => self.start_template(ix, window, cx),
             Entry::Command(ext, command) => self.run_ext_command(&ext, command, window, cx),
             Entry::NewSessionWith(agent) => {
@@ -136,12 +145,12 @@ mod tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
     use serde_json::json;
-    use wai_settings::Template;
+    use wai_settings::{Settings, Template};
 
     use crate::ext_host::tests::{bodies, install, log_path, logged, workspace_at};
     use crate::sidebar::SidebarTab;
     use crate::workspace::Workspace;
-    use crate::workspace::tests::{fake_settings, wait_until};
+    use crate::workspace::tests::{fake_settings, open, wait_until};
 
     const MANIFEST: &str = "id = \"sample\"\nname = \"Sample\"\nversion = \"1.0.0\"\n\
         permissions = [\"process\"]\n[process]\ncommand = \"bin/run\"\n\
@@ -209,7 +218,8 @@ mod tests {
                         "Search",
                         "Files",
                         "Agents",
-                        "Extensions"
+                        "Extensions",
+                        "Settings"
                     ])
                 ),
                 ("Templates".into(), strings(&["Release notes", "Triage"])),
@@ -237,6 +247,23 @@ mod tests {
         cx.simulate_keystrokes("secondary-shift-p");
         cx.simulate_keystrokes("escape");
         assert!(!dialog(cx), "Escape closes it");
+    }
+
+    /// A built-in shows its name, not its id.
+    #[gpui_kit::test]
+    fn palette_names_builtin_agents(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, Settings::default());
+        let groups = labels(&workspace, cx);
+        let (_, agents) = groups.iter().find(|(h, _)| h == "Agents").unwrap();
+        assert_eq!(
+            agents,
+            &[
+                "New session with Antigravity",
+                "New session with Claude",
+                "New session with Codex",
+                "New session with Copilot"
+            ]
+        );
     }
 
     /// A command without a prompt goes to the extension's process as `command/run`.
