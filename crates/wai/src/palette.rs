@@ -10,6 +10,7 @@ use wai_ext::panel::clamp;
 use wai_ext::{CommandSpec, ExtId};
 
 use crate::app::{NewSession, OpenFolder, OpenPalette, ToggleTerminal};
+use crate::settings_view::Section;
 use crate::sidebar::SidebarTab;
 use crate::workspace::Workspace;
 
@@ -23,6 +24,7 @@ pub(crate) enum Entry {
     OpenFolder,
     Tab(SidebarTab),
     Extensions,
+    Settings,
     Template(usize),
     Command(ExtId, CommandSpec),
     NewSessionWith(String),
@@ -42,6 +44,7 @@ impl Workspace {
             ("Files".into(), Entry::Tab(SidebarTab::Files)),
             ("Agents".into(), Entry::Tab(SidebarTab::Agents)),
             ("Extensions".into(), Entry::Extensions),
+            ("Settings".into(), Entry::Settings),
         ];
         let templates = (self.all_templates(cx).into_iter().enumerate())
             .map(|(ix, t)| (clamp(&t.name, TITLE_CHARS).into(), Entry::Template(ix)));
@@ -121,6 +124,7 @@ impl Workspace {
             Entry::Extensions => {
                 self.show_extensions(window, cx);
             }
+            Entry::Settings => self.open_settings(Section::Ai, None, window, cx),
             Entry::Template(ix) => self.start_template(ix, window, cx),
             Entry::Command(ext, command) => self.run_ext_command(&ext, command, window, cx),
             Entry::NewSessionWith(agent) => {
@@ -209,7 +213,8 @@ mod tests {
                         "Search",
                         "Files",
                         "Agents",
-                        "Extensions"
+                        "Extensions",
+                        "Settings"
                     ])
                 ),
                 ("Templates".into(), strings(&["Release notes", "Triage"])),

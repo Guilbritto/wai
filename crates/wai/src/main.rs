@@ -12,6 +12,7 @@ mod layout;
 mod notify;
 mod palette;
 mod search_view;
+mod settings_view;
 #[cfg(target_os = "macos")]
 mod shell_path;
 mod sidebar;

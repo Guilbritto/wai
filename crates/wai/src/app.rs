@@ -23,7 +23,8 @@ actions!(
         Paste,
         CopySelection,
         Save,
-        OpenPalette
+        OpenPalette,
+        OpenSettings
     ]
 );
 
@@ -62,6 +63,7 @@ fn bind_keys(cx: &mut App) {
         ("secondary-alt-right", Box::new(FocusNextPane), workspace),
         ("secondary-o", Box::new(OpenFolder), workspace),
         ("secondary-shift-p", Box::new(OpenPalette), workspace),
+        ("secondary-,", Box::new(OpenSettings), workspace),
         // The prompt box lets Escape through (it has nothing to clear).
         ("escape", Box::new(CancelTurn), Some("ChatSession")),
         (paste, Box::new(Paste), Some("Terminal")),

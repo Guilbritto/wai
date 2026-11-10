@@ -18,12 +18,17 @@ use wai_agent::{
 };
 use wai_ext::{CommandSpec, ExtEvent, ExtId, HostEvent, Reply};
 use wai_project::{FsChange, ProjectWatcher};
-use wai_settings::{AppState, OpenSession, Settings, Template, config_dir, load_templates, shown};
+use wai_settings::{
+    AppState, Change, OpenSession, Settings, Template, config_dir, load_templates, shown,
+    write_change,
+};
 use wai_terminal::DEFAULT_BG;
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::agents_view::{AgentsView, ShowSession};
-use crate::app::{CloseSession, FocusNextPane, NewSession, OpenFolder, Quit, Save, ToggleTerminal};
+use crate::app::{
+    CloseSession, FocusNextPane, NewSession, OpenFolder, OpenSettings, Quit, Save, ToggleTerminal,
+};
 use crate::aurora;
 use crate::chat::{ChatEvent, ChatSession, TurnState, signed_out};
 use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved, recovery};
@@ -33,6 +38,7 @@ use crate::files::{FileTree, OpenFile};
 use crate::layout::{self, Slot, Zone};
 use crate::notify::{self, should_notify};
 use crate::search_view::{OpenMatch, SearchView};
+use crate::settings_view::{Section, SettingsData, SettingsEvent, SettingsView};
 use crate::sidebar::{SidebarTab, canonical};
 use crate::terminal_view::{self, TerminalView};
 use crate::topbar::BRAND;
@@ -62,6 +68,8 @@ pub enum Pane {
     Session(Entity<ChatSession>),
     /// Open files in tabs; one pane at most. Not kept between runs.
     Editor(Entity<EditorPane>),
+    /// The settings screen; one at most. Not kept between runs.
+    Settings(Entity<SettingsView>),
 }
 
 impl Pane {
@@ -1281,7 +1289,7 @@ impl Workspace {
             Pane::Preparing { ticket, .. } => {
                 self.cancelled.insert(*ticket);
             }
-            Pane::Empty(_) => {}
+            Pane::Empty(_) | Pane::Settings(_) => {}
         }
         self.drop_pane(ix, window, cx);
     }
@@ -1576,6 +1584,94 @@ impl Workspace {
         pane
     }
 
+    fn settings_data(&self, notice: Option<SharedString>) -> SettingsData {
+        SettingsData {
+            settings: self.settings.clone(),
+            error: None,
+            notice,
+        }
+    }
+
+    /// Shows the settings at `section`, with `notice` in it. Its pane is focused when there is
+    /// one; else the focused pane takes it when empty, else a new pane to the right, else (at
+    /// `MAX_PANES`) the next pane that is not the editor, whose session stays in the open list.
+    pub fn open_settings(
+        &mut self,
+        section: Section,
+        notice: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let notice = notice.map(|n| SharedString::from(n.to_string()));
+        let found = (self.panes.iter()).position(|p| matches!(p, Pane::Settings(_)));
+        let ix = match found {
+            Some(ix) => ix,
+            None => {
+                let data = self.settings_data(notice.clone());
+                let view = cx.new(|cx| SettingsView::new(section, data, window, cx));
+                cx.subscribe_in(
+                    &view,
+                    window,
+                    |this, _, event: &SettingsEvent, window, cx| match event {
+                        SettingsEvent::Change(change) => {
+                            this.change_setting(change.clone(), window, cx)
+                        }
+                        SettingsEvent::OpenFile => {
+                            let path = this.user_dir.join("settings.toml");
+                            this.open_file(path, None, window, cx)
+                        }
+                        SettingsEvent::Test(_) => {}
+                    },
+                )
+                .detach();
+                let focused = self.focused_pane;
+                let ix = if matches!(self.panes[focused], Pane::Empty(_)) {
+                    focused
+                } else if self.panes.len() < MAX_PANES {
+                    self.panes.push(Pane::Empty(None));
+                    self.panes.len() - 1
+                } else {
+                    let len = self.panes.len();
+                    (1..len)
+                        .map(|n| (focused + n) % len)
+                        .find(|&ix| !matches!(self.panes[ix], Pane::Editor(_)))
+                        .unwrap_or(focused)
+                };
+                self.panes[ix] = Pane::Settings(view);
+                self.save_state(cx);
+                ix
+            }
+        };
+        if let Pane::Settings(view) = &self.panes[ix] {
+            let data = self.settings_data(notice);
+            view.update(cx, |v, cx| {
+                v.show(section, cx);
+                v.set(data, cx);
+            });
+        }
+        self.focus_pane(ix, window, cx);
+    }
+
+    /// Writes `change` to the user's file; the watcher applies it.
+    pub fn change_setting(&mut self, change: Change, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(e) = write_change(&self.user_dir, &change) {
+            let text = format!("Could not save settings: {e}");
+            window.push_notification(Notification::warning(text), cx);
+        }
+    }
+
+    /// The settings screen follows `self.settings`.
+    #[allow(dead_code)] // the settings watcher calls it (Task 6)
+    pub fn sync_settings_view(&self, cx: &mut Context<Self>) {
+        for pane in &self.panes {
+            if let Pane::Settings(view) = pane {
+                let notice = view.read(cx).notice();
+                let data = self.settings_data(notice);
+                view.update(cx, |v, cx| v.set(data, cx));
+            }
+        }
+    }
+
     fn focus_next_pane(&mut self, _: &FocusNextPane, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_pane((self.focused_pane + 1) % self.panes.len(), window, cx);
     }
@@ -1821,6 +1917,7 @@ impl Render for Workspace {
                 .child(match pane {
                     Pane::Session(session) => session.clone().into_any_element(),
                     Pane::Editor(pane) => pane.clone().into_any_element(),
+                    Pane::Settings(view) => view.clone().into_any_element(),
                     Pane::Preparing { agent, .. } => v_flex()
                         .size_full()
                         .items_center()
@@ -1857,6 +1954,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::focus_next_pane))
             .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::open_palette))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.open_settings(Section::Ai, None, window, cx)
+            }))
             .relative()
             .size_full()
             .bg(theme.background)
