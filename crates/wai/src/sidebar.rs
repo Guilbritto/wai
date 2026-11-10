@@ -66,7 +66,9 @@ impl Workspace {
     /// Lists the default agent's sessions again: on `Ready`, after each turn and each new
     /// session, never on a timer. A newer refresh drops the one in flight.
     pub(crate) fn refresh_history(&mut self, cx: &mut Context<Self>) {
-        let agent = self.settings.default_agent.clone();
+        let Some(agent) = self.default_agent() else {
+            return;
+        };
         let ready = matches!(
             self.registry.read(cx).status(&agent),
             Some(AgentStatus::Ready(caps)) if caps.list_sessions
@@ -351,7 +353,9 @@ impl Workspace {
             title: title.clone().into(),
             source: Dragged::History(summary.clone()),
         };
-        let forkable = self.can_fork(&self.settings.default_agent, cx);
+        let forkable = self
+            .default_agent()
+            .is_some_and(|agent| self.can_fork(&agent, cx));
         row(false, cx)
             .child(
                 div()
@@ -379,7 +383,9 @@ impl Workspace {
                     move |this, _, window, cx| {
                         let (id, title, cwd) =
                             (source.id.clone(), source.title.clone(), source.cwd.clone());
-                        let agent = this.settings.default_agent.clone();
+                        let Some(agent) = this.default_agent() else {
+                            return;
+                        };
                         this.fork(agent, id, title, cwd, window, cx)
                     },
                 )))

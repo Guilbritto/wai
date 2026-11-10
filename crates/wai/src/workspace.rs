@@ -367,9 +367,16 @@ impl Workspace {
         }
     }
 
+    /// The agent a new session uses; `None` until the user chooses one.
+    pub fn default_agent(&self) -> Option<String> {
+        self.settings.default_agent.clone()
+    }
+
     /// Starts the default agent, so the history fills in once it is ready.
     pub fn start_agent(&mut self, cx: &mut Context<Self>) {
-        let agent = self.settings.default_agent.clone();
+        let Some(agent) = self.default_agent() else {
+            return;
+        };
         self.registry.update(cx, |r, cx| r.handle(&agent, cx));
     }
 
@@ -760,7 +767,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<(Entity<ChatSession>, bool)> {
-        let agent = self.settings.default_agent.clone();
+        let agent = self.default_agent()?;
         if let Some(session) = self.session(&agent, &summary.id, cx) {
             return Some((session, false));
         }
@@ -827,7 +834,9 @@ impl Workspace {
     fn lit(&self, dragged: &DraggedSession, ix: usize, cx: &App) -> Option<bool> {
         let session = match &dragged.source {
             Dragged::Open(session) => Some(session.clone()),
-            Dragged::History(row) => self.session(&self.settings.default_agent, &row.id, cx),
+            Dragged::History(row) => self
+                .default_agent()
+                .and_then(|agent| self.session(&agent, &row.id, cx)),
         };
         let from = session.and_then(|s| self.panes.iter().position(|p| p.session() == Some(&s)));
         let empty = matches!(self.panes.get(ix)?, Pane::Empty(_));
@@ -943,7 +952,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let agent = self.settings.default_agent.clone();
+        let Some(agent) = self.default_agent() else {
+            return;
+        };
         self.start_session(agent, None, false, None, window, cx)
     }
 
@@ -964,10 +975,9 @@ impl Workspace {
         let Some(template) = self.all_templates(cx).get(ix).cloned() else {
             return;
         };
-        let agent = template
-            .agent
-            .clone()
-            .unwrap_or_else(|| self.settings.default_agent.clone());
+        let Some(agent) = template.agent.clone().or_else(|| self.default_agent()) else {
+            return;
+        };
         if !self.registry.read(cx).knows(&agent) {
             let pane = self.session_pane();
             if matches!(self.panes[pane], Pane::Preparing { .. }) {
@@ -993,7 +1003,9 @@ impl Workspace {
     ) {
         match command.prompt {
             Some(prompt) => {
-                let agent = self.settings.default_agent.clone();
+                let Some(agent) = self.default_agent() else {
+                    return;
+                };
                 self.start_session(agent, Some(prompt), false, None, window, cx)
             }
             None => self.ext_host.read(cx).run_command(ext, &command.id),
@@ -1035,7 +1047,9 @@ impl Workspace {
                 send,
                 reply,
             } => {
-                let agent = agent.unwrap_or_else(|| self.settings.default_agent.clone());
+                let Some(agent) = agent.or_else(|| self.default_agent()) else {
+                    return reply.send(Err("No default AI is chosen".into()));
+                };
                 if !self.registry.read(cx).knows(&agent) {
                     return reply.send(Err(format!("No agent named {agent}")));
                 }
@@ -1698,9 +1712,9 @@ impl Workspace {
 
     /// What an empty pane says is wrong with the default agent, if anything.
     fn agent_problem(&self, cx: &App) -> Option<String> {
-        let agent = &self.settings.default_agent;
-        match self.registry.read(cx).status(agent)? {
-            AgentStatus::SignedOut => Some(signed_out(agent)),
+        let agent = self.default_agent()?;
+        match self.registry.read(cx).status(&agent)? {
+            AgentStatus::SignedOut => Some(signed_out(&agent)),
             AgentStatus::Failed(error) => Some(error.clone()),
             _ => None,
         }
@@ -1978,7 +1992,7 @@ pub(crate) mod tests {
             .expect("run `cargo build -p wai-agent --bin wai-fake-agent` first");
         let command = format!("{} {flag}", wai_agent::quote(&fake));
         Settings {
-            default_agent: "fake".into(),
+            default_agent: Some("fake".into()),
             agents: [("fake".into(), AgentConfig { command })].into(),
             ..Default::default()
         }
@@ -2830,7 +2844,7 @@ pub(crate) mod tests {
         let mut settings = fake_settings(flag);
         let fake = settings.agents.remove("fake").unwrap();
         settings.agents = [("a".into(), fake.clone()), ("b".into(), fake)].into();
-        settings.default_agent = "a".into();
+        settings.default_agent = Some("a".into());
         let (workspace, cx) = open(cx, settings);
         let registry = workspace.read_with(cx, |w, _| w.registry.clone());
         let mut sessions = Vec::new();
