@@ -1,6 +1,6 @@
 # wai user guide
 
-This guide describes wai 0.1.0. On Windows, read **ctrl** where it says **⌘**, except where the shortcut table says otherwise.
+This guide describes wai 0.2.0. On Windows, read **ctrl** where it says **⌘**, except where the shortcut table says otherwise.
 
 ## The window
 
