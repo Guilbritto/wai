@@ -221,12 +221,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let state = state_path
-            .as_deref()
-            .map(AppState::load)
-            .unwrap_or_default();
-        // A state from before approvals: today's values are approved.
-        let approved = state.approved.unwrap_or_else(|| seed_approved(&settings));
+        let state = state_path.as_deref().map(AppState::read);
+        let approved = match &state {
+            // Missing or corrupt: breaking the file must not approve what settings.toml says.
+            Some(None) => BTreeSet::new(),
+            Some(Some(AppState {
+                approved: Some(approved),
+                ..
+            })) => approved.clone(),
+            // A state from before approvals, or none kept (tests): today's values are approved.
+            _ => seed_approved(&settings),
+        };
         let configs = approved_configs(&Settings::default().agents, &settings, &approved);
         let registry = cx.new(|_| AgentRegistry::new(configs));
         let shell = settings
@@ -354,7 +359,7 @@ impl Workspace {
             starting: HashMap::new(),
             early: HashMap::new(),
             ext_sessions: HashMap::new(),
-            models_seen: state.models_seen,
+            models_seen: state.flatten().map(|s| s.models_seen).unwrap_or_default(),
             approved,
             shell,
             asking: Vec::new(),
@@ -3473,6 +3478,11 @@ pub(crate) mod tests {
         // The config dir does not exist yet on a first run.
         let path = dir.path().join("wai").join("state.json");
         let (workspace, cx) = open_at(cx, fake_settings(""), Some(path.clone()));
+        // Nothing but the built-ins is approved yet: the agent and the shell are asked for.
+        launch(&workspace, cx);
+        while question(&workspace, cx).is_some() {
+            click("approval-allow", cx);
+        }
 
         cx.simulate_keystrokes("secondary-n");
         wait_until(cx, "the session", |cx| {
@@ -3953,6 +3963,8 @@ pub(crate) mod tests {
         cx.executor().allow_parking(); // the fake agent is a real process
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("state.json");
+        // From before approvals: the first launch approves today's command.
+        AppState::default().save(&state).unwrap();
         let (workspace, cx) = open_at(cx, fake_settings(""), Some(state.clone()));
         launch(&workspace, cx);
         let (new, file) = fake_file("--reply other");
@@ -3962,8 +3974,9 @@ pub(crate) mod tests {
         assert_eq!(question(&workspace, cx), None);
         let file_text = std::fs::read_to_string(dir.path().join("settings.toml")).unwrap();
         assert_eq!(file_text, file, "nothing is written");
+        let old = fake_settings("").agents["fake"].command.clone();
         workspace.read_with(cx, |w, cx| {
-            assert_ne!(w.registry.read(cx).command("fake"), Some(new.as_str()))
+            assert_eq!(w.registry.read(cx).command("fake"), Some(old.as_str()))
         });
         assert!(!AppState::load(&state).approved.unwrap().contains(&new));
 
@@ -3984,6 +3997,8 @@ pub(crate) mod tests {
         cx.executor().allow_parking(); // the fake agent is a real process
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("state.json");
+        // From before approvals: the first launch approves today's command.
+        AppState::default().save(&state).unwrap();
         let (workspace, cx) = open_at(cx, fake_settings(""), Some(state.clone()));
         launch(&workspace, cx);
         let (new, file) = fake_file("--reply other");
@@ -4001,6 +4016,39 @@ pub(crate) mod tests {
         launch(&workspace, cx);
         assert_eq!(question(&workspace, cx), None);
         assert_eq!(reply(&workspace, cx), "other");
+    }
+
+    /// A launch whose `state.json` holds `text` (`None`: there is none) approves only the
+    /// built-ins: it asks for the user's own command.
+    fn asks_without_a_state(text: Option<&str>, cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        if let Some(text) = text {
+            std::fs::write(&state, text).unwrap();
+        }
+        let settings = fake_settings("--reply mine");
+        let command = settings.agents["fake"].command.clone();
+        let (workspace, cx) = open_at(cx, settings, Some(state.clone()));
+        launch(&workspace, cx);
+        assert_eq!(
+            question(&workspace, cx),
+            Some(format!("fake (new): {command}"))
+        );
+        workspace.read_with(cx, |w, cx| {
+            assert!(!w.approved.contains(&command));
+            assert_eq!(w.registry.read(cx).command("fake"), None);
+        });
+        assert!(!AppState::load(&state).approved.unwrap().contains(&command));
+    }
+
+    #[gpui_kit::test]
+    fn missing_state_approves_nothing(cx: &mut TestAppContext) {
+        asks_without_a_state(None, cx);
+    }
+
+    #[gpui_kit::test]
+    fn corrupt_state_approves_nothing(cx: &mut TestAppContext) {
+        asks_without_a_state(Some("{"), cx);
     }
 
     #[gpui_kit::test]

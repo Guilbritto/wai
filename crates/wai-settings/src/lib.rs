@@ -474,12 +474,15 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// `None` when the file is missing or does not parse.
+    pub fn read(path: &Path) -> Option<AppState> {
+        let text = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+
     /// Missing or corrupt files yield the default state.
     pub fn load(path: &Path) -> AppState {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
+        Self::read(path).unwrap_or_default()
     }
 
     /// Creates the folder on a first run.
@@ -716,7 +719,9 @@ mod tests {
         };
         state.save(&path).unwrap();
         assert_eq!(AppState::load(&path), state);
+        assert_eq!(AppState::read(&d.path().join("missing.json")), None);
         std::fs::write(&path, "{").unwrap();
+        assert_eq!(AppState::read(&path), None);
         assert_eq!(AppState::load(&path), AppState::default());
         std::fs::write(&path, r#"{"terminal_visible":true}"#).unwrap();
         assert_eq!(AppState::load(&path).approved, None);
