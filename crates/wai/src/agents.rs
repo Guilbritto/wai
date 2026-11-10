@@ -81,6 +81,16 @@ impl AgentRegistry {
         }
     }
 
+    /// Running agents keep their process: the next spawn uses the new command.
+    pub fn set_configs(&mut self, configs: BTreeMap<String, AgentConfig>) {
+        self.configs = configs;
+    }
+
+    #[cfg(test)]
+    pub fn command(&self, name: &str) -> Option<&str> {
+        (self.configs.get(name)).map(|c| c.command.as_str())
+    }
+
     pub fn knows(&self, name: &str) -> bool {
         self.configs.contains_key(name) || self.extension.contains_key(name)
     }

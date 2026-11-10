@@ -6,7 +6,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, Sizable as _, h_flex, h_resizable, resizable_panel, v_flex,
+    ActiveTheme as _, IconName, Sizable as _, Theme, h_flex, h_resizable, resizable_panel, v_flex,
     v_resizable,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -28,6 +28,7 @@ use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::agents_view::{AgentsView, ShowSession};
 use crate::app::{
     CloseSession, FocusNextPane, NewSession, OpenFolder, OpenSettings, Quit, Save, ToggleTerminal,
+    theme_mode,
 };
 use crate::aurora;
 use crate::chat::{ChatEvent, ChatSession, TurnState, signed_out};
@@ -126,6 +127,14 @@ pub(crate) enum Leave {
     Open(PathBuf),
 }
 
+/// Whether the batch names `path`, or lost track of what changed.
+fn touches(batch: &[FsChange], path: &Path) -> bool {
+    batch.iter().any(|change| match change {
+        FsChange::Rescan => true,
+        FsChange::Changed(paths) => paths.iter().any(|p| p == path),
+    })
+}
+
 /// The window's root view: the top bar over sidebar | chat panes over the terminal panel, each a
 /// card on the aurora.
 pub struct Workspace {
@@ -165,6 +174,9 @@ pub struct Workspace {
     /// The project's one watcher and the task that hands its changes out; `None` when the
     /// project cannot be watched.
     watch: Option<(ProjectWatcher, Task<()>)>,
+    settings_watch: Option<(ProjectWatcher, Task<()>)>,
+    #[cfg(test)]
+    pub(crate) applied: usize,
     next_ticket: u64,
     /// Tickets whose "Preparing…" pane ⌘W closed: their session never opens.
     cancelled: HashSet<u64>,
@@ -306,6 +318,9 @@ impl Workspace {
             extensions: None,
             ext_host,
             watch: None,
+            settings_watch: None,
+            #[cfg(test)]
+            applied: 0,
             next_ticket: 0,
             cancelled: HashSet::new(),
             starting: HashMap::new(),
@@ -359,14 +374,91 @@ impl Workspace {
         self.watch = Some((watcher, task));
     }
 
-    /// Hands a watcher batch to the open files it touches.
-    fn disk_changed(&self, batch: &[FsChange], window: &mut Window, cx: &mut Context<Self>) {
-        let touched = |path: &Path| {
-            batch.iter().any(|change| match change {
-                FsChange::Rescan => true,
-                FsChange::Changed(paths) => paths.iter().any(|p| p == path),
-            })
+    /// Watches the user's settings folder; `settings.toml` changing (the screen's write or a
+    /// hand edit) reloads the settings. `state.json` shares the folder and never reloads.
+    pub fn watch_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = std::fs::create_dir_all(&self.user_dir);
+        let file = canonical(&self.user_dir).join("settings.toml");
+        let (watcher, changes) = match ProjectWatcher::start(&canonical(&self.user_dir)) {
+            Ok(started) => started,
+            Err(e) => {
+                self.settings_watch = None;
+                return eprintln!("wai: cannot watch {}: {e}", self.user_dir.display());
+            }
         };
+        let task = cx.spawn_in(window, async move |this, cx| {
+            while let Ok(change) = changes.recv().await {
+                let mut batch = vec![change];
+                while let Ok(more) = changes.try_recv() {
+                    batch.push(more);
+                }
+                if !touches(&batch, &file) {
+                    continue;
+                }
+                let reloaded = this.update_in(cx, |this, window, cx| {
+                    this.reload_settings(window, cx);
+                });
+                if reloaded.is_err() {
+                    break;
+                }
+            }
+        });
+        self.settings_watch = Some((watcher, task));
+    }
+
+    /// Reads the layers again. A file that does not load keeps the settings in force.
+    pub fn reload_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match Settings::load(&self.user_dir, Some(&self.project)) {
+            Ok((new, notices)) => self.apply_settings(new, notices, window, cx),
+            Err(e) => {
+                let text = e.to_string();
+                window.push_notification(Notification::warning(text.clone()), cx);
+                self.settings_error = Some(text);
+                self.sync_settings_view(cx);
+            }
+        }
+    }
+
+    /// Every reload ends here. Running sessions keep their agent: only the next start differs.
+    pub fn apply_settings(
+        &mut self,
+        new: Settings,
+        notices: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(test)]
+        {
+            self.applied += 1;
+        }
+        self.settings_error = None;
+        if new.theme != self.settings.theme {
+            Theme::change(theme_mode(new.theme), Some(window), cx);
+            window.refresh();
+        }
+        let configs = new.agents.clone();
+        self.registry.update(cx, |r, _| r.set_configs(configs));
+        let chosen =
+            new.default_agent.is_some() && new.default_agent != self.settings.default_agent;
+        self.settings = new;
+        if chosen {
+            self.start_agent(cx);
+            self.refresh_history(cx);
+        }
+        for notice in notices {
+            window.push_notification(Notification::warning(notice).autohide(false), cx);
+        }
+        self.sync_settings_view(cx);
+        cx.notify();
+    }
+
+    /// Hands a watcher batch to the open files it touches, and the project's settings file to
+    /// `reload_settings`.
+    fn disk_changed(&mut self, batch: &[FsChange], window: &mut Window, cx: &mut Context<Self>) {
+        if touches(batch, &self.project.join(".wai").join("settings.toml")) {
+            self.reload_settings(window, cx);
+        }
+        let touched = |path: &Path| touches(batch, path);
         for pane in &self.panes {
             if let Pane::Editor(pane) = pane {
                 for tab in pane.read(cx).tabs.clone() {
@@ -1664,7 +1756,6 @@ impl Workspace {
     }
 
     /// The settings screen follows `self.settings`.
-    #[allow(dead_code)] // the settings watcher calls it (Task 6)
     pub fn sync_settings_view(&self, cx: &mut Context<Self>) {
         for pane in &self.panes {
             if let Pane::Settings(view) = pane {
@@ -1701,6 +1792,7 @@ impl Workspace {
         for notice in notices {
             window.push_notification(Notification::warning(notice).autohide(false), cx);
         }
+        self.reload_settings(window, cx);
         self.suggest_extensions(window, cx);
         let project = self.project.clone();
         self.ext_host
@@ -2034,14 +2126,14 @@ pub(crate) mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    use gpui_kit::component::WindowExt as _;
+    use gpui_kit::component::{ActiveTheme as _, WindowExt as _};
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
         AppContext as _, ElementId, Entity, Modifiers, MouseButton, Pixels, Point, TestAppContext,
         VisualTestContext, point, px, size,
     };
     use wai_agent::{AgentError, PromptBlock, SessionEvent, SessionSummary};
-    use wai_settings::{AgentConfig, AppState, OpenSession, Settings, ThemeChoice};
+    use wai_settings::{AgentConfig, AppState, Change, OpenSession, Settings, ThemeChoice};
 
     use super::{Pane, Workspace};
     use crate::agents::{AgentStatus, RegistryEvent};
@@ -3248,6 +3340,139 @@ pub(crate) mod tests {
             );
             assert!(matches!(&w.panes[3], Pane::Empty(Some(why)) if why == "Could not start"));
             assert!(w.sessions.contains(&fourth), "in the open list only");
+        });
+    }
+
+    /// A window whose settings watcher looks at a fresh user dir holding `file`.
+    fn live<'a>(
+        cx: &'a mut TestAppContext,
+        settings: Settings,
+        file: Option<&str>,
+    ) -> (
+        Entity<Workspace>,
+        &'a mut VisualTestContext,
+        tempfile::TempDir,
+    ) {
+        cx.executor().allow_parking(); // the watcher thread is real
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(file) = file {
+            std::fs::write(dir.path().join("settings.toml"), file).unwrap();
+        }
+        let (workspace, cx) = open(cx, settings);
+        let user = dir.path().to_path_buf();
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.user_dir = user;
+                w.watch_settings(window, cx);
+            })
+        });
+        (workspace, cx, dir)
+    }
+
+    #[gpui_kit::test]
+    fn editing_the_file_applies_the_theme(cx: &mut TestAppContext) {
+        let (_workspace, cx, dir) = live(cx, Settings::default(), None);
+        assert!(cx.update(|_, cx| cx.theme().is_dark()));
+        std::fs::write(dir.path().join("settings.toml"), "theme = \"light\"\n").unwrap();
+        wait_until(cx, "the light theme", |cx| {
+            cx.update(|_, cx| !cx.theme().is_dark())
+        });
+    }
+
+    #[gpui_kit::test]
+    fn broken_edit_keeps_the_last_good_settings(cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = live(cx, Settings::default(), None);
+        std::fs::write(dir.path().join("settings.toml"), "theme = [").unwrap();
+        wait_until(cx, "the error", |cx| {
+            workspace.read_with(cx, |w, _| w.settings_error.is_some())
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |w, _| assert_eq!(w.settings.theme, ThemeChoice::Dark));
+        assert!(cx.update(|window, cx| !window.notifications(cx).is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn own_write_reloads_once_without_a_second_dialog(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = live(cx, Settings::default(), None);
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.change_setting(Change::Theme(ThemeChoice::Light), window, cx)
+            })
+        });
+        wait_until(cx, "the light theme", |cx| {
+            cx.update(|_, cx| !cx.theme().is_dark())
+        });
+        // Past the debounce: a second batch would show up as a second apply.
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(20));
+            cx.executor().advance_clock(Duration::from_millis(20));
+            cx.run_until_parked();
+        }
+        workspace.read_with(cx, |w, _| assert_eq!(w.applied, 1));
+        assert!(cx.update(|window, cx| !window.has_active_dialog(cx)));
+    }
+
+    #[gpui_kit::test]
+    fn deleted_user_file_falls_back_to_first_run(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let settings = history_settings(1);
+        let file = format!(
+            "default_agent = \"fake\"\n[agents.fake]\ncommand = \'\'\'{}\'\'\'\n",
+            settings.agents["fake"].command
+        );
+        let (workspace, cx, dir) = live(cx, settings, Some(&file));
+        let rows = load_history(&workspace, 1, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
+        });
+        std::fs::remove_file(dir.path().join("settings.toml")).unwrap();
+        wait_until(cx, "the first-run settings", |cx| {
+            workspace.read_with(cx, |w, _| w.default_agent().is_none())
+        });
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(w.sessions.len(), 1);
+            let status = w.registry.read(cx).status("fake").cloned();
+            assert!(matches!(status, Some(AgentStatus::Ready(_))), "{status:?}");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn project_switch_reloads_settings(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = live(cx, Settings::default(), None);
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".wai")).unwrap();
+        std::fs::write(
+            project.path().join(".wai/settings.toml"),
+            "theme = \"light\"\n",
+        )
+        .unwrap();
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.set_project(project.path().to_path_buf(), window, cx)
+            })
+        });
+        assert!(cx.update(|_, cx| !cx.theme().is_dark()));
+    }
+
+    #[gpui_kit::test]
+    fn changed_command_applies_to_the_next_start(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let settings = history_settings(1);
+        let (workspace, cx, dir) = live(cx, settings.clone(), None);
+        load_history(&workspace, 1, cx);
+        std::fs::write(
+            dir.path().join("settings.toml"),
+            "default_agent = \"fake\"\n[agents.fake]\ncommand = \"/bin/true\"\n",
+        )
+        .unwrap();
+        wait_until(cx, "the new command", |cx| {
+            workspace.read_with(cx, |w, _| w.settings.agents["fake"].command == "/bin/true")
+        });
+        workspace.read_with(cx, |w, cx| {
+            let status = w.registry.read(cx).status("fake").cloned();
+            assert!(matches!(status, Some(AgentStatus::Ready(_))), "{status:?}");
+            assert_eq!(w.registry.read(cx).command("fake"), Some("/bin/true"));
         });
     }
 }
