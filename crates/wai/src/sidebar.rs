@@ -129,16 +129,17 @@ impl Workspace {
             SidebarTab::History => self.render_history(cx).into_any_element(),
             SidebarTab::Files => self.files.clone().into_any_element(),
             SidebarTab::Search => self.search.clone().into_any_element(),
-            SidebarTab::Agents => div()
-                .size_full()
-                .child(self.agents.clone())
-                .into_any_element(),
+            SidebarTab::Agents => self.render_agents(cx).into_any_element(),
             SidebarTab::Extensions => div()
                 .size_full()
                 .children(self.extensions.clone())
                 .into_any_element(),
         };
         let built_in = TABS.map(|(tab, id, label)| (tab, ElementId::from(id), label.into()));
+        // On the right, Agents has no tab.
+        let hidden = usize::from(self.agents_right);
+        let built_in = (built_in.into_iter())
+            .filter(|(tab, ..)| !(self.agents_right && *tab == SidebarTab::Agents));
         let extension = panels.iter().enumerate().map(|(ix, p)| {
             let title = clamp(&p.title, PANEL_TITLE_CHARS);
             let tab = SidebarTab::Panel(p.view.entity_id());
@@ -150,7 +151,6 @@ impl Workspace {
         });
         let ring = theme.ring;
         let mut tabs: Vec<_> = built_in
-            .into_iter()
             .chain(extension)
             .map(|(tab, id, label)| {
                 aurora::tab(self.sidebar_tab == tab, cx)
@@ -181,7 +181,7 @@ impl Workspace {
             .collect();
         // The built-in tabs share one line: wrapped one by one, the last breaks off even where
         // it fits. The extensions' tabs wrap after them.
-        let panel_tabs = tabs.split_off(TABS.len());
+        let panel_tabs = tabs.split_off(TABS.len() - hidden);
         v_flex()
             .size_full()
             .py_2()

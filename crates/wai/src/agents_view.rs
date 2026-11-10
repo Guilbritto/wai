@@ -1,13 +1,17 @@
-//! The sidebar's Agents tab: one live card per open session. It repaints from the sessions'
-//! notifications (a session notifies on each event), never on a timer.
+//! The Agents view: one live card per open session, in the sidebar's Agents tab or in its own
+//! panel right of the panes. It repaints from the sessions' notifications (a session notifies on
+//! each event), never on a timer.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use wai_agent::PlanEntry;
 
+use crate::app::ToggleAgents;
+use crate::aurora::{self, DISPLAY_FONT};
 use crate::chat::{ChatSession, TurnState};
-use crate::workspace::{Dragged, DraggedSession};
+use crate::sidebar::SidebarTab;
+use crate::workspace::{Dragged, DraggedSession, Workspace};
 
 /// A card was clicked: show this session in the focused pane.
 pub struct ShowSession(pub Entity<ChatSession>);
@@ -157,6 +161,82 @@ impl AgentsView {
     }
 }
 
+impl Workspace {
+    /// Moves the view between the sidebar's tab and its own panel on the right, shown. The
+    /// sidebar has no Agents tab while it is on the right.
+    pub(crate) fn move_agents(&mut self, cx: &mut Context<Self>) {
+        self.agents_right = !self.agents_right;
+        self.agents_collapsed = false;
+        if !self.agents_right {
+            self.sidebar_tab = SidebarTab::Agents;
+        } else if self.sidebar_tab == SidebarTab::Agents {
+            self.sidebar_tab = SidebarTab::Sessions;
+        }
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    /// Hides the panel on the right, or shows it again; in the sidebar there is nothing to hide.
+    pub(crate) fn toggle_agents(
+        &mut self,
+        _: &ToggleAgents,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.agents_right {
+            return;
+        }
+        self.agents_collapsed = !self.agents_collapsed;
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    /// The view under its header: the button that moves it and, on the right, the one that
+    /// collapses it.
+    pub(crate) fn render_agents(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let (bar, icon, tip) = if self.agents_right {
+            let icon = IconName::PanelLeftOpen;
+            (aurora::card_bar(cx), icon, "Move to the sidebar")
+        } else {
+            (h_flex(), IconName::PanelRightOpen, "Move to the right")
+        };
+        let button = |id: &'static str, icon: IconName, tip: &'static str| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .icon(icon)
+                .tooltip(tip)
+                .accessibility_label(tip)
+        };
+        let title = div()
+            .flex_1()
+            .font_family(DISPLAY_FONT)
+            .text_size(px(14.))
+            .font_weight(FontWeight::BOLD)
+            .child("Agents");
+        let header = bar
+            .px_3()
+            .py_1()
+            .gap_1()
+            .child(title)
+            .child(
+                button("agents-move", icon, tip)
+                    .on_click(cx.listener(|this, _, _, cx| this.move_agents(cx))),
+            )
+            .children(self.agents_right.then(|| {
+                button("agents-collapse", IconName::PanelRightClose, "Collapse").on_click(
+                    cx.listener(|this, _, window, cx| {
+                        this.toggle_agents(&ToggleAgents, window, cx)
+                    }),
+                )
+            }));
+        v_flex()
+            .size_full()
+            .child(header)
+            .child(div().flex_1().min_h_0().child(self.agents.clone()))
+    }
+}
+
 fn plan_row(entry: &PlanEntry, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     let (icon, color) = match entry.status.as_str() {
@@ -206,13 +286,15 @@ impl Render for AgentsView {
 #[cfg(test)]
 mod tests {
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{Entity, TestAppContext, VisualTestContext};
+    use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
+    use wai_settings::{AppState, Settings};
 
     use super::{PlanEntry, status_label, summary, usage_text};
     use crate::chat::TurnState;
+    use crate::sidebar::SidebarTab;
 
     use crate::workspace::Workspace;
-    use crate::workspace::tests::{fake_settings, open, wait_until};
+    use crate::workspace::tests::{click, fake_settings, open, open_at, wait_until};
 
     #[test]
     fn plan_rows_are_capped() {
@@ -291,6 +373,150 @@ mod tests {
             }
             window.click(("agent-card", 0usize), cx);
         });
+        cx.run_until_parked();
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes[w.focused_pane].session(), Some(&first));
+        });
+    }
+
+    fn found(id: &'static str, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.try_find(id).is_some()
+        })
+    }
+
+    /// The header's button moves the view to its own panel right of the panes, without the
+    /// sidebar's tab, and back.
+    #[gpui_kit::test]
+    fn agents_move_to_the_right_and_back(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_resize(size(px(1400.), px(900.)));
+        assert!(!found("topbar-agents", cx));
+        assert!(cx.debug_bounds("agents-panel").is_none());
+
+        click("tab-agents", cx);
+        click("agents-move", cx);
+        workspace.read_with(cx, |w, _| {
+            assert!(w.agents_right && !w.agents_collapsed);
+            assert_eq!(w.sidebar_tab, SidebarTab::Sessions);
+        });
+        assert!(!found("tab-agents", cx));
+        assert!(found("tab-search", cx) && found("topbar-agents", cx));
+        let panel = cx.debug_bounds("agents-panel").expect("panel drawn");
+        let pane = cx.debug_bounds("pane-0").expect("pane drawn");
+        let sidebar = cx.debug_bounds("sidebar").expect("sidebar drawn");
+        assert!(panel.left() >= pane.right(), "{panel:?} {pane:?}");
+        assert_eq!(panel.size.width, sidebar.size.width);
+
+        click("agents-move", cx);
+        workspace.read_with(cx, |w, _| {
+            assert!(!w.agents_right);
+            assert_eq!(w.sidebar_tab, SidebarTab::Agents);
+        });
+        assert!(found("tab-agents", cx) && found("agents-move", cx));
+        assert!(!found("topbar-agents", cx) && !found("agents-collapse", cx));
+        assert!(cx.debug_bounds("agents-panel").is_none());
+        // In the sidebar there is nothing to collapse.
+        cx.simulate_keystrokes("secondary-alt-b");
+        assert!(workspace.read_with(cx, |w, _| !w.agents_collapsed));
+    }
+
+    /// Collapsing hides the whole panel; the top bar's button and the shortcut toggle it.
+    #[gpui_kit::test]
+    fn agents_panel_collapses(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_resize(size(px(1400.), px(900.)));
+        cx.update(|_, cx| workspace.update(cx, |w, cx| w.move_agents(cx)));
+        let shown = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.render_frame(cx));
+            let drawn = cx.debug_bounds("agents-panel").is_some();
+            assert_eq!(drawn, workspace.read_with(cx, |w, _| !w.agents_collapsed));
+            drawn
+        };
+        assert!(shown(cx));
+        click("agents-collapse", cx);
+        assert!(!shown(cx));
+        assert!(
+            found("topbar-agents", cx),
+            "the button stays to show it again"
+        );
+        click("topbar-agents", cx);
+        assert!(shown(cx));
+        click("topbar-agents", cx);
+        assert!(!shown(cx));
+        cx.simulate_keystrokes("secondary-alt-b");
+        assert!(shown(cx));
+        cx.simulate_keystrokes("secondary-alt-b");
+        assert!(!shown(cx));
+    }
+
+    /// The position and the collapsed state are written on each change and come back at launch.
+    #[gpui_kit::test]
+    fn agents_position_is_saved_and_restored(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = AppState {
+            agents_right: true,
+            agents_collapsed: true,
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        let (workspace, cx) = open_at(cx, Settings::default(), Some(path.clone()));
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.restore(window, cx)));
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |w, _| w.agents_right && w.agents_collapsed));
+        assert!(cx.debug_bounds("agents-panel").is_none());
+
+        click("topbar-agents", cx);
+        let state = AppState::load(&path);
+        assert!(state.agents_right && !state.agents_collapsed);
+        click("agents-collapse", cx);
+        assert!(AppState::load(&path).agents_collapsed);
+        click("topbar-agents", cx);
+        click("agents-move", cx);
+        let state = AppState::load(&path);
+        assert!(!state.agents_right && !state.agents_collapsed);
+    }
+
+    /// On the right, a card click still shows its session in the focused pane, and the top bar's
+    /// button counts the sessions that need the user.
+    #[gpui_kit::test]
+    fn right_panel_card_shows_session(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--ask-permission"));
+        cx.simulate_resize(size(px(1400.), px(900.)));
+        new_session(&workspace, 1, cx);
+        let first = workspace.read_with(cx, |w, _| w.sessions[0].clone());
+        new_session(&workspace, 2, cx);
+        let second = workspace.read_with(cx, |w, _| w.sessions[1].clone());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.move_agents(cx);
+                w.show(first.clone(), false, window, cx)
+            })
+        });
+        let label = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                let button = window.find("topbar-agents");
+                button.label().unwrap_or_default().to_string()
+            })
+        };
+        assert_eq!(label(cx), "Toggle agents");
+        cx.simulate_input("edit");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "needs you", |cx| {
+            first.read_with(cx, |s, _| s.model.state == TurnState::NeedsYou)
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.show(second.clone(), false, window, cx))
+        });
+        cx.run_until_parked();
+        assert_eq!(label(cx), "Toggle agents · 1 needs you");
+
+        cx.update(|window, cx| window.click(("agent-card", 0usize), cx));
         cx.run_until_parked();
         workspace.read_with(cx, |w, _| {
             assert_eq!(w.panes[w.focused_pane].session(), Some(&first));

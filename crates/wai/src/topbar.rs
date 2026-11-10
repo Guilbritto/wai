@@ -11,7 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_ext::panel::clamp;
 
-use crate::app::{NewSession, OpenPalette, ToggleTerminal};
+use crate::app::{NewSession, OpenPalette, ToggleAgents, ToggleTerminal};
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::chat::TurnState;
 use crate::sidebar::SidebarTab;
@@ -158,6 +158,26 @@ impl Workspace {
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.toggle_terminal(&ToggleTerminal, window, cx)
                 }));
+        // Only while Agents is on the right: shows or hides its panel, with how many need the user.
+        let agents =
+            self.agents_right.then(|| {
+                let label = match needs_you {
+                    0 => "Toggle agents".to_string(),
+                    1 => "Toggle agents · 1 needs you".to_string(),
+                    n => format!("Toggle agents · {n} need you"),
+                };
+                Button::new("topbar-agents")
+                    .ghost()
+                    .small()
+                    .icon(IconName::PanelRight)
+                    .when(needs_you > 0, |el| el.label(needs_you.to_string()))
+                    .tooltip(label.clone())
+                    .accessibility_label(label)
+                    .selected(!self.agents_collapsed)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_agents(&ToggleAgents, window, cx)
+                    }))
+            });
         let new = Button::new("sidebar-new")
             .debug_selector(|| "sidebar-new".into())
             .primary()
@@ -178,6 +198,7 @@ impl Workspace {
             .child(palette)
             .child(settings)
             .child(terminal)
+            .children(agents)
             .child(new);
 
         let bar = h_flex()

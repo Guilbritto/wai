@@ -25,7 +25,8 @@ actions!(
         CopySelection,
         Save,
         OpenPalette,
-        OpenSettings
+        OpenSettings,
+        ToggleAgents
     ]
 );
 
@@ -61,6 +62,7 @@ fn bind_keys(cx: &mut App) {
         ("secondary-q", Box::new(Quit), None),
         ("secondary-n", Box::new(NewSession), workspace),
         ("ctrl-`", Box::new(ToggleTerminal), workspace),
+        ("secondary-alt-b", Box::new(ToggleAgents), workspace),
         // A session leaves the screen and stays open; R20: an editor closes its active tab.
         ("secondary-w", Box::new(ClosePane), workspace),
         ("secondary-s", Box::new(Save), workspace),

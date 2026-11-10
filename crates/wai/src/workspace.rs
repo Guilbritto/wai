@@ -171,6 +171,10 @@ pub struct Workspace {
     pub files: Entity<FileTree>,
     pub search: Entity<SearchView>,
     pub(crate) agents: Entity<AgentsView>,
+    /// The Agents view is its own panel right of the panes, not a sidebar tab.
+    pub(crate) agents_right: bool,
+    /// That panel is hidden.
+    pub(crate) agents_collapsed: bool,
     /// Created on first use (the sidebar's Extensions button, a project's suggestion): it reads
     /// `user_dir`'s extensions.
     pub(crate) extensions: Option<Entity<ExtensionsView>>,
@@ -341,6 +345,8 @@ impl Workspace {
             user_dir: config_dir(),
             registry,
             agents,
+            agents_right: false,
+            agents_collapsed: false,
             sessions: Vec::new(),
             panes: vec![Pane::Empty(None)],
             focused_pane: 0,
@@ -730,6 +736,8 @@ impl Workspace {
         if state.terminal_visible {
             self.toggle_terminal(&ToggleTerminal, window, cx);
         }
+        self.agents_right = state.agents_right;
+        self.agents_collapsed = state.agents_collapsed;
         self.focus_pane(0, window, cx);
         self.save_state(cx);
         self.recover(window, cx);
@@ -771,7 +779,7 @@ impl Workspace {
 
     /// Writes what the next launch restores: on each structural change and at quit, never on a
     /// timer. A session in no pane is saved with pane `MAX_PANES`.
-    fn save_state(&self, cx: &App) {
+    pub(crate) fn save_state(&self, cx: &App) {
         let Some(path) = &self.state_path else {
             return;
         };
@@ -792,6 +800,8 @@ impl Workspace {
             terminal_visible: self.terminal_visible,
             // ponytail: the sidebar does not resize yet; save its width once it does.
             sidebar_width: SIDEBAR_WIDTH,
+            agents_right: self.agents_right,
+            agents_collapsed: self.agents_collapsed,
             approved: Some(self.approved.clone()),
             models_seen: self.models_seen.clone(),
         };
@@ -2483,12 +2493,18 @@ impl Render for Workspace {
             div().size_full().children(self.terminal.clone()),
         )
         .debug_selector(|| "terminal".into());
+        // ponytail: fixed at the sidebar's width, which does not resize either.
+        let agents = (self.agents_right && !self.agents_collapsed).then(|| {
+            on_card(aurora::card(false, cx), self.render_agents(cx))
+                .debug_selector(|| "agents-panel".into())
+        });
 
         div()
             .key_context("Workspace")
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::new_session))
             .on_action(cx.listener(Self::toggle_terminal))
+            .on_action(cx.listener(Self::toggle_agents))
             .on_action(cx.listener(Self::close_focused_pane))
             .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::focus_next_pane))
@@ -2534,6 +2550,13 @@ impl Render for Workspace {
                                                 .child(terminal),
                                         ),
                                 ),
+                            )
+                            .child(
+                                resizable_panel()
+                                    .size(px(SIDEBAR_WIDTH))
+                                    .fixed()
+                                    .visible(agents.is_some())
+                                    .child(div().size_full().children(agents)),
                             ),
                     ),
                 ),
@@ -3073,6 +3096,35 @@ pub(crate) mod tests {
 
         click("tab-agents", cx);
         let from = center_of(("agent-card", 0usize), cx);
+        drag_to_pane(from, 0, 0.9, cx);
+
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 2);
+            assert_eq!(w.panes[0].session(), Some(&second));
+            assert_eq!(w.panes[1].session(), Some(&first));
+            assert_eq!(w.focused_pane, 1);
+        });
+    }
+
+    /// A card drags from the Agents panel on the right as it does from the sidebar's tab.
+    #[gpui_kit::test]
+    fn drag_agent_card_from_right_panel_splits(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(2));
+        cx.simulate_resize(size(px(1400.), px(900.)));
+        let rows = load_history(&workspace, 2, cx);
+        for row in &rows {
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(row, false, window, cx)));
+        }
+        let (first, second) =
+            workspace.read_with(cx, |w, _| (w.sessions[0].clone(), w.sessions[1].clone()));
+        assert_eq!(pane_session(&workspace, 0, cx), second);
+
+        click("tab-agents", cx);
+        click("agents-move", cx);
+        let from = center_of(("agent-card", 0usize), cx);
+        let panel = cx.debug_bounds("agents-panel").expect("panel drawn");
+        assert!(panel.contains(&from), "the card is in the right panel");
         drag_to_pane(from, 0, 0.9, cx);
 
         workspace.read_with(cx, |w, _| {
