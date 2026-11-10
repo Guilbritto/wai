@@ -468,6 +468,8 @@ impl Workspace {
             terminal_visible: self.terminal_visible,
             // ponytail: the sidebar does not resize yet; save its width once it does.
             sidebar_width: SIDEBAR_WIDTH,
+            approved: None,
+            models_seen: Default::default(),
         };
         // ponytail: a few hundred bytes on the UI thread; move to the background executor if
         // it ever shows in a frame.

@@ -1,7 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+mod approve;
+mod edit;
+pub use approve::{Approval, is_approved, seed_approved, unapproved};
+pub use edit::{Change, write_change};
 
 /// An agent wai knows how to start, with the hints Settings shows when it is not ready.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -435,6 +440,16 @@ pub struct AppState {
     pub open_sessions: Vec<OpenSession>,
     pub terminal_visible: bool,
     pub sidebar_width: f32,
+    /// Agent commands and shells the user approved; `None` for a state from before approvals.
+    pub approved: Option<BTreeSet<String>>,
+    /// Agent id -> the models its last session offered.
+    pub models_seen: BTreeMap<String, Vec<SeenModel>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SeenModel {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -452,6 +467,8 @@ impl Default for AppState {
             open_sessions: Vec::new(),
             terminal_visible: false,
             sidebar_width: 260.0,
+            approved: None,
+            models_seen: BTreeMap::new(),
         }
     }
 }
@@ -687,11 +704,22 @@ mod tests {
             }],
             terminal_visible: true,
             sidebar_width: 300.0,
+            approved: Some(["x".into()].into()),
+            models_seen: [(
+                "codex".to_string(),
+                vec![SeenModel {
+                    id: "gpt-5".into(),
+                    name: "GPT-5".into(),
+                }],
+            )]
+            .into(),
         };
         state.save(&path).unwrap();
         assert_eq!(AppState::load(&path), state);
         std::fs::write(&path, "{").unwrap();
         assert_eq!(AppState::load(&path), AppState::default());
+        std::fs::write(&path, r#"{"terminal_visible":true}"#).unwrap();
+        assert_eq!(AppState::load(&path).approved, None);
     }
 
     #[test]
