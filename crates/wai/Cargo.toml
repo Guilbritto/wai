@@ -74,4 +74,6 @@ binaries = [{ path = "wai", main = true }]
 before-packaging-command = "cargo build --release -p wai"
 # cargo-packager builds the .icns from the pngs; NSIS needs the .ico (assets/icon/generate.sh).
 icons = ["assets/icon/icon.png", "assets/icon/icon@2x.png"]
+# The display font's licence (R86); on macOS, `Contents/Resources/OFL.txt`.
+resources = ["assets/fonts/OFL.txt"]
 nsis = { installer-icon = "assets/icon/icon.ico" }

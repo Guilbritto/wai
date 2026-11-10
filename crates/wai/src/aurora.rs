@@ -1,10 +1,6 @@
 //! The "wai Aurora" look, after the Central de IA: its palette, its gpui-component theme (the dark
 //! one; light mode keeps Default Light) and the bundled display font.
 //! Palette: docs/superpowers/specs/2026-11-09-wai-visual-aurora-design.md.
-#![expect(
-    dead_code,
-    reason = "the views take the rest of the palette in the next tasks"
-)]
 
 use std::borrow::Cow;
 use std::rc::Rc;
@@ -43,16 +39,13 @@ fn white(alpha: f32) -> Hsla {
 }
 
 /// Window background.
+#[cfg(test)]
 pub(crate) fn noite() -> Hsla {
     rgb(0x070a18).into()
 }
 /// Popovers, dialogs, menus.
 pub(crate) fn noite_2() -> Hsla {
     rgb(0x0d1230).into()
-}
-/// Secondary surfaces.
-pub(crate) fn noite_3() -> Hsla {
-    rgb(0x141a3d).into()
 }
 /// Primary, focus ring, "working", send.
 pub(crate) fn boreal() -> Hsla {
@@ -66,15 +59,13 @@ pub(crate) fn magenta() -> Hsla {
     rgb(0xff6ec7).into()
 }
 /// Info, links.
+#[cfg(test)]
 pub(crate) fn ceu() -> Hsla {
     rgb(0x5bb8ff).into()
 }
 /// Agent header star, eyebrows, numbered badges.
 pub(crate) fn brasa() -> Hsla {
     rgb(0xff8f4f).into()
-}
-pub(crate) fn ok() -> Hsla {
-    rgb(0x46e39a).into()
 }
 /// Warning, "needs you".
 pub(crate) fn ambar() -> Hsla {

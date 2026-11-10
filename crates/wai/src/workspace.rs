@@ -1596,8 +1596,8 @@ fn on_card(card: Div, content: impl IntoElement) -> Div {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let top_bar = self.render_top_bar(cx);
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let top_bar = self.render_top_bar(window, cx);
         let sidebar = self.render_sidebar(cx);
         let theme = cx.theme();
         let split = self.panes.len() > 1;
@@ -1732,7 +1732,9 @@ pub(crate) mod tests {
 
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
+    use gpui_kit::{
+        AppContext as _, Entity, Pixels, Point, TestAppContext, VisualTestContext, point, px, size,
+    };
     use wai_agent::{AgentError, PromptBlock, SessionEvent, SessionSummary};
     use wai_settings::{AgentConfig, AppState, OpenSession, Settings, ThemeChoice};
 
@@ -2242,6 +2244,48 @@ pub(crate) mod tests {
         let status = cx.debug_bounds("topbar-status").expect("status drawn");
         let actions = cx.debug_bounds("topbar-actions").expect("actions drawn");
         assert!(status.right() < actions.left(), "{status:?} {actions:?}");
+    }
+
+    /// Presses at `from` and moves 1 px: on the macOS title bar, a window move. The test
+    /// window's `start_window_move` is `unimplemented!`, so a move panics.
+    fn press_and_nudge(from: Point<Pixels>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.drag(from, from + point(px(1.), px(0.)), cx));
+    }
+
+    /// The title bar moves the window on any press inside it; a top-bar action stops that.
+    #[gpui_kit::test]
+    fn top_bar_actions_do_not_move_the_window(cx: &mut TestAppContext) {
+        let (_, cx) = open(cx, Settings::default());
+        let palette = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find("topbar-palette").bounds().center()
+        });
+        press_and_nudge(palette, cx);
+    }
+
+    /// The control: the rest of the bar still moves the window.
+    #[cfg(target_os = "macos")]
+    #[gpui_kit::test]
+    #[should_panic(expected = "not implemented")]
+    fn top_bar_project_moves_the_window(cx: &mut TestAppContext) {
+        let (_, cx) = open(cx, Settings::default());
+        cx.update(|window, cx| window.render_frame(cx));
+        let project = cx.debug_bounds("topbar-project").expect("project drawn");
+        press_and_nudge(project.center(), cx);
+    }
+
+    /// In full screen the traffic lights leave, and so does the title bar's 80 pt gap.
+    #[cfg(target_os = "macos")]
+    #[gpui_kit::test]
+    fn top_bar_drops_the_gap_in_full_screen(cx: &mut TestAppContext) {
+        let (_, cx) = open(cx, Settings::default());
+        let left = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| window.render_frame(cx));
+            cx.debug_bounds("topbar").expect("top bar drawn").left()
+        };
+        assert_eq!(left(cx), px(80.));
+        cx.update(|window, _| window.toggle_fullscreen());
+        assert_eq!(left(cx), px(12.));
     }
 
     #[gpui_kit::test]

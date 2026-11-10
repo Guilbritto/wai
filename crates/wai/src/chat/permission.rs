@@ -87,10 +87,7 @@ impl DiffView {
                 v_flex()
                     .p_2()
                     .rounded(px(12.))
-                    .bg(match theme.is_dark() {
-                        true => rgb(0x0a0e24).into(),
-                        false => theme.muted,
-                    })
+                    .bg(theme.muted)
                     .overflow_hidden()
                     .font_family(theme.mono_font_family.clone())
                     .text_size(theme.mono_font_size)
@@ -144,7 +141,8 @@ pub(super) fn frame(
                 ]),
             aurora::brasa(),
         ),
-        false => (frame.border_color(theme.warning), theme.warning),
+        // Warning (yellow-500) text reads ~1.9:1 on white.
+        false => (frame.border_color(theme.warning), theme.muted_foreground),
     };
     let heading = v_flex()
         .gap_1()

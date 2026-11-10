@@ -143,12 +143,17 @@ impl Workspace {
                 SharedString::from(title),
             )
         });
+        let ring = theme.ring;
         let tabs = built_in
             .into_iter()
             .chain(extension)
             .map(|(tab, id, label)| {
                 aurora::tab(self.sidebar_tab == tab, cx)
                     .id(id)
+                    .role(Role::Tab)
+                    .aria_label(label.clone())
+                    .aria_selected(self.sidebar_tab == tab)
+                    .focus_visible(move |el| el.border_color(ring))
                     // Focusable, and Enter or Space clicks it.
                     .tab_index(0)
                     .h(px(26.))

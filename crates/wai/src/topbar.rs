@@ -37,7 +37,11 @@ pub(crate) fn status_label(working: usize, needs_you: usize) -> String {
 }
 
 impl Workspace {
-    pub(crate) fn render_top_bar(&self, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    pub(crate) fn render_top_bar(
+        &self,
+        window: &Window,
+        cx: &mut Context<Workspace>,
+    ) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let dark = theme.is_dark();
         let (working, needs_you) = (self.sessions.iter()).fold((0, 0), |(w, n), session| {
@@ -50,7 +54,8 @@ impl Workspace {
         let (on, off, warn) = if dark {
             (aurora::boreal(), aurora::nevoa_2(), aurora::ambar())
         } else {
-            (theme.cyan, theme.muted_foreground, theme.warning)
+            // Light's warning (yellow-500) reads ~1.5:1 on the pill; the text colour reads.
+            (theme.cyan, theme.muted_foreground, theme.foreground)
         };
         let dot = div()
             .flex_none()
@@ -105,6 +110,7 @@ impl Workspace {
             .small()
             .icon(IconName::LayoutDashboard)
             .tooltip("Extensions")
+            .accessibility_label("Extensions")
             .selected(self.sidebar_tab == SidebarTab::Extensions)
             .on_click(cx.listener(|this, _, window, cx| {
                 this.show_extensions(window, cx);
@@ -114,6 +120,7 @@ impl Workspace {
             .small()
             .icon(IconName::Menu)
             .tooltip("Run a command…")
+            .accessibility_label("Run a command…")
             .on_click(
                 cx.listener(|this, _, window, cx| this.open_palette(&OpenPalette, window, cx)),
             );
@@ -123,6 +130,7 @@ impl Workspace {
                 .small()
                 .icon(IconName::SquareTerminal)
                 .tooltip("Toggle terminal")
+                .accessibility_label("Toggle terminal")
                 .selected(self.terminal_visible)
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.toggle_terminal(&ToggleTerminal, window, cx)
@@ -137,6 +145,9 @@ impl Workspace {
             .on_click(cx.listener(|this, _, window, cx| this.new_session(&NewSession, window, cx)));
         let right = h_flex()
             .debug_selector(|| "topbar-actions".into())
+            // The title bar moves the window on a press anywhere in it, then a 1 px move, and
+            // zooms on a double click; neither may start on a button.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .flex_none()
             .gap_1()
             .children(self.templates_menu(cx))
@@ -160,6 +171,8 @@ impl Workspace {
             // Transparent over the aurora; light mode keeps the title bar's own colours.
             TitleBar::new()
                 .when(dark, |el| el.bg(transparent_black()))
+                // In full screen the traffic lights leave, but the title bar keeps their 80 pt.
+                .when(window.is_fullscreen(), |el| el.pl_0())
                 .child(bar)
                 .into_any_element()
         } else {
@@ -183,6 +196,7 @@ impl Workspace {
             .small()
             .icon(IconName::FileText)
             .tooltip("New from template")
+            .accessibility_label("New from template")
             .dropdown_menu(move |menu, _, _| {
                 names.iter().enumerate().fold(menu, |menu, (ix, name)| {
                     let workspace = workspace.clone();

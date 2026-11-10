@@ -21,7 +21,7 @@ This guide describes wai 0.1.0. On Windows, read **ctrl** where it says **⌘**,
 
 There are four ways to start a session:
 - **⌘N** or the **+** button starts one with the default agent (`default_agent`, `claude` unless you change it).
-- **New from template** (▾) starts one from a template.
+- **New from template** (the file icon in the top bar) starts one from a template.
 - The palette's **New session with &lt;agent&gt;** picks the agent.
 - A **History** row reopens a past session.
 
@@ -48,7 +48,7 @@ Each open session has a coloured dot in the sidebar:
 
 | Dot | Meaning |
 |---|---|
-| Blue | `Working` |
+| Teal in Aurora, cyan in light mode | `Working` |
 | Amber, labelled `Needs you` | A permission card or a question waits for you |
 | Grey | Idle |
 | Red | `Error`: the agent exited or failed |
