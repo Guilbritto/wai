@@ -175,6 +175,8 @@ pub struct Workspace {
     /// project cannot be watched.
     watch: Option<(ProjectWatcher, Task<()>)>,
     settings_watch: Option<(ProjectWatcher, Task<()>)>,
+    /// The load notices already shown: a reload pushes only new ones.
+    load_notices: Vec<String>,
     #[cfg(test)]
     pub(crate) applied: usize,
     next_ticket: u64,
@@ -319,6 +321,7 @@ impl Workspace {
             ext_host,
             watch: None,
             settings_watch: None,
+            load_notices: Vec::new(),
             #[cfg(test)]
             applied: 0,
             next_ticket: 0,
@@ -440,14 +443,24 @@ impl Workspace {
         self.registry.update(cx, |r, _| r.set_configs(configs));
         let chosen =
             new.default_agent.is_some() && new.default_agent != self.settings.default_agent;
+        if new.terminal.shell != self.settings.terminal.shell
+            && let Some(terminal) = &self.terminal
+        {
+            let shell = new.terminal.shell.clone();
+            terminal.update(cx, |t, _| t.shell = shell);
+        }
         self.settings = new;
         if chosen {
             self.start_agent(cx);
             self.refresh_history(cx);
         }
-        for notice in notices {
-            window.push_notification(Notification::warning(notice).autohide(false), cx);
+        for notice in &notices {
+            if !self.load_notices.contains(notice) {
+                let shown = Notification::warning(notice.clone()).autohide(false);
+                window.push_notification(shown, cx);
+            }
         }
+        self.load_notices = notices;
         self.sync_settings_view(cx);
         cx.notify();
     }
@@ -2137,7 +2150,7 @@ pub(crate) mod tests {
 
     use super::{Pane, Workspace};
     use crate::agents::{AgentStatus, RegistryEvent};
-    use crate::app;
+    use crate::app::{self, ToggleTerminal};
     use crate::chat::{ChatEvent, ChatItem, NoticeKind, TurnState};
     use crate::notify;
     use crate::sidebar::canonical;
@@ -3381,13 +3394,18 @@ pub(crate) mod tests {
 
     #[gpui_kit::test]
     fn broken_edit_keeps_the_last_good_settings(cx: &mut TestAppContext) {
-        let (workspace, cx, dir) = live(cx, Settings::default(), None);
+        let light = Settings {
+            theme: ThemeChoice::Light,
+            ..Default::default()
+        };
+        let (workspace, cx, dir) = live(cx, light, Some("theme = \"light\"\n"));
         std::fs::write(dir.path().join("settings.toml"), "theme = [").unwrap();
         wait_until(cx, "the error", |cx| {
             workspace.read_with(cx, |w, _| w.settings_error.is_some())
         });
         cx.run_until_parked();
-        workspace.read_with(cx, |w, _| assert_eq!(w.settings.theme, ThemeChoice::Dark));
+        workspace.read_with(cx, |w, _| assert_eq!(w.settings.theme, ThemeChoice::Light));
+        assert!(cx.update(|_, cx| !cx.theme().is_dark()));
         assert!(cx.update(|window, cx| !window.notifications(cx).is_empty()));
     }
 
@@ -3474,5 +3492,47 @@ pub(crate) mod tests {
             assert!(matches!(status, Some(AgentStatus::Ready(_))), "{status:?}");
             assert_eq!(w.registry.read(cx).command("fake"), Some("/bin/true"));
         });
+    }
+
+    #[gpui_kit::test]
+    fn shell_change_reaches_the_next_spawn_only(cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = live(cx, Settings::default(), None);
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.toggle_terminal(&ToggleTerminal, window, cx));
+        });
+        let shell = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, cx| {
+                w.terminal.as_ref().unwrap().read(cx).shell.clone()
+            })
+        };
+        let before = shell(cx);
+        std::fs::write(
+            dir.path().join("settings.toml"),
+            "[terminal]\nshell = \"/bin/other\"\n",
+        )
+        .unwrap();
+        wait_until(cx, "the new shell", |cx| {
+            shell(cx).as_deref() == Some("/bin/other")
+        });
+        assert_ne!(before.as_deref(), Some("/bin/other"));
+    }
+
+    #[gpui_kit::test]
+    fn reloads_push_a_load_notice_once(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = live(cx, Settings::default(), None);
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".wai")).unwrap();
+        std::fs::write(
+            project.path().join(".wai/settings.toml"),
+            "[agents.x]\ncommand = \"x\"\n",
+        )
+        .unwrap();
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.set_project(project.path().to_path_buf(), window, cx);
+                w.reload_settings(window, cx);
+            })
+        });
+        assert_eq!(cx.update(|window, cx| window.notifications(cx).len()), 1);
     }
 }
