@@ -4,7 +4,7 @@ This guide describes wai 0.1.0. On Windows, read **ctrl** where it says **⌘**,
 
 ## The window
 
-- **Top bar.** It shows the project's name and how many agents are working or need you, and holds the buttons **New from template** (shown when templates exist), **Extensions**, the command palette, the terminal and **New session**. On macOS it is the title bar: drag it to move the window, double-click it to zoom.
+- **Top bar.** It shows the project's name and how many agents are working or need you, and holds the buttons **New from template** (shown when templates exist), **Extensions**, the command palette, **Settings** (⚙), the terminal and **New session**. On macOS it is the title bar: drag it to move the window, double-click it to zoom.
 - **Sidebar.** The tabs **Sessions**, **Files**, **Search** and **Agents**, plus one tab per extension panel.
 - **Panes.** Up to four sit side by side. Each holds a chat session, the editor (one editor pane at most) or Settings (one at most). **⌘⌥→** moves the focus to the next pane.
 - **Terminal.** It sits at the bottom, toggled with **ctrl-`**.
@@ -190,7 +190,7 @@ Clicking a card shows that session in the focused pane.
 
 | Group | Rows |
 |---|---|
-| wai | New session, Toggle terminal, Open folder…, Search, Files, Agents, Extensions |
+| wai | New session, Toggle terminal, Open folder…, Search, Files, Agents, Extensions, Settings |
 | Templates | Every template |
 | Commands | The enabled extensions' commands |
 | Agents | `New session with <agent>`, one per agent |
@@ -205,6 +205,7 @@ Clicking a card shows that session in the focused pane.
 | Save | ⌘S | ctrl-s | window |
 | Open folder | ⌘O | ctrl-o (ctrl-shift-o in the terminal) | window |
 | Command palette | ⌘⇧P | ctrl-shift-p | window |
+| Settings | ⌘, | ctrl-, | window |
 | Focus next pane | ⌘⌥→ | ctrl-alt-→ | window |
 | Show or hide the terminal | ctrl-` | ctrl-` | window |
 | Stop the turn | Esc | Esc | chat session |
@@ -251,7 +252,7 @@ Only your own settings file can turn it on; a project's `.wai/settings.toml` can
 | Templates | `<config>/templates.toml` | `<config>\templates.toml` |
 
 - **When they apply:** at once, with no restart. wai watches your `settings.toml` and the project's `.wai/settings.toml`, and changes made in the [Settings screen](#the-settings-screen) are written to your file.
-- **A broken settings file:** wai does not stop. It keeps the last good settings (the defaults at launch, so no agent), shows a notice with the error, and the Settings screen turns read-only with `settings.toml has an error: …` and **Open**. Fix the file and it applies again. The screen never writes over a broken file.
+- **A broken settings file:** wai does not stop. It keeps the last good settings (the defaults at launch, so no agent), and the Settings screen turns read-only with `settings.toml has an error: …` and **Open**. An edit that breaks the file while wai runs also shows a notice with the error. Fix the file and it applies again. The screen never writes over a broken file.
 - **Unknown keys** are ignored.
 
 ### The Settings screen
@@ -264,7 +265,7 @@ Only your own settings file can turn it on; a project's `.wai/settings.toml` can
 **Sections**
 - **AI** (the first run opens it): a radio list with one row per agent: the four built-ins, those you added and those from extensions. Each row has:
   - its status: `CLI not found`, `Not checked`, `Starting…`, `Ready`, `Not signed in · run <hint>` or `Failed: <last error line>`;
-  - **Test**, which starts the agent once to learn its status and models. It stops the agent again unless it is the default or has open sessions;
+  - **Test**, which starts the agent to learn its status and models. The agent keeps running afterwards;
   - **Default model**, a picker once wai has seen the agent's models; before that it says `Start a session or press Test to see the models.`;
   - **Advanced**, folded, which shows the **Command**. Changing it asks `Run a new command?` (see [Agent commands](#agent-commands)).
 - **Appearance:** **Theme**, Dark or Light, applies at once.
@@ -331,7 +332,7 @@ Only Claude's command was checked end to end. Codex's command downloads and star
 
 **Approving a command.** wai runs an agent command or a terminal shell only after you approve that exact value. The built-in commands are approved from the start. When a value is new or changed (by editing `settings.toml`, by a reload, or on the screen), wai asks `Run a new command?` with the old and new value and **Allow** or **Don't allow**.
 - **Allow** adds it to the approved list in wai's own `state.json` and uses it.
-- **Don't allow** keeps the last approved value for this run (an agent never approved stays unavailable) and writes nothing to `settings.toml`. wai asks again the next time it would run that value.
+- **Don't allow** keeps the last approved value for this run (an agent never approved stays unavailable) and writes nothing to `settings.toml`: a value edited on the screen is asked about before it is written, so the file stays as it was. wai asks again when you pick that agent as the default, when the value changes, and at the next launch; other reloads leave it alone.
 
 Enabled extensions can add agents. They appear as `<extension-id>/<name>`.
 
