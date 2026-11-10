@@ -156,6 +156,11 @@ impl SettingsView {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub(crate) fn section(&self) -> Section {
+        self.section
+    }
+
     pub(crate) fn notice(&self) -> Option<SharedString> {
         self.data.notice.clone()
     }

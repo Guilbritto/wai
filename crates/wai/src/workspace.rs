@@ -44,6 +44,7 @@ use crate::sidebar::{SidebarTab, canonical};
 use crate::terminal_view::{self, TerminalView};
 use crate::topbar::BRAND;
 
+pub(crate) const CHOOSE_AI: &str = "Choose an AI to start a session.";
 const SIDEBAR_WIDTH: f32 = 260.;
 const TERMINAL_HEIGHT: f32 = 260.;
 pub const MAX_PANES: usize = 4;
@@ -1072,7 +1073,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(agent) = self.default_agent() else {
-            return;
+            return self.open_settings(Section::Ai, Some(CHOOSE_AI), window, cx);
         };
         self.start_session(agent, None, false, None, window, cx)
     }
@@ -1095,7 +1096,7 @@ impl Workspace {
             return;
         };
         let Some(agent) = template.agent.clone().or_else(|| self.default_agent()) else {
-            return;
+            return self.open_settings(Section::Ai, Some(CHOOSE_AI), window, cx);
         };
         if !self.registry.read(cx).knows(&agent) {
             let pane = self.session_pane();
@@ -1123,7 +1124,7 @@ impl Workspace {
         match command.prompt {
             Some(prompt) => {
                 let Some(agent) = self.default_agent() else {
-                    return;
+                    return self.open_settings(Section::Ai, Some(CHOOSE_AI), window, cx);
                 };
                 self.start_session(agent, Some(prompt), false, None, window, cx)
             }
@@ -2247,6 +2248,62 @@ pub(crate) mod tests {
         workspace.update(cx, |w, cx| w.start_agent(cx));
         wait_until(cx, "the history", |cx| history_rows(workspace, cx) == n);
         workspace.read_with(cx, |w, _| w.history_rows().into_iter().cloned().collect())
+    }
+
+    #[gpui_kit::test]
+    fn no_default_opens_settings_on_new_session(cx: &mut TestAppContext) {
+        let settings = Settings {
+            default_agent: None,
+            ..fake_settings("")
+        };
+        let (workspace, cx) = open(cx, settings);
+        cx.simulate_keystrokes("secondary-n");
+        workspace.read_with(cx, |w, cx| {
+            let Pane::Settings(view) = &w.panes[0] else {
+                panic!("expected the Settings pane");
+            };
+            assert_eq!(view.read(cx).section(), crate::settings_view::Section::Ai);
+            assert_eq!(view.read(cx).notice().as_deref(), Some(super::CHOOSE_AI));
+            assert_eq!(
+                w.panes
+                    .iter()
+                    .filter(|p| matches!(p, Pane::Settings(_)))
+                    .count(),
+                1
+            );
+            assert!(w.registry.read(cx).status("fake").is_none());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn choosing_a_default_starts_it(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let fake = Settings {
+            default_agent: None,
+            ..fake_settings("")
+        };
+        let file = format!(
+            "[agents.fake]\ncommand = \'\'\'{}\'\'\'\n",
+            fake.agents["fake"].command
+        );
+        let (workspace, cx, _dir) = live(cx, fake, Some(&file));
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.change_setting(Change::DefaultAgent("fake".into()), window, cx)
+            })
+        });
+        wait_until(cx, "the agent", |cx| {
+            workspace.read_with(cx, |w, cx| {
+                matches!(
+                    w.registry.read(cx).status("fake"),
+                    Some(AgentStatus::Ready(_))
+                )
+            })
+        });
+        cx.simulate_keystrokes("secondary-n");
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.sessions.len() == 1)
+        });
     }
 
     #[gpui_kit::test]

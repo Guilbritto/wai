@@ -256,7 +256,18 @@ impl Workspace {
                     }),
             )
             // Only the visible rows render: an agent can hold thousands of sessions.
-            .when(open, |el| {
+            .when(open && self.default_agent().is_none(), |el| {
+                el.child(
+                    div()
+                        .id("history-hint")
+                        .p_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Choose an AI in Settings to see its history.")
+                        .test_support(),
+                )
+            })
+            .when(open && self.default_agent().is_some(), |el| {
                 el.child(
                     uniform_list(
                         "history",
@@ -483,5 +494,20 @@ mod tests {
         assert!(shown("all-projects".into(), cx));
         let header = cx.update(|window, _| window.find("history-toggle"));
         assert_eq!(header.expanded(), Some(true));
+    }
+
+    #[gpui_kit::test]
+    fn history_hint_without_default(cx: &mut TestAppContext) {
+        let settings = Settings {
+            default_agent: None,
+            ..Default::default()
+        };
+        let (_workspace, cx) = open(cx, settings);
+        cx.update(|window, cx| window.click("history-toggle", cx));
+        let hint = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.try_find("history-hint")
+        });
+        assert!(hint.is_some());
     }
 }

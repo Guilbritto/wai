@@ -9,7 +9,7 @@ use gpui_kit::*;
 use wai_settings::{Settings, Template, ThemeChoice};
 
 use crate::settings_view::Section;
-use crate::workspace::Workspace;
+use crate::workspace::{CHOOSE_AI, Workspace};
 
 actions!(
     wai,
@@ -165,6 +165,8 @@ pub fn run(
                     w.suggest_extensions(window, cx);
                     if w.settings_error.is_some() {
                         w.open_settings(Section::Ai, None, window, cx);
+                    } else if w.default_agent().is_none() {
+                        w.open_settings(Section::Ai, Some(CHOOSE_AI), window, cx);
                     }
                 });
                 for notice in notices {
