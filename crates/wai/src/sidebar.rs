@@ -4,18 +4,20 @@
 use std::ops::Range;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::SessionSummary;
 use wai_ext::panel::clamp;
+use wai_settings::SessionGroup;
 pub use wai_settings::canonical;
 
 use crate::agents::AgentStatus;
 use crate::aurora;
 use crate::chat::{ChatSession, TurnState};
-use crate::workspace::{Dragged, DraggedSession, MAX_PANES, Workspace};
+use crate::workspace::{Dragged, DraggedSession, MAX_PANES, Renamed, Workspace};
 
 pub(crate) const ROW_HEIGHT: f32 = 28.;
 
@@ -207,13 +209,250 @@ impl Workspace {
             .child(v_flex().flex_1().min_h_0().child(content))
     }
 
+    /// The open sessions outside any group, then each group under its header. A row keeps its
+    /// index in `sessions`, whichever group draws it.
     fn render_sessions(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
-        v_flex().size_full().child(heading("Open", cx)).children(
-            self.sessions
-                .iter()
-                .enumerate()
-                .map(|(ix, session)| self.open_row(ix, session, cx)),
-        )
+        let rows = |group: Option<usize>| {
+            let sessions = self.sessions.iter().enumerate();
+            sessions
+                .filter(move |(_, session)| self.group_of(&session.read(cx).id) == group)
+                .map(|(ix, session)| self.open_row(ix, session, cx).into_any_element())
+        };
+        let groups = self.groups.iter().enumerate().flat_map(|(ix, group)| {
+            let header = self.group_header(ix, group, rows(Some(ix)).count(), cx);
+            let rows = rows(Some(ix)).filter(|_| !group.collapsed);
+            std::iter::once(header.into_any_element()).chain(rows)
+        });
+        v_flex()
+            .size_full()
+            .child(
+                // A row dropped here leaves its group.
+                v_flex()
+                    .id("open-ungrouped")
+                    // The lit border's room, so nothing moves when it lights.
+                    .border_1()
+                    .border_color(gpui_kit::transparent_black())
+                    .drag_over(light)
+                    .on_drop(cx.listener(|this, dragged: &DraggedSession, _, cx| {
+                        this.group_session(dragged, None, cx)
+                    }))
+                    .child(
+                        h_flex()
+                            .pr_1()
+                            .justify_between()
+                            .child(heading("Open", cx))
+                            .child(
+                                Button::new("new-group")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Plus)
+                                    .tooltip("New group")
+                                    .accessibility_label("New group")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.new_group(window, cx)
+                                    })),
+                            ),
+                    )
+                    .children(rows(None))
+                    .test_support(),
+            )
+            .children(groups)
+    }
+
+    /// The group holding session `id`.
+    fn group_of(&self, id: &str) -> Option<usize> {
+        let holds = |group: &SessionGroup| group.sessions.iter().any(|s| s == id);
+        self.groups.iter().position(holds)
+    }
+
+    /// Takes session `id` out of its group.
+    pub(crate) fn ungroup(&mut self, id: &str) {
+        for group in &mut self.groups {
+            group.sessions.retain(|s| s != id);
+        }
+    }
+
+    /// An open session dropped on group `to`'s header joins it, leaving the one it was in;
+    /// dropped on the ungrouped rows (`None`), it only leaves.
+    fn group_session(
+        &mut self,
+        dragged: &DraggedSession,
+        to: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let Dragged::Open(session) = &dragged.source else {
+            return;
+        };
+        let id = session.read(cx).id.clone();
+        self.ungroup(&id);
+        if let Some(group) = to.and_then(|ix| self.groups.get_mut(ix)) {
+            group.sessions.push(id);
+        }
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    /// A group named "New group" at the end of the list, its name being typed.
+    fn new_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.groups.push(SessionGroup {
+            name: "New group".into(),
+            collapsed: false,
+            sessions: Vec::new(),
+        });
+        self.save_state(cx);
+        self.rename(Renamed::Group(self.groups.len() - 1), window, cx);
+    }
+
+    /// Turns a session's title or a group's name into an input holding it: Enter, or the focus
+    /// leaving, renames; Esc does not.
+    fn rename(&mut self, what: Renamed, window: &mut Window, cx: &mut Context<Self>) {
+        let value = match &what {
+            Renamed::Session(session) => {
+                let title = session.read(cx).model.shown_title();
+                title.unwrap_or_default().to_string()
+            }
+            Renamed::Group(ix) => self.groups[*ix].name.clone(),
+        };
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+        let events = cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
+            InputEvent::PressEnter { .. } => this.end_rename(true, window, cx),
+            InputEvent::Blur => this.commit_rename(cx),
+            _ => {}
+        });
+        self.renaming = Some((what, input, events));
+        cx.notify();
+    }
+
+    /// Enter (`commit`) or Esc in the input: the focus goes back to the focused pane.
+    fn end_rename(&mut self, commit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        match commit {
+            true => self.commit_rename(cx),
+            false => self.renaming = None,
+        }
+        self.focus_pane(self.focused_pane, window, cx);
+    }
+
+    /// A session takes the typed name; an empty one, or the agent's title unchanged, gives it
+    /// the agent's title back. A group keeps its name when the typed one is empty.
+    fn commit_rename(&mut self, cx: &mut Context<Self>) {
+        let Some((what, input, _)) = self.renaming.take() else {
+            return;
+        };
+        let name = input.read(cx).value().trim().to_string();
+        match what {
+            Renamed::Session(session) => session.update(cx, |s, cx| {
+                let new = !name.is_empty() && s.model.title.as_ref() != Some(&name);
+                s.rename(new.then_some(name), cx)
+            }),
+            Renamed::Group(ix) => {
+                if let Some(group) = self.groups.get_mut(ix).filter(|_| !name.is_empty()) {
+                    group.name = name;
+                }
+            }
+        }
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    /// The input of `what` while it is renamed.
+    fn renaming(&self, what: &Renamed) -> Option<Input> {
+        let (renamed, input, _) = self.renaming.as_ref()?;
+        (renamed == what).then(|| Input::new(input).xsmall().flex_1())
+    }
+
+    /// A group's header: its chevron, name and session count, then rename and delete. An open
+    /// session dropped on it joins the group.
+    fn group_header(
+        &self,
+        ix: usize,
+        group: &SessionGroup,
+        count: usize,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let chevron = match group.collapsed {
+            true => IconName::ChevronRight,
+            false => IconName::ChevronDown,
+        };
+        let input = self.renaming(&Renamed::Group(ix));
+        let name = group.name.clone();
+        row(false, cx)
+            .pl_1()
+            .child(
+                Button::new(("group-toggle", ix))
+                    .ghost()
+                    .xsmall()
+                    .icon(chevron)
+                    .accessibility_label(match group.collapsed {
+                        true => "Expand group",
+                        false => "Collapse group",
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.groups[ix].collapsed = !this.groups[ix].collapsed;
+                        this.save_state(cx);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                h_flex()
+                    .id(("group", ix))
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .gap_2()
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(gpui_kit::transparent_black())
+                    .aria_label(format!("{name}, {count}"))
+                    .drag_over(light)
+                    .on_drop(cx.listener(move |this, dragged: &DraggedSession, _, cx| {
+                        this.group_session(dragged, Some(ix), cx)
+                    }))
+                    .on_action(cx.listener(|this, _: &Escape, window, cx| {
+                        this.end_rename(false, window, cx)
+                    }))
+                    .map(|el| match input {
+                        Some(input) => el.child(input),
+                        None => el
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(name),
+                            )
+                            .child(div().text_xs().child(count.to_string()))
+                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                if event.click_count() > 1 {
+                                    this.rename(Renamed::Group(ix), window, cx)
+                                }
+                            })),
+                    })
+                    // Registers the id so tests can find it and drop on it.
+                    .test_support(),
+            )
+            .child(rename_button(("group-rename", ix)).on_click(
+                cx.listener(move |this, _, window, cx| this.rename(Renamed::Group(ix), window, cx)),
+            ))
+            .child(
+                Button::new(("group-delete", ix))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .tooltip("Delete group")
+                    .accessibility_label("Delete group")
+                    // Its sessions stay open, in no group.
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.renaming = None;
+                        this.groups.remove(ix);
+                        this.save_state(cx);
+                        cx.notify();
+                    })),
+            )
     }
 
     fn render_history(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
@@ -275,16 +514,18 @@ impl Workspace {
         let s = session.read(cx);
         let dot = status_color(s.status(), theme);
         let label = matches!(s.status(), TurnState::NeedsYou).then_some("Needs you");
-        let title = s.model.title.clone().unwrap_or("New session".into());
+        let title = s.model.shown_title().unwrap_or("New session").to_string();
         let active = self.panes[self.focused_pane].session() == Some(session);
         let (open, side, end) = (session.clone(), session.clone(), session.clone());
+        let rename = session.clone();
+        let input = self.renaming(&Renamed::Session(session.clone()));
         let dragged = DraggedSession {
             title: title.clone().into(),
             source: Dragged::Open(session.clone()),
         };
         let (agent, id, cwd) = (s.agent.clone(), s.id.clone(), s.cwd.clone());
         let forkable = self.can_fork(&agent, cx);
-        let fork_title = s.model.title.clone();
+        let fork_title = s.model.shown_title().map(str::to_string);
         row(active, cx)
             .child(
                 h_flex()
@@ -303,15 +544,32 @@ impl Workspace {
                                 BoxShadow::new(px(0.), px(0.), dot.alpha(0.7)).blur_radius(px(4.)),
                             ]),
                     )
-                    .child(div().flex_1().min_w_0().truncate().child(title))
-                    .children(label.map(|l| div().text_xs().text_color(dot).child(l)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.show(open.clone(), false, window, cx)
+                    .aria_label(title.clone())
+                    .on_action(cx.listener(|this, _: &Escape, window, cx| {
+                        this.end_rename(false, window, cx)
                     }))
-                    .on_drag(dragged, DraggedSession::preview)
+                    .map(|el| match input {
+                        Some(input) => el.child(input),
+                        // A second click renames.
+                        None => el
+                            .child(div().flex_1().min_w_0().truncate().child(title))
+                            .children(label.map(|l| div().text_xs().text_color(dot).child(l)))
+                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                match event.click_count() {
+                                    1 => this.show(open.clone(), false, window, cx),
+                                    _ => this.rename(Renamed::Session(open.clone()), window, cx),
+                                }
+                            }))
+                            .on_drag(dragged, DraggedSession::preview),
+                    })
                     // Registers the id so tests can find and drag it.
                     .test_support(),
             )
+            .child(rename_button(("open-rename", ix)).on_click(cx.listener(
+                move |this, _, window, cx| {
+                    this.rename(Renamed::Session(rename.clone()), window, cx)
+                },
+            )))
             .when(self.panes.len() < MAX_PANES, |el| {
                 el.child(side_button(("open-side", ix)).on_click(cx.listener(
                     move |this, _, window, cx| this.show(side.clone(), true, window, cx),
@@ -424,6 +682,30 @@ pub(crate) fn row(active: bool, cx: &App) -> Div {
         .text_sm()
 }
 
+/// A group's header, or the rows outside any group, while an open session is dragged over it:
+/// lit as a pane is.
+fn light(
+    style: StyleRefinement,
+    dragged: &DraggedSession,
+    _: &mut Window,
+    cx: &mut App,
+) -> StyleRefinement {
+    match dragged.source {
+        Dragged::Open(_) => aurora::drop_target(style, cx),
+        _ => style,
+    }
+}
+
+// ponytail: the bundled icons have no pencil; a pencil needs wai's own asset source.
+fn rename_button(id: impl Into<ElementId>) -> Button {
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .icon(IconName::ALargeSmall)
+        .tooltip("Rename")
+        .accessibility_label("Rename")
+}
+
 fn side_button(id: impl Into<ElementId>) -> Button {
     Button::new(id)
         .ghost()
@@ -443,13 +725,22 @@ fn fork_button(id: impl Into<ElementId>) -> Button {
 #[cfg(test)]
 mod tests {
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{ElementId, TestAppContext, VisualTestContext};
-    use wai_settings::Settings;
+    use gpui_kit::{
+        ElementId, Entity, Modifiers, MouseButton, Pixels, Point, TestAppContext,
+        VisualTestContext, point, px,
+    };
+    use wai_agent::SessionEvent;
+    use wai_settings::{AppState, SessionGroup, Settings};
 
     use gpui_kit::component::ActiveTheme as _;
 
     use super::{TurnState, status_color};
-    use crate::workspace::tests::{history_settings, load_history, open};
+    use crate::agents::RegistryEvent;
+    use crate::workspace::Workspace;
+    use crate::workspace::tests::{
+        click, fake_settings, history_settings, launch, load_history, open, open_at, question,
+        wait_until,
+    };
     use crate::{app, aurora};
 
     #[gpui_kit::test]
@@ -498,5 +789,270 @@ mod tests {
             window.try_find("history-hint")
         });
         assert!(hint.is_some());
+    }
+
+    /// A workspace with `n` sessions open, resumed from the history: "Session 0", "Session 1"…
+    fn with_sessions(
+        n: usize,
+        cx: &mut TestAppContext,
+    ) -> (Entity<Workspace>, &mut VisualTestContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(n));
+        for row in load_history(&workspace, n, cx) {
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&row, false, window, cx)));
+        }
+        cx.run_until_parked();
+        (workspace, cx)
+    }
+
+    fn press(id: impl Into<ElementId>, cx: &mut VisualTestContext) {
+        let id = id.into();
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.click(id, cx);
+        });
+        cx.run_until_parked();
+    }
+
+    /// Types `text` over what the focused input holds (a rename selects it all), then `key`.
+    fn type_name(text: &str, key: &str, cx: &mut VisualTestContext) {
+        cx.simulate_keystrokes("backspace");
+        cx.simulate_input(text);
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+    }
+
+    fn label(id: impl Into<ElementId>, cx: &mut VisualTestContext) -> Option<String> {
+        let id = id.into();
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            let found = window.try_find(id)?;
+            Some(found.label().unwrap_or_default().to_string())
+        })
+    }
+
+    fn center_of(id: impl Into<ElementId>, cx: &mut VisualTestContext) -> Point<Pixels> {
+        let id = id.into();
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find(id).bounds().center()
+        })
+    }
+
+    /// Drags the element `from` onto the element `to`, each event in its own update.
+    fn drag(from: impl Into<ElementId>, to: impl Into<ElementId>, cx: &mut VisualTestContext) {
+        let (from, to) = (center_of(from, cx), center_of(to, cx));
+        let none = Modifiers::none();
+        cx.simulate_mouse_move(from, None, none);
+        cx.simulate_mouse_down(from, MouseButton::Left, none);
+        for at in [from + point(px(8.), px(0.)), to] {
+            cx.simulate_mouse_move(at, MouseButton::Left, none);
+            cx.update(|window, cx| window.render_frame(cx));
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, none);
+        cx.run_until_parked();
+    }
+
+    fn open_row(ix: usize) -> ElementId {
+        ("open", ix).into()
+    }
+
+    fn group(ix: usize) -> ElementId {
+        ("group", ix).into()
+    }
+
+    /// Each group's name, collapsed state and sessions.
+    fn groups(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<SessionGroup> {
+        workspace.read_with(cx, |w, _| w.groups.clone())
+    }
+
+    fn named(name: &str, sessions: &[&str]) -> SessionGroup {
+        SessionGroup {
+            name: name.into(),
+            collapsed: false,
+            sessions: sessions.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// The user's name for a session shows on its Open row, its pane's header and its Agents
+    /// card; Esc keeps the old one, an empty one gives the agent's title back, and a title the
+    /// agent sends does not replace it.
+    #[gpui_kit::test]
+    fn rename_session(cx: &mut TestAppContext) {
+        let (workspace, cx) = with_sessions(1, cx);
+        let session = workspace.read_with(cx, |w, _| w.sessions[0].clone());
+        let name = |cx: &mut VisualTestContext| session.read_with(cx, |s, _| s.model.name.clone());
+        assert_eq!(label(open_row(0), cx).as_deref(), Some("Session 0"));
+
+        press(("open-rename", 0usize), cx);
+        type_name("Mine", "enter", cx);
+        assert_eq!(name(cx).as_deref(), Some("Mine"));
+        assert_eq!(label(open_row(0), cx).as_deref(), Some("Mine"));
+        let header = cx.update(|window, cx| {
+            window.render_frame(cx);
+            let pane = window.within(ElementId::View(session.entity_id()));
+            pane.find("session-title").label().map(str::to_string)
+        });
+        assert_eq!(header.as_deref(), Some("Mine"));
+        press("tab-agents", cx);
+        let card = label(("agent-card", 0usize), cx).unwrap();
+        assert!(card.starts_with("Mine"), "{card:?}");
+        press("tab-sessions", cx);
+
+        // The agent's title is kept, under the user's name.
+        let registry = workspace.read_with(cx, |w, _| w.registry.clone());
+        let (agent, id) = session.read_with(cx, |s, _| (s.agent.clone(), s.id.clone()));
+        registry.update(cx, |_, cx| {
+            cx.emit(RegistryEvent::Session {
+                agent,
+                session: id,
+                event: SessionEvent::Title("From the agent".into()),
+            })
+        });
+        cx.run_until_parked();
+        let title = session.read_with(cx, |s, _| s.model.title.clone());
+        assert_eq!(title.as_deref(), Some("From the agent"));
+        assert_eq!(label(open_row(0), cx).as_deref(), Some("Mine"));
+
+        // A double click renames too; Esc leaves the name as it was.
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.double_click(open_row(0), cx);
+        });
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |w, _| w.renaming.is_some()));
+        type_name("Other", "escape", cx);
+        assert!(workspace.read_with(cx, |w, _| w.renaming.is_none()));
+        assert_eq!(name(cx).as_deref(), Some("Mine"));
+
+        press(("open-rename", 0usize), cx);
+        type_name("", "enter", cx);
+        assert_eq!(name(cx), None);
+        assert_eq!(label(open_row(0), cx).as_deref(), Some("From the agent"));
+    }
+
+    /// New group, rename, collapse and delete; deleting a group keeps its sessions open.
+    #[gpui_kit::test]
+    fn groups_are_created_renamed_collapsed_and_deleted(cx: &mut TestAppContext) {
+        let (workspace, cx) = with_sessions(2, cx);
+        let ids: Vec<String> = workspace.read_with(cx, |w, cx| {
+            w.sessions.iter().map(|s| s.read(cx).id.clone()).collect()
+        });
+
+        press("new-group", cx);
+        assert_eq!(groups(&workspace, cx), [named("New group", &[])]);
+        assert!(workspace.read_with(cx, |w, _| w.renaming.is_some()));
+        type_name("Review", "enter", cx);
+        assert_eq!(groups(&workspace, cx), [named("Review", &[])]);
+        assert_eq!(label(group(0), cx).as_deref(), Some("Review, 0"));
+
+        // Renamed from its button and by a double click; an empty name keeps the old one.
+        press(("group-rename", 0usize), cx);
+        type_name("Later", "enter", cx);
+        assert_eq!(groups(&workspace, cx), [named("Later", &[])]);
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.double_click(group(0), cx);
+        });
+        cx.run_until_parked();
+        type_name("", "enter", cx);
+        press(("group-rename", 0usize), cx);
+        type_name("Gone", "escape", cx);
+        assert_eq!(groups(&workspace, cx), [named("Later", &[])]);
+
+        // A row keeps its index in a group; collapsed, the group hides it.
+        drag(open_row(1), group(0), cx);
+        assert_eq!(groups(&workspace, cx), [named("Later", &[&ids[1]])]);
+        assert_eq!(label(group(0), cx).as_deref(), Some("Later, 1"));
+        assert!(label(open_row(1), cx).is_some());
+        press(("group-toggle", 0usize), cx);
+        assert!(groups(&workspace, cx)[0].collapsed);
+        assert!(label(open_row(1), cx).is_none());
+        assert!(label(open_row(0), cx).is_some(), "ungrouped rows stay");
+        press(("group-toggle", 0usize), cx);
+        assert!(label(open_row(1), cx).is_some());
+
+        press(("group-delete", 0usize), cx);
+        assert_eq!(groups(&workspace, cx), []);
+        assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 2);
+        assert!(label(open_row(1), cx).is_some());
+    }
+
+    /// A row dropped on a group's header joins that group only; dropped on the ungrouped rows,
+    /// it leaves. Ending a session takes it out of its group, which stays.
+    #[gpui_kit::test]
+    fn rows_drag_into_and_out_of_groups(cx: &mut TestAppContext) {
+        let (workspace, cx) = with_sessions(2, cx);
+        let ids: Vec<String> = workspace.read_with(cx, |w, cx| {
+            w.sessions.iter().map(|s| s.read(cx).id.clone()).collect()
+        });
+        for name in ["A", "B"] {
+            press("new-group", cx);
+            type_name(name, "enter", cx);
+        }
+
+        drag(open_row(0), group(0), cx);
+        assert_eq!(
+            groups(&workspace, cx),
+            [named("A", &[&ids[0]]), named("B", &[])]
+        );
+        drag(open_row(0), group(1), cx);
+        assert_eq!(
+            groups(&workspace, cx),
+            [named("A", &[]), named("B", &[&ids[0]])]
+        );
+        drag(open_row(1), group(1), cx);
+        drag(open_row(0), "open-ungrouped", cx);
+        assert_eq!(
+            groups(&workspace, cx),
+            [named("A", &[]), named("B", &[&ids[1]])]
+        );
+
+        press(("open-close", 1usize), cx);
+        assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 1);
+        assert_eq!(groups(&workspace, cx), [named("A", &[]), named("B", &[])]);
+    }
+
+    /// A session's name and the groups are kept in `state.json` and come back on a relaunch.
+    #[gpui_kit::test]
+    fn names_and_groups_survive_a_relaunch(cx: &mut TestAppContext, relaunch: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(path.clone()));
+        launch(&workspace, cx);
+        while question(&workspace, cx).is_some() {
+            click("approval-allow", cx);
+        }
+        cx.simulate_keystrokes("secondary-n");
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
+        });
+
+        press(("open-rename", 0usize), cx);
+        type_name("Mine", "enter", cx);
+        press("new-group", cx);
+        type_name("Review", "enter", cx);
+        drag(open_row(0), group(0), cx);
+        press(("group-toggle", 0usize), cx);
+
+        let review = SessionGroup {
+            collapsed: true,
+            ..named("Review", &["fake-1"])
+        };
+        let state = AppState::load(&path);
+        assert_eq!(state.open_sessions[0].name.as_deref(), Some("Mine"));
+        assert_eq!(state.groups, std::slice::from_ref(&review));
+
+        relaunch.executor().allow_parking();
+        let (workspace, cx) = open_at(relaunch, fake_settings(""), Some(path.clone()));
+        launch(&workspace, cx);
+        assert_eq!(groups(&workspace, cx), std::slice::from_ref(&review));
+        let name = workspace.read_with(cx, |w, cx| w.sessions[0].read(cx).model.name.clone());
+        assert_eq!(name.as_deref(), Some("Mine"));
+        assert_eq!(label(group(0), cx).as_deref(), Some("Review, 1"));
+        let state = AppState::load(&path);
+        assert_eq!(state.open_sessions[0].name.as_deref(), Some("Mine"));
+        assert_eq!(state.groups, std::slice::from_ref(&review));
     }
 }

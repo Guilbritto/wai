@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
+use gpui_kit::component::input::InputState;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, Theme, h_flex, h_resizable, resizable_panel, v_flex,
@@ -19,6 +20,7 @@ use wai_agent::{
 };
 use wai_ext::{CommandSpec, ExtEvent, ExtId, HostEvent, Reply};
 use wai_project::{FsChange, ProjectWatcher};
+use wai_settings::SessionGroup;
 use wai_settings::{
     AgentConfig, AppState, Approval, Change, OpenSession, SeenModel, Settings, Template,
     agent_label, config_dir, is_approved, load_templates, seed_approved, shown, unapproved,
@@ -126,6 +128,13 @@ impl Render for Preview {
     }
 }
 
+/// What the Open list renames in place.
+#[derive(Clone, PartialEq)]
+pub(crate) enum Renamed {
+    Session(Entity<ChatSession>),
+    Group(usize),
+}
+
 /// What waits on the question about unsaved edits.
 #[derive(Clone)]
 pub(crate) enum Leave {
@@ -205,6 +214,10 @@ pub struct Workspace {
     state_path: Option<PathBuf>,
     /// Agent id -> the models its last Test saw; kept in `state.json`.
     pub models_seen: BTreeMap<String, Vec<SeenModel>>,
+    /// The Open list's groups, each with its sessions' ids; kept in `state.json`.
+    pub groups: Vec<SessionGroup>,
+    /// The Open row or group being renamed, with its input.
+    pub(crate) renaming: Option<(Renamed, Entity<InputState>, Subscription)>,
     /// The agent commands and shells the user allowed; kept in `state.json`, never in
     /// `settings.toml`.
     pub approved: BTreeSet<String>,
@@ -371,6 +384,8 @@ impl Workspace {
             early: HashMap::new(),
             ext_sessions: HashMap::new(),
             models_seen: state.flatten().map(|s| s.models_seen).unwrap_or_default(),
+            groups: Vec::new(),
+            renaming: None,
             approved,
             shell,
             asking: Vec::new(),
@@ -720,6 +735,7 @@ impl Workspace {
             return;
         };
         let state = AppState::load(path);
+        self.groups = state.groups;
         let mut panes: [Option<Entity<ChatSession>>; MAX_PANES] = Default::default();
         for saved in state.open_sessions {
             let (agent, id, cwd) = (&saved.agent, &saved.session_id, &saved.cwd);
@@ -731,7 +747,10 @@ impl Workspace {
             if let Some(slot @ None) = panes.get_mut(saved.pane) {
                 *slot = Some(session.clone());
             }
-            session.update(cx, |s, cx| s.load(true, window, cx));
+            session.update(cx, |s, cx| {
+                s.model.name = saved.name;
+                s.load(true, window, cx)
+            });
         }
         let panes: Vec<_> = panes.into_iter().flatten().map(Pane::Session).collect();
         if !panes.is_empty() {
@@ -795,6 +814,7 @@ impl Workspace {
                 session_id: s.id.clone(),
                 cwd: s.cwd.clone(),
                 pane: pane(session).unwrap_or(MAX_PANES),
+                name: s.model.name.clone(),
             }
         });
         let unrestored = self.unrestored.iter().cloned();
@@ -808,6 +828,7 @@ impl Workspace {
             agents_collapsed: self.agents_collapsed,
             approved: Some(self.approved.clone()),
             models_seen: self.models_seen.clone(),
+            groups: self.groups.clone(),
         };
         // ponytail: a few hundred bytes on the UI thread; move to the background executor if
         // it ever shows in a frame.
@@ -950,6 +971,7 @@ impl Workspace {
                 // Its pane keeps the notice; the next launch does not try again.
                 ChatEvent::RestoreFailed => {
                     this.sessions.retain(|s| s != session);
+                    this.ungroup(&session.read(cx).id);
                     this.sync_agents(cx);
                     this.save_state(cx);
                 }
@@ -1001,7 +1023,7 @@ impl Workspace {
     }
 
     /// Focuses pane `ix`: its prompt box, or the workspace when it has no session.
-    fn focus_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.focused_pane = ix;
         match &self.panes[ix] {
             Pane::Session(session) => session.update(cx, |s, cx| s.focus(window, cx)),
@@ -1408,7 +1430,7 @@ impl Workspace {
                     json!({
                         "agent": s.agent,
                         "session": s.id,
-                        "title": s.model.title,
+                        "title": s.model.shown_title(),
                         "state": state_name(s.status()),
                     })
                 });
@@ -1664,6 +1686,7 @@ impl Workspace {
     ) {
         session.read(cx).stop();
         self.sessions.retain(|s| s != session);
+        self.ungroup(&session.read(cx).id);
         self.sync_agents(cx);
         match self.panes.iter().position(|p| p.session() == Some(session)) {
             Some(ix) => self.drop_pane(ix, window, cx),
@@ -3871,7 +3894,7 @@ pub(crate) mod tests {
     }
 
     /// What `app::run` does once the window is open, but the watcher.
-    fn launch(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+    pub(crate) fn launch(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| {
                 let pending = unapproved(&Settings::default(), &w.settings, &w.approved);
@@ -3888,6 +3911,7 @@ pub(crate) mod tests {
             session_id: id.into(),
             cwd: std::env::temp_dir(),
             pane,
+            name: None,
         }
     }
 
@@ -3927,6 +3951,7 @@ pub(crate) mod tests {
                 session_id: "fake-1".into(),
                 cwd: canonical(&std::env::temp_dir()),
                 pane: 0,
+                name: None,
             }]
         );
         assert_eq!(state.project, Some(canonical(&std::env::temp_dir())));

@@ -27,7 +27,7 @@ pub fn should_notify(
 /// Title and body: the pending permission's title or question, or the start of the last agent
 /// message.
 pub fn message(kind: NotifyKind, model: &ChatModel) -> (String, String) {
-    let title = model.title.as_deref().unwrap_or("New session");
+    let title = model.shown_title().unwrap_or("New session");
     let mut items = model.items.iter().rev();
     match kind {
         NotifyKind::NeedsYou => {

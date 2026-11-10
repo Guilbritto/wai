@@ -199,6 +199,8 @@ pub struct ChatModel {
     pub items: Vec<ChatItem>,
     pub state: TurnState,
     pub title: Option<String>,
+    /// The user's name for the session, kept in wai: shown in place of the agent's `title`.
+    pub name: Option<String>,
     pub usage: Option<UsageInfo>,
     /// The agent's latest plan: a new one replaces it whole.
     pub plan: Vec<PlanEntry>,
@@ -216,6 +218,7 @@ impl Default for ChatModel {
             items: Vec::new(),
             state: TurnState::Idle,
             title: None,
+            name: None,
             usage: None,
             plan: Vec::new(),
             done: false,
@@ -240,6 +243,11 @@ fn split_content(content: &[ToolContent]) -> (String, Vec<FileDiff>) {
 }
 
 impl ChatModel {
+    /// What the session is called: the user's name for it, else the agent's title.
+    pub fn shown_title(&self) -> Option<&str> {
+        self.name.as_deref().or(self.title.as_deref())
+    }
+
     fn push(&mut self, item: ChatItem) -> usize {
         self.items.push(item);
         self.items.len() - 1
@@ -657,6 +665,18 @@ mod tests {
         assert!(!m.done);
         m.on_turn_ended(&StopReason::Cancelled);
         assert!(!m.done);
+    }
+
+    #[test]
+    fn user_name_wins_over_agent_title() {
+        let mut m = ChatModel::default();
+        assert_eq!(m.shown_title(), None);
+        m.apply(&SessionEvent::Title("Agent".into()));
+        assert_eq!(m.shown_title(), Some("Agent"));
+        m.name = Some("Mine".into());
+        m.apply(&SessionEvent::Title("Agent 2".into()));
+        assert_eq!(m.shown_title(), Some("Mine"));
+        assert_eq!(m.title.as_deref(), Some("Agent 2"));
     }
 
     #[test]
