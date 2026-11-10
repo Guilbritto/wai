@@ -45,8 +45,8 @@ pub enum ChatEvent {
         tool: String,
         text: String,
     },
-    /// R87: the header's ×, to close the pane showing this session.
-    Close,
+    /// R87: the header's ×, to take the pane showing this session off the screen.
+    Hide,
 }
 
 /// A message's markdown and how many bytes of it the view already handed over.
@@ -1254,8 +1254,8 @@ mod tests {
         });
     }
 
-    /// R12: ⌘W on a session waiting for a permission closes it and its pane, and the agent's
-    /// turn ends instead of waiting for an answer nobody can give.
+    /// R12: the Open row's × on a session waiting for a permission ends it and drops its pane,
+    /// and the agent's turn ends instead of waiting for an answer nobody can give.
     #[gpui_kit::test]
     fn close_drops_session_and_pane_and_ends_its_turn(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
@@ -1290,7 +1290,10 @@ mod tests {
         wait_until(cx, "the permission card", |cx| {
             state(&side, cx) == TurnState::NeedsYou
         });
-        cx.simulate_keystrokes("secondary-w");
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.click(("open-close", 1usize), cx);
+        });
 
         workspace.read_with(cx, |w, _| {
             assert!(

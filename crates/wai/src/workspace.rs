@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use gpui_kit::component::WindowExt as _;
@@ -29,7 +29,7 @@ use wai_terminal::DEFAULT_BG;
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::agents_view::{AgentsView, ShowSession};
 use crate::app::{
-    CloseSession, FocusNextPane, NewSession, OpenFolder, OpenSettings, Quit, Save, ToggleTerminal,
+    ClosePane, FocusNextPane, NewSession, OpenFolder, OpenSettings, Quit, Save, ToggleTerminal,
     theme_mode,
 };
 use crate::aurora;
@@ -49,7 +49,7 @@ use crate::terminal_view::{self, TerminalView};
 use crate::topbar::BRAND;
 
 pub(crate) const CHOOSE_AI: &str = "Choose an AI to start a session.";
-const SIDEBAR_WIDTH: f32 = 260.;
+const SIDEBAR_WIDTH: f32 = 280.;
 const TERMINAL_HEIGHT: f32 = 260.;
 pub const MAX_PANES: usize = 4;
 /// Events kept per session id that is not open yet (see `Workspace::early`).
@@ -166,8 +166,6 @@ pub struct Workspace {
     /// The default agent's sessions, each with its cwd canonicalized for the project filter.
     pub history: Vec<(PathBuf, SessionSummary)>,
     pub all_projects: bool,
-    /// R88: the sidebar's History is open. Kept in memory only: each launch starts collapsed.
-    pub(crate) history_open: bool,
     pub(crate) history_task: Option<Task<()>>,
     pub sidebar_tab: SidebarTab,
     pub files: Entity<FileTree>,
@@ -190,8 +188,6 @@ pub struct Workspace {
     #[cfg(test)]
     pub(crate) applied: usize,
     next_ticket: u64,
-    /// Tickets whose "Preparing…" pane ⌘W closed: their session never opens.
-    cancelled: HashSet<u64>,
     /// `new_session` calls in flight, per agent.
     starting: HashMap<String, usize>,
     /// Events for session ids not open yet, per agent: an agent may describe a session (title,
@@ -352,7 +348,6 @@ impl Workspace {
             terminal: None,
             history: Vec::new(),
             all_projects: false,
-            history_open: false,
             history_task: None,
             sidebar_tab: SidebarTab::default(),
             files,
@@ -366,7 +361,6 @@ impl Workspace {
             #[cfg(test)]
             applied: 0,
             next_ticket: 0,
-            cancelled: HashSet::new(),
             starting: HashMap::new(),
             early: HashMap::new(),
             ext_sessions: HashMap::new(),
@@ -956,7 +950,7 @@ impl Workspace {
                     let session = session.read(cx).id.clone();
                     return this.open_output(&session, tool, text.clone(), window, cx);
                 }
-                ChatEvent::Close => {
+                ChatEvent::Hide => {
                     let pane = this.panes.iter().position(|p| p.session() == Some(session));
                     if let Some(ix) = pane {
                         this.close_pane(ix, window, cx);
@@ -1489,15 +1483,13 @@ impl Workspace {
             let started = handle.new_session(cwd.clone(), mcp).await;
             this.update_in(cx, |this, window, cx| {
                 let early = this.landed(&agent, started.as_ref().ok().map(|s| s.id.as_str()));
-                // Replaced meanwhile (a history row shown there), the placeholder is gone: the
-                // session still opens. Closed (⌘W), it does not.
-                let cancelled = this.cancelled.remove(&ticket);
+                // Replaced or closed meanwhile, the placeholder is gone: the session still opens,
+                // in the sidebar.
                 let pane = this
                     .panes
                     .iter()
                     .position(|p| matches!(p, Pane::Preparing { ticket: t, .. } if *t == ticket));
                 let shown = match started {
-                    Ok(_) if cancelled => return refuse(reply, "The session was closed"),
                     Ok(started) => {
                         // A session that starts proves the agent works (signed in again, say).
                         this.registry.update(cx, |r, cx| r.mark_ready(&agent, cx));
@@ -1616,28 +1608,39 @@ impl Workspace {
     }
 
     /// ⌘W: `close_pane` on the focused pane.
-    fn close_session(&mut self, _: &CloseSession, window: &mut Window, cx: &mut Context<Self>) {
+    fn close_focused_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
         self.close_pane(self.focused_pane, window, cx);
     }
 
-    /// Drops pane `ix`'s session from the panes and the open list (the agent keeps it in its
-    /// history). With more than one pane, the pane goes too. A "Preparing…" pane's session never
-    /// opens. R20: in an editor pane it closes the active tab instead (the pane goes with the last
-    /// one). R87: a pane's × runs it on its own pane, focused or not.
+    /// Takes pane `ix` off the screen. A session in it stays open, in the sidebar; a "Preparing…"
+    /// one still opens there; a Settings pane just goes. R20: in an editor pane it closes the
+    /// active tab instead (the pane goes with the last one). R87: a pane's × runs it on its own
+    /// pane, focused or not.
     fn close_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        match &self.panes[ix] {
-            Pane::Editor(pane) => return pane.update(cx, |p, cx| p.close(p.active, window, cx)),
-            Pane::Session(session) => {
-                session.read(cx).stop();
-                self.sessions.retain(|s| s != session);
-                self.sync_agents(cx);
-            }
-            Pane::Preparing { ticket, .. } => {
-                self.cancelled.insert(*ticket);
-            }
-            Pane::Empty(_) | Pane::Settings(_) => {}
+        if let Pane::Editor(pane) = &self.panes[ix] {
+            return pane.update(cx, |p, cx| p.close(p.active, window, cx));
         }
         self.drop_pane(ix, window, cx);
+    }
+
+    /// An Open row's ×: drops `session` from the open list and from its pane, if one shows it
+    /// (the agent keeps it in its history).
+    pub(crate) fn end_session(
+        &mut self,
+        session: &Entity<ChatSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        session.read(cx).stop();
+        self.sessions.retain(|s| s != session);
+        self.sync_agents(cx);
+        match self.panes.iter().position(|p| p.session() == Some(session)) {
+            Some(ix) => self.drop_pane(ix, window, cx),
+            None => {
+                self.save_state(cx);
+                cx.notify();
+            }
+        }
     }
 
     /// A `new_session` of `agent` returned (`id`: the session it started): the events that came
@@ -2453,7 +2456,7 @@ impl Render for Workspace {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::new_session))
             .on_action(cx.listener(Self::toggle_terminal))
-            .on_action(cx.listener(Self::close_session))
+            .on_action(cx.listener(Self::close_focused_pane))
             .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::focus_next_pane))
             .on_action(cx.listener(Self::open_folder))
@@ -2790,9 +2793,10 @@ pub(crate) mod tests {
         assert_eq!(title.as_deref(), Some("title 999"));
     }
 
-    /// ⌘W on a "Preparing…" pane cancels the session: it never opens, even once it lands.
+    /// ⌘W on a "Preparing…" pane only takes it off the screen: the session still opens, in the
+    /// sidebar.
     #[gpui_kit::test]
-    fn close_while_preparing_cancels_the_session(cx: &mut TestAppContext) {
+    fn hide_while_preparing_still_opens_the_session(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, fake_settings(""));
 
@@ -2808,15 +2812,15 @@ pub(crate) mod tests {
         });
 
         workspace.read_with(cx, |w, _| {
-            assert_eq!(w.sessions.len(), 1, "only the second session opens");
-            assert_eq!(w.panes[0].session(), w.sessions.first());
+            assert_eq!(w.sessions.len(), 2, "both sessions open");
+            assert_eq!(w.panes[0].session(), w.sessions.last());
         });
     }
 
-    /// R87: a session pane's × does what ⌘W does there, focused or not: the session leaves the
-    /// open list and its pane goes.
+    /// R87: a session pane's × does what ⌘W does there, focused or not: its pane goes and the
+    /// session stays open in the sidebar, running.
     #[gpui_kit::test]
-    fn close_button_closes_its_own_pane(cx: &mut TestAppContext) {
+    fn close_button_hides_its_own_pane(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, history_settings(2));
         let rows = load_history(&workspace, 2, cx);
@@ -2836,22 +2840,94 @@ pub(crate) mod tests {
         workspace.read_with(cx, |w, _| {
             assert_eq!(w.panes.len(), 1);
             assert_eq!(w.panes[0].session(), Some(&first));
-            assert!(!w.sessions.contains(&second), "it left the open list");
+            assert!(w.sessions.contains(&second), "it stays in the open list");
         });
 
         // A click's mouse-down already focuses its pane; the × pressed from the keyboard does
-        // not, and still closes its own pane.
+        // not, and still hides its own pane.
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| {
-                w.resume(&rows[1], true, window, cx);
+                w.show(second.clone(), true, window, cx);
                 w.focus_pane(0, window, cx);
             })
         });
-        let third = pane_session(&workspace, 1, cx);
-        third.update(cx, |_, cx| cx.emit(ChatEvent::Close));
+        second.update(cx, |_, cx| cx.emit(ChatEvent::Hide));
         workspace.read_with(cx, |w, _| {
             assert_eq!(w.panes.len(), 1);
             assert_eq!(w.panes[0].session(), Some(&first));
+        });
+
+        // ⌘W on the last pane leaves it empty; both sessions stay open.
+        cx.simulate_keystrokes("secondary-w");
+        workspace.read_with(cx, |w, _| {
+            assert!(matches!(w.panes[..], [Pane::Empty(None)]));
+            assert_eq!(w.sessions, [first.clone(), second.clone()]);
+        });
+    }
+
+    /// An Open row's × ends that session: it leaves the open list and the pane showing it goes.
+    #[gpui_kit::test]
+    fn open_row_close_ends_the_session(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(3));
+        let rows = load_history(&workspace, 3, cx);
+        for (row, side) in rows.iter().zip([false, true, false]) {
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(row, side, window, cx)));
+        }
+        let close = |session: &Entity<crate::chat::ChatSession>, cx: &mut VisualTestContext| {
+            let ix = workspace.read_with(cx, |w, _| w.sessions.iter().position(|s| s == session));
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.click(("open-close", ix.unwrap()), cx);
+            });
+        };
+        let (left, right) = (
+            pane_session(&workspace, 0, cx),
+            pane_session(&workspace, 1, cx),
+        );
+        // One row replaced another in its pane: that one is open, in no pane.
+        let hidden = workspace.read_with(cx, |w, _| {
+            w.sessions
+                .iter()
+                .find(|s| ![&left, &right].contains(s))
+                .cloned()
+        });
+
+        close(&hidden.expect("a session in no pane"), cx);
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.sessions, [left.clone(), right.clone()]);
+            assert_eq!(w.panes.len(), 2, "no pane showed it");
+        });
+
+        close(&right, cx);
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.sessions, std::slice::from_ref(&left));
+            assert_eq!(w.panes.len(), 1);
+            assert_eq!(w.panes[0].session(), Some(&left));
+        });
+    }
+
+    /// ⌘W on the Settings pane removes it (it is not a session, nothing keeps running); the open
+    /// session keeps its pane and stays in the Open list.
+    #[gpui_kit::test]
+    fn close_settings_keeps_the_sessions(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(1));
+        let rows = load_history(&workspace, 1, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
+        let session = pane_session(&workspace, 0, cx);
+
+        cx.simulate_keystrokes("secondary-,");
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 2);
+            assert!(matches!(w.panes[w.focused_pane], Pane::Settings(_)));
+        });
+        cx.simulate_keystrokes("secondary-w");
+        workspace.read_with(cx, |w, _| {
+            assert!(!w.panes.iter().any(|p| matches!(p, Pane::Settings(_))));
+            assert_eq!(w.panes.len(), 1);
+            assert_eq!(w.panes[0].session(), Some(&session));
+            assert_eq!(w.sessions, std::slice::from_ref(&session));
         });
     }
 
@@ -2974,7 +3050,7 @@ pub(crate) mod tests {
         let rows = load_history(&workspace, 2, cx);
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
         let first = pane_session(&workspace, 0, cx);
-        cx.update(|window, cx| window.click("history-toggle", cx));
+        cx.update(|window, cx| window.click("tab-history", cx));
 
         let from = center_of(("history", 1usize), cx);
         drag_to_pane(from, 0, 0.5, cx);
@@ -3178,7 +3254,7 @@ pub(crate) mod tests {
         });
         assert_eq!(history_rows(&workspace, cx), 0);
 
-        cx.update(|window, cx| window.click("history-toggle", cx));
+        cx.update(|window, cx| window.click("tab-history", cx));
         cx.update(|window, cx| window.click("all-projects", cx));
         assert_eq!(history_rows(&workspace, cx), 25);
     }
@@ -3234,7 +3310,7 @@ pub(crate) mod tests {
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
 
         // The sidebar offers Fork on the history rows and on the open session.
-        cx.update(|window, cx| window.click("history-toggle", cx));
+        cx.update(|window, cx| window.click("tab-history", cx));
         cx.update(|window, cx| window.click(("history-fork", 1usize), cx));
         wait_until(cx, "the fork", |cx| {
             workspace.read_with(cx, |w, _| w.panes.len() == 2)
@@ -3263,6 +3339,7 @@ pub(crate) mod tests {
         });
 
         // An open session forks too, by its row.
+        cx.update(|window, cx| window.click("tab-sessions", cx));
         cx.update(|window, cx| window.click(("open-fork", 0usize), cx));
         wait_until(cx, "the second fork", |cx| {
             workspace.read_with(cx, |w, _| w.panes.len() == 3)
@@ -3284,7 +3361,7 @@ pub(crate) mod tests {
         let (workspace, cx) = open(cx, fake_settings(&flags));
         load_history(&workspace, 2, cx);
 
-        cx.update(|window, cx| window.click("history-toggle", cx));
+        cx.update(|window, cx| window.click("tab-history", cx));
         cx.update(|window, cx| window.click(("history-fork", 0usize), cx));
         wait_until(cx, "the notice", |cx| {
             cx.update(|window, cx| !window.notifications(cx).is_empty())
@@ -3360,7 +3437,7 @@ pub(crate) mod tests {
             let terminal = cx.debug_bounds("terminal").expect("terminal drawn");
             assert_eq!(
                 (sidebar.size.width, terminal.size.height),
-                (px(260.), px(260.)),
+                (px(super::SIDEBAR_WIDTH), px(260.)),
                 "window {window:?}"
             );
         }

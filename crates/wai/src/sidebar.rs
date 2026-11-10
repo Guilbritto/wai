@@ -5,7 +5,7 @@ use std::ops::Range;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::SessionSummary;
@@ -23,6 +23,7 @@ pub(crate) const ROW_HEIGHT: f32 = 28.;
 pub enum SidebarTab {
     #[default]
     Sessions,
+    History,
     Files,
     Search,
     Agents,
@@ -36,8 +37,9 @@ pub enum SidebarTab {
 const PANEL_TITLE_CHARS: usize = 24;
 
 /// Each tab with its element id and label.
-const TABS: [(SidebarTab, &str, &str); 4] = [
+const TABS: [(SidebarTab, &str, &str); 5] = [
     (SidebarTab::Sessions, "tab-sessions", "Sessions"),
+    (SidebarTab::History, "tab-history", "History"),
     (SidebarTab::Files, "tab-files", "Files"),
     (SidebarTab::Search, "tab-search", "Search"),
     (SidebarTab::Agents, "tab-agents", "Agents"),
@@ -124,6 +126,7 @@ impl Workspace {
                 .children(shown.map(|p| p.view.clone()))
                 .into_any_element(),
             SidebarTab::Sessions => self.render_sessions(cx).into_any_element(),
+            SidebarTab::History => self.render_history(cx).into_any_element(),
             SidebarTab::Files => self.files.clone().into_any_element(),
             SidebarTab::Search => self.search.clone().into_any_element(),
             SidebarTab::Agents => div()
@@ -146,7 +149,7 @@ impl Workspace {
             )
         });
         let ring = theme.ring;
-        let tabs = built_in
+        let mut tabs: Vec<_> = built_in
             .into_iter()
             .chain(extension)
             .map(|(tab, id, label)| {
@@ -159,9 +162,9 @@ impl Workspace {
                     // Focusable, and Enter or Space clicks it.
                     .tab_index(0)
                     .h(px(26.))
-                    .px(px(5.))
+                    .px(px(3.))
                     .rounded(px(9.))
-                    .text_size(px(12.5))
+                    .text_size(px(12.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(label)
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -174,7 +177,11 @@ impl Workspace {
                     }))
                     // Registers the id so tests can find and click it (a Button does it itself).
                     .test_support()
-            });
+            })
+            .collect();
+        // The built-in tabs share one line: wrapped one by one, the last breaks off even where
+        // it fits. The extensions' tabs wrap after them.
+        let panel_tabs = tabs.split_off(TABS.len());
         v_flex()
             .size_full()
             .py_2()
@@ -194,69 +201,43 @@ impl Workspace {
                             el.border_color(theme.border)
                         }
                     })
-                    .children(tabs),
+                    .child(h_flex().gap(px(2.)).children(tabs))
+                    .children(panel_tabs),
             )
             .child(v_flex().flex_1().min_h_0().child(content))
     }
 
     fn render_sessions(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        v_flex().size_full().child(heading("Open", cx)).children(
+            self.sessions
+                .iter()
+                .enumerate()
+                .map(|(ix, session)| self.open_row(ix, session, cx)),
+        )
+    }
+
+    fn render_history(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let rows = self.history_rows().len();
-        let open = self.history_open;
-        let ring = cx.theme().ring;
-        let chevron = match open {
-            true => IconName::ChevronDown,
-            false => IconName::ChevronRight,
-        };
-        let label = format!("History · {rows}");
-        // R88: the whole row, the switch aside, opens and closes the History.
-        let toggle = aurora::tab(false, cx)
-            .id("history-toggle")
-            .flex_1()
-            .rounded(px(8.))
-            .role(Role::Button)
-            .aria_label(label.clone())
-            .aria_expanded(open)
-            .focus_visible(move |el| el.border_color(ring))
-            // Focusable, and Enter or Space clicks it.
-            .tab_index(0)
-            .child(heading(&label, cx).pt_1().pr_1())
-            .child(Icon::new(chevron).xsmall())
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.history_open = !this.history_open;
-                cx.notify();
-            }))
-            // Registers the id so tests can find and click it.
-            .test_support();
         v_flex()
             .size_full()
-            .child(heading("Open", cx))
-            .children(
-                self.sessions
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, session)| self.open_row(ix, session, cx)),
-            )
             .child(
                 h_flex()
-                    .mt_2()
                     .pr_3()
-                    .gap_2()
-                    .child(toggle)
-                    .when(open, |el| {
-                        el.child(
-                            Switch::new("all-projects")
-                                .xsmall()
-                                .label("All projects")
-                                .checked(self.all_projects)
-                                .on_click(cx.listener(|this, all: &bool, _, cx| {
-                                    this.all_projects = *all;
-                                    cx.notify();
-                                })),
-                        )
-                    }),
+                    .justify_between()
+                    .child(heading(&format!("History · {rows}"), cx))
+                    .child(
+                        Switch::new("all-projects")
+                            .xsmall()
+                            .label("All projects")
+                            .checked(self.all_projects)
+                            .on_click(cx.listener(|this, all: &bool, _, cx| {
+                                this.all_projects = *all;
+                                cx.notify();
+                            })),
+                    ),
             )
             // Only the visible rows render: an agent can hold thousands of sessions.
-            .when(open && self.default_agent().is_none(), |el| {
+            .when(self.default_agent().is_none(), |el| {
                 el.child(
                     div()
                         .id("history-hint")
@@ -267,7 +248,7 @@ impl Workspace {
                         .test_support(),
                 )
             })
-            .when(open && self.default_agent().is_some(), |el| {
+            .when(self.default_agent().is_some(), |el| {
                 el.child(
                     uniform_list(
                         "history",
@@ -296,7 +277,7 @@ impl Workspace {
         let label = matches!(s.status(), TurnState::NeedsYou).then_some("Needs you");
         let title = s.model.title.clone().unwrap_or("New session".into());
         let active = self.panes[self.focused_pane].session() == Some(session);
-        let (open, side) = (session.clone(), session.clone());
+        let (open, side, end) = (session.clone(), session.clone(), session.clone());
         let dragged = DraggedSession {
             title: title.clone().into(),
             source: Dragged::Open(session.clone()),
@@ -350,6 +331,17 @@ impl Workspace {
                     },
                 )))
             })
+            .child(
+                Button::new(("open-close", ix))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .tooltip("End session")
+                    .accessibility_label("End session")
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.end_session(&end, window, cx)),
+                    ),
+            )
     }
 
     fn history_row(
@@ -469,10 +461,10 @@ mod tests {
         });
     }
 
-    /// R88: History starts collapsed, without its rows or the "All projects" switch; its header,
-    /// "HISTORY · N", opens it.
+    /// The History tab holds the history rows and the "All projects" switch; the Sessions tab
+    /// lists only the open sessions.
     #[gpui_kit::test]
-    fn history_starts_collapsed_and_toggles(cx: &mut TestAppContext) {
+    fn history_has_its_own_tab(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, history_settings(3));
         load_history(&workspace, 3, cx);
@@ -485,15 +477,12 @@ mod tests {
         let row = || ElementId::from(("history-side", 0usize));
         assert!(!shown(row(), cx), "no history rows");
         assert!(!shown("all-projects".into(), cx));
-        let header = cx.update(|window, _| window.find("history-toggle"));
-        assert_eq!(header.label(), Some("History · 3"));
-        assert_eq!(header.expanded(), Some(false));
+        let tab = cx.update(|window, _| window.find("tab-history"));
+        assert_eq!(tab.label(), Some("History"));
 
-        cx.update(|window, cx| window.click("history-toggle", cx));
+        cx.update(|window, cx| window.click("tab-history", cx));
         assert!(shown(row(), cx));
         assert!(shown("all-projects".into(), cx));
-        let header = cx.update(|window, _| window.find("history-toggle"));
-        assert_eq!(header.expanded(), Some(true));
     }
 
     #[gpui_kit::test]
@@ -503,7 +492,7 @@ mod tests {
             ..Default::default()
         };
         let (_workspace, cx) = open(cx, settings);
-        cx.update(|window, cx| window.click("history-toggle", cx));
+        cx.update(|window, cx| window.click("tab-history", cx));
         let hint = cx.update(|window, cx| {
             window.render_frame(cx);
             window.try_find("history-hint")
