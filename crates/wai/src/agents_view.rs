@@ -7,6 +7,7 @@ use gpui_kit::*;
 use wai_agent::PlanEntry;
 
 use crate::chat::{ChatSession, TurnState};
+use crate::workspace::{Dragged, DraggedSession};
 
 /// A card was clicked: show this session in the focused pane.
 pub struct ShowSession(pub Entity<ChatSession>);
@@ -75,7 +76,12 @@ impl AgentsView {
         cx.notify();
     }
 
-    fn card(&self, ix: usize, session: &Entity<ChatSession>, cx: &Context<Self>) -> Button {
+    fn card(
+        &self,
+        ix: usize,
+        session: &Entity<ChatSession>,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
         let s = session.read(cx);
         let m = &s.model;
@@ -84,6 +90,10 @@ impl AgentsView {
         let title = m.title.clone().unwrap_or("New session".into());
         let open = session.clone();
         let summary = summary(&title, label, &m.plan, m.current_tool());
+        let dragged = DraggedSession {
+            title: title.clone().into(),
+            source: Dragged::Open(session.clone()),
+        };
         // A `Button`, not a styled div: only components are reachable by element id in tests.
         let body = v_flex()
             .w_full()
@@ -126,7 +136,7 @@ impl AgentsView {
                     .child(div().flex_1().min_w_0().truncate().child(s.agent.clone()))
                     .children(m.usage.as_ref().map(|u| usage_text(u.used, u.size))),
             );
-        Button::new(("agent-card", ix))
+        let button = Button::new(("agent-card", ix))
             .accessibility_label(summary)
             .ghost()
             .w_full()
@@ -136,7 +146,14 @@ impl AgentsView {
             .border_color(theme.border)
             .text_sm()
             .child(body)
-            .on_click(cx.listener(move |_, _, _, cx| cx.emit(ShowSession(open.clone()))))
+            .on_click(cx.listener(move |_, _, _, cx| cx.emit(ShowSession(open.clone()))));
+        // The card drags its session onto a pane, as an Open row does (a `Button` cannot drag).
+        div()
+            .id(("agent-drag", ix))
+            .w_full()
+            .cursor_grab()
+            .child(button)
+            .on_drag(dragged, DraggedSession::preview)
     }
 }
 

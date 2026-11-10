@@ -2094,6 +2094,15 @@ impl Workspace {
         self.focus_pane(ix, window, cx);
     }
 
+    /// The top bar's Settings button: takes the Settings pane off the screen when there is one,
+    /// else opens it.
+    pub(crate) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match (self.panes.iter()).position(|p| matches!(p, Pane::Settings(_))) {
+            Some(ix) => self.close_pane(ix, window, cx),
+            None => self.open_settings(Section::Ai, None, window, cx),
+        }
+    }
+
     /// Writes `change` to the user's file; the watcher applies it. A command or shell not
     /// approved yet is asked about first, and written only on Allow.
     pub fn change_setting(&mut self, change: Change, window: &mut Window, cx: &mut Context<Self>) {
@@ -2955,6 +2964,21 @@ pub(crate) mod tests {
         });
     }
 
+    /// The top bar's Settings button is a toggle: a second click takes the pane off the screen.
+    #[gpui_kit::test]
+    fn settings_button_toggles_the_pane(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, Settings::default());
+        let shown = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, _| {
+                w.panes.iter().any(|p| matches!(p, Pane::Settings(_)))
+            })
+        };
+        click("topbar-settings", cx);
+        assert!(shown(cx));
+        click("topbar-settings", cx);
+        assert!(!shown(cx));
+    }
+
     /// A lone empty pane has no ×; in a split, an empty pane's × drops that pane.
     #[gpui_kit::test]
     fn lone_empty_pane_has_no_close(cx: &mut TestAppContext) {
@@ -3023,6 +3047,32 @@ pub(crate) mod tests {
         assert_eq!(pane_session(&workspace, 0, cx), second);
 
         let from = center_of(("open", 0usize), cx);
+        drag_to_pane(from, 0, 0.9, cx);
+
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 2);
+            assert_eq!(w.panes[0].session(), Some(&second));
+            assert_eq!(w.panes[1].session(), Some(&first));
+            assert_eq!(w.focused_pane, 1);
+        });
+    }
+
+    /// An Agents card drags like an Open row: dropped on a pane's right quarter, its session
+    /// opens in a new pane there.
+    #[gpui_kit::test]
+    fn drag_agent_card_to_right_edge_splits(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(2));
+        let rows = load_history(&workspace, 2, cx);
+        for row in &rows {
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(row, false, window, cx)));
+        }
+        let (first, second) =
+            workspace.read_with(cx, |w, _| (w.sessions[0].clone(), w.sessions[1].clone()));
+        assert_eq!(pane_session(&workspace, 0, cx), second);
+
+        click("tab-agents", cx);
+        let from = center_of(("agent-card", 0usize), cx);
         drag_to_pane(from, 0, 0.9, cx);
 
         workspace.read_with(cx, |w, _| {
