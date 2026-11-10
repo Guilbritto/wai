@@ -37,13 +37,17 @@ fn table<'a>(parent: &'a mut Table, name: &str) -> &'a mut Table {
 
 fn set(t: &mut Table, key: &str, v: Option<toml_edit::Item>) {
     match v {
-        Some(mut v) => {
-            if let (Some(old), Some(new)) = (t.get(key).and_then(Item::as_value), v.as_value_mut())
-            {
-                *new.decor_mut() = old.decor().clone();
+        Some(mut v) => match t.get_mut(key) {
+            Some(slot) => {
+                if let (Some(old), Some(new)) = (slot.as_value(), v.as_value_mut()) {
+                    *new.decor_mut() = old.decor().clone();
+                }
+                *slot = v;
             }
-            t.insert(key, v);
-        }
+            None => {
+                t.insert(key, v);
+            }
+        },
         None => {
             t.remove(key);
         }
@@ -176,6 +180,24 @@ mod tests {
         write_change(d.path(), &Change::Shell(Some("z".into()))).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.contains("theme = \"dark\" # keep"), "{text}");
+        std::fs::write(
+            &p,
+            "# mine\ntheme = \"light\" # keep\n[agents.codex]\n# cmd\ncommand = \"a\" # c\n",
+        )
+        .unwrap();
+        write_change(d.path(), &Change::Theme(ThemeChoice::Dark)).unwrap();
+        write_change(
+            d.path(),
+            &Change::AgentCommand {
+                agent: "codex".into(),
+                command: "b".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "# mine\ntheme = \"dark\" # keep\n[agents.codex]\n# cmd\ncommand = \"b\" # c\n"
+        );
         let t: toml::Table = toml::from_str(&text).unwrap();
         assert_eq!(t["models"]["codex"].as_str(), Some("b"));
         assert_eq!(t["models"]["other"].as_str(), Some("y"));
