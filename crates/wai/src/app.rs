@@ -8,6 +8,7 @@ use gpui_kit::component::{Theme, ThemeMode, TitleBar, WindowExt as _};
 use gpui_kit::*;
 use wai_settings::{Settings, Template, ThemeChoice};
 
+use crate::settings_view::Section;
 use crate::workspace::Workspace;
 
 actions!(
@@ -109,6 +110,7 @@ pub fn run(
     settings: Settings,
     templates: Vec<Template>,
     notices: Vec<String>,
+    settings_error: Option<String>,
     state_path: PathBuf,
 ) {
     // Without the asset source every component icon (status, chevrons) renders blank.
@@ -148,12 +150,18 @@ pub fn run(
             .update(cx, |_, window, cx| {
                 workspace.update(cx, |w, cx| {
                     w.templates = templates;
-                    w.start_agent(cx);
+                    w.settings_error = settings_error;
+                    if w.settings_error.is_none() {
+                        w.start_agent(cx);
+                    }
                     w.watch_project(window, cx);
                     // Before `restore`: a saved session may be an extension agent's.
                     w.start_extensions(cx);
                     w.restore(window, cx);
                     w.suggest_extensions(window, cx);
+                    if w.settings_error.is_some() {
+                        w.open_settings(Section::Ai, None, window, cx);
+                    }
                 });
                 for notice in notices {
                     window.push_notification(Notification::warning(notice).autohide(false), cx);

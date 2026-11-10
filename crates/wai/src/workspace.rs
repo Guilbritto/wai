@@ -132,6 +132,8 @@ pub struct Workspace {
     /// Canonical, so history cwds compare with it (R3).
     pub project: PathBuf,
     pub settings: Settings,
+    /// Why `settings.toml` did not load; Settings shows it and stays read-only.
+    pub settings_error: Option<String>,
     /// The "New from template" menu's entries; empty hides the menu.
     pub templates: Vec<Template>,
     /// The config dir: the user's `templates.toml` (re-read on a project switch) and `scratch/`,
@@ -311,6 +313,7 @@ impl Workspace {
             ext_sessions: HashMap::new(),
             state_path,
             next_recovery: 0,
+            settings_error: None,
             focus,
             _subscriptions: vec![
                 routing,
@@ -1587,7 +1590,7 @@ impl Workspace {
     fn settings_data(&self, notice: Option<SharedString>) -> SettingsData {
         SettingsData {
             settings: self.settings.clone(),
-            error: None,
+            error: self.settings_error.clone(),
             notice,
         }
     }
