@@ -1431,6 +1431,7 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(pickers, ["model", "effort"]);
+        assert!(session.read_with(cx, |s, _| s.legacy_mode_picker().is_some()));
     }
 
     #[gpui_kit::test]
@@ -1483,7 +1484,8 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(pickers, ["model", "effort", "mode"]);
-        assert!(session.read_with(cx, |s, _| s.has_mode_option()));
+        assert!(session.read_with(cx, |s, _| s.modes.is_some()
+            && s.legacy_mode_picker().is_none()));
     }
 
     #[gpui_kit::test]
