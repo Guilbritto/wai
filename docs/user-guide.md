@@ -4,14 +4,15 @@ This guide describes wai 0.2.1. On Windows, read **ctrl** where it says **⌘**,
 
 ## The window
 
-- **Top bar.** It shows wai's version and the commit it was built from (`0.2.1 · 01dd232`), the project's name and how many agents are working or need you, and holds the buttons **New from template** (shown when templates exist), **Extensions**, the command palette, **Settings** (⚙), the terminal and **New session**. On macOS it is the title bar: drag it to move the window, double-click it to zoom.
+- **Top bar.** It shows wai's version and the commit it was built from (`0.2.1 · 01dd232`), the project's name and how many agents are working or need you, and holds the buttons **New from template** (shown when templates exist), **Extensions**, the command palette, **Settings** (⚙), the terminal, the Agents panel (only while it is on the right) and **New session**. On macOS it is the title bar: drag it to move the window, double-click it to zoom.
 - **Sidebar.** The tabs **Sessions**, **History**, **Files**, **Search** and **Agents**, plus one tab per extension panel.
+- **Agents panel.** Agents can leave the sidebar for its own panel right of the panes, which collapses with **⌘⌥B** (see [The Agents tab](#the-agents-tab)).
 - **Panes.** Up to four sit side by side. Each holds a chat session, the editor (one editor pane at most) or Settings (one at most). **⌘⌥→** moves the focus to the next pane.
 - **Terminal.** It sits at the bottom, toggled with **ctrl-`**.
 
 **The look:** the default dark theme is Aurora: an indigo night with a soft, still aurora behind floating glass cards. Set `theme = "light"` for the light one, which keeps plain panels and no aurora (see [Settings](#settings)).
 
-**On relaunch** wai restores the project, the open sessions with their history, which pane each was in, whether the terminal was open, and the sidebar width. Editor tabs are not restored, except unsaved ones (see [Unsaved edits after a quit](#unsaved-edits-after-a-quit)).
+**On relaunch** wai restores the project, the open sessions with their history, which pane each was in, whether the terminal was open, where Agents was (and whether its panel was collapsed), and the sidebar width. Editor tabs are not restored, except unsaved ones (see [Unsaved edits after a quit](#unsaved-edits-after-a-quit)).
 
 **Opening another folder:** **⌘O** opens it in the same window. If any file has unsaved edits, wai asks first.
 
@@ -185,7 +186,11 @@ The Agents tab has one live card per open session. Each card shows:
 - the tool call in progress;
 - the context used (`used / size (pct%)`).
 
-Clicking a card shows that session in the focused pane.
+Clicking a card shows that session in the focused pane; dragging it onto a pane works as an **Open** row does.
+
+**On the right.** The button in the Agents header, or **Move Agents to the right** in the command palette, moves Agents out of the sidebar into its own panel right of the panes, as wide as the sidebar. The sidebar then has no Agents tab. **Move to the sidebar** (same button, same palette row) puts it back.
+
+**Collapsing.** On the right, the header's **Collapse** button hides the panel. The top bar's Agents button and **⌘⌥B** show it again; both toggle it. The button shows how many sessions need you. In the palette, **Agents** shows the panel too.
 
 ## The terminal
 
@@ -202,7 +207,7 @@ Clicking a card shows that session in the focused pane.
 
 | Group | Rows |
 |---|---|
-| wai | New session, Toggle terminal, Open folder…, Search, Files, Agents, Extensions, Settings |
+| wai | New session, Toggle terminal, Open folder…, Search, Files, Agents, Move Agents to the right (or to the sidebar), Extensions, Settings |
 | Templates | Every template |
 | Commands | The enabled extensions' commands |
 | Agents | `New session with <agent>`, one per agent |
@@ -220,6 +225,7 @@ Clicking a card shows that session in the focused pane.
 | Settings | ⌘, | ctrl-, | window |
 | Focus next pane | ⌘⌥→ | ctrl-alt-→ | window |
 | Show or hide the terminal | ctrl-` | ctrl-` | window |
+| Show or hide the Agents panel, while it is on the right | ⌘⌥B | ctrl-alt-b | window |
 | Stop the turn | Esc | Esc | chat session |
 | Send the prompt / new line | Enter / Shift+Enter | Enter / Shift+Enter | prompt box |
 | Copy the selection | ⌘C | ctrl-shift-c | terminal |

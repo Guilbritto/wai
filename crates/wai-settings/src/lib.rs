@@ -468,6 +468,10 @@ pub struct AppState {
     pub open_sessions: Vec<OpenSession>,
     pub terminal_visible: bool,
     pub sidebar_width: f32,
+    /// The Agents view is its own panel right of the panes, not a sidebar tab.
+    pub agents_right: bool,
+    /// That panel is hidden.
+    pub agents_collapsed: bool,
     /// Agent commands and shells the user approved; `None` for a state from before approvals.
     pub approved: Option<BTreeSet<String>>,
     /// Agent id -> the models its last session offered.
@@ -495,6 +499,8 @@ impl Default for AppState {
             open_sessions: Vec::new(),
             terminal_visible: false,
             sidebar_width: 260.0,
+            agents_right: false,
+            agents_collapsed: false,
             approved: None,
             models_seen: BTreeMap::new(),
         }
@@ -784,6 +790,8 @@ mod tests {
             }],
             terminal_visible: true,
             sidebar_width: 300.0,
+            agents_right: true,
+            agents_collapsed: true,
             approved: Some(["x".into()].into()),
             models_seen: [(
                 "codex".to_string(),
@@ -802,6 +810,9 @@ mod tests {
         assert_eq!(AppState::load(&path), AppState::default());
         std::fs::write(&path, r#"{"terminal_visible":true}"#).unwrap();
         assert_eq!(AppState::load(&path).approved, None);
+        // A state from before the Agents panel: in the sidebar.
+        let old = AppState::load(&path);
+        assert!(!old.agents_right && !old.agents_collapsed);
     }
 
     #[test]

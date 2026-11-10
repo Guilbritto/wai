@@ -24,6 +24,7 @@ pub(crate) enum Entry {
     ToggleTerminal,
     OpenFolder,
     Tab(SidebarTab),
+    MoveAgents,
     Extensions,
     Settings,
     Template(usize),
@@ -37,6 +38,10 @@ pub(crate) type Group = (&'static str, Vec<(SharedString, Entry)>);
 impl Workspace {
     /// The palette's groups in order; empty ones are left out.
     pub(crate) fn palette(&self, cx: &App) -> Vec<Group> {
+        let move_agents = match self.agents_right {
+            true => "Move Agents to the sidebar",
+            false => "Move Agents to the right",
+        };
         let wai = vec![
             ("New session".into(), Entry::NewSession),
             ("Toggle terminal".into(), Entry::ToggleTerminal),
@@ -44,6 +49,7 @@ impl Workspace {
             ("Search".into(), Entry::Tab(SidebarTab::Search)),
             ("Files".into(), Entry::Tab(SidebarTab::Files)),
             ("Agents".into(), Entry::Tab(SidebarTab::Agents)),
+            (move_agents.into(), Entry::MoveAgents),
             ("Extensions".into(), Entry::Extensions),
             ("Settings".into(), Entry::Settings),
         ];
@@ -118,6 +124,13 @@ impl Workspace {
             Entry::NewSession => self.new_session(&NewSession, window, cx),
             Entry::ToggleTerminal => self.toggle_terminal(&ToggleTerminal, window, cx),
             Entry::OpenFolder => self.open_folder(&OpenFolder, window, cx),
+            Entry::MoveAgents => self.move_agents(cx),
+            // On the right, Agents has no tab: its panel shows.
+            Entry::Tab(SidebarTab::Agents) if self.agents_right => {
+                self.agents_collapsed = false;
+                self.save_state(cx);
+                cx.notify();
+            }
             Entry::Tab(tab) => {
                 self.sidebar_tab = tab;
                 if tab == SidebarTab::Search {
@@ -218,6 +231,7 @@ mod tests {
                         "Search",
                         "Files",
                         "Agents",
+                        "Move Agents to the right",
                         "Extensions",
                         "Settings"
                     ])
@@ -244,6 +258,19 @@ mod tests {
             workspace.read_with(cx, |w, _| w.sidebar_tab),
             SidebarTab::Extensions
         );
+        // Moved to the right, "Agents" shows the panel: the sidebar has no such tab.
+        run("move agents", cx);
+        assert!(workspace.read_with(cx, |w, _| w.agents_right));
+        workspace.update(cx, |w, _| w.agents_collapsed = true);
+        run("agents", cx);
+        workspace.read_with(cx, |w, _| {
+            assert!(!w.agents_collapsed);
+            assert_eq!(w.sidebar_tab, SidebarTab::Extensions);
+        });
+        let (_, wai) = labels(&workspace, cx).remove(0);
+        assert!(wai.contains(&"Move Agents to the sidebar".to_string()));
+        run("move agents", cx);
+        assert!(workspace.read_with(cx, |w, _| !w.agents_right));
         cx.simulate_keystrokes("secondary-shift-p");
         cx.simulate_keystrokes("escape");
         assert!(!dialog(cx), "Escape closes it");
