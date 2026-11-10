@@ -2643,6 +2643,9 @@ pub(crate) mod tests {
             narrow < wide,
             "the name truncates: {narrow:?} at 900 px, {wide:?} at 1400 px"
         );
+        let version = cx.debug_bounds("topbar-version").expect("version drawn");
+        let project = cx.debug_bounds("topbar-project").expect("project drawn");
+        assert!(version.right() < project.left(), "{version:?} {project:?}");
         let new = cx.debug_bounds("sidebar-new").expect("new session drawn");
         assert!(new.right() <= px(900.), "{new:?}");
         let status = cx.debug_bounds("topbar-status").expect("status drawn");

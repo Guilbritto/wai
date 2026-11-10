@@ -36,6 +36,14 @@ pub(crate) fn status_label(working: usize, needs_you: usize) -> String {
     }
 }
 
+/// The running build: the version, then the commit it was built from (`build.rs`), when known.
+pub(crate) fn version() -> String {
+    match env!("WAI_BUILD") {
+        "" => env!("CARGO_PKG_VERSION").to_string(),
+        build => format!("{} · {build}", env!("CARGO_PKG_VERSION")),
+    }
+}
+
 impl Workspace {
     pub(crate) fn render_top_bar(
         &self,
@@ -89,6 +97,13 @@ impl Workspace {
                     .text_size(px(15.))
                     .font_weight(FontWeight::BOLD)
                     .child("wai"),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "topbar-version".into())
+                    .text_xs()
+                    .text_color(off)
+                    .child(version()),
             );
         let project = aurora::pill(cx)
             .debug_selector(|| "topbar-project".into())
@@ -219,7 +234,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::status_label;
+    use super::{status_label, version};
 
     #[test]
     fn status_label_counts() {
@@ -227,5 +242,22 @@ mod tests {
         assert_eq!(status_label(1, 0), "1 agent working");
         assert_eq!(status_label(3, 1), "3 agents working · 1 needs you");
         assert_eq!(status_label(0, 2), "No agent working · 2 need you");
+    }
+
+    /// The version, then the commit this test binary was built from (build.rs); only the
+    /// version outside a git checkout.
+    #[test]
+    fn version_names_the_build() {
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned());
+        let expected = match head {
+            Some(head) => format!("{} · {head}", env!("CARGO_PKG_VERSION")),
+            None => env!("CARGO_PKG_VERSION").to_string(),
+        };
+        assert_eq!(version(), expected);
     }
 }
