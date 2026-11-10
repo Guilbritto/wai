@@ -6,7 +6,7 @@ This guide describes wai 0.1.0. On Windows, read **ctrl** where it says **⌘**,
 
 - **Top bar.** It shows the project's name and how many agents are working or need you, and holds the buttons **New from template** (shown when templates exist), **Extensions**, the command palette, the terminal and **New session**. On macOS it is the title bar: drag it to move the window, double-click it to zoom.
 - **Sidebar.** The tabs **Sessions**, **Files**, **Search** and **Agents**, plus one tab per extension panel.
-- **Panes.** Up to four sit side by side. Each holds a chat session, or the editor (one editor pane at most). **⌘⌥→** moves the focus to the next pane.
+- **Panes.** Up to four sit side by side. Each holds a chat session, the editor (one editor pane at most) or Settings (one at most). **⌘⌥→** moves the focus to the next pane.
 - **Terminal.** It sits at the bottom, toggled with **ctrl-`**.
 
 **The look:** the default dark theme is Aurora: an indigo night with a soft, still aurora behind floating glass cards. Set `theme = "light"` for the light one, which keeps plain panels and no aurora (see [Settings](#settings)).
@@ -20,14 +20,14 @@ This guide describes wai 0.1.0. On Windows, read **ctrl** where it says **⌘**,
 ### Starting
 
 There are four ways to start a session:
-- **⌘N** or the **+** button starts one with the default agent (`default_agent`, `claude` unless you change it).
+- **⌘N** or the **+** button starts one with the default agent (`default_agent`, which you choose in [Settings](#the-settings-screen); until you do, these open Settings instead).
 - **New from template** (the file icon in the top bar) starts one from a template.
 - The palette's **New session with &lt;agent&gt;** picks the agent.
 - A **History** row reopens a past session (open **History** first; it starts closed).
 
 While the agent prepares the session, its pane shows `Preparing <agent>…`. **⌘W** there cancels it.
 
-**The default agent** starts with wai, so its history is listed without waiting.
+**The default agent** starts with wai, so its history is listed without waiting. With none chosen, no agent starts, the History is empty and Settings says `Choose an AI to start a session.`
 
 ### Chatting
 
@@ -35,8 +35,10 @@ While the agent prepares the session, its pane shows `Preparing <agent>…`. **�
 - **Attaching files:** drop them on the prompt box. PNG, JPEG, GIF and WebP files up to 5 MB go as images; any other file goes as a reference to its path.
 - **The header** shows:
   - the session's title;
+  - a picker for each of the agent's `model` and `thought_level` options, when it offers them;
   - the agent's mode picker, when the agent has modes (Claude Code's include default, plan and accept-edits modes);
   - the context used, as `used / size`.
+- **Model pickers:** a change applies to that session only, from then on, and wai does not keep it across relaunches. A new session starts with the **Default model** from Settings, if you set one; if the agent no longer offers it, the session says `<agent> no longer offers the model <model>; using <current>.` and keeps the agent's own choice. Resumed, forked and restored sessions keep what the agent restores. An agent that offers no such option shows no picker.
 - **The transcript:**
   - Replies stream in as Markdown, and thinking is folded.
   - Tool calls show their output, up to 2,000 lines, with **Show all**.
@@ -248,17 +250,46 @@ Only your own settings file can turn it on; a project's `.wai/settings.toml` can
 | Settings | `<config>/settings.toml` | `<config>\settings.toml` |
 | Templates | `<config>/templates.toml` | `<config>\templates.toml` |
 
-- **When they are read:** settings are read at launch, so restart wai after changing them.
-- **A broken settings file:** an invalid value stops wai with a message naming the file, for example `Error: invalid settings in …/settings.toml: unknown variant `blue`, expected `dark` or `light``.
+- **When they apply:** at once, with no restart. wai watches your `settings.toml` and the project's `.wai/settings.toml`, and changes made in the [Settings screen](#the-settings-screen) are written to your file.
+- **A broken settings file:** wai does not stop. It keeps the last good settings (the defaults at launch, so no agent), shows a notice with the error, and the Settings screen turns read-only with `settings.toml has an error: …` and **Open**. Fix the file and it applies again. The screen never writes over a broken file.
 - **Unknown keys** are ignored.
+
+### The Settings screen
+
+- **Opening:** **⌘,** (ctrl-, on Windows and Linux), the ⚙ button in the top bar, or **Settings** in the command palette. It opens as a pane tab. There is at most one: opening it again focuses it. **⌘W** closes it, and it is not restored on relaunch.
+- **Arranging:** drag its **Settings** title onto a pane like a session's title. It moves or splits as a session does.
+- **Layout:** the sections on the left, a **Search settings** field on top that filters the rows of every section, and **Open settings.toml** at the bottom, which opens your file in the editor.
+- **No Save button.** Each change is written at once to your `settings.toml`, keeping its comments and formatting, and applies as the table below says.
+
+**Sections**
+- **AI** (the first run opens it): a radio list with one row per agent: the four built-ins, those you added and those from extensions. Each row has:
+  - its status: `CLI not found`, `Not checked`, `Starting…`, `Ready`, `Not signed in · run <hint>` or `Failed: <last error line>`;
+  - **Test**, which starts the agent once to learn its status and models. It stops the agent again unless it is the default or has open sessions;
+  - **Default model**, a picker once wai has seen the agent's models; before that it says `Start a session or press Test to see the models.`;
+  - **Advanced**, folded, which shows the **Command**. Changing it asks `Run a new command?` (see [Agent commands](#agent-commands)).
+- **Appearance:** **Theme**, Dark or Light, applies at once.
+- **Terminal:** **Shell**, a path; empty is the system default. It applies to terminals opened afterwards, and changing it asks `Run a new command?`.
+- **Updates:** **Check for updates** and **Repository**.
+
+**First run.** With no `default_agent`, no agent starts and wai opens Settings on **AI**, saying `Choose an AI to start a session.` Choosing a row writes `default_agent` and starts that agent. wai never picks one for you, even when only one is ready. **⌘N**, **+**, a template without an agent and an empty pane lead to the same place; the palette's **New session with <agent>** still starts a specific agent.
+
+| Change | Takes effect |
+|---|---|
+| Theme | at once |
+| Default agent | for the next sessions; open sessions keep their agent |
+| Default model | for the next sessions of that agent |
+| An agent's command | for the next start of that agent; running sessions are not killed |
+| Shell | for terminals opened afterwards |
+| Updates | at the next check |
 
 Every setting and its default:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `default_agent` | `"claude"` | The agent ⌘N starts, whose history the sidebar lists, and that templates without `agent` use |
+| `default_agent` | unset | The agent ⌘N starts, whose history the sidebar lists, and that templates without `agent` use. Unset, wai starts no agent and opens Settings |
 | `theme` | `"dark"` | `"dark"` (Aurora) or `"light"` |
-| `agents.<name>.command` | `agents.claude.command = "npx -y @agentclientprotocol/claude-agent-acp@0.101.0"` | How to start the ACP agent `<name>` (see below) |
+| `agents.<name>.command` | the built-in's command (see below) | How to start the ACP agent `<name>` (see below) |
+| `models.<name>` | unset | The id of the model a new session of agent `<name>` starts with |
 | `terminal.shell` | unset | The terminal's program (no arguments); unset means `$SHELL`, then `/bin/sh` |
 | `updates.check` | `false` | Turns on the update check |
 | `updates.repo` | unset | `owner/repo` on GitHub; unset means nothing is checked |
@@ -284,6 +315,23 @@ shell = "/bin/zsh"
 The `command` is one of two forms:
 - **A command line.** It is split like a POSIX shell line on every platform, so quote arguments with spaces. Backslashes are escapes there, so for Windows paths prefer the JSON form. Leading `NAME=value` words set environment variables for the agent.
 - **A JSON object, written as a string:** `command = '{"command": "/path/to/agent", "args": ["--acp"], "env": {"NAME": "value"}}'`.
+
+**The built-in agents.** There are four, and none is the default until you choose it. An entry `[agents.<id>]` with a built-in's id replaces its command; any other id adds an agent, shown with its id as its name.
+
+| Id | Name | Command | If the CLI is missing | If signed out |
+|---|---|---|---|---|
+| `claude` | Claude | `npx -y @agentclientprotocol/claude-agent-acp@0.101.0` | Install Node.js (it provides npx) | `claude /login` |
+| `codex` | Codex | `npx -y @agentclientprotocol/codex-acp@2.6.0` | Install Node.js (it provides npx) | `npx @openai/codex login` |
+| `antigravity` | Antigravity | `agy acp` | https://antigravity.google/docs/cli | `agy login` |
+| `copilot` | Copilot | `copilot --acp --stdio` | `npm install -g @github/copilot` | `copilot`, then `/login` |
+
+Only Claude's command was checked end to end. Codex's command downloads and starts, but was not signed in when tried; Antigravity and Copilot were not tried, and no install or login hint was checked.
+
+**Copilot's ACP mode is a public preview.** Its row carries the warning `Copilot may edit files and run commands without asking.`
+
+**Approving a command.** wai runs an agent command or a terminal shell only after you approve that exact value. The built-in commands are approved from the start. When a value is new or changed (by editing `settings.toml`, by a reload, or on the screen), wai asks `Run a new command?` with the old and new value and **Allow** or **Don't allow**.
+- **Allow** adds it to the approved list in wai's own `state.json` and uses it.
+- **Don't allow** keeps the last approved value for this run (an agent never approved stays unavailable) and writes nothing to `settings.toml`. wai asks again the next time it would run that value.
 
 Enabled extensions can add agents. They appear as `<extension-id>/<name>`.
 
@@ -324,13 +372,14 @@ A repository you open can carry a `.wai/` folder. Because opening a cloned repos
 
 | File | Allowed | Not allowed |
 |---|---|---|
-| `.wai/settings.toml` | `theme`; `default_agent`, naming an agent your settings or an enabled extension define | `agents` and `terminal` (commands, shells, environment); `updates`. These are ignored with a notice |
+| `.wai/settings.toml` | `theme`; `default_agent`, when you have already chosen a default and it names that default, an agent with an `[agents.<id>]` entry in your file, or an agent of an installed extension | `agents` and `terminal` (commands, shells, environment); `models`; `updates`. These are ignored with a notice |
 | `.wai/templates.toml` | Templates, as above | — |
 | `.wai/extensions.toml` | Suggesting extensions | Installing anything |
 
 - **File limits:** each file is read only if it is a regular file of at most 1 MB.
 - **A broken project file** is skipped with a notice. wai still opens.
-- **Which project:** `.wai/settings.toml` is read for the folder wai was launched with. Templates and suggestions are read again when you open another folder.
+- **A project's `default_agent`** never picks a built-in you have not chosen and never skips the first run; otherwise it is ignored with a notice. When it is honoured, the AI section says `This project uses <agent>`, and the radio still changes your own choice.
+- **Which project:** settings, templates and suggestions are read again when you open another folder.
 
 A suggestion looks like this:
 

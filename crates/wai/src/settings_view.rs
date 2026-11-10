@@ -14,6 +14,7 @@ use gpui_kit::*;
 use wai_settings::{Change, SeenModel, Settings, ThemeChoice, agent_label, builtin};
 
 use crate::aurora::{self, DISPLAY_FONT};
+use crate::workspace::{Dragged, DraggedSession};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Section {
@@ -645,7 +646,27 @@ impl Render for SettingsView {
                 aurora::card_bar(cx)
                     .px_3()
                     .py_2()
-                    .child(div().w_full().child(Input::new(&self.search).small())),
+                    .gap_3()
+                    // The title drags the pane to another place, as a session's does.
+                    .child(
+                        div()
+                            .id("settings-title")
+                            .flex_none()
+                            .cursor_grab()
+                            .font_family(DISPLAY_FONT)
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::BOLD)
+                            .child("Settings")
+                            .on_drag(
+                                DraggedSession {
+                                    title: "Settings".into(),
+                                    source: Dragged::Settings,
+                                },
+                                DraggedSession::preview,
+                            )
+                            .test_support(),
+                    )
+                    .child(div().flex_1().child(Input::new(&self.search).small())),
             )
             .children(banner)
             .child(

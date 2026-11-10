@@ -98,6 +98,8 @@ pub(crate) enum Dragged {
     Open(Entity<ChatSession>),
     /// Resumed where it drops, as a click on its row resumes it.
     History(SessionSummary),
+    /// The Settings pane, moved as an open session is.
+    Settings,
 }
 
 impl DraggedSession {
@@ -1052,17 +1054,26 @@ impl Workspace {
             return;
         }
         let (session, fresh) = match &dragged.source {
-            Dragged::Open(session) if self.sessions.contains(session) => (session.clone(), false),
+            Dragged::Open(session) if self.sessions.contains(session) => {
+                (Some(session.clone()), false)
+            }
             Dragged::Open(_) => return,
             Dragged::History(row) => match self.resumed(row, window, cx) {
-                Some(resumed) => resumed,
+                Some((resumed, fresh)) => (Some(resumed), fresh),
                 None => return,
             },
+            Dragged::Settings => (None, false),
         };
-        let from = self
-            .panes
-            .iter()
-            .position(|p| p.session() == Some(&session));
+        let from = match &session {
+            Some(session) => self.panes.iter().position(|p| p.session() == Some(session)),
+            None => self
+                .panes
+                .iter()
+                .position(|p| matches!(p, Pane::Settings(_))),
+        };
+        if session.is_none() && from.is_none() {
+            return;
+        }
         let empty = matches!(self.panes[ix], Pane::Empty(_));
         let locked = matches!(self.panes[ix], Pane::Editor(_)) && !self.dirty_tabs(cx).is_empty();
         if let Some(slots) = layout::place(self.panes.len(), from, ix, zone, empty, locked) {
@@ -1070,19 +1081,21 @@ impl Workspace {
             self.panes = (slots.into_iter())
                 .map(|slot| match slot {
                     Slot::Old(ix) => old[ix].take().expect("each pane lands once"),
-                    Slot::Dropped => Pane::Session(session.clone()),
+                    Slot::Dropped => {
+                        Pane::Session(session.clone().expect("a dropped session is a session"))
+                    }
                 })
                 .collect();
             self.save_state(cx);
         }
-        if let Some(ix) = self
-            .panes
-            .iter()
-            .position(|p| p.session() == Some(&session))
-        {
+        let shown = self.panes.iter().position(|p| match &session {
+            Some(session) => p.session() == Some(session),
+            None => matches!(p, Pane::Settings(_)),
+        });
+        if let Some(ix) = shown {
             self.focus_pane(ix, window, cx);
         }
-        if fresh {
+        if let (true, Some(session)) = (fresh, &session) {
             session.update(cx, |s, cx| s.load(false, window, cx));
         }
     }
@@ -1096,8 +1109,12 @@ impl Workspace {
             Dragged::History(row) => self
                 .default_agent()
                 .and_then(|agent| self.session(&agent, &row.id, cx)),
+            Dragged::Settings => None,
         };
-        let from = session.and_then(|s| self.panes.iter().position(|p| p.session() == Some(&s)));
+        let from = match &dragged.source {
+            Dragged::Settings => (self.panes.iter()).position(|p| matches!(p, Pane::Settings(_))),
+            _ => session.and_then(|s| self.panes.iter().position(|p| p.session() == Some(&s))),
+        };
         let empty = matches!(self.panes.get(ix)?, Pane::Empty(_));
         (from != Some(ix)).then(|| layout::only_center(self.panes.len(), from, empty))
     }
@@ -2772,6 +2789,38 @@ pub(crate) mod tests {
             assert_eq!(w.panes.len(), 2);
             assert_eq!(w.panes[0].session(), Some(&second));
             assert_eq!(w.panes[1].session(), Some(&first));
+            assert_eq!(w.focused_pane, 1);
+        });
+    }
+
+    /// The Settings title drags like a session header: dropped on a pane's right quarter, it
+    /// moves there and the panes reorder.
+    #[gpui_kit::test]
+    fn drag_settings_to_right_edge_splits(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(1));
+        let rows = load_history(&workspace, 1, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.open_settings(super::Section::Ai, None, window, cx);
+                w.panes.swap(0, 1);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |w, _| {
+            assert!(matches!(w.panes[0], Pane::Settings(_)));
+            assert!(w.panes[1].session().is_some());
+        });
+
+        let from = center_of("settings-title", cx);
+        drag_to_pane(from, 1, 0.9, cx);
+
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 2);
+            assert!(w.panes[0].session().is_some());
+            assert!(matches!(w.panes[1], Pane::Settings(_)));
             assert_eq!(w.focused_pane, 1);
         });
     }
