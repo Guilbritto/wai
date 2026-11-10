@@ -13,7 +13,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::*;
-use wai_settings::{Change, SeenModel, Settings, ThemeChoice, agent_label, builtin};
+use wai_settings::{Change, Processing, SeenModel, Settings, ThemeChoice, agent_label, builtin};
 
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::workspace::{Dragged, DraggedSession};
@@ -22,14 +22,16 @@ use crate::workspace::{Dragged, DraggedSession};
 pub enum Section {
     Ai,
     Appearance,
+    Conversation,
     Terminal,
     Updates,
 }
 
 impl Section {
-    const ALL: [Section; 4] = [
+    const ALL: [Section; 5] = [
         Section::Ai,
         Section::Appearance,
+        Section::Conversation,
         Section::Terminal,
         Section::Updates,
     ];
@@ -38,6 +40,7 @@ impl Section {
         match self {
             Section::Ai => "AI",
             Section::Appearance => "Appearance",
+            Section::Conversation => "Conversation",
             Section::Terminal => "Terminal",
             Section::Updates => "Updates",
         }
@@ -45,8 +48,9 @@ impl Section {
 }
 
 /// Every row with its section and label: what the search matches.
-const ROWS: [(Section, &str); 4] = [
+const ROWS: [(Section, &str); 5] = [
     (Section::Appearance, "Theme"),
+    (Section::Conversation, "Processing"),
     (Section::Terminal, "Shell"),
     (Section::Updates, "Check for updates"),
     (Section::Updates, "Repository"),
@@ -132,6 +136,26 @@ impl SelectItem for Theme {
     }
 }
 
+#[derive(Clone)]
+struct Steps(Processing);
+
+impl SelectItem for Steps {
+    type Value = Processing;
+
+    fn title(&self) -> SharedString {
+        match self.0 {
+            Processing::Steps => "Step by step",
+            Processing::Grouped => "Grouped",
+            Processing::Hidden => "Hidden",
+        }
+        .into()
+    }
+
+    fn value(&self) -> &Processing {
+        &self.0
+    }
+}
+
 /// A model of the Default model select; the empty id is the agent's own choice.
 #[derive(Clone)]
 struct ModelChoice {
@@ -169,6 +193,7 @@ pub struct SettingsView {
     data: SettingsData,
     pub(crate) search: Entity<InputState>,
     theme: Entity<SelectState<Vec<Theme>>>,
+    processing: Entity<SelectState<Vec<Steps>>>,
     /// Per agent id.
     models: BTreeMap<String, Entity<SelectState<Vec<ModelChoice>>>>,
     pub(crate) shell: Entity<InputState>,
@@ -197,6 +222,9 @@ impl SettingsView {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
         let choices = vec![Theme(ThemeChoice::Dark), Theme(ThemeChoice::Light)];
         let theme = cx.new(|cx| SelectState::new(choices, None, window, cx));
+        let choices = [Processing::Steps, Processing::Grouped, Processing::Hidden];
+        let choices: Vec<Steps> = choices.into_iter().map(Steps).collect();
+        let processing = cx.new(|cx| SelectState::new(choices, None, window, cx));
         let shell = cx.new(|cx| InputState::new(window, cx).placeholder("System default"));
         let repo = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo"));
         let command = cx.new(|cx| InputState::new(window, cx));
@@ -209,6 +237,16 @@ impl SettingsView {
                         && *choice != this.data.settings.theme
                     {
                         this.change(Change::Theme(*choice), cx);
+                    }
+                },
+            ),
+            cx.subscribe(
+                &processing,
+                |this, _, SelectEvent::Confirm(choice): &SelectEvent<Vec<Steps>>, cx| {
+                    if let Some(choice) = choice
+                        && *choice != this.data.settings.conversation.processing
+                    {
+                        this.change(Change::Processing(*choice), cx);
                     }
                 },
             ),
@@ -234,6 +272,7 @@ impl SettingsView {
             data,
             search,
             theme,
+            processing,
             models: BTreeMap::new(),
             shell,
             repo,
@@ -356,6 +395,9 @@ impl SettingsView {
         let theme = settings.theme;
         self.theme
             .update(cx, |s, cx| s.set_selected_value(&theme, window, cx));
+        let processing = settings.conversation.processing;
+        self.processing
+            .update(cx, |s, cx| s.set_selected_value(&processing, window, cx));
         for row in self.data.agents.clone() {
             self.sync_models(&row, window, cx);
         }
@@ -530,6 +572,12 @@ impl SettingsView {
                 Select::new(&self.theme).small().disabled(off),
                 cx,
             ),
+            "Processing" => self.row(
+                "Processing",
+                "settings-processing",
+                Select::new(&self.processing).small().disabled(off),
+                cx,
+            ),
             "Shell" => self.row(
                 "Shell",
                 "settings-shell",
@@ -701,9 +749,9 @@ mod tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
-    use wai_settings::{Change, Settings, ThemeChoice};
+    use wai_settings::{Change, Processing, Settings, ThemeChoice};
 
-    use super::{RowStatus, Section, SettingsData, SettingsView};
+    use super::{RowStatus, Section, SelectEvent, SelectItem, SettingsData, SettingsView};
     use crate::workspace::tests::{click, fake_settings, open, question, wait_until};
     use crate::workspace::{Pane, Workspace};
 
@@ -946,6 +994,33 @@ mod tests {
         });
         let text = std::fs::read_to_string(dir.path().join("settings.toml")).unwrap();
         assert!(text.contains("theme = \"light\""), "{text}");
+    }
+
+    /// Conversation has the processing mode: its three choices, and a pick is written.
+    #[gpui_kit::test]
+    fn processing_pick_writes_the_user_file(cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Conversation, None, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-processing").is_some());
+        let view = view(&workspace, cx);
+        let picked = view.read_with(cx, |v, cx| v.processing.read(cx).selected_value().copied());
+        assert_eq!(picked, Some(Processing::Steps));
+        let titles = [Processing::Steps, Processing::Grouped, Processing::Hidden]
+            .map(|mode| SelectItem::title(&super::Steps(mode)).to_string());
+        assert_eq!(titles, ["Step by step", "Grouped", "Hidden"]);
+
+        view.update_in(cx, |v, window, cx| {
+            v.processing.update(cx, |s, cx| {
+                s.set_selected_value(&Processing::Grouped, window, cx);
+                cx.emit(SelectEvent::Confirm(Some(Processing::Grouped)));
+            })
+        });
+        cx.run_until_parked();
+        let text = std::fs::read_to_string(dir.path().join("settings.toml")).unwrap();
+        assert_eq!(text, "[conversation]\nprocessing = \"grouped\"\n");
     }
 
     #[gpui_kit::test]

@@ -21,6 +21,9 @@
 //! - `--fail-fork`: `session/fork` fails with an internal error.
 //! - `--no-load`: do not advertise `loadSession`.
 //! - `--flood <bytes>`: start the turn with one tool call carrying that many bytes of `x\n`.
+//! - `--steps <n>`: start the turn with a thought (`Looking around`), then n Read tool calls
+//!   titled `Read README.md`, each in progress for one `--chunk-delay-ms` and then completed
+//!   with the output `step <i> output`.
 //! - `--edit <path>`, `--write <path>`, `--edit-hunk <path>` (repeatable, run in order): start the
 //!   turn with file edits, each like claude-agent-acp's: a pending Edit tool call (diff and
 //!   location), a permission request (`allow-once` writes the file, `reject-once` fails the call),
@@ -81,6 +84,7 @@ struct Opts {
     fail_fork: bool,
     no_load: bool,
     flood: Option<usize>,
+    steps: usize,
     edits: Vec<(EditKind, PathBuf)>,
     sessions: usize,
     sessions_cwd: PathBuf,
@@ -108,6 +112,7 @@ fn parse_args() -> Opts {
         fail_fork: false,
         no_load: false,
         flood: None,
+        steps: 0,
         edits: Vec::new(),
         sessions: 0,
         sessions_cwd: "/tmp".into(),
@@ -151,6 +156,7 @@ fn parse_args() -> Opts {
             "--fail-fork" => opts.fail_fork = true,
             "--no-load" => opts.no_load = true,
             "--flood" => opts.flood = Some(number(value())),
+            "--steps" => opts.steps = number(value()),
             "--edit" => opts.edits.push((EditKind::Append, value().into())),
             "--write" => opts.edits.push((EditKind::Write, value().into())),
             "--edit-hunk" => opts.edits.push((EditKind::Hunk, value().into())),
@@ -282,6 +288,29 @@ impl Fake {
                 session,
                 acp::SessionUpdate::Plan(acp::Plan::new(entries)),
             )?;
+        }
+        if self.opts.steps > 0 {
+            let thought = acp::SessionUpdate::AgentThoughtChunk(chunk("Looking around"));
+            send(cx, session, thought)?;
+        }
+        for i in 0..self.opts.steps {
+            let id = format!("step-{i}");
+            let call = acp::ToolCall::new(id.clone(), "Read README.md")
+                .kind(acp::ToolKind::Read)
+                .status(acp::ToolCallStatus::InProgress);
+            send(cx, session, acp::SessionUpdate::ToolCall(call))?;
+            if !self.opts.chunk_delay.is_zero() {
+                smol::Timer::after(self.opts.chunk_delay).await;
+            }
+            if self.is_cancelled(session) {
+                return Ok(acp::StopReason::Cancelled);
+            }
+            let output = acp::Content::new(text_block(format!("step {i} output")));
+            let fields = acp::ToolCallUpdateFields::new()
+                .status(acp::ToolCallStatus::Completed)
+                .content(vec![acp::ToolCallContent::Content(output)]);
+            let update = acp::ToolCallUpdate::new(id, fields);
+            send(cx, session, acp::SessionUpdate::ToolCallUpdate(update))?;
         }
         for (i, (kind, path)) in self.opts.edits.iter().enumerate() {
             self.edit(cx, session, &format!("edit-file-{i}"), *kind, path)

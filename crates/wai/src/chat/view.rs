@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::input::{InputEvent, TextareaState};
@@ -12,6 +12,7 @@ use wai_agent::{
     AgentError, AgentHandle, ConfigCategory, ConfigValue, FileDiff, Location, ModeInfo,
     PermissionChoice, PermissionRequest, QuestionRequest, SessionEvent, SessionStarted, StopReason,
 };
+use wai_settings::Processing;
 
 use super::edits::open_line;
 use super::input::Attachment;
@@ -100,6 +101,14 @@ pub struct ChatSession {
     /// Per `Tool`/`Permission` row.
     pub(super) diffs: HashMap<usize, Vec<DiffView>>,
     pub(super) open_thoughts: HashSet<usize>,
+    /// How the steps show (`conversation.processing`).
+    pub(super) processing: Processing,
+    /// The `Tool` rows unfolded to their output.
+    pub(super) open_steps: HashSet<usize>,
+    /// The unfolded runs of steps of the grouped mode, by their first row.
+    pub(super) open_groups: HashSet<usize>,
+    /// While a turn runs: when it started, and the status line's one-second tick.
+    pub(super) turn: Option<(Instant, Task<()>)>,
     /// Per open `Question` row, made when it first draws.
     pub(super) questions: HashMap<usize, QuestionForm>,
     pub(super) scroller: Entity<MessageScrollerState>,
@@ -153,6 +162,10 @@ impl ChatSession {
             texts: HashMap::new(),
             diffs: HashMap::new(),
             open_thoughts: HashSet::new(),
+            processing: Processing::default(),
+            open_steps: HashSet::new(),
+            open_groups: HashSet::new(),
+            turn: None,
             questions: HashMap::new(),
             scroller: cx.new(|cx| MessageScrollerState::new(0, cx)),
             modes: None,
@@ -303,6 +316,24 @@ impl ChatSession {
         self.model.current_mode = current;
     }
 
+    /// Shows the steps as `processing` says, from now on and for the rows already there.
+    pub fn set_processing(&mut self, processing: Processing, cx: &mut Context<Self>) {
+        if self.processing == processing {
+            return;
+        }
+        self.processing = processing;
+        self.remeasure(0..self.model.items.len(), cx);
+        cx.notify();
+    }
+
+    /// Rows `rows` changed height.
+    pub(super) fn remeasure(&mut self, rows: std::ops::Range<usize>, cx: &mut Context<Self>) {
+        self.scroller.update(cx, |list, cx| {
+            let known = list.item_count();
+            list.remeasure_items(rows.start.min(known)..rows.end.min(known), cx);
+        });
+    }
+
     pub fn status(&self) -> &TurnState {
         &self.model.state
     }
@@ -338,6 +369,13 @@ impl ChatSession {
         self.model.note_files(ix, &self.cwd);
         self.sync_row(ix, cx);
         self.sync_rows(Some(ix), cx);
+        // An edit that reached the disk leaves its run of steps: the rows around it follow.
+        if self.processing == Processing::Grouped {
+            let around = |item: &ChatItem| item.is_step() || item.is_edit();
+            if around(&self.model.items[ix]) {
+                self.remeasure(self.model.run(ix, around), cx);
+            }
+        }
         cx.notify();
     }
 
@@ -411,11 +449,29 @@ impl ChatSession {
         let result = f(&mut self.model);
         if self.model.state != state {
             cx.emit(ChatEvent::StateChanged);
+            self.sync_clock(cx);
         }
         if self.model.title != title {
             cx.emit(ChatEvent::TitleChanged);
         }
         result
+    }
+
+    /// The status line's clock: one tick a second while a turn runs, no timer otherwise.
+    fn sync_clock(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.model.state, TurnState::Working | TurnState::NeedsYou) {
+            self.turn = None;
+        } else if self.turn.is_none() {
+            let tick = cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            });
+            self.turn = Some((Instant::now(), tick));
+        }
     }
 
     /// Appends new rows to the list and remeasures `changed`.
@@ -546,6 +602,8 @@ impl ChatSession {
         self.texts.clear();
         self.diffs.clear();
         self.open_thoughts.clear();
+        self.open_steps.clear();
+        self.open_groups.clear();
         self.questions.clear();
         self.scroller.update(cx, |list, cx| list.reset(0, cx));
         self.update_model(cx, |m| m.state = TurnState::Working);
@@ -617,6 +675,7 @@ mod tests {
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{ElementId, Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
     use wai_agent::StopReason;
+    use wai_settings::{Change, Processing, Settings};
 
     use super::ChatSession;
     use crate::agents::RegistryEvent;
@@ -624,7 +683,7 @@ mod tests {
     use crate::notify;
     use crate::sidebar::canonical;
     use crate::workspace::tests::{
-        fake_settings, history_settings, load_history, open, wait_until,
+        fake_settings, history_settings, live, load_history, open, wait_until,
     };
     use crate::workspace::{Pane, Workspace};
 
@@ -1108,6 +1167,179 @@ mod tests {
         );
     }
 
+    /// The fake agent with `flag`, its steps shown as `processing` says.
+    fn processing_settings(flag: &str, processing: Processing) -> Settings {
+        let mut settings = fake_settings(flag);
+        settings.conversation.processing = processing;
+        settings
+    }
+
+    /// Sends a prompt and waits for the turn's reply.
+    fn turn(session: &Entity<ChatSession>, cx: &mut VisualTestContext) {
+        send("go", cx);
+        wait_until(cx, "the reply", |cx| {
+            state(session, cx) == TurnState::Idle && last_agent_text(session, cx).is_some()
+        });
+    }
+
+    /// Whether the next frame draws `id`.
+    fn shows(id: impl Into<ElementId>, cx: &mut VisualTestContext) -> bool {
+        let id = id.into();
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.try_find(id).is_some()
+        })
+    }
+
+    /// `--steps 2` is a thought (row 1) and two Read calls (rows 2 and 3). Step by step, each is
+    /// one folded line; a click unfolds a call's output.
+    #[gpui_kit::test]
+    fn steps_are_folded_lines_that_unfold(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--steps 2"));
+        let session = start_session(&workspace, cx);
+        turn(&session, cx);
+        session.read_with(cx, |s, _| {
+            assert!(matches!(s.model.items[1], ChatItem::Thought { .. }));
+            assert!(matches!(s.model.items[2], ChatItem::Tool(_)));
+            assert!(matches!(s.model.items[3], ChatItem::Tool(_)));
+        });
+
+        assert!(shows(("thought", 1usize), cx));
+        assert!(shows(("step", 2usize), cx) && shows(("step", 3usize), cx));
+        assert!(!shows(("step-output", 2usize), cx), "starts folded");
+        click_edits(None, ("step", 2usize), cx);
+        assert!(shows(("step-output", 2usize), cx));
+        assert!(!shows(("step-output", 3usize), cx));
+        click_edits(None, ("step", 2usize), cx);
+        assert!(!shows(("step-output", 2usize), cx));
+    }
+
+    /// Grouped: the run of steps between two messages is one folded block that says how many;
+    /// unfolded, it lists the step lines, each still folded.
+    #[gpui_kit::test]
+    fn grouped_mode_folds_a_run_of_steps_into_one_block(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let settings = processing_settings("--steps 2", Processing::Grouped);
+        let (workspace, cx) = open(cx, settings);
+        let session = start_session(&workspace, cx);
+        turn(&session, cx);
+
+        assert!(shows(("group", 1usize), cx));
+        assert!(!shows(("group", 2usize), cx), "one block for the run");
+        for hidden in [("thought", 1usize), ("step", 2), ("step", 3)] {
+            assert!(!shows(hidden, cx), "{hidden:?}");
+        }
+        let label = session.read_with(cx, |s, _| s.model.run_label(1..4));
+        assert_eq!(label, "3 steps · Read README.md");
+        assert!(last_agent_text(&session, cx).is_some());
+
+        click_edits(None, ("group", 1usize), cx);
+        for listed in [("thought", 1usize), ("step", 2), ("step", 3)] {
+            assert!(shows(listed, cx), "{listed:?}");
+        }
+        assert!(!shows(("step-output", 2usize), cx), "each still folded");
+        click_edits(None, ("step", 2usize), cx);
+        assert!(shows(("step-output", 2usize), cx));
+    }
+
+    /// Hidden: no step shows, but what needs the user and what changed their files does: the
+    /// permission card, the edit's own line, and the Edits block, whose Revert still works.
+    #[gpui_kit::test]
+    fn hidden_mode_keeps_cards_and_edits(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        let flags = format!("--steps 1 --edit {}", wai_agent::quote(&file));
+        let settings = processing_settings(&flags, Processing::Hidden);
+        let (workspace, cx) = open(cx, settings);
+        let session = start_session(&workspace, cx);
+
+        send("edit", cx);
+        wait_until(cx, "the permission card", |cx| {
+            state(&session, cx) == TurnState::NeedsYou
+        });
+        assert!(shows("perm-allow_once", cx), "the card shows");
+        // Rows: the prompt, the thought, the Read call, the edit, its card.
+        assert!(!shows(("edited", 3usize), cx), "not written yet");
+        click_edits(None, "perm-allow_once", cx);
+        wait_until(cx, "the Edits block", |cx| {
+            state(&session, cx) == TurnState::Idle
+                && session.read_with(cx, |s, _| {
+                    matches!(s.model.items.last(), Some(ChatItem::Edits { .. }))
+                })
+        });
+        let ix = session.read_with(cx, |s, _| s.model.items.len() - 1);
+
+        for hidden in [("thought", 1usize), ("step", 2), ("step", 3), ("group", 1)] {
+            assert!(!shows(hidden, cx), "{hidden:?}");
+        }
+        assert!(shows(("edited", 3usize), cx), "the edit's line");
+        assert!(last_agent_text(&session, cx).is_some());
+        assert!(file.exists());
+        revert(ix, 0, "revert-delete", cx);
+        assert!(!file.exists());
+    }
+
+    /// While a turn runs, a line above the prompt says what the agent does and for how long; it
+    /// goes with the turn, and so does its tick.
+    #[gpui_kit::test]
+    fn status_line_follows_the_turn(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--steps 1 --chunk-delay-ms 300"));
+        let session = start_session(&workspace, cx);
+        assert!(!shows("turn-status", cx));
+        assert!(session.read_with(cx, |s, _| s.turn.is_none()));
+
+        send("go", cx);
+        wait_until(cx, "the Read call", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.activity().as_deref() == Some("Reading README.md…")
+            })
+        });
+        assert!(shows("turn-status", cx));
+        assert!(session.read_with(cx, |s, _| s.turn.is_some()));
+        wait_until(cx, "the reply's first chunk", |cx| {
+            last_agent_text(&session, cx).is_some()
+        });
+        let activity = session.read_with(cx, |s, _| s.model.activity());
+        assert_eq!(activity.as_deref(), Some("Thinking…"));
+        assert!(shows("turn-status", cx));
+
+        wait_until(cx, "the turn's end", |cx| {
+            state(&session, cx) == TurnState::Idle
+        });
+        assert!(!shows("turn-status", cx));
+        assert!(session.read_with(cx, |s, _| s.turn.is_none()), "no tick");
+    }
+
+    /// A change of the mode, from the screen or in the file, reaches the sessions already open.
+    #[gpui_kit::test]
+    fn processing_change_applies_to_open_sessions(cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = live(cx, fake_settings("--steps 1"), None);
+        let session = start_session(&workspace, cx);
+        turn(&session, cx);
+        assert!(shows(("step", 2usize), cx));
+
+        workspace.update_in(cx, |w, window, cx| {
+            w.change_setting(Change::Processing(Processing::Grouped), window, cx)
+        });
+        wait_until(cx, "the grouped mode", |cx| {
+            session.read_with(cx, |s, _| s.processing == Processing::Grouped)
+        });
+        assert!(shows(("group", 1usize), cx));
+        assert!(!shows(("step", 2usize), cx));
+
+        let file = "[conversation]\nprocessing = \"hidden\"\n";
+        fs::write(dir.path().join("settings.toml"), file).unwrap();
+        wait_until(cx, "the hidden mode", |cx| {
+            session.read_with(cx, |s, _| s.processing == Processing::Hidden)
+        });
+        assert!(!shows(("group", 1usize), cx));
+        assert!(!shows(("step", 2usize), cx));
+        assert!(last_agent_text(&session, cx).is_some());
+    }
+
     fn typed(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> String {
         session.read_with(cx, |s, cx| s.input.read(cx).value().to_string())
     }
@@ -1232,6 +1464,7 @@ mod tests {
         });
         let ix = ix.expect("the flood's tool call");
 
+        click_edits(None, ("step", ix), cx);
         click_edits(None, ("show-all", ix), cx);
         click_edits(None, ("open-output", ix), cx);
 

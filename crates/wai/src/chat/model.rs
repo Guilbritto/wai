@@ -1,4 +1,5 @@
 use std::io;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use wai_agent::{
@@ -64,6 +65,48 @@ pub enum ChatItem {
         turn: usize,
         files: Vec<EditedFile>,
     },
+}
+
+impl ChatItem {
+    /// A tool call that wrote its diffs to the user's files: it shows in every processing mode.
+    pub fn is_edit(&self) -> bool {
+        matches!(self, ChatItem::Tool(t) if t.status == ToolStatus::Completed && !t.diffs.is_empty())
+    }
+
+    /// A tool call or thinking, shown as the processing mode says. An edit is not one.
+    pub fn is_step(&self) -> bool {
+        matches!(self, ChatItem::Tool(_) | ChatItem::Thought { .. }) && !self.is_edit()
+    }
+}
+
+/// What the status line says of a running tool call: its kind's verb, then its title without
+/// that verb (`Read README.md` reads "Reading README.md…").
+pub fn doing(kind: &str, title: &str) -> String {
+    let (verb, doing) = match kind {
+        "read" => ("Read", "Reading"),
+        "edit" => ("Edit", "Editing"),
+        "delete" => ("Delete", "Deleting"),
+        "move" => ("Move", "Moving"),
+        "search" => ("Search", "Searching"),
+        "execute" => ("Run", "Running"),
+        "fetch" => ("Fetch", "Fetching"),
+        "think" => return "Thinking…".into(),
+        _ => return format!("{title}…"),
+    };
+    let title = title.lines().next().unwrap_or_default().trim_matches('`');
+    let what = match title.strip_prefix(verb) {
+        Some(rest) if rest.is_empty() || rest.starts_with(' ') => rest,
+        _ => title,
+    };
+    format!("{doing} {}", what.trim()).trim_end().to_string() + "…"
+}
+
+/// `59s`, `1m 05s`.
+pub fn elapsed(secs: u64) -> String {
+    match secs / 60 {
+        0 => format!("{secs}s"),
+        min => format!("{min}m {:02}s", secs % 60),
+    }
 }
 
 /// A file a turn edited: its steps (indices into `turn_edits`, oldest first) and how many of the
@@ -471,8 +514,8 @@ impl ChatModel {
         }
     }
 
-    /// The title of the latest tool call still running; none when idle.
-    pub fn current_tool(&self) -> Option<&str> {
+    /// The latest tool call still running; none when idle.
+    fn running_tool(&self) -> Option<&ToolItem> {
         if !matches!(self.state, TurnState::Working | TurnState::NeedsYou) {
             return None;
         }
@@ -480,10 +523,46 @@ impl ChatModel {
             ChatItem::Tool(t)
                 if matches!(t.status, ToolStatus::Pending | ToolStatus::InProgress) =>
             {
-                Some(t.title.as_str())
+                Some(t)
             }
             _ => None,
         })
+    }
+
+    /// The title of the latest tool call still running; none when idle.
+    pub fn current_tool(&self) -> Option<&str> {
+        self.running_tool().map(|t| t.title.as_str())
+    }
+
+    /// The status line's text while a turn runs; none when idle.
+    pub fn activity(&self) -> Option<String> {
+        match self.state {
+            TurnState::Working => {}
+            TurnState::NeedsYou => return Some("Waiting for you…".into()),
+            _ => return None,
+        }
+        let tool = self.running_tool();
+        Some(tool.map_or("Thinking…".into(), |t| doing(&t.kind, &t.title)))
+    }
+
+    /// The consecutive rows around row `ix` that are all `of` a kind (`ix` is one).
+    pub fn run(&self, ix: usize, of: impl Fn(&ChatItem) -> bool) -> Range<usize> {
+        let before = self.items[..ix].iter().rev().take_while(|i| of(i)).count();
+        let after = self.items[ix..].iter().take_while(|i| of(i)).count();
+        ix - before..ix + after
+    }
+
+    /// A run of steps as the grouped mode heads it: `3 steps · <the latest step>`.
+    pub fn run_label(&self, run: Range<usize>) -> String {
+        let steps = match run.len() {
+            1 => "1 step".to_string(),
+            n => format!("{n} steps"),
+        };
+        let latest = match self.items.get(run.end.wrapping_sub(1)) {
+            Some(ChatItem::Tool(t)) => t.title.lines().next().unwrap_or_default(),
+            _ => "Thinking",
+        };
+        format!("{steps} · {latest}")
     }
 
     pub fn on_turn_ended(&mut self, reason: &StopReason) {
@@ -594,6 +673,76 @@ mod tests {
         assert_eq!(m.current_tool(), Some("t"));
         m.state = TurnState::Idle;
         assert_eq!(m.current_tool(), None);
+    }
+
+    /// The status line says what the running call does, in the words of its kind.
+    #[test]
+    fn activity_follows_the_running_tool() {
+        assert_eq!(doing("read", "Read README.md"), "Reading README.md…");
+        assert_eq!(doing("read", "Readme.md"), "Reading Readme.md…");
+        assert_eq!(doing("execute", "`git log`"), "Running git log…");
+        assert_eq!(doing("search", "Search\nfor x"), "Searching…");
+        assert_eq!(doing("think", "Plan"), "Thinking…");
+        assert_eq!(doing("other", "Flood"), "Flood…");
+
+        let mut m = ChatModel::default();
+        assert_eq!(m.activity(), None);
+        m.push_user("go");
+        assert_eq!(m.activity().as_deref(), Some("Thinking…"));
+        m.apply(&tool("1", ToolStatus::InProgress));
+        assert_eq!(m.activity().as_deref(), Some("Running t…"));
+        m.on_permission(perm());
+        assert_eq!(m.activity().as_deref(), Some("Waiting for you…"));
+        m.on_permission_answered(7, "Yes");
+        m.apply(&SessionEvent::ToolCallUpdate(ToolCallPatch {
+            id: "1".into(),
+            title: None,
+            status: Some(ToolStatus::Completed),
+            content: None,
+            locations: None,
+        }));
+        assert_eq!(m.activity().as_deref(), Some("Thinking…"));
+        m.on_turn_ended(&StopReason::EndTurn);
+        assert_eq!(m.activity(), None);
+    }
+
+    #[test]
+    fn elapsed_time_is_short() {
+        assert_eq!(
+            [0, 59, 60, 3_725].map(elapsed),
+            ["0s", "59s", "1m 00s", "62m 05s"]
+        );
+    }
+
+    /// Steps are tool calls and thinking; an edit that reached the disk is not one, and cuts a
+    /// run of steps in two.
+    #[test]
+    fn steps_run_between_messages_and_edits() {
+        let mut m = ChatModel::default();
+        m.push_user("go"); // 0
+        m.apply(&SessionEvent::AgentThought("hm".into())); // 1
+        m.apply(&tool("1", ToolStatus::Completed)); // 2
+        m.apply(&edit("e", "/p/a", None, "a", ToolStatus::Pending)); // 3
+        m.apply(&tool("2", ToolStatus::InProgress)); // 4
+        m.apply(&text("done")); // 5
+        let steps: Vec<bool> = m.items.iter().map(ChatItem::is_step).collect();
+        assert_eq!(steps, [false, true, true, true, true, false]);
+        assert!(!m.items[3].is_edit(), "not written yet");
+        assert_eq!(m.run(2, ChatItem::is_step), 1..5);
+        assert_eq!(m.run_label(1..5), "4 steps · t");
+
+        m.apply(&SessionEvent::ToolCallUpdate(ToolCallPatch {
+            id: "e".into(),
+            title: None,
+            status: Some(ToolStatus::Completed),
+            content: None,
+            locations: None,
+        }));
+        assert!(m.items[3].is_edit() && !m.items[3].is_step());
+        assert_eq!(m.run(2, ChatItem::is_step), 1..3);
+        assert_eq!(m.run(4, ChatItem::is_step), 4..5);
+        assert_eq!(m.run_label(4..5), "1 step · t");
+        assert_eq!(m.run_label(1..2), "1 step · Thinking");
     }
 
     #[test]

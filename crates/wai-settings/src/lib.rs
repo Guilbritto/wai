@@ -69,6 +69,7 @@ pub struct Settings {
     pub terminal: TerminalSettings,
     pub theme: ThemeChoice,
     pub updates: UpdateSettings,
+    pub conversation: ConversationSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -91,6 +92,26 @@ pub struct UpdateSettings {
     /// `owner/repo` on GitHub whose latest release is checked. Unset, nothing is checked; this
     /// default is the placeholder until wai has a public repository.
     pub repo: Option<String>,
+}
+
+/// How a chat shows, from the user's settings only (see `Settings::load`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ConversationSettings {
+    pub processing: Processing,
+}
+
+/// What a transcript shows of the agent's steps (tool calls and thinking).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Processing {
+    /// One folded line per step.
+    #[default]
+    Steps,
+    /// One folded block per run of steps.
+    Grouped,
+    /// No steps.
+    Hidden,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -127,6 +148,7 @@ impl Default for Settings {
             terminal: TerminalSettings::default(),
             theme: ThemeChoice::default(),
             updates: UpdateSettings::default(),
+            conversation: ConversationSettings::default(),
         }
     }
 }
@@ -205,8 +227,8 @@ fn parse(merged: toml::Value, path: &Path) -> Result<Settings, SettingsError> {
 impl Settings {
     /// Merges defaults, then `<user_dir>/settings.toml`, then `<project_dir>/.wai/settings.toml`.
     /// An error in the user's file fails the load. The project file may not set `agents` or
-    /// `terminal` (R15: opening a cloned repository must not choose what wai runs), nor `updates`
-    /// or `models`; its `default_agent` counts only when the user already chose one, and names it,
+    /// `terminal` (R15: opening a cloned repository must not choose what wai runs), nor `updates`,
+    /// `models` or `conversation`; its `default_agent` counts only when the user already chose one, and names it,
     /// an agent in the user's own `[agents]`, or an extension agent (an id with a `/`). Those
     /// tables, or a project file that does not load, are left out; the returned notices say so.
     pub fn load(
@@ -248,6 +270,12 @@ impl Settings {
             if layer.remove("models").is_some() {
                 notices.push(format!(
                     "Ignored models settings from {}: only user settings can choose default models.",
+                    path.display()
+                ));
+            }
+            if layer.remove("conversation").is_some() {
+                notices.push(format!(
+                    "Ignored conversation settings from {}: only user settings can choose how a conversation shows.",
                     path.display()
                 ));
             }
@@ -638,6 +666,55 @@ mod tests {
             assert_eq!(s.default_agent.as_deref(), Some(want), "{name}");
             assert_eq!(project_default_agent(p.path()).as_deref(), Some(name));
         }
+    }
+
+    #[test]
+    fn processing_defaults_to_steps_and_reads_the_users_choice() {
+        let d = tempfile::tempdir().unwrap();
+        let (s, _) = Settings::load(d.path(), None).unwrap();
+        assert_eq!(s.conversation.processing, Processing::Steps);
+        for (name, mode) in [
+            ("steps", Processing::Steps),
+            ("grouped", Processing::Grouped),
+            ("hidden", Processing::Hidden),
+        ] {
+            let body = format!("[conversation]\nprocessing = \"{name}\"\n");
+            write(d.path(), "settings.toml", &body);
+            let (s, _) = Settings::load(d.path(), None).unwrap();
+            assert_eq!(s.conversation.processing, mode, "{name}");
+        }
+        write(
+            d.path(),
+            "settings.toml",
+            "[conversation]\nprocessing = \"loud\"\n",
+        );
+        assert!(Settings::load(d.path(), None).is_err());
+    }
+
+    /// How the user's chats show is the user's choice: a repository cannot hide the steps.
+    #[test]
+    fn project_cannot_set_conversation() {
+        let (u, p) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        write(
+            u.path(),
+            "settings.toml",
+            "[conversation]\nprocessing = \"grouped\"\n",
+        );
+        write(
+            p.path(),
+            ".wai/settings.toml",
+            "[conversation]\nprocessing = \"hidden\"\n",
+        );
+        let (s, notices) = Settings::load(u.path(), Some(p.path())).unwrap();
+        assert_eq!(s.conversation.processing, Processing::Grouped);
+        let path = p.path().join(".wai").join("settings.toml");
+        assert_eq!(
+            notices,
+            [format!(
+                "Ignored conversation settings from {}: only user settings can choose how a conversation shows.",
+                path.display()
+            )]
+        );
     }
 
     #[test]
