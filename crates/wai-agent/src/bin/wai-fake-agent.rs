@@ -42,6 +42,8 @@
 //! - `--models`: `session/new`, `load` and `fork` return a `model` option (`fake-small`,
 //!   `fake-large`) and an `effort` option (`low`, `high`); `session/set_config_option` stores the
 //!   value per session, and each turn answers `model:<current model id>`.
+//! - `--config-mode`: with `--models`, a `mode` option (`ask`, `code`) joins them.
+//! - `--reject-config`: `session/set_config_option` fails.
 //!
 //! `session/load` replays `previous prompt` and `previous answer`; for an id starting with
 //! `missing` it fails with the ACP session-not-found error instead.
@@ -86,6 +88,8 @@ struct Opts {
     cwd_file: Option<PathBuf>,
     echo_mcp: bool,
     models: bool,
+    config_mode: bool,
+    reject_config: bool,
 }
 
 fn parse_args() -> Opts {
@@ -111,6 +115,8 @@ fn parse_args() -> Opts {
         cwd_file: None,
         echo_mcp: false,
         models: false,
+        config_mode: false,
+        reject_config: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -154,6 +160,8 @@ fn parse_args() -> Opts {
             "--cwd-file" => opts.cwd_file = Some(value().into()),
             "--echo-mcp" => opts.echo_mcp = true,
             "--models" => opts.models = true,
+            "--config-mode" => opts.config_mode = true,
+            "--reject-config" => opts.reject_config = true,
             other => panic!("unknown flag {other}"),
         }
     }
@@ -205,22 +213,36 @@ impl Fake {
             acp::SessionConfigOption::select(id, name, current(id, default), values)
                 .category(category)
         };
-        Some(vec![
+        let mode = self.opts.config_mode.then(|| {
             select(
-                "model",
-                "Model",
-                C::Model,
-                "fake-small",
-                [("fake-small", "Fake Small"), ("fake-large", "Fake Large")],
-            ),
-            select(
-                "effort",
-                "Effort",
-                C::ThoughtLevel,
-                "low",
-                [("low", "Low"), ("high", "High")],
-            ),
-        ])
+                "mode",
+                "Mode",
+                C::Mode,
+                "ask",
+                [("ask", "Ask"), ("code", "Code")],
+            )
+        });
+        Some(
+            vec![
+                select(
+                    "model",
+                    "Model",
+                    C::Model,
+                    "fake-small",
+                    [("fake-small", "Fake Small"), ("fake-large", "Fake Large")],
+                ),
+                select(
+                    "effort",
+                    "Effort",
+                    C::ThoughtLevel,
+                    "low",
+                    [("low", "Low"), ("high", "High")],
+                ),
+            ]
+            .into_iter()
+            .chain(mode)
+            .collect(),
+        )
     }
 
     fn is_cancelled(&self, session: &acp::SessionId) -> bool {
@@ -674,6 +696,9 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
             {
                 let fake = fake.clone();
                 async move |request: acp::SetSessionConfigOptionRequest, responder, _cx| {
+                    if fake.opts.reject_config {
+                        return responder.respond_with_error(Error::internal_error());
+                    }
                     if let acp::SessionConfigOptionValue::ValueId { value } = request.value {
                         let mut config = fake.config.lock().expect("config poisoned");
                         let session = config.entry(request.session_id.to_string()).or_default();

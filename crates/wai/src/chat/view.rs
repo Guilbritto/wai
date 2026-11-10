@@ -1470,4 +1470,42 @@ mod tests {
         };
         assert!(session.read_with(cx, |s, _| s.model.items.contains(&notice)));
     }
+
+    #[gpui_kit::test]
+    fn mode_option_replaces_the_legacy_picker(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--models --config-mode"));
+        let session = start_session(&workspace, cx);
+        let pickers = session.read_with(cx, |s, _| {
+            s.pickers
+                .iter()
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(pickers, ["model", "effort", "mode"]);
+        assert!(session.read_with(cx, |s, _| s.has_mode_option()));
+    }
+
+    #[gpui_kit::test]
+    fn failed_switch_reverts_and_says_so(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--models --reject-config"));
+        let session = start_session(&workspace, cx);
+        session.update(cx, |s, cx| s.set_option("model", "fake-large".into(), cx));
+        wait_until(cx, "the notice", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.items.iter().any(|i| {
+                    matches!(i, ChatItem::Notice { text, kind: NoticeKind::Error }
+                        if text.starts_with("Could not switch Model: "))
+                })
+            })
+        });
+        cx.run_until_parked();
+        let current = session.read_with(cx, |s, _| s.model.config[0].current.clone());
+        assert_eq!(current, "fake-small");
+        let picked = session.read_with(cx, |s, cx| {
+            s.pickers[0].1.read(cx).selected_value().cloned()
+        });
+        assert_eq!(picked.as_deref(), Some("fake-small"));
+    }
 }

@@ -338,7 +338,7 @@ impl ChatSession {
             )
     }
 
-    fn has_mode_option(&self) -> bool {
+    pub(super) fn has_mode_option(&self) -> bool {
         (self.model.config.iter()).any(|o| o.category == wai_agent::ConfigCategory::Mode)
     }
 
