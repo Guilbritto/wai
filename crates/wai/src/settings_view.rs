@@ -9,7 +9,9 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::radio::Radio;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::*;
 use wai_settings::{Change, SeenModel, Settings, ThemeChoice, agent_label, builtin};
 
@@ -540,6 +542,7 @@ impl SettingsView {
                 h_flex().justify_end().child(
                     Switch::new("settings-updates-switch")
                         .checked(self.data.settings.updates.check)
+                        .disabled(off)
                         .on_click(cx.listener(|this, on: &bool, _, cx| {
                             this.change(Change::UpdatesCheck(*on), cx)
                         })),
@@ -985,6 +988,23 @@ mod tests {
         view.update(cx, |v, cx| v.change(Change::Theme(ThemeChoice::Light), cx));
         cx.run_until_parked();
         assert!(!dir.path().join("settings.toml").exists());
+    }
+
+    #[gpui_kit::test]
+    fn updates_switch_is_off_under_the_error(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Updates, None, window, cx)
+        });
+        let view = view(&workspace, cx);
+        view.update(cx, |v, cx| v.set(data(Some("x")), cx));
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("settings-updates-switch").disabled(),
+                Some(true)
+            );
+        });
     }
 
     #[gpui_kit::test]

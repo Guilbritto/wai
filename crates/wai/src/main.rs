@@ -47,8 +47,7 @@ fn main() -> anyhow::Result<()> {
     std::fs::remove_dir_all(config_dir().join("scratch")).ok();
     // Stages a closed run never committed or dropped.
     std::fs::remove_dir_all(wai_ext::staging_dir(&config_dir())).ok();
-    let notices: Vec<String> = notices.into_iter().chain(template_notices).collect();
-    for notice in &notices {
+    for notice in notices.iter().chain(&template_notices) {
         eprintln!("wai: {notice}");
     }
     app::run(
@@ -56,6 +55,7 @@ fn main() -> anyhow::Result<()> {
         settings,
         templates,
         notices,
+        template_notices,
         settings_error,
         state_path,
     );

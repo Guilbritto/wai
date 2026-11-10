@@ -8158,6 +8158,7 @@ dependencies = [
  "smol",
  "tempfile",
  "tokio",
+ "unicode-properties",
  "wai-agent",
  "wai-ext",
  "wai-project",

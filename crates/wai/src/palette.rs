@@ -8,6 +8,7 @@ use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandSt
 use gpui_kit::*;
 use wai_ext::panel::clamp;
 use wai_ext::{CommandSpec, ExtId};
+use wai_settings::agent_label;
 
 use crate::app::{NewSession, OpenFolder, OpenPalette, ToggleTerminal};
 use crate::settings_view::Section;
@@ -53,7 +54,11 @@ impl Workspace {
             (label, Entry::Command(ext, command))
         });
         let agents = (self.registry.read(cx).names().into_iter()).map(|a| {
-            let label = clamp(&format!("New session with {a}"), TITLE_CHARS).into();
+            let label = clamp(
+                &format!("New session with {}", agent_label(&a)),
+                TITLE_CHARS,
+            )
+            .into();
             (label, Entry::NewSessionWith(a))
         });
         let groups = [
@@ -140,12 +145,12 @@ mod tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
     use serde_json::json;
-    use wai_settings::Template;
+    use wai_settings::{Settings, Template};
 
     use crate::ext_host::tests::{bodies, install, log_path, logged, workspace_at};
     use crate::sidebar::SidebarTab;
     use crate::workspace::Workspace;
-    use crate::workspace::tests::{fake_settings, wait_until};
+    use crate::workspace::tests::{fake_settings, open, wait_until};
 
     const MANIFEST: &str = "id = \"sample\"\nname = \"Sample\"\nversion = \"1.0.0\"\n\
         permissions = [\"process\"]\n[process]\ncommand = \"bin/run\"\n\
@@ -242,6 +247,23 @@ mod tests {
         cx.simulate_keystrokes("secondary-shift-p");
         cx.simulate_keystrokes("escape");
         assert!(!dialog(cx), "Escape closes it");
+    }
+
+    /// A built-in shows its name, not its id.
+    #[gpui_kit::test]
+    fn palette_names_builtin_agents(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, Settings::default());
+        let groups = labels(&workspace, cx);
+        let (_, agents) = groups.iter().find(|(h, _)| h == "Agents").unwrap();
+        assert_eq!(
+            agents,
+            &[
+                "New session with Antigravity",
+                "New session with Claude",
+                "New session with Codex",
+                "New session with Copilot"
+            ]
+        );
     }
 
     /// A command without a prompt goes to the extension's process as `command/run`.

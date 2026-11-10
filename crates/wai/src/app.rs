@@ -106,13 +106,15 @@ fn terminal_ctrl_keymap() -> [(&'static str, Box<dyn Action>); 10] {
     ]
 }
 
-/// `notices`: what the settings left out, shown once in the window.
+/// `notices`: what the settings left out, shown once in the window (a reload shows only new
+/// ones); `template_notices`, what the templates did.
 /// `state_path`: where the open sessions, the project and the terminal's visibility are kept.
 pub fn run(
     project: PathBuf,
     settings: Settings,
     templates: Vec<Template>,
     notices: Vec<String>,
+    template_notices: Vec<String>,
     settings_error: Option<String>,
     state_path: PathBuf,
 ) {
@@ -154,6 +156,7 @@ pub fn run(
                 workspace.update(cx, |w, cx| {
                     w.templates = templates;
                     w.settings_error = settings_error;
+                    w.show_load_notices(notices, window, cx);
                     let pending = unapproved(&Settings::default(), &w.settings, &w.approved);
                     w.ask_approval(pending, window, cx);
                     if w.settings_error.is_none() {
@@ -171,7 +174,7 @@ pub fn run(
                         w.open_settings(Section::Ai, Some(CHOOSE_AI), window, cx);
                     }
                 });
-                for notice in notices {
+                for notice in template_notices {
                     window.push_notification(Notification::warning(notice).autohide(false), cx);
                 }
             })

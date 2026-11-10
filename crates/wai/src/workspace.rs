@@ -12,6 +12,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::json;
+use unicode_properties::{GeneralCategory, UnicodeGeneralCategory as _};
 use wai_agent::{
     AgentError, AgentHandle, BrokerError, QuestionAnswer, SessionEvent, SessionStarted,
     SessionSummary, StopReason,
@@ -523,6 +524,20 @@ impl Workspace {
         }
         self.sync_settings_view(cx);
         cx.notify();
+    }
+
+    /// Shows the launch's load notices (R15) and records them: a reload pushes only new ones.
+    pub fn show_load_notices(
+        &mut self,
+        notices: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for notice in &notices {
+            let shown = Notification::warning(notice.clone()).autohide(false);
+            window.push_notification(shown, cx);
+        }
+        self.load_notices = notices;
     }
 
     /// The registry and the terminal get approved values only: an agent or the shell whose
@@ -2095,11 +2110,12 @@ impl Workspace {
         }
     }
 
-    /// The settings screen follows `self.settings`.
+    /// The settings screen follows `self.settings`. Its "Choose an AI" notice goes once one is
+    /// chosen.
     pub fn sync_settings_view(&self, cx: &mut Context<Self>) {
         for pane in &self.panes {
             if let Pane::Settings(view) = pane {
-                let notice = view.read(cx).notice();
+                let notice = (view.read(cx).notice()).filter(|_| self.default_agent().is_none());
                 let data = self.settings_data(notice, cx);
                 view.update(cx, |v, cx| v.set(data, cx));
             }
@@ -2336,7 +2352,6 @@ fn approval_value(approval: &Approval) -> &String {
     new
 }
 
-/// Control characters show escaped: a value cannot hide its end behind line breaks.
 /// The screen's edit that `approval` asks about.
 fn edit_change(approval: Approval) -> Change {
     match approval {
@@ -2348,6 +2363,8 @@ fn edit_change(approval: Approval) -> Change {
     }
 }
 
+/// Control and format characters show escaped: a value cannot hide its end behind line breaks,
+/// bidi overrides or zero-width characters.
 pub(crate) fn approval_text(approval: &Approval) -> String {
     let text = match approval {
         Approval::Agent {
@@ -2361,7 +2378,8 @@ pub(crate) fn approval_text(approval: &Approval) -> String {
             format!("Terminal shell: {old} → {new}")
         }
     };
-    let visible = |c: char| match c.is_control() {
+    let hidden = |c: char| c.is_control() || c.general_category() == GeneralCategory::Format;
+    let visible = |c: char| match hidden(c) {
         true => c.escape_default().to_string(),
         false => c.into(),
     };
@@ -2663,6 +2681,27 @@ pub(crate) mod tests {
             );
             assert!(w.registry.read(cx).status("fake").is_none());
         });
+    }
+
+    #[gpui_kit::test]
+    fn choosing_a_default_clears_the_notice(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let settings = Settings {
+            default_agent: None,
+            ..fake_settings("")
+        };
+        let (workspace, cx) = open(cx, settings);
+        cx.simulate_keystrokes("secondary-n");
+        let view = workspace.read_with(cx, |w, _| match &w.panes[0] {
+            Pane::Settings(view) => view.clone(),
+            _ => panic!("expected the Settings pane"),
+        });
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.apply_settings(fake_settings(""), vec![], window, cx)
+            })
+        });
+        assert_eq!(view.read_with(cx, |v, _| v.notice()), None);
     }
 
     #[gpui_kit::test]
@@ -3144,6 +3183,25 @@ pub(crate) mod tests {
         assert_eq!(history_rows(&workspace, cx), 25);
     }
 
+    /// The old default's rows would resume with the new agent: they go until it lists its own.
+    #[gpui_kit::test]
+    fn switching_the_default_clears_the_old_history(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(2));
+        load_history(&workspace, 2, cx);
+        let mut settings = workspace.read_with(cx, |w, _| w.settings.clone());
+        let other = settings.agents["fake"].clone();
+        settings.agents.insert("other".into(), other);
+        settings.default_agent = Some("other".into());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.apply_settings(settings, vec![], window, cx))
+        });
+        assert_eq!(history_rows(&workspace, cx), 0);
+        wait_until(cx, "the new default's history", |cx| {
+            history_rows(&workspace, cx) == 2
+        });
+    }
+
     #[gpui_kit::test]
     fn open_to_side_caps_at_four_panes(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
@@ -3166,25 +3224,6 @@ pub(crate) mod tests {
             workspace.read_with(cx, |w, _| w.focused_pane),
             (focused + 1) % 4
         );
-    }
-
-    /// The old default's rows would resume with the new agent: they go until it lists its own.
-    #[gpui_kit::test]
-    fn switching_the_default_clears_the_old_history(cx: &mut TestAppContext) {
-        cx.executor().allow_parking(); // the fake agent is a real process
-        let (workspace, cx) = open(cx, history_settings(2));
-        load_history(&workspace, 2, cx);
-        let mut settings = workspace.read_with(cx, |w, _| w.settings.clone());
-        let other = settings.agents["fake"].clone();
-        settings.agents.insert("other".into(), other);
-        settings.default_agent = Some("other".into());
-        cx.update(|window, cx| {
-            workspace.update(cx, |w, cx| w.apply_settings(settings, vec![], window, cx))
-        });
-        assert_eq!(history_rows(&workspace, cx), 0);
-        wait_until(cx, "the new default's history", |cx| {
-            history_rows(&workspace, cx) == 2
-        });
     }
 
     #[gpui_kit::test]
@@ -3743,6 +3782,23 @@ pub(crate) mod tests {
         assert_eq!(notify::sent(), []);
     }
 
+    /// A session of an agent the settings do not have (a broken file at launch, a pending
+    /// command) is not lost: the state keeps it for a launch that can restore it.
+    #[gpui_kit::test]
+    fn unrestored_sessions_stay_in_the_state(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = AppState {
+            open_sessions: vec![saved("x", "1", 0)],
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        let (workspace, cx) = open_at(cx, Settings::default(), Some(path.clone()));
+        launch(&workspace, cx);
+        assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
+        assert_eq!(AppState::load(&path).open_sessions, [saved("x", "1", 0)]);
+    }
+
     #[gpui_kit::test]
     fn restored_session_keeps_the_agents_model(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
@@ -3794,23 +3850,6 @@ pub(crate) mod tests {
         wait_until(cx, "the history title", |cx| {
             session.read_with(cx, |s, _| s.model.title.as_deref() == Some("Session 1"))
         });
-    }
-
-    /// A session of an agent the settings do not have (a broken file at launch, a pending
-    /// command) is not lost: the state keeps it for a launch that can restore it.
-    #[gpui_kit::test]
-    fn unrestored_sessions_stay_in_the_state(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
-        let state = AppState {
-            open_sessions: vec![saved("x", "1", 0)],
-            ..AppState::default()
-        };
-        state.save(&path).unwrap();
-        let (workspace, cx) = open_at(cx, Settings::default(), Some(path.clone()));
-        launch(&workspace, cx);
-        assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
-        assert_eq!(AppState::load(&path).open_sessions, [saved("x", "1", 0)]);
     }
 
     #[gpui_kit::test]
@@ -4096,6 +4135,20 @@ pub(crate) mod tests {
         assert_eq!(cx.update(|window, cx| window.notifications(cx).len()), 1);
     }
 
+    /// The launch's notices count as shown: the first reload does not push them again.
+    #[gpui_kit::test]
+    fn launch_notices_are_not_pushed_again(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.show_load_notices(vec!["x".into()], window, cx);
+                let settings = w.settings.clone();
+                w.apply_settings(settings, vec!["x".into()], window, cx);
+            })
+        });
+        assert_eq!(cx.update(|window, cx| window.notifications(cx).len()), 1);
+    }
+
     pub(crate) fn click(id: &'static str, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             window.render_frame(cx);
@@ -4182,111 +4235,16 @@ pub(crate) mod tests {
         );
     }
 
-    #[gpui_kit::test]
-    fn hand_edited_command_asks_before_running(cx: &mut TestAppContext) {
-        let (workspace, cx, dir) = live(cx, fake_settings(""), None);
-        let old = fake_settings("").agents["fake"].command.clone();
-        let (new, file) = fake_file("--reply other");
-        std::fs::write(dir.path().join("settings.toml"), file).unwrap();
-        wait_until(cx, "the question", |cx| question(&workspace, cx).is_some());
+    #[test]
+    fn question_shows_format_characters_escaped() {
+        let hidden = wai_settings::Approval::Shell {
+            old: None,
+            new: "/bin/sh\u{202e}\u{200b}x".into(),
+        };
         assert_eq!(
-            question(&workspace, cx).unwrap(),
-            format!("fake: {old} → {new}")
+            super::approval_text(&hidden),
+            "Terminal shell: system default → /bin/sh\\u{202e}\\u{200b}x"
         );
-        assert_eq!(reply(&workspace, "fake", cx), "Hello from fake agent");
-    }
-
-    #[gpui_kit::test]
-    fn declined_command_never_runs(cx: &mut TestAppContext, relaunch: &mut TestAppContext) {
-        cx.executor().allow_parking(); // the fake agent is a real process
-        let dir = tempfile::tempdir().unwrap();
-        let state = dir.path().join("state.json");
-        // From before approvals: the first launch approves today's command.
-        AppState::default().save(&state).unwrap();
-        let (workspace, cx) = open_at(cx, fake_settings(""), Some(state.clone()));
-        launch(&workspace, cx);
-        let (new, file) = fake_file("--reply other");
-        edit_user_file(&workspace, dir.path(), &file, cx);
-        assert!(question(&workspace, cx).is_some());
-        click("approval-deny", cx);
-        assert_eq!(question(&workspace, cx), None);
-        let file_text = std::fs::read_to_string(dir.path().join("settings.toml")).unwrap();
-        assert_eq!(file_text, file, "nothing is written");
-        let old = fake_settings("").agents["fake"].command.clone();
-        workspace.read_with(cx, |w, cx| {
-            assert_eq!(w.registry.read(cx).command("fake"), Some(old.as_str()))
-        });
-        assert!(!AppState::load(&state).approved.unwrap().contains(&new));
-
-        relaunch.executor().allow_parking();
-        let (settings, _) = Settings::load(dir.path(), None).unwrap();
-        let (workspace, cx) = open_at(relaunch, settings, Some(state.clone()));
-        launch(&workspace, cx);
-        assert_eq!(question(&workspace, cx), Some(format!("fake (new): {new}")));
-        workspace.read_with(cx, |w, cx| {
-            assert_eq!(w.registry.read(cx).command("fake"), None);
-            assert_eq!(w.registry.read(cx).status("fake"), None, "never started");
-        });
-        assert!(!AppState::load(&state).approved.unwrap().contains(&new));
-    }
-
-    #[gpui_kit::test]
-    fn allowed_command_is_remembered(cx: &mut TestAppContext, relaunch: &mut TestAppContext) {
-        cx.executor().allow_parking(); // the fake agent is a real process
-        let dir = tempfile::tempdir().unwrap();
-        let state = dir.path().join("state.json");
-        // From before approvals: the first launch approves today's command.
-        AppState::default().save(&state).unwrap();
-        let (workspace, cx) = open_at(cx, fake_settings(""), Some(state.clone()));
-        launch(&workspace, cx);
-        let (new, file) = fake_file("--reply other");
-        edit_user_file(&workspace, dir.path(), &file, cx);
-        click("approval-allow", cx);
-        assert_eq!(question(&workspace, cx), None);
-        workspace.read_with(cx, |w, cx| {
-            assert_eq!(w.registry.read(cx).command("fake"), Some(new.as_str()))
-        });
-        assert!(AppState::load(&state).approved.unwrap().contains(&new));
-
-        relaunch.executor().allow_parking();
-        let (settings, _) = Settings::load(dir.path(), None).unwrap();
-        let (workspace, cx) = open_at(relaunch, settings, Some(state));
-        launch(&workspace, cx);
-        assert_eq!(question(&workspace, cx), None);
-        assert_eq!(reply(&workspace, "fake", cx), "other");
-    }
-
-    /// A launch whose `state.json` holds `text` (`None`: there is none) approves only the
-    /// built-ins: it asks for the user's own command.
-    fn asks_without_a_state(text: Option<&str>, cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        let state = dir.path().join("state.json");
-        if let Some(text) = text {
-            std::fs::write(&state, text).unwrap();
-        }
-        let settings = fake_settings("--reply mine");
-        let command = settings.agents["fake"].command.clone();
-        let (workspace, cx) = open_at(cx, settings, Some(state.clone()));
-        launch(&workspace, cx);
-        assert_eq!(
-            question(&workspace, cx),
-            Some(format!("fake (new): {command}"))
-        );
-        workspace.read_with(cx, |w, cx| {
-            assert!(!w.approved.contains(&command));
-            assert_eq!(w.registry.read(cx).command("fake"), None);
-        });
-        assert!(!AppState::load(&state).approved.unwrap().contains(&command));
-    }
-
-    #[gpui_kit::test]
-    fn missing_state_approves_nothing(cx: &mut TestAppContext) {
-        asks_without_a_state(None, cx);
-    }
-
-    #[gpui_kit::test]
-    fn corrupt_state_approves_nothing(cx: &mut TestAppContext) {
-        asks_without_a_state(Some("{"), cx);
     }
 
     fn status(
@@ -4436,6 +4394,113 @@ pub(crate) mod tests {
     #[gpui_kit::test]
     fn declined_screen_edit_writes_nothing(cx: &mut TestAppContext) {
         screen_edit_asks_first(Change::Shell(Some("/bin/other".into())), false, cx);
+    }
+
+    #[gpui_kit::test]
+    fn hand_edited_command_asks_before_running(cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = live(cx, fake_settings(""), None);
+        let old = fake_settings("").agents["fake"].command.clone();
+        let (new, file) = fake_file("--reply other");
+        std::fs::write(dir.path().join("settings.toml"), file).unwrap();
+        wait_until(cx, "the question", |cx| question(&workspace, cx).is_some());
+        assert_eq!(
+            question(&workspace, cx).unwrap(),
+            format!("fake: {old} → {new}")
+        );
+        assert_eq!(reply(&workspace, "fake", cx), "Hello from fake agent");
+    }
+
+    #[gpui_kit::test]
+    fn declined_command_never_runs(cx: &mut TestAppContext, relaunch: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        // From before approvals: the first launch approves today's command.
+        AppState::default().save(&state).unwrap();
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(state.clone()));
+        launch(&workspace, cx);
+        let (new, file) = fake_file("--reply other");
+        edit_user_file(&workspace, dir.path(), &file, cx);
+        assert!(question(&workspace, cx).is_some());
+        click("approval-deny", cx);
+        assert_eq!(question(&workspace, cx), None);
+        let file_text = std::fs::read_to_string(dir.path().join("settings.toml")).unwrap();
+        assert_eq!(file_text, file, "nothing is written");
+        let old = fake_settings("").agents["fake"].command.clone();
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(w.registry.read(cx).command("fake"), Some(old.as_str()))
+        });
+        assert!(!AppState::load(&state).approved.unwrap().contains(&new));
+
+        relaunch.executor().allow_parking();
+        let (settings, _) = Settings::load(dir.path(), None).unwrap();
+        let (workspace, cx) = open_at(relaunch, settings, Some(state.clone()));
+        launch(&workspace, cx);
+        assert_eq!(question(&workspace, cx), Some(format!("fake (new): {new}")));
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(w.registry.read(cx).command("fake"), None);
+            assert_eq!(w.registry.read(cx).status("fake"), None, "never started");
+        });
+        assert!(!AppState::load(&state).approved.unwrap().contains(&new));
+    }
+
+    #[gpui_kit::test]
+    fn allowed_command_is_remembered(cx: &mut TestAppContext, relaunch: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        // From before approvals: the first launch approves today's command.
+        AppState::default().save(&state).unwrap();
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(state.clone()));
+        launch(&workspace, cx);
+        let (new, file) = fake_file("--reply other");
+        edit_user_file(&workspace, dir.path(), &file, cx);
+        click("approval-allow", cx);
+        assert_eq!(question(&workspace, cx), None);
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(w.registry.read(cx).command("fake"), Some(new.as_str()))
+        });
+        assert!(AppState::load(&state).approved.unwrap().contains(&new));
+
+        relaunch.executor().allow_parking();
+        let (settings, _) = Settings::load(dir.path(), None).unwrap();
+        let (workspace, cx) = open_at(relaunch, settings, Some(state));
+        launch(&workspace, cx);
+        assert_eq!(question(&workspace, cx), None);
+        assert_eq!(reply(&workspace, "fake", cx), "other");
+    }
+
+    /// A launch whose `state.json` holds `text` (`None`: there is none) approves only the
+    /// built-ins: it asks for the user's own command.
+    fn asks_without_a_state(text: Option<&str>, cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        if let Some(text) = text {
+            std::fs::write(&state, text).unwrap();
+        }
+        let settings = fake_settings("--reply mine");
+        let command = settings.agents["fake"].command.clone();
+        let (workspace, cx) = open_at(cx, settings, Some(state.clone()));
+        launch(&workspace, cx);
+        assert_eq!(
+            question(&workspace, cx),
+            Some(format!("fake (new): {command}"))
+        );
+        workspace.read_with(cx, |w, cx| {
+            assert!(!w.approved.contains(&command));
+            assert_eq!(w.registry.read(cx).command("fake"), None);
+        });
+        assert!(!AppState::load(&state).approved.unwrap().contains(&command));
+    }
+
+    #[gpui_kit::test]
+    fn missing_state_approves_nothing(cx: &mut TestAppContext) {
+        asks_without_a_state(None, cx);
+    }
+
+    #[gpui_kit::test]
+    fn corrupt_state_approves_nothing(cx: &mut TestAppContext) {
+        asks_without_a_state(Some("{"), cx);
     }
 
     #[gpui_kit::test]
