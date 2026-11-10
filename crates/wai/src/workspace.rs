@@ -183,6 +183,9 @@ pub struct Workspace {
     settings_watch: Option<(ProjectWatcher, Task<()>)>,
     /// The load notices already shown: a reload pushes only new ones.
     load_notices: Vec<String>,
+    /// The last run's sessions `restore` could not reopen (their agent is not in the settings, or
+    /// its command waits for an answer): saved again, for a launch that can.
+    unrestored: Vec<OpenSession>,
     #[cfg(test)]
     pub(crate) applied: usize,
     next_ticket: u64,
@@ -358,6 +361,7 @@ impl Workspace {
             watch: None,
             settings_watch: None,
             load_notices: Vec::new(),
+            unrestored: Vec::new(),
             #[cfg(test)]
             applied: 0,
             next_ticket: 0,
@@ -511,6 +515,9 @@ impl Workspace {
         self.ask_approval(pending, window, cx);
         // Asked first: a default whose command waits for an answer starts after it.
         if chosen {
+            // The old default's history: its rows would resume with the new one.
+            self.history.clear();
+            self.history_task = None;
             self.start_agent(cx);
             self.refresh_history(cx);
         }
@@ -687,8 +694,8 @@ impl Workspace {
 
     /// Reopens the last run's sessions, which `load_session` replays, and its terminal. A session
     /// goes back to its pane: the first one saved for a pane takes it, panes left empty close, and
-    /// one saved in no pane only joins the open list. Sessions of agents the settings no longer
-    /// have are dropped.
+    /// one saved in no pane only joins the open list. Sessions of agents the settings do not have
+    /// (or whose command waits for an answer) stay in the state for a launch that has them.
     pub fn restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = &self.state_path else {
             return;
@@ -696,8 +703,10 @@ impl Workspace {
         let state = AppState::load(path);
         let mut panes: [Option<Entity<ChatSession>>; MAX_PANES] = Default::default();
         for saved in state.open_sessions {
-            let (agent, id, cwd) = (saved.agent, saved.session_id, saved.cwd);
-            let Some(session) = self.loading_session(agent, id, cwd, window, cx) else {
+            let (agent, id, cwd) = (&saved.agent, &saved.session_id, &saved.cwd);
+            let loading = self.loading_session(agent.clone(), id.clone(), cwd.clone(), window, cx);
+            let Some(session) = loading else {
+                self.unrestored.push(saved);
                 continue;
             };
             if let Some(slot @ None) = panes.get_mut(saved.pane) {
@@ -767,9 +776,10 @@ impl Workspace {
                 pane: pane(session).unwrap_or(MAX_PANES),
             }
         });
+        let unrestored = self.unrestored.iter().cloned();
         let state = AppState {
             project: Some(self.project.clone()),
-            open_sessions: open_sessions.collect(),
+            open_sessions: open_sessions.chain(unrestored).collect(),
             terminal_visible: self.terminal_visible,
             // ponytail: the sidebar does not resize yet; save its width once it does.
             sidebar_width: SIDEBAR_WIDTH,
@@ -876,7 +886,8 @@ impl Workspace {
                     Some(AgentStatus::Ready(_)) => self.refresh_history(cx),
                     _ => {}
                 }
-                // Empty panes show the default agent's problem, if any.
+                // The AI rows show the status; empty panes, the default agent's problem.
+                self.sync_settings_view(cx);
                 cx.notify();
             }
         }
@@ -1479,6 +1490,7 @@ impl Workspace {
                         let seen = seen_models(&started.config);
                         if !seen.is_empty() {
                             this.models_seen.insert(agent.clone(), seen);
+                            this.sync_settings_view(cx);
                         }
                         let session = cx.new(|cx| {
                             ChatSession::new(
@@ -2009,6 +2021,12 @@ impl Workspace {
                         }
                         SettingsEvent::OpenFile => {
                             let path = this.user_dir.join("settings.toml");
+                            // Created when missing (a first run): the editor opens only files
+                            // that exist. If this fails, `open_file` reports why.
+                            std::fs::create_dir_all(&this.user_dir).ok();
+                            (std::fs::OpenOptions::new().create(true).append(true))
+                                .open(&path)
+                                .ok();
                             this.open_file(path, None, window, cx)
                         }
                         SettingsEvent::Test(id) => this.test_agent(id, window, cx),
@@ -3150,6 +3168,25 @@ pub(crate) mod tests {
         );
     }
 
+    /// The old default's rows would resume with the new agent: they go until it lists its own.
+    #[gpui_kit::test]
+    fn switching_the_default_clears_the_old_history(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(2));
+        load_history(&workspace, 2, cx);
+        let mut settings = workspace.read_with(cx, |w, _| w.settings.clone());
+        let other = settings.agents["fake"].clone();
+        settings.agents.insert("other".into(), other);
+        settings.default_agent = Some("other".into());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.apply_settings(settings, vec![], window, cx))
+        });
+        assert_eq!(history_rows(&workspace, cx), 0);
+        wait_until(cx, "the new default's history", |cx| {
+            history_rows(&workspace, cx) == 2
+        });
+    }
+
     #[gpui_kit::test]
     fn fork_opens_side_pane_with_history(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
@@ -3690,11 +3727,18 @@ pub(crate) mod tests {
         assert_eq!(ids, ["abc", "def"]);
         assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 3);
         assert!(workspace.read_with(cx, |w, _| w.terminal_visible && w.terminal.is_some()));
+        // The ghost's stays for a launch whose settings have its agent.
         let kept = AppState::load(&path).open_sessions;
         let hidden = saved("fake", "ghi", super::MAX_PANES);
+        let ghost = saved("ghost", "gone", 1);
         assert_eq!(
             kept,
-            [saved("fake", "abc", 0), saved("fake", "def", 1), hidden]
+            [
+                saved("fake", "abc", 0),
+                saved("fake", "def", 1),
+                hidden,
+                ghost
+            ]
         );
         assert_eq!(notify::sent(), []);
     }
@@ -3750,6 +3794,23 @@ pub(crate) mod tests {
         wait_until(cx, "the history title", |cx| {
             session.read_with(cx, |s, _| s.model.title.as_deref() == Some("Session 1"))
         });
+    }
+
+    /// A session of an agent the settings do not have (a broken file at launch, a pending
+    /// command) is not lost: the state keeps it for a launch that can restore it.
+    #[gpui_kit::test]
+    fn unrestored_sessions_stay_in_the_state(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = AppState {
+            open_sessions: vec![saved("x", "1", 0)],
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        let (workspace, cx) = open_at(cx, Settings::default(), Some(path.clone()));
+        launch(&workspace, cx);
+        assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
+        assert_eq!(AppState::load(&path).open_sessions, [saved("x", "1", 0)]);
     }
 
     #[gpui_kit::test]

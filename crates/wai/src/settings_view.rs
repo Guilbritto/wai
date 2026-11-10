@@ -695,6 +695,7 @@ impl Render for SettingsView {
 
 #[cfg(test)]
 mod tests {
+    use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
     use wai_settings::{Change, Settings, ThemeChoice};
@@ -768,6 +769,58 @@ mod tests {
         if wai_agent::program("agy acp").is_none() {
             assert_eq!(rows[0].status, RowStatus::CliNotFound);
         }
+    }
+
+    /// The row the screen shows, not the workspace's.
+    fn shown(view: &Entity<SettingsView>, id: &str, cx: &mut VisualTestContext) -> RowStatus {
+        view.read_with(cx, |v, _| {
+            let row = v.data.agents.iter().find(|r| r.id == id).unwrap();
+            row.status.clone()
+        })
+    }
+
+    /// Choosing a default starts it; the open screen's row follows it to Ready.
+    #[gpui_kit::test]
+    fn row_status_follows_the_agent(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = fake_ws(cx, "");
+        let mut chosen = workspace.read_with(cx, |w, _| w.settings.clone());
+        chosen.default_agent = Some("fake".into());
+        workspace.update(cx, |w, _| w.settings.default_agent = None);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Ai, None, window, cx)
+        });
+        let view = view(&workspace, cx);
+        assert_eq!(shown(&view, "fake", cx), RowStatus::NotChecked);
+        workspace.update_in(cx, |w, window, cx| {
+            w.apply_settings(chosen, vec![], window, cx)
+        });
+        wait_until(cx, "Ready on the screen", |cx| {
+            shown(&view, "fake", cx) == RowStatus::Ready
+        });
+    }
+
+    /// A first run has no `settings.toml` yet: Open settings.toml creates it.
+    #[gpui_kit::test]
+    fn open_file_creates_a_missing_settings_toml(cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Ai, None, window, cx)
+        });
+        let view = view(&workspace, cx);
+        view.update(cx, |_, cx| cx.emit(super::SettingsEvent::OpenFile));
+        let path = crate::sidebar::canonical(&dir.path().join("settings.toml"));
+        wait_until(cx, "the editor tab", |cx| {
+            workspace.read_with(cx, |w, cx| {
+                w.panes.iter().any(|p| match p {
+                    Pane::Editor(pane) => {
+                        (pane.read(cx).tabs.iter()).any(|tab| tab.read(cx).path == path)
+                    }
+                    _ => false,
+                })
+            })
+        });
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        assert!(cx.update(|window, cx| window.notifications(cx).is_empty()));
     }
 
     #[gpui_kit::test]
