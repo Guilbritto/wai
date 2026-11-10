@@ -37,10 +37,10 @@ const TERMINAL_HEIGHT: f32 = 260.;
 pub const MAX_PANES: usize = 4;
 /// Events kept per session id that is not open yet (see `Workspace::early`).
 const EARLY_EVENTS: usize = 1_000;
-const START_HINT: &str = if cfg!(target_os = "macos") {
-    "Start a session (⌘N)"
+const START_KEY: &str = if cfg!(target_os = "macos") {
+    "⌘N"
 } else {
-    "Start a session (Ctrl+N)"
+    "Ctrl+N"
 };
 
 pub enum Pane {
@@ -1549,11 +1549,6 @@ impl Workspace {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let problem = error.cloned().or_else(|| self.agent_problem(cx));
-        let nevoa = if theme.is_dark() {
-            aurora::nevoa()
-        } else {
-            theme.muted_foreground
-        };
         v_flex()
             .size_full()
             .items_center()
@@ -1567,7 +1562,7 @@ impl Workspace {
                     .font_weight(FontWeight::BOLD)
                     .child("Start a session"),
             )
-            .child(div().text_color(nevoa).child(START_HINT))
+            .child(aurora::pill(cx).child(START_KEY))
             .child(
                 Button::new(("new-session", ix))
                     .primary()

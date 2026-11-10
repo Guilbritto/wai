@@ -149,10 +149,12 @@ impl Workspace {
             .map(|(tab, id, label)| {
                 aurora::tab(self.sidebar_tab == tab, cx)
                     .id(id)
+                    // Focusable, and Enter or Space clicks it.
+                    .tab_index(0)
                     .h(px(26.))
-                    .px_2()
+                    .px(px(5.))
                     .rounded(px(9.))
-                    .text_xs()
+                    .text_size(px(12.5))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(label)
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -163,6 +165,7 @@ impl Workspace {
                         }
                         cx.notify();
                     }))
+                    // Registers the id so tests can find and click it (a Button does it itself).
                     .test_support()
             });
         v_flex()
@@ -171,9 +174,9 @@ impl Workspace {
             .text_color(theme.sidebar_foreground)
             .child(
                 h_flex()
-                    .mx_2()
-                    .p(px(3.))
-                    .gap_1()
+                    .mx_1()
+                    .p(px(2.))
+                    .gap(px(2.))
                     .flex_wrap()
                     .rounded(px(12.))
                     .border_1()
