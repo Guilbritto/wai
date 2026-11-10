@@ -401,6 +401,14 @@ impl ChatSession {
         cx.notify();
     }
 
+    /// The user's name for the session (`None`: the agent's title again). Never sent to the
+    /// agent.
+    pub fn rename(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.model.name = name;
+        cx.emit(ChatEvent::TitleChanged);
+        cx.notify();
+    }
+
     /// Runs `f` on the model and reports state and title changes.
     pub(super) fn update_model<R>(
         &mut self,
@@ -576,7 +584,7 @@ impl ChatSession {
                     // takes no prompt; the workspace forgets the session.
                     Err(AgentError::Protocol(e)) if restore => {
                         eprintln!("wai: could not restore session {}: {e}", this.id);
-                        let name = this.model.title.as_ref().unwrap_or(&this.id);
+                        let name = this.model.shown_title().unwrap_or(&this.id);
                         let text = format!("Could not restore session {name}");
                         this.update_model(cx, |m| {
                             m.state = TurnState::Error(text.clone());

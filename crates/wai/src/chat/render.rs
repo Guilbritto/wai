@@ -56,7 +56,11 @@ pub(super) fn glass(el: Div, cx: &App) -> Div {
 
 impl ChatSession {
     fn render_header(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
-        let title = self.model.title.clone().unwrap_or("New session".into());
+        let title = self
+            .model
+            .shown_title()
+            .unwrap_or("New session")
+            .to_string();
         let dragged = DraggedSession {
             title: title.clone().into(),
             source: Dragged::Open(cx.entity()),
@@ -76,6 +80,7 @@ impl ChatSession {
                     .font_family(DISPLAY_FONT)
                     .text_size(px(14.))
                     .font_weight(FontWeight::BOLD)
+                    .aria_label(title.clone())
                     .child(title)
                     .on_drag(dragged, DraggedSession::preview)
                     // Registers the id so tests can find and drag it.

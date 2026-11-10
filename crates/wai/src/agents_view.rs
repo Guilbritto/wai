@@ -87,7 +87,7 @@ impl AgentsView {
         let m = &s.model;
         let color = crate::sidebar::status_color(&s.model.state, theme);
         let label = status_label(&m.state, m.done);
-        let title = m.title.clone().unwrap_or("New session".into());
+        let title = m.shown_title().unwrap_or("New session").to_string();
         let open = session.clone();
         let summary = summary(&title, label, &m.plan, m.current_tool());
         let dragged = DraggedSession {

@@ -444,6 +444,18 @@ pub struct AppState {
     pub approved: Option<BTreeSet<String>>,
     /// Agent id -> the models its last session offered.
     pub models_seen: BTreeMap<String, Vec<SeenModel>>,
+    /// The Open list's groups, in their order.
+    pub groups: Vec<SessionGroup>,
+}
+
+/// A named group of open sessions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionGroup {
+    pub name: String,
+    pub collapsed: bool,
+    /// Its sessions' ids.
+    // ponytail: by session id alone; add the agent if two agents ever share an id.
+    pub sessions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -458,6 +470,9 @@ pub struct OpenSession {
     pub session_id: String,
     pub cwd: PathBuf,
     pub pane: usize,
+    /// The user's name for the session; `None` shows the agent's title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl Default for AppState {
@@ -469,6 +484,7 @@ impl Default for AppState {
             sidebar_width: 260.0,
             approved: None,
             models_seen: BTreeMap::new(),
+            groups: Vec::new(),
         }
     }
 }
@@ -704,6 +720,7 @@ mod tests {
                 session_id: "s1".into(),
                 cwd: "/tmp/proj".into(),
                 pane: 1,
+                name: Some("Mine".into()),
             }],
             terminal_visible: true,
             sidebar_width: 300.0,
@@ -716,6 +733,11 @@ mod tests {
                 }],
             )]
             .into(),
+            groups: vec![SessionGroup {
+                name: "Review".into(),
+                collapsed: true,
+                sessions: vec!["s1".into()],
+            }],
         };
         state.save(&path).unwrap();
         assert_eq!(AppState::load(&path), state);
@@ -725,6 +747,12 @@ mod tests {
         assert_eq!(AppState::load(&path), AppState::default());
         std::fs::write(&path, r#"{"terminal_visible":true}"#).unwrap();
         assert_eq!(AppState::load(&path).approved, None);
+        // A state from before names and groups.
+        let old = r#"{"open_sessions":[{"agent":"a","session_id":"s","cwd":"/","pane":0}]}"#;
+        std::fs::write(&path, old).unwrap();
+        let state = AppState::load(&path);
+        assert_eq!(state.open_sessions[0].name, None);
+        assert_eq!(state.groups, []);
     }
 
     #[test]
