@@ -8141,7 +8141,7 @@ dependencies = [
 
 [[package]]
 name = "wai"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -8168,7 +8168,7 @@ dependencies = [
 
 [[package]]
 name = "wai-agent"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "agent-client-protocol",
  "async-channel",
@@ -8183,7 +8183,7 @@ dependencies = [
 
 [[package]]
 name = "wai-ext"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-channel",
  "dunce",
@@ -8200,7 +8200,7 @@ dependencies = [
 
 [[package]]
 name = "wai-project"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -8213,7 +8213,7 @@ dependencies = [
 
 [[package]]
 name = "wai-settings"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dirs 6.0.0",
  "dunce",
@@ -8227,7 +8227,7 @@ dependencies = [
 
 [[package]]
 name = "wai-terminal"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
