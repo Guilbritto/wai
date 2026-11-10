@@ -22,7 +22,7 @@ pub const BUILTIN_AGENTS: [BuiltinAgent; 4] = [
     BuiltinAgent {
         id: "claude",
         name: "Claude",
-        command: "npx -y @agentclientprotocol/claude-agent-acp@0.101.0",
+        command: "npx -y @agentclientprotocol/claude-agent-acp@0.103.0",
         install: "Install Node.js (it provides npx)",
         login: "claude /login",
     },
@@ -563,6 +563,10 @@ mod tests {
         assert_eq!(s.default_agent, None);
         let ids: Vec<_> = s.agents.keys().map(String::as_str).collect();
         assert_eq!(ids, ["antigravity", "claude", "codex", "copilot"]);
+        assert_eq!(
+            s.agents["claude"].command,
+            "npx -y @agentclientprotocol/claude-agent-acp@0.103.0"
+        );
         assert_eq!(
             s.agents["codex"].command,
             "npx -y @agentclientprotocol/codex-acp@2.6.0"

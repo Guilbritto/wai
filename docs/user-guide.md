@@ -51,6 +51,7 @@ While the agent prepares the session, its pane shows `Preparing <agent>…`. **�
     | **Grouped** | The steps between two replies fold into one block, such as `3 steps · Read README.md`. A click lists the step lines, each still folded |
     | **Hidden** | No steps |
 
+  - **Subagents.** Each subagent the agent runs (Claude Code's Agent tool) shows as a step card with its title, its status and, once it answers, its answer. Its tool calls stay in the transcript, as steps. Its own text and checklist are not shown.
   - **Always shown,** whatever the setting: your prompts, the replies, permission cards and questions, notices, and file edits. An edit that was written reads `✎ Edited <file>` (a click shows its diff), and the turn still ends with its **Edits** block (see [Reviewing edits](#reviewing-edits)).
   - An unfolded tool call shows its output, up to 2,000 lines, with **Show all**.
   - A very large output offers **Open full output in editor**. That opens a read-only copy kept under `<config>/scratch/`, which is cleared at each launch.
@@ -74,6 +75,10 @@ Each open session has a coloured dot in the sidebar:
 
 - **Permission cards.** When an agent asks before acting, the session shows a card with the diff of the edit (when there is one) and the agent's own choices, such as **Yes**, **Yes, always** and **No**. The session reads `Needs you` until you answer.
 - **Questions.** When Claude asks a multiple-choice question, wai shows it as a form with **Submit** and **Decline**. A form wai cannot display is declined, and the transcript says so.
+- **A subagent's card** is titled `<subagent>: <request>` and shows in the session's chat.
+  - **Stop** cancels only the session's own cards.
+  - A background subagent's card stays open, even after the turn ends, until you answer it; the session reads `Needs you` meanwhile.
+  - A subagent the turn was waiting on stops with the turn, and its card closes as `Cancelled`.
 
 ### Reviewing edits
 
@@ -185,6 +190,7 @@ The Search tab searches file contents across the project:
 The Agents tab has one live card per open session. Each card shows:
 - the status;
 - the agent's plan (8 rows, then `+N more`);
+- its running subagents, one line each: `title · Working` or `title · Needs you`, then the tool call in progress. A line goes away when its subagent finishes. A background subagent keeps its line after the turn ends, until it finishes;
 - the tool call in progress;
 - the context used (`used / size (pct%)`).
 
@@ -325,7 +331,7 @@ default_agent = "claude"
 theme = "dark"
 
 [agents.claude]
-command = "npx -y @agentclientprotocol/claude-agent-acp@0.101.0"
+command = "npx -y @agentclientprotocol/claude-agent-acp@0.103.0"
 
 [agents.my-agent]
 command = "MY_AGENT_LOG=debug /opt/my-agent/bin/my-agent --acp"
@@ -347,7 +353,7 @@ The `command` is one of two forms:
 
 | Id | Name | Command | If the CLI is missing | If signed out |
 |---|---|---|---|---|
-| `claude` | Claude | `npx -y @agentclientprotocol/claude-agent-acp@0.101.0` | Install Node.js (it provides npx) | `claude /login` |
+| `claude` | Claude | `npx -y @agentclientprotocol/claude-agent-acp@0.103.0` | Install Node.js (it provides npx) | `claude /login` |
 | `codex` | Codex | `npx -y @agentclientprotocol/codex-acp@2.6.0` | Install Node.js (it provides npx) | `npx @openai/codex login` |
 | `antigravity` | Antigravity | `agy acp` | https://antigravity.google/docs/cli | `agy login` |
 | `copilot` | Copilot | `copilot --acp --stdio` | `npm install -g @github/copilot` | `copilot`, then `/login` |
@@ -387,7 +393,7 @@ If an agent is still not found, for example because your shell gave no `PATH` in
 
   ```toml
   [agents.claude]
-  command = "PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/npx -y @agentclientprotocol/claude-agent-acp@0.101.0"
+  command = "PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/npx -y @agentclientprotocol/claude-agent-acp@0.103.0"
   ```
 
   With Homebrew on Apple silicon, use `/opt/homebrew/bin` in both places.

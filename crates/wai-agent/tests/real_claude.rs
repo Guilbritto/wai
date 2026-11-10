@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 use async_channel::Receiver;
 use wai_agent::{
     AgentCaps, AgentEvent, AgentHandle, AgentSpec, ChoiceKind, FieldKind, PromptBlock,
-    QuestionAnswer, SessionEvent, StopReason, ToolContent,
+    QuestionAnswer, SessionEvent, StopReason, SubagentState, ToolContent,
 };
 
-const COMMAND: &str = "npx -y @agentclientprotocol/claude-agent-acp@0.101.0";
+const COMMAND: &str = "npx -y @agentclientprotocol/claude-agent-acp@0.103.0";
 
 fn run(test: impl Future<Output = ()>) {
     smol::block_on(smol::future::or(test, async {
@@ -293,6 +293,92 @@ fn answer_a_question() {
                 "reply {text:?} does not name {label:?}"
             );
         }
+
+        agent.shutdown().await;
+        std::fs::remove_dir_all(&dir).ok();
+    });
+}
+
+/// A Claude Code subagent (the Agent tool) comes as a child session: announced on the parent,
+/// its tool calls tagged with it, and reported done.
+#[test]
+#[ignore = "needs network, npx and a Claude Code login"]
+fn subagent_runs_as_a_child_session() {
+    run(async {
+        let dir: PathBuf =
+            std::env::temp_dir().join(format!("wai-real-claude-sub-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = wai_settings::canonical(&dir);
+        std::fs::write(dir.join("hello.txt"), "wai").unwrap();
+
+        let (agent, rx) = spawn();
+        ready(&rx).await;
+        let session = agent
+            .new_session(dir.clone(), vec![])
+            .await
+            .expect("new_session");
+
+        let prompt = "Use the Agent tool exactly once, with subagent_type general-purpose, to read hello.txt and report its content. Then reply with that content only.";
+        let t = Instant::now();
+        agent.prompt(session.id.clone(), vec![PromptBlock::Text(prompt.into())]);
+
+        let (mut text, mut title, mut running, mut finished, mut tagged) =
+            (String::new(), None::<String>, None::<String>, false, 0);
+        let reason = loop {
+            match rx.recv().await.expect("event channel closed") {
+                AgentEvent::Update { session: s, event } => {
+                    assert_eq!(s, session.id, "{event:?}");
+                    match event {
+                        SessionEvent::AgentText(s) => text.push_str(&s),
+                        SessionEvent::Subagent(patch) => {
+                            println!("subagent after {:?}: {patch:?}", t.elapsed());
+                            if let Some(t) = patch.title {
+                                title = Some(t);
+                            }
+                            match patch.state {
+                                Some(SubagentState::Running) => running = Some(patch.id),
+                                Some(SubagentState::Done | SubagentState::Ended) => {
+                                    finished |= running.as_deref() == Some(patch.id.as_str())
+                                }
+                                _ => {}
+                            }
+                        }
+                        SessionEvent::SubagentReply { id, text } => {
+                            println!("subagent {id} replied: {text:?}")
+                        }
+                        SessionEvent::ToolCall(call) => {
+                            println!(
+                                "tool call: {} ({}) subagent={:?}",
+                                call.title, call.kind, call.subagent
+                            );
+                            tagged += usize::from(call.subagent.is_some());
+                        }
+                        _ => {}
+                    }
+                }
+                AgentEvent::PermissionRequested(request) => {
+                    println!("permission requested: {:?}", request.title);
+                    let allow = request
+                        .options
+                        .iter()
+                        .find(|o| o.kind == ChoiceKind::AllowOnce)
+                        .map(|o| o.id.clone());
+                    agent.answer_permission(request.id, allow).unwrap();
+                }
+                AgentEvent::TurnEnded { reason, .. } => break reason,
+                AgentEvent::AuthRequired { .. } => panic!("not signed in to Claude Code"),
+                AgentEvent::Exited { error } => panic!("agent exited mid-turn: {error:?}"),
+                _ => {}
+            }
+        };
+        println!(
+            "turn: {:?}; subagent title: {title:?}; tagged tool calls: {tagged}; reply: {text:?}",
+            t.elapsed()
+        );
+        assert_eq!(reason, StopReason::EndTurn);
+        assert!(running.is_some(), "no subagent was announced running");
+        assert!(finished, "the subagent was not reported done");
+        assert!(tagged > 0, "no tool call was tagged with a subagent");
 
         agent.shutdown().await;
         std::fs::remove_dir_all(&dir).ok();

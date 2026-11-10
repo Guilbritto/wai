@@ -473,7 +473,7 @@ mod tests {
         serde_json::from_value(json).unwrap()
     }
 
-    /// The form claude-agent-acp 0.101.0 builds for AskUserQuestion
+    /// The form claude-agent-acp 0.103.0 builds for AskUserQuestion
     /// (`askUserQuestionsToCreateRequest`): a titled single-select (`oneOf`), a titled
     /// multi-select (`items.anyOf`) and a free-text "Other" per question, nothing required.
     #[test]
