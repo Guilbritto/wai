@@ -2,12 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** wai runs the Claude adapter 0.103.0 and shows every Claude Code subagent (Task/Agent tool) of a session as its own line in the Agents tab, with its own status and what it is doing, including background subagents that finish after the main turn ended.
+**Goal:** wai runs the Claude adapter 0.103.0 and shows each running Claude Code subagent (Task/Agent tool) of a session as its own line in the Agents tab, with its own status and what it is doing. A background subagent keeps its line after the main turn ends, until it finishes.
 
 **Architecture:**
 - **`wai-agent`** declares `clientCapabilities.subagents: {}`. A new `Subagents` map in the connection's broker sends everything a subagent session reports to the open session it belongs to (its root, at any depth). The rest of wai never deals with child session ids.
 - **The `wai` crate's chat model** keeps a list of the session's subagents and gives each one a card in the transcript. A subagent's tool calls still show inline, tagged with it, and its permission cards show in the session's chat.
-- **The Agents tab** draws one line per subagent under its session's card.
+- **The Agents tab** draws one line per running subagent under its session's card.
 
 **Tech stack:** Rust 2024; `agent-client-protocol = "5"` (lock: 5.0.0, schema 1.15.1) with the new feature `unstable_subagents`, protocol **v1**; GPUI through `gpui-kit = "=0.9.0"`; `@agentclientprotocol/claude-agent-acp@0.103.0`.
 
@@ -24,7 +24,7 @@ The owner's decisions are marked **(owner)**. Decisions made while writing this 
    - The release note "serve ACP v2 with a direct v2 agent and remove the v1 bridge" (#1560) means this: in 0.101.0, v2 was served by wrapping the v1 agent (`v2AgentApp(logger, onAgent)`). In 0.103.0, v2 has its own agent (`dist/v2/`), and v1 moved to `dist/v1/acp-agent.js`.
    - The release's breaking change is about library imports (`deep imports of dist/ files fail`). wai runs the binary, so it is not affected.
    - The modules a v1 client meets barely changed. `acp-subagents.js` is byte-identical between 0.101.0 and 0.103.0, and `elicitation.js` only gained helpers.
-2. **wai stays on ACP v1. (call; question 1 for the owner)** Reasons:
+2. **wai stays on ACP v1, with the adapter at 0.103.0. (owner)** Confirmed by the owner after reading these reasons:
    - **ACP v2 is a draft.** The announcement ([acp-v2-draft](https://agentclientprotocol.com/announcements/acp-v2-draft)) says "Don't ship it by default in production until we are closer to stabilization", and "Adding v2 support should not mean dropping v1."
    - **The crate gates it.** v2 sits behind `unstable_protocol_v2`, which "may change in a minor release".
    - **v2 is a second client, not a flag.** Its session API differs: `v2::ActiveSession` only sends commands, `session/prompt` returns before the turn ends, there is no `tool_call`, `plan` becomes `plan_update`, and `session/load` and modes are removed. wai would have to keep its v1 client for Codex, Copilot, Antigravity and the fake agent anyway.
@@ -47,14 +47,21 @@ The owner's decisions are marked **(owner)**. Decisions made while writing this 
    - The subagent's tool calls stay inline as today, so diffs, edits and Revert keep working.
    - A permission card from a subagent is titled `{subagent title}: {request title}`.
 6. **`current_tool` and the plan are the main agent's. (owner: "fix both")** `ChatModel::current_tool` skips calls tagged with a subagent. The plan fix comes from decision 3.
-7. **Stop cancels the subagents' open requests too. (call; question 2)**
-   - `session/cancel` on the root answers `cancelled` to the root's pending requests and to those of all its subagents. The adapter turns that into a denial for a background subagent, which then carries on (comment in `dist/v1/acp-agent.js` near `requestPermissionFromClient`).
-   - The end of the root's turn still cancels only the root's own requests. A background subagent's card stays open after the turn ends.
-8. **A session goes back to Idle after a late answer. (call)** A background subagent can ask after the parent's turn ended. Today, answering any card sets the session to `Working`. With this plan, it goes back to `Idle` when no turn runs.
-9. **The Agents tab. (call; question 3)**
-   - Each line reads `{title} · {status}`, plus ` · {current tool}` while the subagent runs.
-   - The statuses are `Working`, `Needs you`, `Done`, `Stopped`, `Failed`, `Ended` and `Unknown`.
-   - A card shows the 8 most recent subagents, then `+N more`.
+7. **Stop cancels only the session's own open requests. (owner)** wai answers `cancelled` only to requests that the root session itself sent, on Stop and at the end of a turn alike.
+   - **A background subagent's** permission and question cards stay open until the user answers them. The adapter does not stop background children on the parent's `session/cancel` (README, "Subagent sessions").
+   - **A foreground subagent** is stopped by the adapter itself: Claude Code stops the children the turn waits on. The adapter then:
+     - withdraws the child's open requests: the abort signal in `awaitingUser` (`dist/native-subagents.js`) becomes `$/cancel_request` in the ACP SDK (`@agentclientprotocol/sdk` 2.5.0, `dist/core/jsonrpc.js`, `prepareRequest`);
+     - reports the child `idle` with `cancelled`.
+
+     wai already resolves a withdrawn question as `Cancelled`. A withdrawn permission is not handled today, so its card would stay open with no one waiting for it. **(call)** wai watches permission withdrawals the way it watches questions (Task 2). That is the agent ending the request, not wai.
+8. **A session's state follows the open cards, not only the turn. (call)** A background subagent can ask before or after the parent's turn ends.
+   - At the end of a turn, the session reads `Needs you` while a subagent's card is still open, not `Idle`.
+   - Answering a card after the turn has ended returns the session to `Idle`. Today, any answer sets the session to `Working`.
+9. **The Agents tab shows only live subagents. (owner)**
+   - A line is shown while its subagent is `Running` (`{title} · Working`) or `NeedsYou` (`{title} · Needs you`), plus ` · {current tool}` when there is one.
+   - The line disappears when the subagent finishes (`Done`, `Stopped`, `Failed` or `Ended`).
+   - **(call)** `Unknown` is hidden too. It comes from the agent exiting (decision 11) or from the adapter losing a child (`disconnected`). The RFD forbids showing it as live, and the session card already shows an exit as `Error`.
+   - **(call)** There is no cap: live subagents are as many as Claude runs at once, so the list cannot grow without bound.
 10. **No crate bump. (call)** 5.1.0 (2026-11-09) adopts schema 1.16.0, whose `v1/client.rs` is identical to 1.15.1. The lock stays on 5.0.0.
 11. **When the agent exits (RFD MUST). (call)** Subagents still `running` or `requires_action` become `Unknown`: a last-known running state must not be shown as live.
 
@@ -101,9 +108,12 @@ These are the failure modes most likely to bite, most likely first. Each one has
 
 1. **A background subagent asks for permission while, or after, its parent's turn ends.**
    - The card must show in the parent's chat, and the answer must reach the agent (not `Stale`).
-   - Afterwards, the session reads `Idle`, not `Working`.
+   - The session reads `Needs you` while the card is open, and `Idle`, not `Working`, once it is answered.
    - Tests: Task 2 `background_permission_outlives_the_turn`; Task 3 `answer_after_the_turn_returns_to_idle`.
-2. **Stop while a subagent's card is open.** The card closes as `Cancelled`, the turn ends `Cancelled`, and no card is left waiting. Test: Task 2 `stop_cancels_a_subagents_request`.
+2. **Stop while a subagent's card is open.**
+   - A background subagent's card stays open, and answering it still works.
+   - A foreground subagent's card closes as `Cancelled` when the adapter withdraws it.
+   - Tests: Task 2 `stop_leaves_a_background_subagents_request_open` and `withdrawn_permission_resolves_on_its_own`.
 3. **Several subagents at once.**
    - Each one's tool calls and state stay on its own line.
    - None of their text lands in the main reply.
@@ -228,7 +238,7 @@ These are the failure modes most likely to bite, most likely first. Each one has
 **Files:**
 - Modify:
   - `crates/wai-agent/src/types.rs`
-  - `crates/wai-agent/src/actor.rs` (`park_permission`, `park_question`, `Command::Cancel`, `cancel_tree`)
+  - `crates/wai-agent/src/actor.rs` (`Parked::Permission`, `park_permission`, `park_question`, the permission handler in `connect`)
   - `crates/wai-agent/src/bin/wai-fake-agent.rs`
 - Compile fixes only: every `PermissionRequest { .. }` and `QuestionRequest { .. }` literal the compiler names (`crates/wai/src/notify.rs`, `crates/wai/src/chat/model.rs` tests).
 - Test: `crates/wai-agent/tests/fake_agent.rs`
@@ -237,17 +247,26 @@ These are the failure modes most likely to bite, most likely first. Each one has
 - **Consumes:** `Subagents::root` (Task 1).
 - **Produces:**
   - `PermissionRequest.subagent: Option<SessionId>` and `QuestionRequest.subagent: Option<SessionId>`. With a subagent, `session` is its root, the open session the card shows in, and `subagent` is the session that asked.
-  - The broker parks a request under the session that asked (`Pending.session` = the child). That way `end_turn(root)` does not cancel a background subagent's request.
+  - The broker parks a request under the session that asked (`Pending.session` = the child). `Command::Cancel` and `end_turn`, which keep calling `cancel_pending(Some(&root))`, therefore cancel only the root's own requests (decision 7). Do not add any cancel that reaches a subagent's requests.
   - `QuestionUnsupported { session }` names the root too.
-  - `fn cancel_tree(&self, root: &str)`: cancels the pending requests of `root` and of every session whose `Subagents::root` is `root`. `Command::Cancel` calls it instead of `cancel_pending(Some(&session))`. `end_turn` and shutdown keep `cancel_pending`.
+  - **A withdrawn permission resolves on its own**, as a question does today:
+    - `Parked::Permission` becomes `Permission { responder, _watch: Sender<()> }`;
+    - `park_permission(self: &Arc<Self>, request, responder, cx: &ConnectionTo<Agent>) -> Result<(), Error>` spawns the same watch as `park_question`: when `responder.cancellation()` fires first, it calls `answer(id, None)`, which emits `PermissionResolved`;
+    - the permission handler in `connect` passes its `cx`.
+
+    This is how a stopped foreground subagent's card closes (decision 7). It fixes the same gap for the root session's own permissions.
   - Never hold the `pending` and `subagents` locks at the same time.
   - The `wai` crate needs no routing change: `Workspace::route` already finds the session by `request.session`, which is now the root. Before this task, a subagent's request matched no open session, and `unrouted` cancelled it.
 - **Fake agent:**
-  - With `--subagent`, `--ask-permission` and `--ask-question` are asked by the subagent, on `<session>-sub`, after its tool call starts. The turn still replies `chose:…` or `answered:…`.
+  - With `--subagent`, `--ask-permission` and `--ask-question` are asked by the subagent, on `<session>-sub`, after its `sub-read` call starts. For `--ask-permission` that is the same `edit-1` `Write notes.md` tool call and request, sent on the child.
+    - Like the adapter's `awaitingUser`, the subagent reports `requires_action` on the parent before asking, and `running` again once answered.
+    - The turn still replies `chose:…` or `answered:…`.
   - New flag `--background`: with `--subagent`, the subagent outlives the turn.
-    - The turn replies and ends right after the subagent's tool call starts. With `--ask-permission`, the permission request is on the wire before the prompt response, and the turn does not wait for it.
+    - The turn streams its reply and ends right after the subagent's tool call starts. Slow that reply with `--chunk-delay-ms` and a long `--reply` to keep the turn running.
+    - With `--ask-permission`, the permission request is on the wire before the first reply chunk, and the turn does not wait for it.
     - The rest (the call completes, the reply, then `idle` `end_turn`) follows once that permission is answered, or 100 ms after the turn ends without one.
-  - Document both in the header list.
+  - New flag `--withdraw-permission`: with `--ask-permission`, first send the same permission request and withdraw it at once (`$/cancel_request`), like `--withdraw-question`.
+  - Document all three in the header list.
 
 - [ ] **Step 1: Write the failing tests** in `fake_agent.rs`:
   - `subagent_permission_reaches_the_parent`:
@@ -255,20 +274,25 @@ These are the failure modes most likely to bite, most likely first. Each one has
     - `permission(&rx)` has `session == r.id` and `subagent == Some("<r>-sub")`;
     - answering `allow-once` ends the turn with text containing `chose:allow-once`.
   - `subagent_question_reaches_the_parent`: with `--subagent --ask-question`, `question(&rx)` has `session == r.id` and `subagent == Some("<r>-sub")`.
-  - `stop_cancels_a_subagents_request` (Review focus 2):
-    1. with `--subagent --ask-permission`, wait for the permission, then `agent.cancel(r.id)`;
-    2. the events up to `TurnEnded` hold `PermissionResolved { id: request.id }`;
-    3. the turn ends `Cancelled`;
-    4. a later `answer_permission(request.id, ..)` is `Err(BrokerError::Stale)`.
+  - `stop_leaves_a_background_subagents_request_open` (Review focus 2):
+    1. `spawn(&["--subagent", "--background", "--ask-permission", "--reply", &vec!["word"; 200].join(" "), "--chunk-delay-ms", "20"])`;
+    2. wait for the permission, then `agent.cancel(r.id)`;
+    3. the turn ends `Cancelled`, and the events up to `TurnEnded` hold no `PermissionResolved { id: request.id }`;
+    4. `answer_permission(request.id, Some("allow-once".into()))` is `Ok(())`;
+    5. a `Subagent { state: Some(Done), .. }` follows.
+  - `withdrawn_permission_resolves_on_its_own` (Review focus 2), mirroring `withdrawn_question_resolves_on_its_own`:
+    1. with `--ask-permission --withdraw-permission`, the first `PermissionRequested` resolves (`PermissionResolved` with its id) with no answer;
+    2. answering it afterwards is `Err(BrokerError::Stale)`;
+    3. the second request still answers `Ok(())`, and the turn's text contains `chose:allow-once`.
   - `background_subagent_ends_after_the_turn`: with `--subagent --background`, the events up to `TurnEnded` (reason `EndTurn`) hold `Subagent { state: Some(Running), .. }` and no `Done`. Then `until` a `Subagent { state: Some(Done), .. }` arrives.
   - `background_permission_outlives_the_turn` (Review focus 1):
-    1. with `--subagent --background --ask-permission`, the events up to `TurnEnded` hold the `PermissionRequested` (with `subagent: Some(..)`) and no `PermissionResolved`;
+    1. with `--subagent --background --ask-permission`, the events up to `TurnEnded` hold the `PermissionRequested` (with `subagent: Some(..)`), a `Subagent { state: Some(NeedsYou), .. }`, and no `PermissionResolved`;
     2. `answer_permission(id, Some("allow-once".into()))` is `Ok(())`;
     3. a `Subagent { state: Some(Done), .. }` follows.
 - [ ] **Step 2: Run them and confirm they fail.**
-  - Run: `cargo build -p wai-agent --bin wai-fake-agent && cargo test -p wai-agent --test fake_agent subagent_ stop_cancels background_`
+  - Run: `cargo build -p wai-agent --bin wai-fake-agent && cargo test -p wai-agent --test fake_agent subagent_ stop_leaves withdrawn_permission background_`
   - Expected: a compile error (`subagent` is not a field of `PermissionRequest`).
-- [ ] **Step 3: Implement** the fields, the re-attribution in `park_permission` and `park_question`, `cancel_tree`, and the fake's flags.
+- [ ] **Step 3: Implement** the fields, the re-attribution in `park_permission` and `park_question`, the permission withdrawal watch, and the fake's flags.
 - [ ] **Step 4: Run the tests.**
   - Run: `cargo build -p wai-agent --bin wai-fake-agent && cargo test -p wai-agent && cargo build -p wai`
   - Expected: PASS.
@@ -298,6 +322,7 @@ These are the failure modes most likely to bite, most likely first. Each one has
 - **`apply(SubagentReply { id, text })`:** sets the card's `text` and returns its index.
 - **`current_tool`:** skips items whose `subagent` is `Some`. The card itself has `subagent: None`, so the main card still shows a foreground subagent it waits on, as it showed the Agent call before.
 - **`after_answer`:** `NeedsYou` while a card is open, else `Working` when `in_turn`, else `Idle`.
+- **`on_turn_ended`:** clear `in_turn` first. The branches that set `Idle` then set `self.state = self.after_answer()` instead: `NeedsYou` while a subagent's card is still open, else `Idle`. The broker resolves the root's own cards before `TurnEnded` arrives, so only subagent cards can still be open (decision 8).
 - **`on_permission` and `on_question`:** with `subagent: Some(id)` of a known subagent, prefix the request's `title` (a permission) or `message` (a question) with `{subagent title}: `.
 - **`on_exited`:** every subagent that is `Running` or `NeedsYou` becomes `Unknown`, and so does its card's status.
 
@@ -313,10 +338,9 @@ These are the failure modes most likely to bite, most likely first. Each one has
     - `subagent_tool("c") == Some("Sub")`;
     - `subagent_tool("d") == None`.
   - `answer_after_the_turn_returns_to_idle` (Review focus 1):
-    - `push_user`, then `on_turn_ended(&EndTurn)`;
-    - `on_permission(PermissionRequest { subagent: Some("c".into()), ..perm() })` makes the state `NeedsYou`;
-    - `on_permission_answered(id, "Yes")` makes it `Idle`;
-    - during a turn, the same answer still gives `Working`.
+    - **Asked after the turn:** `push_user`, then `on_turn_ended(&EndTurn)`. `on_permission(PermissionRequest { subagent: Some("c".into()), ..perm() })` makes the state `NeedsYou`, and `on_permission_answered(id, "Yes")` makes it `Idle`.
+    - **Asked during the turn:** `push_user`, then that `on_permission`, then `on_turn_ended(&EndTurn)` leaves the state `NeedsYou` (and so does `on_turn_ended(&Cancelled)`). The answer then makes it `Idle`.
+    - **Answered during a turn:** the answer still gives `Working`.
   - `subagent_permission_names_the_subagent`: with `"c"` titled `Explore`, a request titled `Write notes.md` with `subagent: Some("c")` is stored with the title `Explore: Write notes.md`.
   - `exit_marks_live_subagents_unknown` (Review focus 5):
     - `"a"` is `Running` and `"b"` is `Done`;
@@ -340,7 +364,7 @@ These are the failure modes most likely to bite, most likely first. Each one has
 
 ---
 
-### Task 4: The Agents tab lists each session's subagents
+### Task 4: The Agents tab lists each session's running subagents
 
 **Files:**
 - Modify: `crates/wai/src/agents_view.rs`
@@ -348,37 +372,32 @@ These are the failure modes most likely to bite, most likely first. Each one has
 **Interfaces:**
 - **Consumes:** `ChatModel.subagents` and `subagent_tool` (Task 3), `crate::sidebar::status_color` (existing).
 - **Produces:**
-  - `pub const MAX_SUBAGENT_ROWS: usize = 8;`
-  - `pub fn subagent_label(state: SubagentState) -> &'static str`:
-
-    | `SubagentState` | Label |
-    |---|---|
-    | `Running` | `Working` |
-    | `NeedsYou` | `Needs you` |
-    | `Done` | `Done` |
-    | `Stopped` | `Stopped` |
-    | `Failed` | `Failed` |
-    | `Ended` | `Ended` |
-    | `Unknown` | `Unknown` |
-
-  - `pub fn subagent_line(title: &str, state: SubagentState, tool: Option<&str>) -> String`: `{title} · {label}`, plus ` · {tool}` when there is a tool.
-  - `summary` gains `subagents: &[String]`, between `plan` and `tool`. It appends `; {line}` for the last `MAX_SUBAGENT_ROWS` lines, then `; +N more` when there are more. Update the existing callers and tests.
-- **The card:** after the plan rows and before the current tool, it draws the last `MAX_SUBAGENT_ROWS` subagents in announcement order, one row each.
-  - Each row has a 6 px dot, coloured with `status_color` of `Running` → `Working`, `NeedsYou` → `NeedsYou`, `Failed` → `Error`, and anything else → `Idle`.
+  - `pub fn subagent_line(title: &str, state: SubagentState, tool: Option<&str>) -> Option<String>`:
+    - `Running` gives `{title} · Working`;
+    - `NeedsYou` gives `{title} · Needs you`;
+    - either one adds ` · {tool}` when there is a tool;
+    - every other state (`Done`, `Stopped`, `Failed`, `Ended`, `Unknown`) gives `None` (decision 9).
+  - `summary` gains `subagents: &[String]`, between `plan` and `tool`, and appends `; {line}` for each line. There is no cap (decision 9). Update the existing callers and tests.
+- **The card:** after the plan rows and before the current tool, one row per subagent whose `subagent_line` is `Some`, in announcement order.
+  - Each row has a 6 px dot, coloured with `status_color` of `Working` for `Running` and `NeedsYou` for `NeedsYou`.
   - Then the line, truncated, in `text_xs`.
-  - Then `+N more` when there are more, styled like the plan's.
+  - A session with no live subagent draws no rows, as today.
 
 - [ ] **Step 1: Write the failing tests:**
-  - `subagent_lines_and_cap`:
-    - `subagent_line("Explore", Running, Some("Read lib.rs")) == "Explore · Working · Read lib.rs"`;
-    - `subagent_line("Explore", Done, None) == "Explore · Done"`;
-    - `summary` with 10 lines `s0`..`s9` contains `; s2` and `; s9`, does not contain `; s1`, and ends with `; +2 more`.
-  - `agents_tab_lists_subagents` (`#[gpui_kit::test]`, following `agents_tab_shows_needs_you_and_plan`):
-    1. use `fake_settings("--subagent --background")`, then one session and a prompt;
-    2. `wait_until` the session is `Idle` and its subagent is `Done` (it ends after the turn);
-    3. render, click `tab-agents`, and the label of `("agent-card", 0usize)` contains `; Explore the code · Done`.
+  - `subagent_lines_show_only_live_ones`:
+    - `subagent_line("Explore", Running, Some("Read lib.rs")) == Some("Explore · Working · Read lib.rs")`;
+    - `subagent_line("Explore", NeedsYou, None) == Some("Explore · Needs you")`;
+    - `Done`, `Stopped`, `Failed`, `Ended` and `Unknown` give `None`;
+    - `summary("t", None, &[], &["a · Working".into()], None) == "t; a · Working"`.
+  - `agents_tab_lists_running_subagents` (`#[gpui_kit::test]`, following `agents_tab_shows_needs_you_and_plan`):
+    1. use `fake_settings("--subagent --background --ask-permission")`, then one session and a prompt;
+    2. `wait_until` the turn has ended and the subagent is `NeedsYou` (it waits on its permission card, after the turn);
+    3. render and click `tab-agents`. The label of `("agent-card", 0usize)` contains `; Explore the code · Needs you · Write notes.md` (its latest running call);
+    4. answer the card through the session (`answer` with `allow-once`, as `permission_card_buttons_answer` does);
+    5. `wait_until` the subagent is `Done`;
+    6. render again. The label no longer contains `Explore the code`.
 - [ ] **Step 2: Run them and confirm they fail.**
-  - Run: `cargo build -p wai-agent --bin wai-fake-agent && cargo test -p wai subagent_lines agents_tab_lists`
+  - Run: `cargo build -p wai-agent --bin wai-fake-agent && cargo test -p wai subagent_lines agents_tab_lists_running`
   - Expected: a compile error (no `subagent_line`).
 - [ ] **Step 3: Implement it.**
 - [ ] **Step 4: Run the tests.**
@@ -423,8 +442,11 @@ These are the failure modes most likely to bite, most likely first. Each one has
   - If the machine has no login, add `real agents not run` to the commit body. The owner then runs these checks before merging.
 - [ ] **Step 6: Update `docs/user-guide.md`:**
   - **`### Chatting`, the transcript:** each subagent shows as a card with its title, its status and its answer. Its tool calls stay in the transcript. Its own text and checklist are not shown.
-  - **`### Permissions and questions`:** a subagent's card is titled `<subagent>: <request>`. Stop also cancels the open cards of that session's subagents, and a background subagent reads that as a refusal and carries on.
-  - **`## The Agents tab`:** add "its subagents, one line each: `title · status · current tool`, the 8 most recent", the seven statuses, and that background subagents keep their line and turn `Done` after the turn ends.
+  - **`### Permissions and questions`:** a subagent's card is titled `<subagent>: <request>`.
+    - Stop cancels only the session's own cards.
+    - A background subagent's card stays open, even after the turn ends, until you answer it, and the session reads `Needs you` meanwhile.
+    - A subagent the turn was waiting on stops with the turn, and its card closes as `Cancelled`.
+  - **`## The Agents tab`:** add "its running subagents, one line each: `title · Working` or `title · Needs you`, then the tool call in progress". A line goes away when its subagent finishes. A background subagent keeps its line after the turn ends, until it finishes.
   - **Commands:** every `claude-agent-acp@0.101.0` in the guide and in `README.md` becomes `@0.103.0`.
 - [ ] **Step 7: Run the whole CI gate.**
   - Run: `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo build -p wai-agent --bin wai-fake-agent && cargo test --workspace`
@@ -441,7 +463,7 @@ These are the failure modes most likely to bite, most likely first. Each one has
   - wai's domain types in `types.rs` are protocol-neutral, so the UI would not change.
 - **Stopping one subagent.** The adapter grants `capabilities.cancel` per child, so `session/cancel` with the child's id would stop it. Add a stop button on the line if the owner wants it.
 - **Opening a subagent's own transcript** (its text, thinking and checklist) in a pane. The adapter forwards that text now; wai drops it in `Subagents::route`.
-- **Withdrawn permission requests (`$/cancel_request`).** wai already handles withdrawn questions but not withdrawn permissions, for a session and for a subagent alike. This is an existing gap.
+- **Finished subagents in the Agents tab.** The owner chose live ones only. A finished subagent stays visible as its card in the chat.
 - **`null` clears and `session_message_chunk`** in subagent patches (`ponytail:` comments in Task 1).
 - **A subagent's `cwd`** (`isolation: "worktree"`). R34's first-sight check resolves relative paths against the session's `cwd`. ACP paths are absolute, so it only matters for an agent that sends relative ones.
 - **The flat `_meta.claudeCode.parentToolUseId` fallback**, for an adapter that ignores `subagents`. 0.101.0 already honoured the capability (`acp-subagents.js` is identical), so no pinned Claude adapter needs it.
