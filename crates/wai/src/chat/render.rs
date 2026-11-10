@@ -82,8 +82,14 @@ impl ChatSession {
                     .test_support(),
             )
             .children(
+                self.pickers
+                    .iter()
+                    .map(|(_, select)| div().w(px(140.)).child(Select::new(select).small())),
+            )
+            .children(
                 self.modes
                     .as_ref()
+                    .filter(|_| !self.has_mode_option())
                     // The select's own view is `size_full`: the box sets its width.
                     .map(|modes| div().w(px(140.)).child(Select::new(modes).small())),
             )
@@ -332,6 +338,10 @@ impl ChatSession {
             )
     }
 
+    fn has_mode_option(&self) -> bool {
+        (self.model.config.iter()).any(|o| o.category == wai_agent::ConfigCategory::Mode)
+    }
+
     /// Follows a mode the agent switched to on its own.
     fn sync_mode_select(&self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(select), Some(mode)) = (&self.modes, &self.model.current_mode) else {
@@ -346,6 +356,7 @@ impl ChatSession {
 impl Render for ChatSession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_mode_select(window, cx);
+        self.sync_pickers(window, cx);
         let empty = self.model.items.is_empty() && self.model.state == TurnState::Idle;
         let messages = div().flex_1().min_h_0();
         let messages = match empty {

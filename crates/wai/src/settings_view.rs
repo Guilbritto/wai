@@ -2,6 +2,8 @@
 //! shows what the workspace gives it (`set`) and says what the user changed (`SettingsEvent`);
 //! the workspace writes the user's file.
 
+use std::collections::BTreeMap;
+
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::radio::Radio;
@@ -83,9 +85,7 @@ pub struct AgentRow {
     pub status: RowStatus,
     /// The command in force (approved).
     pub command: String,
-    #[allow(dead_code)] // for the Default model select (Task 10)
     pub models: Vec<SeenModel>,
-    #[allow(dead_code)] // for the Default model select (Task 10)
     pub default_model: Option<String>,
     pub is_default: bool,
 }
@@ -129,11 +129,45 @@ impl SelectItem for Theme {
     }
 }
 
+/// A model of the Default model select; the empty id is the agent's own choice.
+#[derive(Clone)]
+struct ModelChoice {
+    id: String,
+    name: String,
+}
+
+impl SelectItem for ModelChoice {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.name.clone().into()
+    }
+
+    fn value(&self) -> &String {
+        &self.id
+    }
+}
+
+fn model_choices(row: &AgentRow) -> Vec<ModelChoice> {
+    let first = ModelChoice {
+        id: String::new(),
+        name: "Agent's choice".into(),
+    };
+    (std::iter::once(first))
+        .chain(row.models.iter().map(|m| ModelChoice {
+            id: m.id.clone(),
+            name: m.name.clone(),
+        }))
+        .collect()
+}
+
 pub struct SettingsView {
     section: Section,
     data: SettingsData,
     pub(crate) search: Entity<InputState>,
     theme: Entity<SelectState<Vec<Theme>>>,
+    /// Per agent id.
+    models: BTreeMap<String, Entity<SelectState<Vec<ModelChoice>>>>,
     pub(crate) shell: Entity<InputState>,
     repo: Entity<InputState>,
     /// The unfolded Advanced row's command; Enter asks to run it.
@@ -197,6 +231,7 @@ impl SettingsView {
             data,
             search,
             theme,
+            models: BTreeMap::new(),
             shell,
             repo,
             command,
@@ -276,12 +311,52 @@ impl SettingsView {
         cx.notify();
     }
 
+    fn sync_models(&mut self, row: &AgentRow, window: &mut Window, cx: &mut Context<Self>) {
+        let items = model_choices(row);
+        let current = row.default_model.clone().unwrap_or_default();
+        let select = match self.models.get(&row.id) {
+            Some(select) => {
+                select.update(cx, |s, cx| s.set_items(items, window, cx));
+                select.clone()
+            }
+            None => {
+                let select = cx.new(|cx| SelectState::new(items, None, window, cx));
+                let agent = row.id.clone();
+                self._subscriptions.push(cx.subscribe(
+                    &select,
+                    move |this, _, event: &SelectEvent<Vec<ModelChoice>>, cx| {
+                        let SelectEvent::Confirm(Some(id)) = event else {
+                            return;
+                        };
+                        let model = (!id.is_empty()).then(|| id.clone());
+                        if model != this.data.settings.models.get(&agent).cloned() {
+                            this.change(
+                                Change::Model {
+                                    agent: agent.clone(),
+                                    model,
+                                },
+                                cx,
+                            );
+                        }
+                    },
+                ));
+                self.models.insert(row.id.clone(), select.clone());
+                select
+            }
+        };
+        select.update(cx, |s, cx| s.set_selected_value(&current, window, cx));
+    }
+
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.stale = false;
         let settings = &self.data.settings;
         let theme = settings.theme;
         self.theme
             .update(cx, |s, cx| s.set_selected_value(&theme, window, cx));
+        for row in self.data.agents.clone() {
+            self.sync_models(&row, window, cx);
+        }
+        let settings = &self.data.settings;
         let texts = [
             settings.terminal.shell.clone(),
             settings.updates.repo.clone(),
@@ -374,7 +449,32 @@ impl SettingsView {
             )
             .children(install)
             .children(warn)
+            .child(self.default_model(row, cx))
             .children(row.extension.is_none().then(|| self.advanced(row, cx)))
+    }
+
+    fn default_model(&self, row: &AgentRow, cx: &mut Context<Self>) -> Div {
+        let selector = format!("settings-model-{}", row.id);
+        let control = match (row.models.is_empty(), self.models.get(&row.id)) {
+            (false, Some(select)) => div().w(px(260.)).child(
+                Select::new(select)
+                    .small()
+                    .disabled(self.data.error.is_some()),
+            ),
+            _ => div()
+                .text_color(cx.theme().muted_foreground)
+                .child("Start a session or press Test to see the models."),
+        };
+        h_flex()
+            .debug_selector(move || selector)
+            .gap_4()
+            .items_center()
+            .child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Default model"),
+            )
+            .child(control)
     }
 
     /// Folded: the command, which Enter asks to run.
@@ -660,6 +760,27 @@ mod tests {
         let seen = workspace.read_with(cx, |w, _| w.models_seen["fake"].clone());
         let ids: Vec<_> = seen.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["fake-small", "fake-large"]);
+    }
+
+    #[gpui_kit::test]
+    fn settings_lists_seen_models(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = fake_ws(cx, "--models");
+        workspace.update_in(cx, |w, window, cx| {
+            w.start_session("fake".into(), None, false, None, window, cx)
+        });
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
+        });
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Ai, None, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-model-fake").is_some());
+        let names: Vec<_> = super::model_choices(&row(&workspace, "fake", cx))
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+        assert_eq!(names, ["Agent's choice", "Fake Small", "Fake Large"]);
     }
 
     #[gpui_kit::test]

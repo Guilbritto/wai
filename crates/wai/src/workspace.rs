@@ -1413,6 +1413,10 @@ impl Workspace {
                         // A session that starts proves the agent works (signed in again, say).
                         this.registry.update(cx, |r, cx| r.mark_ready(&agent, cx));
                         let id = started.id.clone();
+                        let seen = seen_models(&started.config);
+                        if !seen.is_empty() {
+                            this.models_seen.insert(agent.clone(), seen);
+                        }
                         let session = cx.new(|cx| {
                             ChatSession::new(
                                 agent.clone(),
@@ -1426,6 +1430,9 @@ impl Workspace {
                         });
                         session
                             .update(cx, |s, cx| early.iter().for_each(|e| s.handle_event(e, cx)));
+                        if let Some(model) = this.settings.models.get(&agent) {
+                            session.update(cx, |s, cx| s.apply_default_model(model, cx));
+                        }
                         // Routed and followed before a sent prompt changes its state.
                         this.add_session(session.clone(), window, cx);
                         if let Some(text) = prompt {
@@ -1896,15 +1903,7 @@ impl Workspace {
                 match started {
                     Ok(started) => {
                         this.registry.update(cx, |r, cx| r.mark_ready(&id, cx));
-                        let models = (started.config.iter())
-                            .filter(|o| o.category == wai_agent::ConfigCategory::Model)
-                            .flat_map(|o| o.values.iter())
-                            .map(|v| SeenModel {
-                                id: v.id.clone(),
-                                name: v.name.clone(),
-                            })
-                            .collect();
-                        this.models_seen.insert(id, models);
+                        this.models_seen.insert(id, seen_models(&started.config));
                         this.save_state(cx);
                     }
                     Err(AgentError::AuthRequired) => this
@@ -2368,6 +2367,17 @@ impl Render for Workspace {
                 ),
             )
     }
+}
+
+fn seen_models(config: &[wai_agent::ConfigOption]) -> Vec<SeenModel> {
+    (config.iter())
+        .filter(|o| o.category == wai_agent::ConfigCategory::Model)
+        .flat_map(|o| o.values.iter())
+        .map(|v| SeenModel {
+            id: v.id.clone(),
+            name: v.name.clone(),
+        })
+        .collect()
 }
 
 fn fork_failure(error: &AgentError) -> String {
@@ -3555,6 +3565,38 @@ pub(crate) mod tests {
             [saved("fake", "abc", 0), saved("fake", "def", 1), hidden]
         );
         assert_eq!(notify::sent(), []);
+    }
+
+    #[gpui_kit::test]
+    fn restored_session_keeps_the_agents_model(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = AppState {
+            open_sessions: vec![saved("fake", "abc", 0)],
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        let mut settings = fake_settings("--models");
+        settings.models.insert("fake".into(), "fake-large".into());
+        let (workspace, cx) = open_at(cx, settings, Some(path));
+        cx.deactivate_window();
+        launch(&workspace, cx);
+        let session = pane_session(&workspace, 0, cx);
+        wait_until(cx, "the replay", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.state == TurnState::Idle && !s.model.items.is_empty()
+            })
+        });
+        session.update(cx, |s, cx| s.send_text("which?", cx));
+        wait_until(cx, "the reply", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.state == TurnState::Idle
+                    && s.model.items.iter().any(
+                        |i| matches!(i, ChatItem::Agent { text } if text == "model:fake-small"),
+                    )
+            })
+        });
     }
 
     /// R14: the state keeps no titles; a restored session takes its title from the history.
