@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gpui_kit::component::WindowExt as _;
@@ -19,8 +19,9 @@ use wai_agent::{
 use wai_ext::{CommandSpec, ExtEvent, ExtId, HostEvent, Reply};
 use wai_project::{FsChange, ProjectWatcher};
 use wai_settings::{
-    AppState, Change, OpenSession, SeenModel, Settings, Template, config_dir, load_templates,
-    shown, write_change,
+    AgentConfig, AppState, Approval, Change, OpenSession, SeenModel, Settings, Template,
+    agent_label, config_dir, is_approved, load_templates, seed_approved, shown, unapproved,
+    write_change,
 };
 use wai_terminal::DEFAULT_BG;
 
@@ -198,6 +199,13 @@ pub struct Workspace {
     state_path: Option<PathBuf>,
     /// Agent id -> the models its last Test saw; kept in `state.json`.
     pub models_seen: BTreeMap<String, Vec<SeenModel>>,
+    /// The agent commands and shells the user allowed; kept in `state.json`, never in
+    /// `settings.toml`.
+    pub approved: BTreeSet<String>,
+    /// The shell the terminal runs: the settings' once approved, else the last approved one.
+    pub shell: Option<String>,
+    /// The values waiting for an answer, the first one's dialog open.
+    pub(crate) asking: Vec<Approval>,
     /// The next recovery file number to try (`recovery::next_file`).
     next_recovery: u64,
     focus: FocusHandle,
@@ -213,7 +221,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let registry = cx.new(|_| AgentRegistry::new(&settings));
+        let state = state_path
+            .as_deref()
+            .map(AppState::load)
+            .unwrap_or_default();
+        // A state from before approvals: today's values are approved.
+        let approved = state.approved.unwrap_or_else(|| seed_approved(&settings));
+        let configs = approved_configs(&Settings::default().agents, &settings, &approved);
+        let registry = cx.new(|_| AgentRegistry::new(configs));
+        let shell = settings
+            .terminal
+            .shell
+            .clone()
+            .filter(|s| approved.contains(s));
         let routing = cx.subscribe(&registry, |this, _, event, cx| this.route(event, cx));
         // The process ends ~200 ms after the quit hooks: nothing it started may outlive it. The
         // agents are signalled and the extensions killed first: stopping a shell that ignores
@@ -334,9 +354,10 @@ impl Workspace {
             starting: HashMap::new(),
             early: HashMap::new(),
             ext_sessions: HashMap::new(),
-            models_seen: (state_path.as_deref())
-                .map(|path| AppState::load(path).models_seen)
-                .unwrap_or_default(),
+            models_seen: state.models_seen,
+            approved,
+            shell,
+            asking: Vec::new(),
             state_path,
             next_recovery: 0,
             settings_error: None,
@@ -447,17 +468,16 @@ impl Workspace {
             Theme::change(theme_mode(new.theme), Some(window), cx);
             window.refresh();
         }
-        let configs = new.agents.clone();
-        self.registry.update(cx, |r, _| r.set_configs(configs));
+        // What runs now: the old values the questions show.
+        let mut old = Settings {
+            agents: self.registry.read(cx).configs().clone(),
+            ..Settings::default()
+        };
+        old.terminal.shell = self.shell.clone();
         let chosen =
             new.default_agent.is_some() && new.default_agent != self.settings.default_agent;
-        if new.terminal.shell != self.settings.terminal.shell
-            && let Some(terminal) = &self.terminal
-        {
-            let shell = new.terminal.shell.clone();
-            terminal.update(cx, |t, _| t.shell = shell);
-        }
         self.settings = new;
+        self.enforce(cx);
         if chosen {
             self.start_agent(cx);
             self.refresh_history(cx);
@@ -469,8 +489,116 @@ impl Workspace {
             }
         }
         self.load_notices = notices;
+        let pending = unapproved(&old, &self.settings, &self.approved);
+        self.ask_approval(pending, window, cx);
         self.sync_settings_view(cx);
         cx.notify();
+    }
+
+    /// The registry and the terminal get approved values only: an agent or the shell whose
+    /// value is not approved keeps the last approved one (an agent never approved, none).
+    fn enforce(&mut self, cx: &mut Context<Self>) {
+        let (settings, approved) = (&self.settings, &self.approved);
+        self.registry.update(cx, |r, _| {
+            let configs = approved_configs(r.configs(), settings, approved);
+            r.set_configs(configs)
+        });
+        let shell = &self.settings.terminal.shell;
+        if shell.as_ref().is_none_or(|s| self.approved.contains(s)) {
+            self.shell = shell.clone();
+        }
+        if let Some(terminal) = &self.terminal {
+            let shell = self.shell.clone();
+            terminal.update(cx, |t, _| t.shell = shell);
+        }
+    }
+
+    /// Asks whether to run each value, one dialog at a time and in order; a value already
+    /// waiting is asked once.
+    pub fn ask_approval(
+        &mut self,
+        pending: Vec<Approval>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let idle = self.asking.is_empty();
+        for approval in pending {
+            if !self.asking.contains(&approval) {
+                self.asking.push(approval);
+            }
+        }
+        if idle {
+            self.ask_next(window, cx);
+        }
+    }
+
+    /// Opens the dialog for the first value still waiting. Only its buttons close it.
+    fn ask_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let approved = &self.approved;
+        self.asking
+            .retain(|a| !approved.contains(approval_value(a)));
+        let Some(approval) = self.asking.first().cloned() else {
+            return;
+        };
+        let text = approval_text(&approval);
+        let this = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let answer = |allow: bool| {
+                let (this, approval) = (this.clone(), approval.clone());
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    window.close_dialog(cx);
+                    this.update(cx, |this, cx| this.answer(&approval, allow, window, cx))
+                        .ok();
+                }
+            };
+            let title = div()
+                .debug_selector(|| "approval-title".into())
+                .child("Run a new command?");
+            dialog
+                .close_button(false)
+                .overlay_closable(false)
+                .keyboard(false)
+                .title(title)
+                .child(text.clone())
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("approval-deny")
+                                .label("Don't allow")
+                                .on_click(answer(false)),
+                        )
+                        .child(
+                            Button::new("approval-allow")
+                                .primary()
+                                .label("Allow")
+                                .on_click(answer(true)),
+                        ),
+                )
+        });
+    }
+
+    /// Allow approves the value and puts it in force; Don't allow keeps what runs now. Neither
+    /// writes `settings.toml`.
+    fn answer(
+        &mut self,
+        approval: &Approval,
+        allow: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.asking.retain(|a| a != approval);
+        if allow {
+            self.approved.insert(approval_value(approval).clone());
+            self.save_state(cx);
+            self.enforce(cx);
+            if let Approval::Agent { id, .. } = approval
+                && self.default_agent().as_ref() == Some(id)
+            {
+                self.start_agent(cx);
+            }
+            self.sync_settings_view(cx);
+        }
+        self.ask_next(window, cx);
     }
 
     /// Hands a watcher batch to the open files it touches, and the project's settings file to
@@ -592,7 +720,7 @@ impl Workspace {
             terminal_visible: self.terminal_visible,
             // ponytail: the sidebar does not resize yet; save its width once it does.
             sidebar_width: SIDEBAR_WIDTH,
-            approved: None,
+            approved: Some(self.approved.clone()),
             models_seen: self.models_seen.clone(),
         };
         // ponytail: a few hundred bytes on the UI thread; move to the background executor if
@@ -1356,7 +1484,7 @@ impl Workspace {
         let terminal = match &self.terminal {
             Some(terminal) => terminal.clone(),
             None => {
-                let (shell, cwd) = (self.settings.terminal.shell.clone(), self.project.clone());
+                let (shell, cwd) = (self.shell.clone(), self.project.clone());
                 let terminal = cx.new(|cx| TerminalView::new(shell, cwd, cx));
                 self.terminal = Some(terminal.clone());
                 terminal
@@ -2078,6 +2206,46 @@ fn title(project: &Path) -> String {
     format!("wai — {}", folder_name(project))
 }
 
+/// Each agent's config while its command is approved, else its `last` one while that is, else
+/// none.
+fn approved_configs(
+    last: &BTreeMap<String, AgentConfig>,
+    settings: &Settings,
+    approved: &BTreeSet<String>,
+) -> BTreeMap<String, AgentConfig> {
+    let ok = |c: &&AgentConfig| is_approved(&c.command, approved);
+    let config = |id: &String, c| Some(c).filter(ok).or_else(|| last.get(id).filter(ok));
+    (settings.agents.iter())
+        .filter_map(|(id, c)| Some((id.clone(), config(id, c)?.clone())))
+        .collect()
+}
+
+fn approval_value(approval: &Approval) -> &String {
+    let (Approval::Agent { new, .. } | Approval::Shell { new, .. }) = approval;
+    new
+}
+
+/// Control characters show escaped: a value cannot hide its end behind line breaks.
+pub(crate) fn approval_text(approval: &Approval) -> String {
+    let text = match approval {
+        Approval::Agent {
+            id,
+            old: Some(old),
+            new,
+        } => format!("{}: {old} → {new}", agent_label(id)),
+        Approval::Agent { id, old: None, new } => format!("{} (new): {new}", agent_label(id)),
+        Approval::Shell { old, new } => {
+            let old = old.as_deref().unwrap_or("system default");
+            format!("Terminal shell: {old} → {new}")
+        }
+    };
+    let visible = |c: char| match c.is_control() {
+        true => c.escape_default().to_string(),
+        false => c.into(),
+    };
+    text.chars().map(visible).collect()
+}
+
 /// A resizable panel's content on `card`, inset 4 px: the cards sit 8 px apart.
 fn on_card(card: Div, content: impl IntoElement) -> Div {
     div()
@@ -2224,7 +2392,7 @@ fn stop_reason(reason: &StopReason) -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
     use gpui_kit::component::{ActiveTheme as _, WindowExt as _};
@@ -2234,7 +2402,9 @@ pub(crate) mod tests {
         VisualTestContext, point, px, size,
     };
     use wai_agent::{AgentError, PromptBlock, SessionEvent, SessionSummary};
-    use wai_settings::{AgentConfig, AppState, Change, OpenSession, Settings, ThemeChoice};
+    use wai_settings::{
+        AgentConfig, AppState, Change, OpenSession, Settings, ThemeChoice, unapproved,
+    };
 
     use super::{Pane, Workspace};
     use crate::agents::{AgentStatus, RegistryEvent};
@@ -3269,6 +3439,8 @@ pub(crate) mod tests {
     fn launch(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| {
+                let pending = unapproved(&Settings::default(), &w.settings, &w.approved);
+                w.ask_approval(pending, window, cx);
                 w.start_agent(cx);
                 w.restore(window, cx);
             })
@@ -3628,9 +3800,8 @@ pub(crate) mod tests {
             "default_agent = \"fake\"\n[agents.fake]\ncommand = \"/bin/true\"\n",
         )
         .unwrap();
-        wait_until(cx, "the new command", |cx| {
-            workspace.read_with(cx, |w, _| w.settings.agents["fake"].command == "/bin/true")
-        });
+        wait_until(cx, "the question", |cx| question(&workspace, cx).is_some());
+        click("approval-allow", cx);
         workspace.read_with(cx, |w, cx| {
             let status = w.registry.read(cx).status("fake").cloned();
             assert!(matches!(status, Some(AgentStatus::Ready(_))), "{status:?}");
@@ -3655,9 +3826,9 @@ pub(crate) mod tests {
             "[terminal]\nshell = \"/bin/other\"\n",
         )
         .unwrap();
-        wait_until(cx, "the new shell", |cx| {
-            shell(cx).as_deref() == Some("/bin/other")
-        });
+        wait_until(cx, "the question", |cx| question(&workspace, cx).is_some());
+        click("approval-allow", cx);
+        assert_eq!(shell(cx).as_deref(), Some("/bin/other"));
         assert_ne!(before.as_deref(), Some("/bin/other"));
     }
 
@@ -3678,5 +3849,193 @@ pub(crate) mod tests {
             })
         });
         assert_eq!(cx.update(|window, cx| window.notifications(cx).len()), 1);
+    }
+
+    fn click(id: &'static str, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.click(id, cx);
+        });
+        cx.run_until_parked();
+    }
+
+    /// The approval dialog's text while it is open.
+    fn question(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<String> {
+        let open = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.has_active_dialog(cx)
+        });
+        let titled = cx.debug_bounds("approval-title").is_some();
+        let text = workspace.read_with(cx, |w, _| w.asking.first().map(super::approval_text));
+        text.filter(|_| open && titled)
+    }
+
+    /// `fake` run with `flag`, and a user settings.toml choosing it.
+    fn fake_file(flag: &str) -> (String, String) {
+        let command = fake_settings(flag).agents["fake"].command.clone();
+        let file = format!("default_agent = \"fake\"\n[agents.fake]\ncommand = '''{command}'''\n");
+        (command, file)
+    }
+
+    /// Writes the user's settings.toml in `dir` and reloads, as the watcher does.
+    fn edit_user_file(
+        workspace: &Entity<Workspace>,
+        dir: &Path,
+        file: &str,
+        cx: &mut VisualTestContext,
+    ) {
+        std::fs::write(dir.join("settings.toml"), file).unwrap();
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.user_dir = dir.into();
+                w.reload_settings(window, cx)
+            })
+        });
+        cx.run_until_parked();
+    }
+
+    /// A new `fake` session that sends "hi": the agent's reply.
+    fn reply(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> String {
+        let n = workspace.read_with(cx, |w, _| w.sessions.len());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                let prompt = Some("hi".into());
+                w.start_session("fake".into(), prompt, true, None, window, cx)
+            })
+        });
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.sessions.len() > n)
+        });
+        let session = workspace.read_with(cx, |w, _| w.sessions[n].clone());
+        let text = |cx: &mut VisualTestContext| {
+            session.read_with(cx, |s, _| {
+                let idle = s.model.state == TurnState::Idle;
+                let agent = s.model.items.iter().rev().find_map(|item| match item {
+                    ChatItem::Agent { text } => Some(text.clone()),
+                    _ => None,
+                });
+                agent.filter(|_| idle)
+            })
+        };
+        wait_until(cx, "the reply", |cx| text(cx).is_some());
+        text(cx).unwrap()
+    }
+
+    #[test]
+    fn question_shows_line_breaks_escaped() {
+        let hidden = wai_settings::Approval::Agent {
+            id: "a\nb".into(),
+            old: None,
+            new: "ok\n\n\nevil".into(),
+        };
+        assert_eq!(
+            super::approval_text(&hidden),
+            "a\\nb (new): ok\\n\\n\\nevil"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn hand_edited_command_asks_before_running(cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = live(cx, fake_settings(""), None);
+        let old = fake_settings("").agents["fake"].command.clone();
+        let (new, file) = fake_file("--reply other");
+        std::fs::write(dir.path().join("settings.toml"), file).unwrap();
+        wait_until(cx, "the question", |cx| question(&workspace, cx).is_some());
+        assert_eq!(
+            question(&workspace, cx).unwrap(),
+            format!("fake: {old} → {new}")
+        );
+        assert_eq!(reply(&workspace, cx), "Hello from fake agent");
+    }
+
+    #[gpui_kit::test]
+    fn declined_command_never_runs(cx: &mut TestAppContext, relaunch: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(state.clone()));
+        launch(&workspace, cx);
+        let (new, file) = fake_file("--reply other");
+        edit_user_file(&workspace, dir.path(), &file, cx);
+        assert!(question(&workspace, cx).is_some());
+        click("approval-deny", cx);
+        assert_eq!(question(&workspace, cx), None);
+        let file_text = std::fs::read_to_string(dir.path().join("settings.toml")).unwrap();
+        assert_eq!(file_text, file, "nothing is written");
+        workspace.read_with(cx, |w, cx| {
+            assert_ne!(w.registry.read(cx).command("fake"), Some(new.as_str()))
+        });
+        assert!(!AppState::load(&state).approved.unwrap().contains(&new));
+
+        relaunch.executor().allow_parking();
+        let (settings, _) = Settings::load(dir.path(), None).unwrap();
+        let (workspace, cx) = open_at(relaunch, settings, Some(state.clone()));
+        launch(&workspace, cx);
+        assert_eq!(question(&workspace, cx), Some(format!("fake (new): {new}")));
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(w.registry.read(cx).command("fake"), None);
+            assert_eq!(w.registry.read(cx).status("fake"), None, "never started");
+        });
+        assert!(!AppState::load(&state).approved.unwrap().contains(&new));
+    }
+
+    #[gpui_kit::test]
+    fn allowed_command_is_remembered(cx: &mut TestAppContext, relaunch: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(state.clone()));
+        launch(&workspace, cx);
+        let (new, file) = fake_file("--reply other");
+        edit_user_file(&workspace, dir.path(), &file, cx);
+        click("approval-allow", cx);
+        assert_eq!(question(&workspace, cx), None);
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(w.registry.read(cx).command("fake"), Some(new.as_str()))
+        });
+        assert!(AppState::load(&state).approved.unwrap().contains(&new));
+
+        relaunch.executor().allow_parking();
+        let (settings, _) = Settings::load(dir.path(), None).unwrap();
+        let (workspace, cx) = open_at(relaunch, settings, Some(state));
+        launch(&workspace, cx);
+        assert_eq!(question(&workspace, cx), None);
+        assert_eq!(reply(&workspace, cx), "other");
+    }
+
+    #[gpui_kit::test]
+    fn existing_setup_is_seeded(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        AppState::default().save(&state).unwrap();
+        let settings = fake_settings("--reply mine");
+        let command = settings.agents["fake"].command.clone();
+        let (workspace, cx) = open_at(cx, settings, Some(state.clone()));
+        launch(&workspace, cx);
+        assert_eq!(question(&workspace, cx), None);
+        workspace.read_with(cx, |w, _| assert!(w.approved.contains(&command)));
+        assert!(AppState::load(&state).approved.unwrap().contains(&command));
+    }
+
+    #[gpui_kit::test]
+    fn unapproved_shell_is_not_used(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the shell is a real process
+        let (workspace, cx) = open(cx, Settings::default());
+        let before = workspace.read_with(cx, |w, _| w.settings.terminal.shell.clone().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let file = "[terminal]\nshell = \"/bin/other\"\n";
+        edit_user_file(&workspace, dir.path(), file, cx);
+        assert_eq!(
+            question(&workspace, cx),
+            Some(format!("Terminal shell: {before} → /bin/other"))
+        );
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.toggle_terminal(&ToggleTerminal, window, cx));
+        });
+        let shell = workspace.read_with(cx, |w, cx| {
+            w.terminal.as_ref().unwrap().read(cx).shell.clone()
+        });
+        assert_eq!(shell, Some(before));
     }
 }

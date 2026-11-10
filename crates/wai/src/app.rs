@@ -6,7 +6,7 @@ use gpui_kit::component::input::CursorBlink;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{Theme, ThemeMode, TitleBar, WindowExt as _};
 use gpui_kit::*;
-use wai_settings::{Settings, Template, ThemeChoice};
+use wai_settings::{Settings, Template, ThemeChoice, unapproved};
 
 use crate::settings_view::Section;
 use crate::workspace::{CHOOSE_AI, Workspace};
@@ -154,6 +154,8 @@ pub fn run(
                 workspace.update(cx, |w, cx| {
                     w.templates = templates;
                     w.settings_error = settings_error;
+                    let pending = unapproved(&Settings::default(), &w.settings, &w.approved);
+                    w.ask_approval(pending, window, cx);
                     if w.settings_error.is_none() {
                         w.start_agent(cx);
                     }

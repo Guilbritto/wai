@@ -7,7 +7,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::radio::Radio;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use wai_settings::{Change, SeenModel, Settings, ThemeChoice, agent_label, builtin};
 
@@ -76,14 +76,16 @@ impl RowStatus {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // `command`, `models` and `default_model` are for the editors (Task 9)
 pub struct AgentRow {
     pub id: String,
     pub label: String,
     pub extension: Option<String>,
     pub status: RowStatus,
+    /// The command in force (approved).
     pub command: String,
+    #[allow(dead_code)] // for the Default model select (Task 10)
     pub models: Vec<SeenModel>,
+    #[allow(dead_code)] // for the Default model select (Task 10)
     pub default_model: Option<String>,
     pub is_default: bool,
 }
@@ -134,8 +136,13 @@ pub struct SettingsView {
     theme: Entity<SelectState<Vec<Theme>>>,
     pub(crate) shell: Entity<InputState>,
     repo: Entity<InputState>,
-    /// A text field holds edits not committed yet (Enter or blur): a reload leaves it alone.
-    editing: [bool; 2],
+    /// The unfolded Advanced row's command; Enter asks to run it.
+    pub(crate) command: Entity<InputState>,
+    /// The agent whose Advanced is unfolded.
+    advanced: Option<String>,
+    /// A text field holds edits not committed yet (Enter, or blur but for the command): a reload
+    /// leaves it alone.
+    editing: [bool; 3],
     /// `data` changed: the fields show it at the next frame.
     stale: bool,
     _subscriptions: Vec<Subscription>,
@@ -155,6 +162,7 @@ impl SettingsView {
         let theme = cx.new(|cx| SelectState::new(choices, None, window, cx));
         let shell = cx.new(|cx| InputState::new(window, cx).placeholder("System default"));
         let repo = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo"));
+        let command = cx.new(|cx| InputState::new(window, cx));
         let mut subscriptions = vec![
             cx.observe(&search, |_, _, cx| cx.notify()),
             cx.subscribe(
@@ -177,6 +185,13 @@ impl SettingsView {
                 }
             }));
         }
+        subscriptions.push(
+            cx.subscribe(&command, |this, _, event: &InputEvent, cx| match event {
+                InputEvent::Change => this.editing[2] = true,
+                InputEvent::PressEnter { .. } => this.commit_command(cx),
+                _ => {}
+            }),
+        );
         let mut this = Self {
             section,
             data,
@@ -184,7 +199,9 @@ impl SettingsView {
             theme,
             shell,
             repo,
-            editing: [false; 2],
+            command,
+            advanced: None,
+            editing: [false; 3],
             stale: true,
             _subscriptions: subscriptions,
         };
@@ -241,6 +258,24 @@ impl SettingsView {
         );
     }
 
+    /// The run goes through the reload, which asks for approval.
+    fn commit_command(&mut self, cx: &mut Context<Self>) {
+        self.editing[2] = false;
+        let command = self.command.read(cx).value().trim().to_string();
+        if let Some(agent) = self.advanced.clone()
+            && !command.is_empty()
+        {
+            self.change(Change::AgentCommand { agent, command }, cx);
+        }
+    }
+
+    fn toggle_advanced(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.advanced = (self.advanced.as_deref() != Some(id)).then(|| id.to_string());
+        self.editing[2] = false;
+        self.stale = true;
+        cx.notify();
+    }
+
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.stale = false;
         let settings = &self.data.settings;
@@ -259,6 +294,14 @@ impl SettingsView {
                 let text = texts[ix].clone().unwrap_or_default();
                 input.update(cx, |i, cx| i.set_value(text, window, cx));
             }
+        }
+        let advanced =
+            (self.advanced.as_ref()).and_then(|id| self.data.agents.iter().find(|a| &a.id == id));
+        if let Some(row) = advanced
+            && !self.editing[2]
+        {
+            let text = row.command.clone();
+            (self.command).update(cx, |i, cx| i.set_value(text, window, cx));
         }
     }
 
@@ -331,6 +374,48 @@ impl SettingsView {
             )
             .children(install)
             .children(warn)
+            .children(row.extension.is_none().then(|| self.advanced(row, cx)))
+    }
+
+    /// Folded: the command, which Enter asks to run.
+    fn advanced(&self, row: &AgentRow, cx: &mut Context<Self>) -> Div {
+        let open = self.advanced.as_deref() == Some(row.id.as_str());
+        let id = row.id.clone();
+        let selector = format!("settings-command-{}", row.id);
+        let command = open.then(|| {
+            h_flex()
+                .debug_selector(move || selector)
+                .gap_4()
+                .items_center()
+                .child(
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Command"),
+                )
+                .child(
+                    div().flex_1().child(
+                        Input::new(&self.command)
+                            .small()
+                            .disabled(self.data.error.is_some()),
+                    ),
+                )
+        });
+        v_flex()
+            .child(
+                h_flex().child(
+                    Button::new(SharedString::from(format!("advanced-{}", row.id)))
+                        .ghost()
+                        .small()
+                        .icon(if open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .label("Advanced")
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_advanced(&id, cx))),
+                ),
+            )
+            .children(command)
     }
 
     fn rows(&self, label: &str, cx: &mut Context<Self>) -> Div {
@@ -489,6 +574,7 @@ impl Render for SettingsView {
 
 #[cfg(test)]
 mod tests {
+    use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
     use wai_settings::{Change, Settings, ThemeChoice};
 
@@ -605,6 +691,31 @@ mod tests {
             Some("Copilot may edit files and run commands without asking.")
         );
         assert_eq!(super::warning(&row(&workspace, "claude", cx)), None);
+    }
+
+    #[gpui_kit::test]
+    fn advanced_command_is_written_on_enter(cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = fake_ws(cx, "");
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Ai, None, window, cx)
+        });
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.click("advanced-fake", cx);
+        });
+        cx.run_until_parked();
+        let view = view(&workspace, cx);
+        let input = view.read_with(cx, |v, _| v.command.clone());
+        let shown = input.read_with(cx, |i, _| i.value().to_string());
+        assert_eq!(shown, fake_settings("").agents["fake"].command);
+        input.update_in(cx, |i, window, cx| i.focus(window, cx));
+        cx.simulate_input("--reply other");
+        cx.simulate_keystrokes("enter");
+        let (settings, _) = Settings::load(dir.path(), None).unwrap();
+        let typed = fake_settings("--reply other").agents["fake"]
+            .command
+            .clone();
+        assert_eq!(settings.agents["fake"].command, typed);
     }
 
     #[gpui_kit::test]
