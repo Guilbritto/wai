@@ -15,6 +15,7 @@ use agent_client_protocol::{
 use async_channel::{Receiver, Sender};
 
 use crate::convert;
+use crate::subagents::Subagents;
 use crate::types::*;
 
 type Reply<T> = Sender<Result<T, AgentError>>;
@@ -84,6 +85,7 @@ impl AgentHandle {
             events,
             next_id: AtomicU64::new(1),
             pending: Mutex::default(),
+            subagents: Mutex::default(),
         });
         let (stop, stop_rx) = async_channel::bounded(1);
         let (done_tx, done) = async_channel::bounded::<()>(1);
@@ -278,12 +280,26 @@ struct Broker {
     events: Sender<AgentEvent>,
     next_id: AtomicU64,
     pending: Mutex<HashMap<u64, Pending>>,
+    /// Never locked together with `pending`.
+    subagents: Mutex<Subagents>,
 }
 
 impl Broker {
     fn emit(&self, event: AgentEvent) {
         // ponytail: the channel is unbounded, so this fails only when nobody listens anymore.
         let _ = self.events.try_send(event);
+    }
+
+    /// A session's update, emitted for the open session it belongs to (a subagent's: its root).
+    fn on_update(&self, n: acp::SessionNotification) {
+        let routed = self
+            .subagents
+            .lock()
+            .expect("broker poisoned")
+            .route(n.session_id.to_string(), n.update);
+        if let Some((session, event)) = routed {
+            self.emit(AgentEvent::Update { session, event });
+        }
     }
 
     fn park(&self, id: u64, session: SessionId, parked: Parked, event: AgentEvent) {
@@ -478,12 +494,7 @@ async fn connect(
         .name(format!("wai-agent:{}", spec.name))
         .on_receive_notification(
             async move |n: acp::SessionNotification, _cx| {
-                if let Some(event) = convert::session_event(n.update) {
-                    updates.emit(AgentEvent::Update {
-                        session: n.session_id.to_string(),
-                        event,
-                    });
-                }
+                updates.on_update(n);
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
@@ -518,12 +529,15 @@ async fn actor_loop(
             acp::InitializeRequest::new(ProtocolVersion::V1)
                 .client_info(acp::Implementation::new("wai", env!("CARGO_PKG_VERSION")))
                 // Forms only: wai opens no URLs for an agent. With it, Claude asks its
-                // AskUserQuestion through `elicitation/create`.
+                // AskUserQuestion through `elicitation/create`. With `subagents`, each of its
+                // subagents comes as a child session (routed to its root by `Subagents`).
                 .client_capabilities(
-                    acp::ClientCapabilities::new().elicitation(
-                        acp::ElicitationCapabilities::new()
-                            .form(acp::ElicitationFormCapabilities::new()),
-                    ),
+                    acp::ClientCapabilities::new()
+                        .elicitation(
+                            acp::ElicitationCapabilities::new()
+                                .form(acp::ElicitationFormCapabilities::new()),
+                        )
+                        .subagents(acp::SubagentCapabilities::new()),
                 ),
         )
         .block_task()

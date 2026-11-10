@@ -2,6 +2,7 @@
 
 mod actor;
 mod convert;
+mod subagents;
 mod types;
 
 pub use actor::{AgentHandle, program};

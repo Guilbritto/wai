@@ -341,6 +341,7 @@ impl ChatModel {
                 self.plan = entries.clone();
                 None
             }
+            SessionEvent::Subagent(_) | SessionEvent::SubagentReply { .. } => None,
         }
     }
 
@@ -625,6 +626,7 @@ mod tests {
             status,
             content: vec![],
             locations: vec![],
+            subagent: None,
         })
     }
 
@@ -1040,6 +1042,7 @@ mod tests {
                 new_text: new.into(),
             })],
             locations: vec![],
+            subagent: None,
         })
     }
 
@@ -1100,6 +1103,7 @@ mod tests {
                 status,
                 content: diffs.into_iter().map(ToolContent::Diff).collect(),
                 locations,
+                subagent: None,
             })
         };
         let diff = |path: &Path| FileDiff {

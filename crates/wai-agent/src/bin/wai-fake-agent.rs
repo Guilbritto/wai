@@ -15,6 +15,11 @@
 //!   once (`$/cancel_request`).
 //! - `--ask-unsupported-question`: `--ask-question` with one more field `shape` of an unknown
 //!   schema type (`_shape`).
+//! - `--subagent`: before the reply, run a subagent `Explore the code` as a child session
+//!   `<session>-sub`: announced `running` on the parent; on the child a Read tool call `sub-read`
+//!   (`Read lib.rs`), a one-entry plan (`Sub step`), the text `sub text`, then the call completed;
+//!   then on the parent its reply `found it` (a `session_message`) and `idle` (`end_turn`). Like
+//!   claude-agent-acp, only for a client that advertised `subagents`.
 //! - `--crash-after <n>`: after n chunks print `fake agent crashed` to stderr and exit 3.
 //! - `--require-auth`: `session/new` fails with the ACP auth-required error.
 //! - `--require-auth-on-prompt`: `session/prompt` fails with the ACP auth-required error.
@@ -75,6 +80,7 @@ struct Opts {
     chunk_delay: Duration,
     ask_permission: bool,
     plan: bool,
+    subagent: bool,
     ask_question: bool,
     withdraw_question: bool,
     unsupported_question: bool,
@@ -103,6 +109,7 @@ fn parse_args() -> Opts {
         chunk_delay: Duration::ZERO,
         ask_permission: false,
         plan: false,
+        subagent: false,
         ask_question: false,
         withdraw_question: false,
         unsupported_question: false,
@@ -144,6 +151,7 @@ fn parse_args() -> Opts {
             "--chunk-delay-ms" => opts.chunk_delay = Duration::from_millis(number(value()) as u64),
             "--ask-permission" => opts.ask_permission = true,
             "--plan" => opts.plan = true,
+            "--subagent" => opts.subagent = true,
             "--ask-question" => opts.ask_question = true,
             "--withdraw-question" => opts.withdraw_question = true,
             "--ask-unsupported-question" => {
@@ -180,6 +188,8 @@ struct Fake {
     cancelled: Mutex<HashSet<String>>,
     /// The client advertised `elicitation.form` at initialize.
     forms: AtomicBool,
+    /// The client advertised `subagents` at initialize.
+    subagents: AtomicBool,
     /// Per session: the MCP servers it got, as `--echo-mcp` reports them.
     mcp: Mutex<HashMap<String, String>>,
     /// `--models`: per session, the chosen value of each config option.
@@ -322,6 +332,9 @@ impl Fake {
                 return Ok(reason);
             }
         }
+        if self.opts.subagent && self.subagents.load(Ordering::Relaxed) {
+            self.subagent(cx, session).await?;
+        }
         let reply = if self.opts.models {
             let options = self.config_options(session).unwrap_or_default();
             let model = options.into_iter().next().and_then(|o| match o.kind {
@@ -340,6 +353,51 @@ impl Fake {
             self.opts.reply.clone()
         };
         self.stream(cx, session, &reply).await
+    }
+
+    /// `--subagent`: the child session `<session>-sub` does its work, then answers the parent.
+    async fn subagent(
+        &self,
+        cx: &ConnectionTo<Client>,
+        session: &acp::SessionId,
+    ) -> Result<(), Error> {
+        let child = acp::SessionId::new(format!("{session}-sub"));
+        let state = |state| {
+            acp::SessionUpdate::SubagentUpdate(acp::SubagentUpdate::new(child.clone()).state(state))
+        };
+        let announce = acp::SubagentUpdate::new(child.clone())
+            .title("Explore the code".to_string())
+            .state(acp::StateUpdate::Running(acp::RunningStateUpdate::new()));
+        send(cx, session, acp::SessionUpdate::SubagentUpdate(announce))?;
+        let call = acp::ToolCall::new("sub-read", "Read lib.rs")
+            .kind(acp::ToolKind::Read)
+            .status(acp::ToolCallStatus::InProgress);
+        send(cx, &child, acp::SessionUpdate::ToolCall(call))?;
+        let entry = acp::PlanEntry::new(
+            "Sub step",
+            acp::PlanEntryPriority::Medium,
+            acp::PlanEntryStatus::InProgress,
+        );
+        send(
+            cx,
+            &child,
+            acp::SessionUpdate::Plan(acp::Plan::new(vec![entry])),
+        )?;
+        send(
+            cx,
+            &child,
+            acp::SessionUpdate::AgentMessageChunk(chunk("sub text")),
+        )?;
+        let fields = acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Completed);
+        let update = acp::ToolCallUpdate::new("sub-read", fields);
+        send(cx, &child, acp::SessionUpdate::ToolCallUpdate(update))?;
+        let reply = acp::SessionMessage::new("sub-reply")
+            .sender_session_id(child.clone())
+            .recipient_session_id(session.clone())
+            .content(vec![text_block("found it")]);
+        send(cx, session, acp::SessionUpdate::SessionMessage(reply))?;
+        let idle = acp::IdleStateUpdate::new().stop_reason(acp::IdleStopReason::EndTurn);
+        send(cx, session, state(acp::StateUpdate::Idle(idle)))
     }
 
     /// Streams `reply` one word per chunk.
@@ -582,6 +640,7 @@ fn main() -> Result<(), Error> {
         next_session: AtomicU64::new(1),
         cancelled: Mutex::default(),
         forms: AtomicBool::new(false),
+        subagents: AtomicBool::new(false),
         mcp: Mutex::default(),
         config: Mutex::default(),
     });
@@ -601,6 +660,8 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                         .elicitation
                         .is_some_and(|e| e.supports_form());
                     fake.forms.store(forms, Ordering::Relaxed);
+                    let subagents = request.client_capabilities.subagents.is_some();
+                    fake.subagents.store(subagents, Ordering::Relaxed);
                     let caps = acp::AgentCapabilities::new()
                         .load_session(!fake.opts.no_load)
                         .prompt_capabilities(acp::PromptCapabilities::new().image(true))

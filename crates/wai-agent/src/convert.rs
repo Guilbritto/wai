@@ -34,6 +34,7 @@ pub(crate) fn session_event(update: acp::SessionUpdate) -> Option<SessionEvent> 
             status: tool_status(t.status),
             content: tool_contents(t.content),
             locations: locations(t.locations),
+            subagent: None,
         }),
         U::ToolCallUpdate(u) => SessionEvent::ToolCallUpdate(ToolCallPatch {
             id: u.tool_call_id.to_string(),
@@ -73,6 +74,51 @@ pub(crate) fn session_event(update: acp::SessionUpdate) -> Option<SessionEvent> 
                 .collect(),
         ),
         _ => return None,
+    })
+}
+
+pub(crate) fn subagent_patch(u: acp::SubagentUpdate) -> SubagentPatch {
+    use acp::{IdleStopReason as R, StateUpdate as S};
+    let state = match u.state {
+        MaybeUndefined::Value(S::Running(_)) => Some(SubagentState::Running),
+        MaybeUndefined::Value(S::RequiresAction(_)) => Some(SubagentState::NeedsYou),
+        MaybeUndefined::Value(S::Idle(idle)) => Some(match idle.stop_reason {
+            Some(R::EndTurn) => SubagentState::Done,
+            Some(R::Cancelled) => SubagentState::Stopped,
+            Some(R::Error(_)) => SubagentState::Failed,
+            _ => SubagentState::Ended,
+        }),
+        MaybeUndefined::Value(_) => Some(SubagentState::Unknown),
+        _ => None,
+    };
+    SubagentPatch {
+        id: u.session_id.to_string(),
+        title: match u.title {
+            MaybeUndefined::Value(title) => Some(title),
+            _ => None,
+        },
+        state,
+    }
+}
+
+/// A subagent's message to `session`: its text blocks, joined. `None` for the session's own
+/// outgoing message, or one without text. ponytail: `session_message_chunk` is not read, because
+/// the adapter sends whole messages on v1.
+pub(crate) fn subagent_reply(m: acp::SessionMessage, session: &str) -> Option<SessionEvent> {
+    let id = match m.sender_session_id {
+        MaybeUndefined::Value(id) if id.0.as_ref() != session => id.to_string(),
+        _ => return None,
+    };
+    let MaybeUndefined::Value(content) = m.content else {
+        return None;
+    };
+    let text: Vec<String> = content.into_iter().filter_map(text).collect();
+    if text.is_empty() {
+        return None;
+    }
+    Some(SessionEvent::SubagentReply {
+        id,
+        text: text.join("\n"),
     })
 }
 

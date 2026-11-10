@@ -6,8 +6,8 @@ use async_channel::Receiver;
 use wai_agent::{
     AgentCaps, AgentError, AgentEvent, AgentHandle, AgentSpec, BrokerError, Choice, ChoiceKind,
     ConfigCategory, ConfigOption, ConfigValue, FieldKind, McpServer, PermissionRequest,
-    PromptBlock, QuestionAnswer, QuestionRequest, SessionEvent, StopReason, ToolContent, program,
-    quote,
+    PromptBlock, QuestionAnswer, QuestionRequest, SessionEvent, StopReason, SubagentPatch,
+    SubagentState, ToolContent, program, quote,
 };
 
 fn run(test: impl Future<Output = ()>) {
@@ -644,6 +644,58 @@ fn set_config_switches_the_model() {
         agent.prompt(session.id, hello());
         let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
         assert_eq!(agent_text(&events), "model:fake-large");
+    });
+}
+
+/// A subagent's traffic (`--subagent`) comes out as the parent's: its announcement and states,
+/// its tool call tagged with it, its reply; not its text or its plan.
+#[test]
+fn subagent_traffic_reaches_the_parent() {
+    run(async {
+        let (agent, rx) = spawn(&["--subagent"]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        agent.prompt(session.id.clone(), hello());
+        let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+
+        let sub = format!("{}-sub", session.id);
+        let updates: Vec<&SessionEvent> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Update { session: s, event } => {
+                    assert_eq!(*s, session.id, "{event:?}");
+                    Some(event)
+                }
+                _ => None,
+            })
+            .collect();
+        let patch = |state| {
+            SessionEvent::Subagent(SubagentPatch {
+                id: sub.clone(),
+                title: Some("Explore the code".into()),
+                state: Some(state),
+            })
+        };
+        let position = |want: &SessionEvent| updates.iter().position(|e| *e == want);
+        let running = position(&patch(SubagentState::Running)).expect("running");
+        let done = updates
+            .iter()
+            .position(|e| {
+                matches!(e, SessionEvent::Subagent(p) if p.id == sub && p.state == Some(SubagentState::Done))
+            })
+            .expect("done");
+        assert!(running < done);
+        assert!(
+            updates.iter().any(|e| matches!(e, SessionEvent::ToolCall(v)
+                if v.id == "sub-read" && v.subagent.as_deref() == Some(sub.as_str()))),
+            "{updates:?}"
+        );
+        assert!(updates.contains(&&SessionEvent::SubagentReply {
+            id: sub.clone(),
+            text: "found it".into(),
+        }));
+        assert!(!updates.iter().any(|e| matches!(e, SessionEvent::Plan(_))));
+        assert_eq!(agent_text(&events), "Hello from fake agent");
     });
 }
 
