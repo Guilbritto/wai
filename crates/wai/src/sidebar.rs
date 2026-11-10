@@ -15,7 +15,7 @@ pub use wai_settings::canonical;
 use crate::agents::AgentStatus;
 use crate::aurora;
 use crate::chat::{ChatSession, TurnState};
-use crate::workspace::{MAX_PANES, Workspace};
+use crate::workspace::{Dragged, DraggedSession, MAX_PANES, Workspace};
 
 pub(crate) const ROW_HEIGHT: f32 = 28.;
 
@@ -284,6 +284,10 @@ impl Workspace {
         let title = s.model.title.clone().unwrap_or("New session".into());
         let active = self.panes[self.focused_pane].session() == Some(session);
         let (open, side) = (session.clone(), session.clone());
+        let dragged = DraggedSession {
+            title: title.clone().into(),
+            source: Dragged::Open(session.clone()),
+        };
         let (agent, id, cwd) = (s.agent.clone(), s.id.clone(), s.cwd.clone());
         let forkable = self.can_fork(&agent, cx);
         let fork_title = s.model.title.clone();
@@ -309,7 +313,10 @@ impl Workspace {
                     .children(label.map(|l| div().text_xs().text_color(dot).child(l)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.show(open.clone(), false, window, cx)
-                    })),
+                    }))
+                    .on_drag(dragged, DraggedSession::preview)
+                    // Registers the id so tests can find and drag it.
+                    .test_support(),
             )
             .when(self.panes.len() < MAX_PANES, |el| {
                 el.child(side_button(("open-side", ix)).on_click(cx.listener(
@@ -340,6 +347,10 @@ impl Workspace {
     ) -> impl IntoElement + use<> {
         let title = summary.title.clone().unwrap_or_else(|| summary.id.clone());
         let (open, side, source) = (summary.clone(), summary.clone(), summary.clone());
+        let dragged = DraggedSession {
+            title: title.clone().into(),
+            source: Dragged::History(summary.clone()),
+        };
         let forkable = self.can_fork(&self.settings.default_agent, cx);
         row(false, cx)
             .child(
@@ -349,9 +360,14 @@ impl Workspace {
                     .min_w_0()
                     .truncate()
                     .child(title)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.resume(&open, false, window, cx)
-                    })),
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            this.resume(&open, false, window, cx)
+                        }),
+                    )
+                    .on_drag(dragged, DraggedSession::preview)
+                    // Registers the id so tests can find and drag it.
+                    .test_support(),
             )
             .when(self.panes.len() < MAX_PANES, |el| {
                 el.child(side_button(("history-side", ix)).on_click(

@@ -6,7 +6,8 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, Sizable as _, h_resizable, resizable_panel, v_flex, v_resizable,
+    ActiveTheme as _, IconName, Sizable as _, h_flex, h_resizable, resizable_panel, v_flex,
+    v_resizable,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -29,6 +30,7 @@ use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved, recovery};
 use crate::ext_host::{ExtHost, SessionCall};
 use crate::extensions_view::{ExtensionsView, InstallPlugin};
 use crate::files::{FileTree, OpenFile};
+use crate::layout::{self, Slot, Zone};
 use crate::notify::{self, should_notify};
 use crate::search_view::{OpenMatch, SearchView};
 use crate::sidebar::{SidebarTab, canonical};
@@ -68,6 +70,43 @@ impl Pane {
             Pane::Session(session) => Some(session),
             _ => None,
         }
+    }
+}
+
+/// R89: a session dragged from an Open row, a pane's header or a History row onto a pane.
+#[derive(Clone)]
+pub(crate) struct DraggedSession {
+    pub(crate) title: SharedString,
+    pub(crate) source: Dragged,
+}
+
+#[derive(Clone)]
+pub(crate) enum Dragged {
+    Open(Entity<ChatSession>),
+    /// Resumed where it drops, as a click on its row resumes it.
+    History(SessionSummary),
+}
+
+impl DraggedSession {
+    /// The `on_drag` preview: a pill with the title.
+    pub(crate) fn preview(
+        &self,
+        offset: Point<Pixels>,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> Entity<Preview> {
+        cx.new(|_| Preview(self.title.clone(), offset))
+    }
+}
+
+/// GPUI draws a drag's view where its source was grabbed: the padding brings the pill under
+/// the pointer.
+pub(crate) struct Preview(SharedString, Point<Pixels>);
+
+impl Render for Preview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pill = aurora::pill(cx).child(self.0.clone());
+        div().pl(self.1.x).pt(self.1.y).child(pill)
     }
 }
 
@@ -704,17 +743,102 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let agent = self.settings.default_agent.clone();
-        if let Some(session) = self.session(&agent, &summary.id, cx) {
-            return self.show(session, side, window, cx);
-        }
-        let (id, cwd) = (summary.id.clone(), summary.cwd.clone());
-        let Some(session) = self.loading_session(agent, id, cwd, window, cx) else {
+        let Some((session, fresh)) = self.resumed(summary, window, cx) else {
             return;
         };
-        session.update(cx, |s, _| s.model.title = summary.title.clone());
         self.show(session.clone(), side, window, cx);
-        session.update(cx, |s, cx| s.load(false, window, cx));
+        if fresh {
+            session.update(cx, |s, cx| s.load(false, window, cx));
+        }
+    }
+
+    /// A history row's session: the open one with its id, else a new one titled like the row,
+    /// which is `fresh`: it loads once its caller has put it in a pane.
+    fn resumed(
+        &mut self,
+        summary: &SessionSummary,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<(Entity<ChatSession>, bool)> {
+        let agent = self.settings.default_agent.clone();
+        if let Some(session) = self.session(&agent, &summary.id, cx) {
+            return Some((session, false));
+        }
+        let (id, cwd) = (summary.id.clone(), summary.cwd.clone());
+        let session = self.loading_session(agent, id, cwd, window, cx)?;
+        session.update(cx, |s, _| s.model.title = summary.title.clone());
+        Some((session, true))
+    }
+
+    /// R89: `dragged` lands on pane `ix`'s `zone` (`layout::place`) and its pane takes the
+    /// focus. A session it replaces stays open, in no pane; a History row resumes as a click on
+    /// it does.
+    fn drop_session(
+        &mut self,
+        dragged: &DraggedSession,
+        ix: usize,
+        zone: Zone,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The panes may have changed since the zones drew.
+        if ix >= self.panes.len() {
+            return;
+        }
+        let (session, fresh) = match &dragged.source {
+            Dragged::Open(session) if self.sessions.contains(session) => (session.clone(), false),
+            Dragged::Open(_) => return,
+            Dragged::History(row) => match self.resumed(row, window, cx) {
+                Some(resumed) => resumed,
+                None => return,
+            },
+        };
+        let from = self
+            .panes
+            .iter()
+            .position(|p| p.session() == Some(&session));
+        let locked = matches!(self.panes[ix], Pane::Editor(_)) && !self.dirty_tabs(cx).is_empty();
+        if let Some(slots) = layout::place(self.panes.len(), from, ix, zone, locked) {
+            let mut old: Vec<_> = self.panes.drain(..).map(Some).collect();
+            self.panes = (slots.into_iter())
+                .map(|slot| match slot {
+                    Slot::Old(ix) => old[ix].take().expect("each pane lands once"),
+                    Slot::Dropped => Pane::Session(session.clone()),
+                })
+                .collect();
+            self.save_state(cx);
+        }
+        if let Some(ix) = self
+            .panes
+            .iter()
+            .position(|p| p.session() == Some(&session))
+        {
+            self.focus_pane(ix, window, cx);
+        }
+        if fresh {
+            session.update(cx, |s, cx| s.load(false, window, cx));
+        }
+    }
+
+    /// R89: while something is dragged, pane `ix`'s left and right quarters and its middle,
+    /// each lit while a session is over it.
+    fn drop_zones(ix: usize, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let zone = |zone: Zone| {
+            div()
+                .h_full()
+                .drag_over::<DraggedSession>(|style, _, _, cx| aurora::drop_target(style, cx))
+                .on_drop(
+                    cx.listener(move |this, dragged: &DraggedSession, window, cx| {
+                        this.drop_session(dragged, ix, zone, window, cx)
+                    }),
+                )
+        };
+        h_flex()
+            .absolute()
+            .inset_0()
+            .child(zone(Zone::Left).w(relative(0.25)))
+            .child(zone(Zone::Center).flex_1())
+            .child(zone(Zone::Right).w(relative(0.25)))
     }
 
     /// Whether `agent` advertised `session/fork` and `session/load` (a fork loads to replay).
@@ -1635,6 +1759,7 @@ impl Render for Workspace {
         let sidebar = self.render_sidebar(cx);
         let theme = cx.theme();
         let split = self.panes.len() > 1;
+        let dragging = cx.has_active_drag();
         let panes = self.panes.iter().enumerate().map(|(ix, pane)| {
             let focused = split && ix == self.focused_pane;
             let content = v_flex()
@@ -1665,7 +1790,8 @@ impl Render for Workspace {
                     Pane::Empty(error) => {
                         self.empty_pane(ix, error.as_ref(), cx).into_any_element()
                     }
-                });
+                })
+                .when(dragging, |el| el.relative().child(Self::drop_zones(ix, cx)));
             resizable_panel().child(on_card(aurora::card(focused, cx), content))
         });
         let sidebar = on_card(aurora::card(false, cx), sidebar).debug_selector(|| "sidebar".into());
@@ -1767,8 +1893,8 @@ pub(crate) mod tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
-        AppContext as _, ElementId, Entity, Pixels, Point, TestAppContext, VisualTestContext,
-        point, px, size,
+        AppContext as _, ElementId, Entity, Modifiers, MouseButton, Pixels, Point, TestAppContext,
+        VisualTestContext, point, px, size,
     };
     use wai_agent::{AgentError, PromptBlock, SessionEvent, SessionSummary};
     use wai_settings::{AgentConfig, AppState, OpenSession, Settings, ThemeChoice};
@@ -2018,6 +2144,112 @@ pub(crate) mod tests {
         workspace.read_with(cx, |w, _| {
             assert!(matches!(w.panes[..], [Pane::Session(_)]));
             assert_eq!(w.sessions.len(), 1, "the session stays open");
+        });
+    }
+
+    fn center_of(id: impl Into<ElementId>, cx: &mut VisualTestContext) -> Point<Pixels> {
+        let id = id.into();
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find(id).bounds().center()
+        })
+    }
+
+    /// Drags from `from` to `x` of the way across pane `ix`, at its middle. Each event has its
+    /// own update, as on a real window (`window.drag` sends them all in one): a pane's
+    /// mouse-down focus, deferred, lands before the drop.
+    fn drag_to_pane(from: Point<Pixels>, ix: usize, x: f32, cx: &mut VisualTestContext) {
+        let pane = cx
+            .debug_bounds(format!("pane-{ix}").leak())
+            .expect("pane drawn");
+        let to = point(pane.left() + pane.size.width * x, pane.center().y);
+        let none = Modifiers::none();
+        cx.simulate_mouse_move(from, None, none);
+        cx.simulate_mouse_down(from, MouseButton::Left, none);
+        for at in [from + point(px(8.), px(0.)), to] {
+            cx.simulate_mouse_move(at, MouseButton::Left, none);
+            cx.update(|window, cx| window.render_frame(cx));
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, none);
+    }
+
+    /// R89: an Open row dropped on a pane's right quarter opens in a new pane there, focused.
+    #[gpui_kit::test]
+    fn drag_open_row_to_right_edge_splits(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(2));
+        let rows = load_history(&workspace, 2, cx);
+        for row in &rows {
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(row, false, window, cx)));
+        }
+        // The second took the only pane: the first is open in none.
+        let (first, second) =
+            workspace.read_with(cx, |w, _| (w.sessions[0].clone(), w.sessions[1].clone()));
+        assert_eq!(pane_session(&workspace, 0, cx), second);
+
+        let from = center_of(("open", 0usize), cx);
+        drag_to_pane(from, 0, 0.9, cx);
+
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 2);
+            assert_eq!(w.panes[0].session(), Some(&second));
+            assert_eq!(w.panes[1].session(), Some(&first));
+            assert_eq!(w.focused_pane, 1);
+        });
+    }
+
+    /// R89: a History row dropped on a pane's center resumes there; the session it replaced
+    /// stays open, in no pane.
+    #[gpui_kit::test]
+    fn history_drop_on_center_keeps_the_replaced_session_open(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(2));
+        let rows = load_history(&workspace, 2, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
+        let first = pane_session(&workspace, 0, cx);
+        cx.update(|window, cx| window.click("history-toggle", cx));
+
+        let from = center_of(("history", 1usize), cx);
+        drag_to_pane(from, 0, 0.5, cx);
+
+        let shown = pane_session(&workspace, 0, cx);
+        assert_eq!(shown.read_with(cx, |s, _| s.id.clone()), rows[1].id);
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 1);
+            assert_eq!(w.sessions.len(), 2);
+            assert!(
+                w.sessions.contains(&first),
+                "the replaced session stays open"
+            );
+        });
+    }
+
+    /// R89: a pane's header dropped on another pane's center swaps the two.
+    #[gpui_kit::test]
+    fn drag_header_onto_pane_swaps(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(2));
+        let rows = load_history(&workspace, 2, cx);
+        for (row, side) in rows.iter().zip([false, true]) {
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(row, side, window, cx)));
+        }
+        let (first, second) = (
+            pane_session(&workspace, 0, cx),
+            pane_session(&workspace, 1, cx),
+        );
+
+        let from = cx.update(|window, cx| {
+            window.render_frame(cx);
+            let header = window.within(ElementId::View(second.entity_id()));
+            header.find("session-title").bounds().center()
+        });
+        drag_to_pane(from, 0, 0.5, cx);
+
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 2);
+            assert_eq!(w.panes[0].session(), Some(&second));
+            assert_eq!(w.panes[1].session(), Some(&first));
+            assert_eq!(w.focused_pane, 0);
         });
     }
 

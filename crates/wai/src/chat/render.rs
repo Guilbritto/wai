@@ -15,6 +15,7 @@ use super::model::{ChatItem, NoticeKind, ToolItem, TurnState, UsageInfo, show_la
 use super::view::{ChatEvent, ChatSession};
 use super::{permission, question};
 use crate::aurora::{self, DISPLAY_FONT};
+use crate::workspace::{Dragged, DraggedSession};
 
 /// `43k`, `1M`, `1.5M`.
 fn tokens(n: u64) -> String {
@@ -56,19 +57,29 @@ pub(super) fn glass(el: Div, cx: &App) -> Div {
 impl ChatSession {
     fn render_header(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let title = self.model.title.clone().unwrap_or("New session".into());
+        let dragged = DraggedSession {
+            title: title.clone().into(),
+            source: Dragged::Open(cx.entity()),
+        };
         aurora::card_bar(cx)
             .gap_3()
             .px_3()
             .py_2()
+            // R89: the title drags the session to another pane.
             .child(
                 div()
+                    .id("session-title")
                     .flex_1()
                     .min_w_0()
                     .truncate()
+                    .cursor_grab()
                     .font_family(DISPLAY_FONT)
                     .text_size(px(14.))
                     .font_weight(FontWeight::BOLD)
-                    .child(title),
+                    .child(title)
+                    .on_drag(dragged, DraggedSession::preview)
+                    // Registers the id so tests can find and drag it.
+                    .test_support(),
             )
             .children(
                 self.modes

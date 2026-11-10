@@ -11,8 +11,8 @@ use gpui_kit::component::{ActiveTheme as _, Theme, ThemeRegistry, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Axis, Bounds, BoxShadow, Corners, Div, FontWeight, Hsla, InteractiveElement,
-    IntoElement, ParentElement, Styled, canvas, div, hsla, linear_color_stop, linear_gradient,
-    point, px, rgb, size,
+    IntoElement, ParentElement, StyleRefinement, Styled, canvas, div, hsla, linear_color_stop,
+    linear_gradient, point, px, rgb, size,
 };
 
 /// Nunito Bold (OFL 1.1, `assets/fonts/OFL.txt`), for the brand and titles.
@@ -250,6 +250,23 @@ pub(crate) fn tab(active: bool, cx: &App) -> Div {
     } else {
         base.text_color(nevoa()).hover(|el| el.bg(vidro()))
     }
+}
+
+/// R89: a pane's drop zone while a session is dragged over it, lit like a selected tab: lilas
+/// at 16% in a lilas 45% border. Light mode: the theme's `accent` in its `ring`. Rounded like
+/// the card inside its border.
+pub(crate) fn drop_target(style: StyleRefinement, cx: &App) -> StyleRefinement {
+    let theme = cx.theme();
+    let (fill, border, radius) = if theme.is_dark() {
+        (lilas().alpha(0.16), lilas().alpha(0.45), 15.)
+    } else {
+        (theme.accent, theme.ring, 11.)
+    };
+    style
+        .bg(fill)
+        .border_1()
+        .border_color(border)
+        .rounded(px(radius))
 }
 
 /// `button` filled with `fill`, `hover` under the pointer and pressed, `text` for its label and

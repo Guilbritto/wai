@@ -8,6 +8,7 @@ mod ext_host;
 mod ext_panel;
 mod extensions_view;
 mod files;
+mod layout;
 mod notify;
 mod palette;
 mod search_view;
