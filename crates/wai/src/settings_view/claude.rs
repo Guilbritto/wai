@@ -9,7 +9,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::*;
-use wai_settings::claude::{ClaudeData, McpSource, short};
+use wai_settings::claude::{ClaudeData, McpSource, McpStatus, short};
 
 use super::{Section, SettingsEvent, SettingsView};
 use crate::aurora;
@@ -34,6 +34,47 @@ pub(crate) struct Row {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Tone {
     Muted,
+    Ok,
+    Warn,
+    Err,
+}
+
+/// The last `claude mcp list` run in this modal.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) enum McpCheck {
+    #[default]
+    NotRun,
+    Running,
+    Done(BTreeMap<String, McpStatus>),
+    Failed(String),
+}
+
+/// The status line of an MCP server row.
+pub(crate) fn status_line(check: &McpCheck, name: &str, enabled: bool) -> (Tone, String) {
+    let muted = |t: &str| (Tone::Muted, t.to_string());
+    if !enabled {
+        return muted("Off for this project");
+    }
+    match check {
+        McpCheck::NotRun => muted("Not checked"),
+        McpCheck::Running => muted("Checking…"),
+        McpCheck::Failed(t) => (Tone::Warn, t.clone()),
+        McpCheck::Done(map) => match map.get(name) {
+            Some(McpStatus::Connected) => (Tone::Ok, "Connected".into()),
+            Some(McpStatus::NeedsAuth) => (Tone::Warn, "Needs sign-in · run /mcp in Claude".into()),
+            Some(McpStatus::Failed(r)) if r.is_empty() => (Tone::Err, "Failed to connect".into()),
+            Some(McpStatus::Failed(r)) => {
+                (Tone::Err, format!("Failed to connect · {}", clamp(r, 160)))
+            }
+            Some(McpStatus::Pending) => (
+                Tone::Warn,
+                "Pending approval · start Claude in this project to approve".into(),
+            ),
+            Some(McpStatus::Disabled) => muted("Off for this project"),
+            Some(McpStatus::Other(t)) => (Tone::Muted, clamp(t, 160)),
+            None => muted("Not listed by claude mcp list"),
+        },
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -75,7 +116,7 @@ pub(crate) fn plugin_groups(data: &ClaudeData, home: &Path) -> Vec<Group> {
 }
 
 /// The MCP servers by source; the claude.ai connectors group is always there, as a Coming soon row.
-pub(crate) fn mcp_groups(data: &ClaudeData) -> Vec<Group> {
+pub(crate) fn mcp_groups(data: &ClaudeData, check: &McpCheck) -> Vec<Group> {
     let mut groups: [(&str, Vec<Row>); 3] = [
         ("From plugins", vec![]),
         ("User", vec![]),
@@ -93,15 +134,7 @@ pub(crate) fn mcp_groups(data: &ClaudeData) -> Vec<Group> {
             badge: Some(badge),
             path: None,
             summary: Some(s.transport.to_string()),
-            status: Some((
-                Tone::Muted,
-                if s.enabled {
-                    "Not checked"
-                } else {
-                    "Off for this project"
-                }
-                .into(),
-            )),
+            status: Some(status_line(check, &s.name, s.enabled)),
             control: Control::Mcp { ix, on: s.enabled },
         });
     }
@@ -169,6 +202,16 @@ impl SettingsView {
         cx.notify();
     }
 
+    pub fn set_mcp_check(&mut self, check: McpCheck, cx: &mut Context<Self>) {
+        self.mcp_check = check;
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub fn mcp_check(&self) -> &McpCheck {
+        &self.mcp_check
+    }
+
     #[cfg(test)]
     pub fn claude(&self) -> Option<&ClaudeData> {
         self.claude.as_ref()
@@ -193,7 +236,7 @@ impl SettingsView {
     }
 
     /// The buttons beside a Claude page's title.
-    pub(super) fn claude_actions(&self, section: Section, cx: &App) -> Option<Div> {
+    pub(super) fn claude_actions(&self, section: Section, cx: &mut Context<Self>) -> Option<Div> {
         let buttons = match section {
             Section::Plugins => [
                 Button::new("soon-browse").small().label("Browse"),
@@ -204,7 +247,26 @@ impl SettingsView {
             ]
             .into_iter()
             .collect::<Vec<_>>(),
-            Section::Mcp => vec![Button::new("soon-add-server").small().label("Add server…")],
+            Section::Mcp => {
+                let running = self.mcp_check == McpCheck::Running;
+                let check = Button::new("mcp-check")
+                    .small()
+                    .label(if running {
+                        "Checking…"
+                    } else {
+                        "Check status"
+                    })
+                    .disabled(running)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::CheckMcp)));
+                return Some(
+                    h_flex().gap_2().items_center().child(check).child(
+                        Button::new("soon-add-server")
+                            .small()
+                            .label("Add server…")
+                            .disabled(true),
+                    ),
+                );
+            }
             _ => return None,
         };
         let mut row = h_flex().gap_2().items_center();
@@ -236,7 +298,7 @@ impl SettingsView {
             .iter()
             .map(|p| div().px_3().py_2().text_color(danger).child(p.clone()));
         let all = match section {
-            Section::Mcp => mcp_groups(data),
+            Section::Mcp => mcp_groups(data, &self.mcp_check),
             _ => plugin_groups(data, &self.data.home),
         };
         let total: usize = all.iter().map(|g| g.rows.len()).sum();
@@ -317,6 +379,9 @@ impl SettingsView {
         let status = row.status.as_ref().map(|(tone, text)| {
             let color = match tone {
                 Tone::Muted => muted,
+                Tone::Ok => cx.theme().success,
+                Tone::Warn => cx.theme().warning,
+                Tone::Err => cx.theme().danger,
             };
             h_flex()
                 .gap_1()
@@ -397,7 +462,10 @@ mod tests {
 
     use wai_settings::claude::{ClaudeData, McpServer, McpSource, Plugin};
 
-    use super::{Control, Tone, default_open, filter, mcp_groups, plugin_groups};
+    use super::{
+        Control, McpCheck, Tone, default_open, filter, mcp_groups, plugin_groups, status_line,
+    };
+    use wai_settings::claude::McpStatus;
 
     fn plugin(id: &str, version: &str, enabled: bool, locked: Option<&str>) -> Plugin {
         let (name, marketplace) = id.split_once('@').unwrap();
@@ -500,7 +568,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let groups = mcp_groups(&data);
+        let groups = mcp_groups(&data, &McpCheck::NotRun);
         let titles: Vec<_> = groups.iter().map(|g| g.title.as_str()).collect();
         assert_eq!(
             titles,
@@ -546,9 +614,70 @@ mod tests {
         );
         assert_eq!(connectors.rows[0].control, Control::Soon);
 
-        let empty = mcp_groups(&ClaudeData::default());
+        let empty = mcp_groups(&ClaudeData::default(), &McpCheck::NotRun);
         assert_eq!(empty.len(), 1);
         assert_eq!(empty[0].title, "claude.ai connectors");
+    }
+
+    #[test]
+    fn status_lines_read_plainly() {
+        use std::collections::BTreeMap;
+        let line = |check: &McpCheck, name: &str, on: bool| status_line(check, name, on);
+        let t = |tone, text: &str| (tone, text.to_string());
+        let done = |s| McpCheck::Done(BTreeMap::from([("a".to_string(), s)]));
+        assert_eq!(
+            line(&McpCheck::Running, "a", false),
+            t(Tone::Muted, "Off for this project")
+        );
+        assert_eq!(
+            line(&McpCheck::NotRun, "a", true),
+            t(Tone::Muted, "Not checked")
+        );
+        assert_eq!(
+            line(&McpCheck::Running, "a", true),
+            t(Tone::Muted, "Checking…")
+        );
+        assert_eq!(
+            line(&McpCheck::Failed("Needs the claude CLI".into()), "a", true),
+            t(Tone::Warn, "Needs the claude CLI")
+        );
+        assert_eq!(
+            line(&done(McpStatus::Connected), "a", true),
+            t(Tone::Ok, "Connected")
+        );
+        assert_eq!(
+            line(&done(McpStatus::NeedsAuth), "a", true),
+            t(Tone::Warn, "Needs sign-in · run /mcp in Claude")
+        );
+        assert_eq!(
+            line(&done(McpStatus::Failed("HTTP 400".into())), "a", true),
+            t(Tone::Err, "Failed to connect · HTTP 400")
+        );
+        assert_eq!(
+            line(&done(McpStatus::Failed(String::new())), "a", true),
+            t(Tone::Err, "Failed to connect")
+        );
+        let long = line(&done(McpStatus::Failed("x".repeat(200))), "a", true).1;
+        assert_eq!(long, format!("Failed to connect · {}…", "x".repeat(160)));
+        assert_eq!(
+            line(&done(McpStatus::Pending), "a", true),
+            t(
+                Tone::Warn,
+                "Pending approval · start Claude in this project to approve"
+            )
+        );
+        assert_eq!(
+            line(&done(McpStatus::Disabled), "a", true),
+            t(Tone::Muted, "Off for this project")
+        );
+        assert_eq!(
+            line(&done(McpStatus::Other("odd".into())), "a", true),
+            t(Tone::Muted, "odd")
+        );
+        assert_eq!(
+            line(&done(McpStatus::Connected), "b", true),
+            t(Tone::Muted, "Not listed by claude mcp list")
+        );
     }
 
     #[test]

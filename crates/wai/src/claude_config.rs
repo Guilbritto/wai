@@ -1,12 +1,45 @@
 //! The workspace's side of the Claude pages in Settings: reading `~/.claude` off the UI thread
 //! and writing a plugin's switch.
 
+use std::path::PathBuf;
+use std::time::Duration;
+
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
-use wai_settings::claude::{Stamp, WriteError, read_claude, set_plugin_enabled};
+use wai_settings::claude::{Stamp, WriteError, parse_mcp_list, read_claude, set_plugin_enabled};
 
+use crate::settings_view::claude::McpCheck;
 use crate::workspace::Workspace;
+
+/// Runs `claude mcp list` in `cwd` and returns its output; a hung or failing run is an `Err`.
+pub(crate) async fn run_mcp_list(
+    program: PathBuf,
+    cwd: PathBuf,
+    timeout: Duration,
+) -> Result<String, String> {
+    let run = async {
+        let out = smol::process::Command::new(program)
+            .args(["mcp", "list"])
+            .current_dir(cwd)
+            .stdin(smol::process::Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await
+            .map_err(|e| e.to_string())?;
+        if out.status.success() {
+            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+        }
+        let err = String::from_utf8_lossy(&out.stderr);
+        let last = err.lines().rev().find(|l| !l.trim().is_empty());
+        Err(last.unwrap_or("claude mcp list failed").trim().to_string())
+    };
+    let timed_out = async {
+        smol::Timer::after(timeout).await;
+        Err(format!("claude mcp list took over {}s", timeout.as_secs()))
+    };
+    smol::future::or(run, timed_out).await
+}
 
 impl Workspace {
     /// Reads Claude's files in the background and hands them to the open modal.
@@ -20,6 +53,36 @@ impl Workspace {
                 if let Some(view) = this.settings_view() {
                     view.update(cx, |v, cx| v.set_claude(data, cx));
                 }
+            })
+            .ok();
+        }));
+    }
+
+    /// Runs `claude mcp list` in the project and shows each server's status in the open modal.
+    pub(crate) fn check_mcp(&mut self, cx: &mut Context<Self>) {
+        let set = |this: &mut Self, check: McpCheck, cx: &mut Context<Self>| {
+            if let Some(view) = this.settings_view() {
+                view.update(cx, |v, cx| v.set_mcp_check(check, cx));
+            }
+        };
+        let program = (self.claude_program.clone())
+            .or_else(|| wai_settings::find_program("claude".as_ref()))
+            .filter(|p| p.is_file());
+        let Some(program) = program else {
+            self.mcp_task = None;
+            set(self, McpCheck::Failed("Needs the claude CLI".into()), cx);
+            return;
+        };
+        set(self, McpCheck::Running, cx);
+        let project = self.project.clone();
+        self.mcp_task = Some(cx.spawn(async move |this, cx| {
+            let out = run_mcp_list(program, project, Duration::from_secs(60)).await;
+            this.update(cx, |this, cx| {
+                let check = match out {
+                    Ok(out) => McpCheck::Done(parse_mcp_list(&out)),
+                    Err(e) => McpCheck::Failed(format!("Check failed: {e}")),
+                };
+                set(this, check, cx);
             })
             .ok();
         }));
@@ -68,8 +131,9 @@ mod tests {
     use wai_settings::Settings;
 
     use crate::settings_view::Section;
+    use crate::settings_view::claude::McpCheck;
     use crate::workspace::Workspace;
-    use crate::workspace::tests::{click, open};
+    use crate::workspace::tests::{click, open, wait_until};
 
     fn put(path: impl AsRef<Path>, text: &str) {
         let path = path.as_ref();
@@ -153,6 +217,109 @@ mod tests {
         view.read_with(cx, |v, _| v.claude().unwrap().plugins[ix].enabled)
     }
 
+    fn open_mcp(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Mcp, None, window, cx)
+        });
+        cx.run_until_parked();
+    }
+
+    /// The statuses of the rows the page shows, by label.
+    fn mcp_statuses(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(String, (crate::settings_view::claude::Tone, String))> {
+        let view = workspace.read_with(cx, |w, _| w.settings_view()).unwrap();
+        view.read_with(cx, |v, _| {
+            let groups =
+                crate::settings_view::claude::mcp_groups(v.claude().unwrap(), v.mcp_check());
+            groups
+                .into_iter()
+                .flat_map(|g| g.rows)
+                .filter_map(|r| Some((r.name, r.status?)))
+                .collect()
+        })
+    }
+
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn check_status_runs_claude_mcp_list_in_the_project(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the check is a real process
+        use std::os::unix::fs::PermissionsExt as _;
+        let (workspace, cx, tmp) = claude_ws(cx);
+        // The fixture disables plugin:alpha:db for this project; the check needs it on.
+        let key = wai_settings::claude::project_key_for(&tmp.path().join("project"));
+        put(
+            tmp.path().join("home/.claude.json"),
+            &format!(r#"{{"projects":{{"{key}":{{}}}}}}"#),
+        );
+        let bin = tmp.path().join("bin/claude");
+        put(
+            &bin,
+            "#!/bin/sh\npwd > \"$0.cwd\"\necho \"$@\" > \"$0.args\"\nprintf '%s\\n' 'plugin:alpha:db: db-mcp - ✔ Connected'\n",
+        );
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        workspace.update(cx, |w, _| w.claude_program = Some(bin.clone()));
+        open_mcp(&workspace, cx);
+        click("mcp-check", cx);
+        wait_until(cx, "the check", |cx| {
+            mcp_statuses(&workspace, cx)
+                .iter()
+                .any(|(name, s)| name == "db" && s.1 == "Connected")
+        });
+        let statuses = mcp_statuses(&workspace, cx);
+        let db = statuses.iter().find(|(n, _)| n == "db").unwrap();
+        assert_eq!(db.1.0, crate::settings_view::claude::Tone::Ok);
+        let args = std::fs::read_to_string(tmp.path().join("bin/claude.args")).unwrap();
+        assert_eq!(args, "mcp list\n");
+        let cwd = std::fs::read_to_string(tmp.path().join("bin/claude.cwd")).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(cwd.trim()).unwrap(),
+            std::fs::canonicalize(tmp.path().join("project")).unwrap()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn check_status_without_the_cli_says_so(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the check is a real process
+        let (workspace, cx, _tmp) = claude_ws(cx);
+        open_mcp(&workspace, cx);
+        click("mcp-check", cx);
+        let statuses = mcp_statuses(&workspace, cx);
+        assert!(!statuses.is_empty());
+        for (name, (tone, text)) in statuses {
+            if text == "Off for this project" {
+                continue;
+            }
+            assert_eq!(
+                (tone, text.as_str()),
+                (
+                    crate::settings_view::claude::Tone::Warn,
+                    "Needs the claude CLI"
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_list_gives_up_after_the_timeout() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("claude");
+        put(&script, "#!/bin/sh\nexec sleep 5\n");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        let out = smol::block_on(super::run_mcp_list(
+            script,
+            tmp.path().to_path_buf(),
+            std::time::Duration::from_millis(200),
+        ));
+        assert_eq!(out, Err("claude mcp list took over 0s".to_string()));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
     #[gpui_kit::test]
     fn modal_opens_before_claude_is_read(cx: &mut TestAppContext) {
         let (workspace, cx, _tmp) = claude_ws(cx);
@@ -234,9 +401,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (home, project) = (tmp.path().join("home"), tmp.path().join("project"));
         claude_fixture(&home, &project);
-        let groups = crate::settings_view::claude::mcp_groups(&wai_settings::claude::read_claude(
-            &home, &project,
-        ));
+        let groups = crate::settings_view::claude::mcp_groups(
+            &wai_settings::claude::read_claude(&home, &project),
+            &McpCheck::NotRun,
+        );
         assert!(!format!("{groups:?}").contains("s3cr3t"));
         assert_eq!(groups.iter().map(|g| g.rows.len()).sum::<usize>(), 5);
     }

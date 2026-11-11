@@ -2,8 +2,8 @@
 //! versions, counts and transports are kept; env, headers, tokens, commands, urls and account
 //! data are never copied out of the files.
 
-use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 
@@ -749,6 +749,53 @@ fn fill_entries(data: &mut ClaudeData, home: &Path, project: &Path, settings: [O
     data.hooks.extend(plugin_hooks);
 }
 
+/// What `claude mcp list` says about one server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum McpStatus {
+    Connected,
+    NeedsAuth,
+    Failed(String),
+    Pending,
+    Disabled,
+    Other(String),
+}
+
+/// Reads `claude mcp list`: the status of each server by name. The command or URL part of a
+/// line is never kept.
+pub fn parse_mcp_list(text: &str) -> BTreeMap<String, McpStatus> {
+    let mut map = BTreeMap::new();
+    for line in text.lines() {
+        if line.starts_with("claude.ai ") {
+            continue;
+        }
+        let Some((name, rest)) = line.split_once(": ") else {
+            continue;
+        };
+        let marked =
+            |at: &usize| rest[at + 3..].starts_with(|c| matches!(c, '✔' | '!' | '✘' | '⏸' | '⊘'));
+        let Some(at) = rest.rmatch_indices(" - ").map(|(at, _)| at).find(marked) else {
+            continue;
+        };
+        let status = rest[at + 3..].trim();
+        let status = if status.starts_with('✔') {
+            McpStatus::Connected
+        } else if status.starts_with("! Needs authentication") {
+            McpStatus::NeedsAuth
+        } else if let Some(reason) = status.strip_prefix("✘ Failed to connect") {
+            let reason = reason.trim_start().trim_start_matches('—');
+            McpStatus::Failed(reason.trim().to_string())
+        } else if status.starts_with('⏸') {
+            McpStatus::Pending
+        } else if status.starts_with('⊘') {
+            McpStatus::Disabled
+        } else {
+            McpStatus::Other(status.to_string())
+        };
+        map.insert(name.to_string(), status);
+    }
+    map
+}
+
 pub fn read_claude(home: &Path, project: &Path) -> ClaudeData {
     let mut data = ClaudeData::default();
     let problems = &mut data.problems;
@@ -1092,6 +1139,33 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::fs;
+
+    #[test]
+    fn parse_mcp_list_reads_claude_output() {
+        let text = "Checking MCP server health…\n\
+\n\
+claude.ai Figma: https://mcp.figma.com/mcp - ✔ Connected\n\
+plugin:context7:context7: https://mcp.context7.com/mcp?client=claude-code-plugin (HTTP) - ! Needs authentication\n\
+plugin:github:github: https://api.githubcopilot.com/mcp/ (HTTP) - ✘ Failed to connect — HTTP 400: Error POSTing to endpoint: bad request: Authorization header is badly formatted\n\
+plugin:playwright:playwright: npx @playwright/mcp@latest - ✔ Connected\n\
+u: u-mcp - ⏸ Pending approval (run `claude` to approve)\n\
+l: https://l.test (SSE) - ⊘ Disabled for this project (re-enable via /mcp)\n";
+        let map = parse_mcp_list(text);
+        let want = BTreeMap::from([
+            ("plugin:context7:context7".to_string(), McpStatus::NeedsAuth),
+            (
+                "plugin:github:github".to_string(),
+                McpStatus::Failed(
+                    "HTTP 400: Error POSTing to endpoint: bad request: Authorization header is badly formatted"
+                        .into(),
+                ),
+            ),
+            ("plugin:playwright:playwright".to_string(), McpStatus::Connected),
+            ("u".to_string(), McpStatus::Pending),
+            ("l".to_string(), McpStatus::Disabled),
+        ]);
+        assert_eq!(map, want);
+    }
 
     fn put(path: impl AsRef<Path>, text: &str) {
         let path = path.as_ref();

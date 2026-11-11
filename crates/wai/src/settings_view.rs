@@ -193,6 +193,7 @@ pub enum SettingsEvent {
     Change(Change),
     OpenFile,
     Test(String),
+    CheckMcp,
     /// `seen` is the settings.json stamp the switch was shown with.
     TogglePlugin {
         id: String,
@@ -296,6 +297,7 @@ pub struct SettingsView {
     claude: Option<ClaudeData>,
     /// A write is out: the switches wait for it.
     busy: bool,
+    mcp_check: claude::McpCheck,
     /// Groups the user flipped from their default (open or closed), per page.
     toggled: HashSet<(Section, usize)>,
     _subscriptions: Vec<Subscription>,
@@ -375,6 +377,7 @@ impl SettingsView {
             stale: true,
             claude: None,
             busy: false,
+            mcp_check: Default::default(),
             toggled: HashSet::new(),
             _subscriptions: subscriptions,
         };

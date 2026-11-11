@@ -163,6 +163,9 @@ pub struct Workspace {
     /// Whose `~/.claude` the Claude pages of Settings read.
     pub(crate) claude_home: PathBuf,
     pub(crate) claude_task: Option<Task<()>>,
+    /// The `claude` that `mcp list` runs; none means the one on PATH.
+    pub(crate) claude_program: Option<PathBuf>,
+    pub(crate) mcp_task: Option<Task<()>>,
     pub registry: Entity<AgentRegistry>,
     /// Every open session, shown in a pane or not, in the order they opened.
     pub sessions: Vec<Entity<ChatSession>>,
@@ -359,6 +362,8 @@ impl Workspace {
             user_dir: config_dir(),
             claude_home: wai_settings::claude::claude_home(),
             claude_task: None,
+            claude_program: None,
+            mcp_task: None,
             registry,
             agents,
             agents_right: false,
@@ -2117,6 +2122,7 @@ impl Workspace {
                     this.open_file(path, None, window, cx)
                 }
                 SettingsEvent::Test(id) => this.test_agent(id, window, cx),
+                SettingsEvent::CheckMcp => this.check_mcp(cx),
                 SettingsEvent::TogglePlugin { id, on, seen } => {
                     this.toggle_plugin(id.clone(), *on, *seen, window, cx)
                 }
@@ -2665,6 +2671,7 @@ pub(crate) mod tests {
         workspace.update(cx, |w, _| {
             w.user_dir = std::env::temp_dir().join("wai-no-config");
             w.claude_home = std::env::temp_dir().join("wai-no-claude");
+            w.claude_program = Some(std::env::temp_dir().join("wai-no-claude/claude"));
         });
         let window = cx.update(|cx| cx.windows()[0]);
         let cx = Box::leak(Box::new(VisualTestContext::from_window(window, cx)));
