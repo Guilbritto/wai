@@ -9,7 +9,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::*;
-use wai_settings::claude::{ClaudeData, short};
+use wai_settings::claude::{ClaudeData, McpSource, short};
 
 use super::{Section, SettingsEvent, SettingsView};
 use crate::aurora;
@@ -39,6 +39,8 @@ pub(crate) enum Tone {
 #[derive(Debug, PartialEq)]
 pub(crate) enum Control {
     Plugin { ix: usize, on: bool, locked: bool },
+    Mcp { ix: usize, on: bool },
+    Soon,
 }
 
 /// The plugins, one group per marketplace.
@@ -69,6 +71,60 @@ pub(crate) fn plugin_groups(data: &ClaudeData, home: &Path) -> Vec<Group> {
             rows,
             add_soon: true,
         })
+        .collect()
+}
+
+/// The MCP servers by source; the claude.ai connectors group is always there, as a Coming soon row.
+pub(crate) fn mcp_groups(data: &ClaudeData) -> Vec<Group> {
+    let mut groups: [(&str, Vec<Row>); 3] = [
+        ("From plugins", vec![]),
+        ("User", vec![]),
+        ("This project", vec![]),
+    ];
+    for (ix, s) in data.mcp.iter().enumerate() {
+        let (g, badge) = match &s.source {
+            McpSource::Plugin(name) => (0, format!("plugin: {name}")),
+            McpSource::User => (1, "user".to_string()),
+            McpSource::Local => (2, "local".to_string()),
+            McpSource::Project => (2, ".mcp.json".to_string()),
+        };
+        groups[g].1.push(Row {
+            name: s.label.clone(),
+            badge: Some(badge),
+            path: None,
+            summary: Some(s.transport.to_string()),
+            status: Some((
+                Tone::Muted,
+                if s.enabled {
+                    "Not checked"
+                } else {
+                    "Off for this project"
+                }
+                .into(),
+            )),
+            control: Control::Mcp { ix, on: s.enabled },
+        });
+    }
+    let connectors = Group {
+        title: "claude.ai connectors".into(),
+        rows: vec![Row {
+            name: "Connectors from your claude.ai account".into(),
+            badge: None,
+            path: None,
+            summary: Some("They live in your Claude account, not in a local file".into()),
+            status: None,
+            control: Control::Soon,
+        }],
+        add_soon: false,
+    };
+    (groups.into_iter())
+        .filter(|(_, rows)| !rows.is_empty())
+        .map(|(title, rows)| Group {
+            title: title.into(),
+            rows,
+            add_soon: false,
+        })
+        .chain([connectors])
         .collect()
 }
 
@@ -138,25 +194,27 @@ impl SettingsView {
 
     /// The buttons beside a Claude page's title.
     pub(super) fn claude_actions(&self, section: Section, cx: &App) -> Option<Div> {
-        (section == Section::Plugins).then(|| {
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(
-                    Button::new("soon-browse")
-                        .small()
-                        .label("Browse")
-                        .disabled(true),
-                )
-                .child(aurora::soon(cx))
-                .child(
-                    Button::new("soon-plugins-menu")
-                        .ghost()
-                        .small()
-                        .icon(IconName::Ellipsis)
-                        .disabled(true),
-                )
-        })
+        let buttons = match section {
+            Section::Plugins => [
+                Button::new("soon-browse").small().label("Browse"),
+                Button::new("soon-plugins-menu")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Ellipsis),
+            ]
+            .into_iter()
+            .collect::<Vec<_>>(),
+            Section::Mcp => vec![Button::new("soon-add-server").small().label("Add server…")],
+            _ => return None,
+        };
+        let mut row = h_flex().gap_2().items_center();
+        for (ix, button) in buttons.into_iter().enumerate() {
+            row = row.child(button.disabled(true));
+            if ix == 0 {
+                row = row.child(aurora::soon(cx));
+            }
+        }
+        Some(row)
     }
 
     pub(super) fn claude_page(&self, section: Section, query: &str, cx: &mut Context<Self>) -> Div {
@@ -177,7 +235,10 @@ impl SettingsView {
             .problems
             .iter()
             .map(|p| div().px_3().py_2().text_color(danger).child(p.clone()));
-        let all = plugin_groups(data, &self.data.home);
+        let all = match section {
+            Section::Mcp => mcp_groups(data),
+            _ => plugin_groups(data, &self.data.home),
+        };
         let total: usize = all.iter().map(|g| g.rows.len()).sum();
         let searching = !query.is_empty();
         let groups = filter(all, query);
@@ -286,6 +347,12 @@ impl SettingsView {
                             .disabled(true),
                     )
             }
+            Control::Mcp { ix, on } => h_flex()
+                .gap_2()
+                .items_center()
+                .child(Switch::new(("mcp-toggle", *ix)).checked(*on).disabled(true))
+                .child(aurora::soon(cx)),
+            Control::Soon => h_flex().child(aurora::soon(cx)),
         };
         h_flex()
             .justify_between()
@@ -328,9 +395,9 @@ impl SettingsView {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use wai_settings::claude::{ClaudeData, Plugin};
+    use wai_settings::claude::{ClaudeData, McpServer, McpSource, Plugin};
 
-    use super::{Control, Tone, default_open, filter, plugin_groups};
+    use super::{Control, Tone, default_open, filter, mcp_groups, plugin_groups};
 
     fn plugin(id: &str, version: &str, enabled: bool, locked: Option<&str>) -> Plugin {
         let (name, marketplace) = id.split_once('@').unwrap();
@@ -412,6 +479,76 @@ mod tests {
             filter(plugin_groups(&data(), home), ""),
             plugin_groups(&data(), home)
         );
+    }
+
+    #[test]
+    fn mcp_rows_show_source_and_transport() {
+        let server = |name: &str, source, transport, enabled| McpServer {
+            name: name.into(),
+            label: name.into(),
+            source,
+            transport,
+            enabled,
+        };
+        let data = ClaudeData {
+            mcp: vec![
+                server("db", McpSource::Plugin("alpha".into()), "stdio", false),
+                server("web", McpSource::Plugin("beta".into()), "HTTP", true),
+                server("u", McpSource::User, "stdio", true),
+                server("l", McpSource::Local, "SSE", true),
+                server("p", McpSource::Project, "WebSocket", true),
+            ],
+            ..Default::default()
+        };
+        let groups = mcp_groups(&data);
+        let titles: Vec<_> = groups.iter().map(|g| g.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "From plugins",
+                "User",
+                "This project",
+                "claude.ai connectors"
+            ]
+        );
+        let rows: Vec<_> = groups[..3].iter().flat_map(|g| &g.rows).collect();
+        let badges: Vec<_> = rows.iter().map(|r| r.badge.as_deref().unwrap()).collect();
+        assert_eq!(
+            badges,
+            [
+                "plugin: alpha",
+                "plugin: beta",
+                "user",
+                "local",
+                ".mcp.json"
+            ]
+        );
+        let summaries: Vec<_> = rows.iter().map(|r| r.summary.as_deref().unwrap()).collect();
+        assert_eq!(summaries, ["stdio", "HTTP", "stdio", "SSE", "WebSocket"]);
+        assert_eq!(
+            rows[0].status,
+            Some((Tone::Muted, "Off for this project".into()))
+        );
+        assert_eq!(rows[1].status, Some((Tone::Muted, "Not checked".into())));
+        let controls: Vec<_> = rows.iter().map(|r| &r.control).collect();
+        assert_eq!(controls[0], &Control::Mcp { ix: 0, on: false });
+        assert_eq!(controls[4], &Control::Mcp { ix: 4, on: true });
+        let connectors = &groups[3];
+        assert!(!connectors.add_soon);
+        assert_eq!(connectors.rows.len(), 1);
+        assert_eq!(
+            connectors.rows[0].name,
+            "Connectors from your claude.ai account"
+        );
+        assert_eq!(
+            connectors.rows[0].summary.as_deref(),
+            Some("They live in your Claude account, not in a local file")
+        );
+        assert_eq!(connectors.rows[0].control, Control::Soon);
+
+        let empty = mcp_groups(&ClaudeData::default());
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].title, "claude.ai connectors");
     }
 
     #[test]

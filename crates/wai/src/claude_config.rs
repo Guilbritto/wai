@@ -103,6 +103,21 @@ mod tests {
             );
         }
         put(
+            home.join(".claude/plugins/cache/m/alpha/1.2.0/.mcp.json"),
+            r#"{"mcpServers":{"db":{"command":"db-mcp","env":{"KEY":"s3cr3t"}}}}"#,
+        );
+        let key = wai_settings::claude::project_key_for(project);
+        put(
+            home.join(".claude.json"),
+            &format!(
+                r#"{{"oauthAccount":{{"emailAddress":"s3cr3t@x.test"}},"mcpServers":{{"u":{{"command":"u-mcp"}}}},"projects":{{"{key}":{{"mcpServers":{{"l":{{"type":"sse","url":"https://l.test"}}}},"disabledMcpServers":["plugin:alpha:db"]}}}}}}"#
+            ),
+        );
+        put(
+            project.join(".mcp.json"),
+            r#"{"mcpServers":{"p":{"type":"ws","url":"wss://p.test"}}}"#,
+        );
+        put(
             home.join(".claude/settings.json"),
             r#"{"model":"opus","enabledPlugins":{"beta@m":false}}"#,
         );
@@ -212,6 +227,40 @@ mod tests {
             assert_eq!(window.find(("plugin-menu", 0usize)).disabled(), Some(true));
             assert_eq!(window.find(("soon-add", 0usize)).disabled(), Some(true));
         });
+    }
+
+    #[test]
+    fn mcp_rows_carry_no_secret() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, project) = (tmp.path().join("home"), tmp.path().join("project"));
+        claude_fixture(&home, &project);
+        let groups = crate::settings_view::claude::mcp_groups(&wai_settings::claude::read_claude(
+            &home, &project,
+        ));
+        assert!(!format!("{groups:?}").contains("s3cr3t"));
+        assert_eq!(groups.iter().map(|g| g.rows.len()).sum::<usize>(), 5);
+    }
+
+    #[gpui_kit::test]
+    fn mcp_toggle_is_coming_soon(cx: &mut TestAppContext) {
+        let (workspace, cx, tmp) = claude_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Mcp, None, window, cx)
+        });
+        cx.run_until_parked();
+        let before = std::fs::read(tmp.path().join("home/.claude.json")).unwrap();
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find(("mcp-toggle", 0usize)).disabled(), Some(true));
+            assert_eq!(window.find("soon-add-server").disabled(), Some(true));
+            window.click(("mcp-toggle", 0usize), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            std::fs::read(tmp.path().join("home/.claude.json")).unwrap(),
+            before
+        );
+        assert_eq!(cx.update(|window, cx| window.notifications(cx).len()), 0);
     }
 
     #[gpui_kit::test]

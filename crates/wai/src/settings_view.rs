@@ -22,7 +22,7 @@ use wai_settings::{Change, Processing, SeenModel, Settings, ThemeChoice, agent_l
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::extensions_view::ExtensionsView;
 
-mod claude;
+pub(crate) mod claude;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Section {
@@ -33,6 +33,7 @@ pub enum Section {
     Updates,
     Extensions,
     Plugins,
+    Mcp,
 }
 
 impl Section {
@@ -45,6 +46,7 @@ impl Section {
             Section::Updates => "Updates",
             Section::Extensions => "Extensions",
             Section::Plugins => "Plugins",
+            Section::Mcp => "MCP Servers",
         }
     }
 
@@ -57,6 +59,7 @@ impl Section {
             Section::Updates => "updates",
             Section::Extensions => "extensions",
             Section::Plugins => "plugins",
+            Section::Mcp => "mcp",
         }
     }
 
@@ -69,6 +72,9 @@ impl Section {
             Section::Updates => "Whether wai looks for new versions.",
             Section::Extensions => "Programs that add panels, commands and agents to wai.",
             Section::Plugins => "Plugins add skills, agents, hooks and MCP servers to Claude Code.",
+            Section::Mcp => {
+                "Servers that give Claude more tools. Turning one off applies to this project, in new Claude sessions, and keeps its configuration."
+            }
         }
     }
 }
@@ -86,7 +92,7 @@ pub(crate) const NAV: &[(&str, &[Section])] = &[
             Section::Extensions,
         ],
     ),
-    ("Claude", &[Section::Plugins]),
+    ("Claude", &[Section::Plugins, Section::Mcp]),
 ];
 
 /// 88% x 86% of the viewport; maximized, the viewport less 24 px on each axis.
@@ -410,6 +416,7 @@ impl SettingsView {
                 (self.data.extensions.as_ref()).map(|ext| ext.read(cx).store().list().len())
             }
             Section::Plugins => self.claude.as_ref().map(|d| d.plugins.len()),
+            Section::Mcp => self.claude.as_ref().map(|d| d.mcp.len()),
             _ => None,
         }
     }
@@ -738,7 +745,7 @@ impl Render for SettingsView {
             .collect();
         let ai = section == Section::Ai;
         let extensions = section == Section::Extensions;
-        let claude_page = section == Section::Plugins;
+        let claude_page = matches!(section, Section::Plugins | Section::Mcp);
         let agents: Vec<_> = if ai {
             (self.data.agents.iter())
                 .filter(|a| a.label.to_lowercase().contains(&query))
