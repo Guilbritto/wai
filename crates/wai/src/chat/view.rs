@@ -880,16 +880,55 @@ mod tests {
             send(message, cx);
         }
         assert_eq!(typed(&session, cx), "");
-        assert!(shows(("queued", 2usize), cx));
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .within("waiting")
+                    .try_find(("queued", 2usize))
+                    .is_some()
+            );
+            let (waiting, input) = (
+                window.find("waiting").bounds(),
+                window.find("input-state").bounds(),
+            );
+            assert!(waiting.bottom() <= input.top());
+        });
         click_edits(None, ("queued-remove", 1usize), cx);
+        cx.update(|window, cx| window.render_frame(cx));
+        assert_eq!(typed(&session, cx), "second", "back in the prompt box");
         assert!(!shows(("queued", 2usize), cx));
         assert!(shows(("queued", 1usize), cx));
+        // Review focus 2: a long message shows at most 3 lines.
+        let long: Vec<String> = (1..=10).map(|i| format!("line {i}")).collect();
+        session.update(cx, |s, cx| {
+            s.queued.push(Message {
+                text: long.join("\n"),
+                attachments: Vec::new(),
+            });
+            cx.notify()
+        });
+        let height = |ix: usize, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.find(("queued", ix)).bounds().size.height
+            })
+        };
+        assert!(
+            height(2, cx) < height(0, cx) * 3.,
+            "the long balloon is not clamped"
+        );
+        session.update(cx, |s, cx| {
+            s.queued.pop();
+            cx.notify()
+        });
 
         wait_until(cx, "the queued prompt's reply", |cx| {
             state(&session, cx) == TurnState::Idle && user_texts(&session, cx).len() == 2
         });
         assert_eq!(user_texts(&session, cx), ["go", "first\n\nthird"]);
-        assert!(!shows(("queued", 0usize), cx));
+        assert!(!shows("waiting", cx));
+        assert_eq!(typed(&session, cx), "second");
     }
 
     /// Stop with messages queued: nothing goes out; their text and attachments go back into the

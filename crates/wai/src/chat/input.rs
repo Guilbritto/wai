@@ -9,7 +9,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, IconName, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -87,7 +87,7 @@ pub(super) struct Message {
 
 impl Message {
     /// What the transcript shows of it: the text, then `Attached: <names>`.
-    fn shown(&self) -> String {
+    pub(super) fn shown(&self) -> String {
         if self.attachments.is_empty() {
             return self.text.clone();
         }
@@ -240,9 +240,21 @@ impl ChatSession {
         if send {
             return self.send_message(message, cx);
         }
-        self.attachments.splice(0..0, message.attachments);
-        self.unsent = Some(message.text);
+        self.take_back(message);
         cx.notify();
+    }
+
+    /// Puts a queued message back in the prompt box: its attachments first among the chips, its
+    /// text after any text already taken back, a blank line apart.
+    pub(super) fn take_back(&mut self, message: Message) {
+        self.attachments.splice(0..0, message.attachments);
+        self.unsent = Some(match self.unsent.take() {
+            Some(held) if !held.is_empty() && !message.text.is_empty() => {
+                format!("{held}\n\n{}", message.text)
+            }
+            Some(held) if message.text.is_empty() => held,
+            _ => message.text,
+        });
     }
 
     /// Puts the text taken back from the queue in the prompt box, before what was typed since.
@@ -484,38 +496,6 @@ impl ChatSession {
                 // Registers the id so tests can find it.
                 .test_support()
         });
-        // The messages waiting for the turn's end, oldest first.
-        let queued = self.queued.iter().enumerate().map(|(ix, message)| {
-            let shown = message.shown();
-            let first = shown.lines().next().unwrap_or_default();
-            h_flex()
-                .id(("queued", ix))
-                .gap_2()
-                .px_3()
-                .text_size(px(12.))
-                .text_color(muted)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .child(format!("Queued · {first}")),
-                )
-                .child(
-                    Button::new(("queued-remove", ix))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
-                        .tooltip("Don't send")
-                        .accessibility_label("Don't send")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.queued.remove(ix);
-                            cx.notify();
-                        })),
-                )
-                // Registers the id so tests can find it.
-                .test_support()
-        });
         let attach = Button::new("attach")
             .ghost()
             .icon(IconName::Plus)
@@ -536,7 +516,6 @@ impl ChatSession {
             .gap_2()
             .p_3()
             .children(status)
-            .children(queued)
             .when(!self.attachments.is_empty(), |el| {
                 el.child(h_flex().gap_2().flex_wrap().children(chips))
             })

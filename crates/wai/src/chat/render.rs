@@ -19,6 +19,57 @@ use super::{permission, question};
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::workspace::{Dragged, DraggedSession};
 
+/// The balloon of a message you sent (`.msg.voce`).
+fn user_bubble(cx: &App) -> Div {
+    let theme = cx.theme();
+    let bubble = div()
+        .max_w(relative(0.88))
+        .px_3()
+        .py(px(9.))
+        .rounded(px(16.))
+        .rounded_br(px(6.))
+        .border_1();
+    match theme.is_dark() {
+        true => bubble
+            .bg(linear_gradient(
+                160.,
+                linear_color_stop(aurora::lilas().alpha(0.32), 0.),
+                linear_color_stop(aurora::lilas().alpha(0.18), 1.),
+            ))
+            .border_color(aurora::lilas().alpha(0.35))
+            .text_color(aurora::tinta()),
+        false => bubble.bg(theme.secondary).border_color(theme.border),
+    }
+}
+
+/// A message waiting in the pinned stack: a dimmed balloon under a muted `caption`, its text
+/// clamped to 3 lines, with `remove` to its left.
+pub(super) fn pinned_message(
+    id: ElementId,
+    caption: &'static str,
+    text: &str,
+    remove: Option<Button>,
+    cx: &App,
+) -> Stateful<Div> {
+    let caption = div()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(caption);
+    h_flex()
+        .id(id)
+        .w_full()
+        .justify_end()
+        .items_center()
+        .gap_2()
+        .children(remove)
+        .child(
+            user_bubble(cx)
+                .opacity(0.75)
+                .child(caption)
+                .child(div().line_clamp(3).child(text.to_string())),
+        )
+}
+
 /// `43k`, `1M`, `1.5M`.
 fn tokens(n: u64) -> String {
     match n {
@@ -279,31 +330,11 @@ impl ChatSession {
         let (dark, muted) = (theme.is_dark(), theme.muted_foreground);
         match &self.model.items[ix] {
             // `.msg.voce`
-            ChatItem::User { text } | ChatItem::Steered { text } => {
-                let bubble = div()
-                    .max_w(relative(0.88))
-                    .px_3()
-                    .py(px(9.))
-                    .rounded(px(16.))
-                    .rounded_br(px(6.))
-                    .border_1();
-                let bubble = match dark {
-                    true => bubble
-                        .bg(linear_gradient(
-                            160.,
-                            linear_color_stop(aurora::lilas().alpha(0.32), 0.),
-                            linear_color_stop(aurora::lilas().alpha(0.18), 1.),
-                        ))
-                        .border_color(aurora::lilas().alpha(0.35))
-                        .text_color(aurora::tinta()),
-                    false => bubble.bg(theme.secondary).border_color(theme.border),
-                };
-                h_flex()
-                    .w_full()
-                    .justify_end()
-                    .child(bubble.child(text.clone()))
-                    .into_any_element()
-            }
+            ChatItem::User { text } | ChatItem::Steered { text } => h_flex()
+                .w_full()
+                .justify_end()
+                .child(user_bubble(cx).child(text.clone()))
+                .into_any_element(),
             // `.msg.claude`, its turn's first one headed "✦ agent" (`.msg-quem`).
             ChatItem::Agent { .. } => {
                 let header = starts_reply(&self.model.items, ix).then(|| {
@@ -570,7 +601,7 @@ impl ChatSession {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.model.waiting.is_empty() {
+        if self.model.waiting.is_empty() && self.queued.is_empty() {
             return None;
         }
         let waiting = self.model.waiting.clone();
@@ -591,6 +622,30 @@ impl ChatSession {
             _ => div().into_any_element(),
         });
         let cards: Vec<_> = cards.collect();
+        let queued: Vec<_> = (self.queued.iter().enumerate())
+            .map(|(ix, message)| {
+                let remove = Button::new(("queued-remove", ix))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .tooltip("Back to the prompt box")
+                    .accessibility_label("Back to the prompt box")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let message = this.queued.remove(ix);
+                        this.take_back(message);
+                        cx.notify();
+                    }));
+                // Registers the id so tests can find it.
+                pinned_message(
+                    ("queued", ix).into(),
+                    "Queued",
+                    &message.shown(),
+                    Some(remove),
+                    cx,
+                )
+                .test_support()
+            })
+            .collect();
         let view = cx.entity();
         let height = canvas(
             move |bounds, _, cx| {
@@ -641,6 +696,7 @@ impl ChatSession {
             stack
                 .child(height)
                 .children(cards)
+                .children(queued)
                 .test_support()
                 .into_any_element(),
         )
