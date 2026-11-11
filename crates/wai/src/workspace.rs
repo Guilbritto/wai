@@ -143,6 +143,14 @@ pub(crate) enum Leave {
     Open(PathBuf),
 }
 
+/// The title of the dialog that asks before quitting or closing with `n` busy sessions.
+pub(crate) fn still_working(n: usize) -> String {
+    match n {
+        1 => "1 session is still working".into(),
+        n => format!("{n} sessions are still working"),
+    }
+}
+
 /// Whether the batch names `path`, or lost track of what changed.
 fn touches(batch: &[FsChange], path: &Path) -> bool {
     batch.iter().any(|change| match change {
@@ -298,11 +306,11 @@ impl Workspace {
         let this = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             let ask = |this: &mut Self, cx: &mut Context<Self>| {
-                let clean = this.dirty_tabs(cx).is_empty();
-                if !clean {
+                let ask = !this.dirty_tabs(cx).is_empty() || this.busy_sessions(cx) > 0;
+                if ask {
                     this.leave(Leave::Close, window, cx);
                 }
-                clean
+                !ask
             };
             this.update(cx, ask).unwrap_or(true)
         });
@@ -1792,11 +1800,90 @@ impl Workspace {
     }
 
     fn proceed(&mut self, then: Leave, window: &mut Window, cx: &mut Context<Self>) {
+        let busy = self.busy_sessions(cx);
         match then {
-            Leave::Quit => cx.quit(),
-            Leave::Close => window.remove_window(),
             Leave::Open(project) => self.set_project(project, window, cx),
+            Leave::Quit if busy == 0 => cx.quit(),
+            Leave::Close if busy == 0 => window.remove_window(),
+            Leave::Quit => self.confirm(
+                still_working(busy),
+                "Quitting ends their turns. End them anyway?",
+                "Quit anyway",
+                |_, _, cx| cx.quit(),
+                window,
+                cx,
+            ),
+            Leave::Close => self.confirm(
+                still_working(busy),
+                "Closing the window ends their turns. End them anyway?",
+                "Close anyway",
+                |_, window, _| window.remove_window(),
+                window,
+                cx,
+            ),
         }
+    }
+
+    /// How many open sessions have a turn running or waiting on the user.
+    pub(crate) fn busy_sessions(&self, cx: &App) -> usize {
+        self.sessions.iter().filter(|s| s.read(cx).busy()).count()
+    }
+
+    /// A dialog asking `body`; Confirm closes it, then runs `then`.
+    pub(crate) fn confirm(
+        &mut self,
+        title: String,
+        body: &'static str,
+        confirm: &'static str,
+        then: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let this = cx.entity().downgrade();
+        let then = std::rc::Rc::new(then);
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (this, then) = (this.clone(), then.clone());
+            let heading = div()
+                .id("confirm-heading")
+                .debug_selector(|| "confirm-title".into())
+                .aria_label(title.clone())
+                .child(title.clone());
+            dialog.title(heading).child(body).footer(
+                DialogFooter::new()
+                    .child(
+                        Button::new("cancel")
+                            .label("Cancel")
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(Button::new("confirm").danger().label(confirm).on_click(
+                        move |_, window, cx| {
+                            window.close_dialog(cx);
+                            this.update(cx, |this, cx| then(this, window, cx)).ok();
+                        },
+                    )),
+            )
+        });
+    }
+
+    /// An Open row's ×: ends `session`, after asking when its turn is still going.
+    pub(crate) fn close_session(
+        &mut self,
+        session: &Entity<ChatSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !session.read(cx).busy() {
+            return self.end_session(session, window, cx);
+        }
+        let session = session.clone();
+        self.confirm(
+            "This session is still working".into(),
+            "Ending it stops its turn. End it anyway?",
+            "End session",
+            move |this, window, cx| this.end_session(&session, window, cx),
+            window,
+            cx,
+        );
     }
 
     /// ⌘S: saves the focused editor pane's active tab.
@@ -2635,7 +2722,7 @@ pub(crate) mod tests {
     use std::time::{Duration, Instant};
 
     use gpui_kit::component::{ActiveTheme as _, WindowExt as _};
-    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
     use gpui_kit::{
         AppContext as _, ElementId, Entity, Modifiers, MouseButton, Pixels, Point, TestAppContext,
         VisualTestContext, point, px, size,
@@ -2714,7 +2801,6 @@ pub(crate) mod tests {
     }
 
     /// Starts a session with the default agent, without the ⌘N entry point, and waits for it.
-    #[allow(dead_code)] // the sessions tests use it
     pub(crate) fn start_now(
         workspace: &Entity<Workspace>,
         cx: &mut VisualTestContext,
@@ -4545,6 +4631,95 @@ pub(crate) mod tests {
             super::approval_text(&hidden),
             "Terminal shell: system default → /bin/sh\\u{202e}\\u{200b}x"
         );
+    }
+
+    fn asked(cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| window.render_frame(cx));
+        cx.debug_bounds("confirm-title").is_some()
+    }
+
+    fn working(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        open(
+            cx,
+            fake_settings("--reply 'a b c d e f g h i j' --chunk-delay-ms 1000"),
+        )
+    }
+
+    fn work(session: &Entity<ChatSession>, cx: &mut VisualTestContext) {
+        session.update(cx, |s, cx| s.send_text("go", cx));
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn quit_asks_while_a_session_works(cx: &mut TestAppContext) {
+        let (workspace, cx) = working(cx);
+        let session = start_now(&workspace, cx);
+
+        cx.simulate_keystrokes("secondary-q");
+        assert!(!asked(cx), "an idle session does not stop a quit");
+
+        work(&session, cx);
+        cx.simulate_keystrokes("secondary-q");
+        assert!(asked(cx));
+        cx.update(|window, _| window.find_by_label("1 session is still working"));
+        click("cancel", cx);
+        assert!(!asked(cx));
+        assert_eq!(
+            session.read_with(cx, |s, _| s.status().clone()),
+            TurnState::Working
+        );
+    }
+
+    #[gpui_kit::test]
+    fn closing_the_window_asks_while_a_session_works(cx: &mut TestAppContext) {
+        let (workspace, cx) = working(cx);
+        let session = start_now(&workspace, cx);
+        work(&session, cx);
+
+        assert!(!cx.simulate_close());
+        assert!(asked(cx));
+        click("cancel", cx);
+        assert!(!cx.cx.update(|app| app.windows().is_empty()));
+
+        assert!(!cx.simulate_close());
+        click("confirm", cx);
+        assert!(cx.cx.update(|app| app.windows().is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn open_row_close_asks_while_its_session_works(cx: &mut TestAppContext) {
+        let (workspace, cx) = working(cx);
+        let session = start_now(&workspace, cx);
+        work(&session, cx);
+
+        click_close(cx);
+        assert!(asked(cx));
+        cx.update(|window, _| window.find_by_label("This session is still working"));
+        click("cancel", cx);
+        assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 1);
+
+        click_close(cx);
+        click("confirm", cx);
+        assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn idle_session_row_close_does_not_ask(cx: &mut TestAppContext) {
+        let (workspace, cx) = working(cx);
+        start_now(&workspace, cx);
+
+        click_close(cx);
+        assert!(!asked(cx));
+        assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
+    }
+
+    fn click_close(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.click(("open-close", 0usize), cx);
+        });
+        cx.run_until_parked();
     }
 
     fn status(

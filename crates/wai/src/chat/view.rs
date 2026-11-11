@@ -362,9 +362,14 @@ impl ChatSession {
         self.input.update(cx, |input, cx| input.focus(window, cx));
     }
 
+    /// Whether a turn is running or waits on the user.
+    pub fn busy(&self) -> bool {
+        matches!(self.model.state, TurnState::Working | TurnState::NeedsYou)
+    }
+
     /// Cancels a running turn: a closed session must not keep working out of sight.
     pub fn stop(&self) {
-        if matches!(self.model.state, TurnState::Working | TurnState::NeedsYou) {
+        if self.busy() {
             self.handle.cancel(self.id.clone());
         }
     }
@@ -714,7 +719,7 @@ mod tests {
     use crate::notify;
     use crate::sidebar::canonical;
     use crate::workspace::tests::{
-        fake_settings, history_settings, live, load_history, open, wait_until,
+        click, fake_settings, history_settings, live, load_history, open, wait_until,
     };
     use crate::workspace::{Pane, Workspace};
 
@@ -1975,6 +1980,7 @@ mod tests {
             window.render_frame(cx);
             window.click(("open-close", 1usize), cx);
         });
+        click("confirm", cx);
 
         workspace.read_with(cx, |w, _| {
             assert!(

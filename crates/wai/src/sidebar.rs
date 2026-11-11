@@ -637,7 +637,9 @@ impl Workspace {
                     .tooltip("End session")
                     .accessibility_label("End session")
                     .on_click(
-                        cx.listener(move |this, _, window, cx| this.end_session(&end, window, cx)),
+                        cx.listener(move |this, _, window, cx| {
+                            this.close_session(&end, window, cx)
+                        }),
                     ),
             )
             .context_menu(move |menu, _, cx| {
