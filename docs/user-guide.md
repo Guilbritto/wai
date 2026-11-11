@@ -7,7 +7,7 @@ This guide describes wai 0.5.0. On Windows, read **ctrl** where it says **⌘**,
 - **Top bar.** It shows wai's version and the commit it was built from (`0.5.0 · 01dd232`), the project's name and how many agents are working or need you, and holds the buttons **New from template** (shown when templates exist), **Extensions**, the command palette, **Settings** (⚙), the terminal, the Agents panel (only while it is on the right) and **New session**. On macOS it is the title bar: drag it to move the window, double-click it to zoom.
 - **Sidebar.** The tabs **Sessions**, **History**, **Files**, **Search** and **Agents**, plus one tab per extension panel.
 - **Agents panel.** Agents can leave the sidebar for its own panel right of the panes, which collapses with **⌘⌥B** (see [The Agents tab](#the-agents-tab)).
-- **Panes.** Up to four sit side by side. Each holds a chat session, the editor (one editor pane at most) or Settings (one at most). **⌘⌥→** moves the focus to the next pane.
+- **Panes.** Up to four sit side by side. Each holds a chat session or the editor (one editor pane at most). **⌘⌥→** moves the focus to the next pane.
 - **Terminal.** It sits at the bottom, toggled with **ctrl-`**.
 
 **The look:** the default dark theme is Aurora: an indigo night with a soft, still aurora behind floating glass cards. Set `theme = "light"` for the light one, which keeps plain panels and no aurora (see [Settings](#settings)).
@@ -239,11 +239,12 @@ Clicking a card shows that session in the focused pane; dragging it onto a pane 
 |---|---|---|---|
 | Quit | ⌘Q | ctrl-q (ctrl-shift-q in the terminal) | anywhere |
 | New session | ⌘N | ctrl-n (ctrl-shift-n in the terminal) | window |
-| Close the pane (the session stays open), Settings, or the editor's active tab | ⌘W | ctrl-w (ctrl-shift-w in the terminal) | window |
+| Close the pane (the session stays open) or the editor's active tab | ⌘W | ctrl-w (ctrl-shift-w in the terminal) | window |
 | Save | ⌘S | ctrl-s | window |
 | Open folder | ⌘O | ctrl-o (ctrl-shift-o in the terminal) | window |
 | Command palette | ⌘⇧P | ctrl-shift-p | window |
 | Settings | ⌘, | ctrl-, | window |
+| Close Settings | Esc | Esc | Settings |
 | Focus next pane | ⌘⌥→ | ctrl-alt-→ | window |
 | Show or hide the terminal | ctrl-` | ctrl-` | window |
 | Show or hide the Agents panel, while it is on the right | ⌘⌥B | ctrl-alt-b | window |
@@ -297,23 +298,51 @@ Only your own settings file can turn it on; a project's `.wai/settings.toml` can
 
 ### The Settings screen
 
-- **Opening:** **⌘,** (ctrl-, on Windows and Linux), the ⚙ button in the top bar, or **Settings** in the command palette. It opens as a pane tab. There is at most one: opening it again focuses it. **⌘W** closes it, and it is not restored on relaunch.
-- **Arranging:** drag its **Settings** title onto a pane like a session's title. It moves or splits as a session does.
-- **Layout:** the sections on the left, a **Search settings** field on top that filters the rows of every section, and **Open settings.toml** at the bottom, which opens your file in the editor.
+Settings is a modal over the window, not a pane.
+
+- **Opening:** **⌘,** (ctrl-, on Windows and Linux), the ⚙ button in the top bar, or **Settings** in the command palette. It opens on the page you asked for. Opening it while it is open shows that page and refreshes its data.
+- **Closing:** **Esc**, a click outside it or its **×**. Closing drops the screen; it is not restored on relaunch.
+- **Size:** 88% of the window each way, centered. The maximize button in the header grows it to the window and back; the size is not kept.
+- **Header:** `Settings`, then the context in muted text: `(<default agent> · <project>)`, or `(<project>)` with no default agent.
+- **Nav** (left, scrolls) in three groups, each row with its count on the right:
+  - **wai**: AI (agents), Appearance, Conversation, Terminal, Updates, Extensions (installed);
+  - **✳ Claude**: Plugins, MCP Servers, Skills, Instructions, Agents, Hooks (rows, once loaded);
+  - **Other agents**: Codex, Copilot, Antigravity, each marked **Soon**.
+- **Content:** the page title (display font) and its description, with the page's actions on the right. Under them a search field, `Search <page>…`, filters that page only and is cleared on every page change.
+- **Nested dialogs** (the command approval, an extension's consent) open above Settings and close back to it.
+- **Open**, **Open settings.toml**, the error banner's **Open** and an extension's **Install in terminal** close Settings first, then do their work.
 - **No Save button.** Each change is written at once to your `settings.toml`, keeping its comments and formatting, and applies as the table below says.
 
-**Sections**
+**wai pages**
+
 - **AI** (the first run opens it): a radio list with one row per agent: the four built-ins, those you added and those from extensions. Each row has:
   - its status: `CLI not found`, `Not checked`, `Starting…`, `Ready`, `Not signed in · run <hint>` or `Failed: <last error line>`;
   - **Test**, which starts the agent to learn its status and models. The agent keeps running afterwards;
   - **Default model**, a picker once wai has seen the agent's models; before that it says `Start a session or press Test to see the models.`;
   - **Advanced**, folded, which shows the **Command**. Changing it asks `Run a new command?` (see [Agent commands](#agent-commands)).
+  - Below them, an **Advanced** group: `settings.toml` with **Open**, which opens your file in the editor.
 - **Appearance:** **Theme**, Dark or Light, applies at once.
-- **Conversation:** **Processing**, how a chat shows the agent's steps: Step by step, Grouped or Hidden (see [Chatting](#chatting)). It applies at once to every open session.
+- **Conversation:** **Processing**, how a chat shows the agent's steps: Step by step, Grouped or Hidden (see [Chatting](#chatting)). It applies at once to every open session. Permission cards, questions and file edits always show.
 - **Terminal:** **Shell**, a path; empty is the system default. It applies to terminals opened afterwards, and changing it asks `Run a new command?`.
-- **Updates:** **Check for updates** and **Repository**.
+- **Updates:** wai checks GitHub releases once a day, only when you turn it on: the **Check for updates** switch and **Repository**.
+- **Extensions:** extensions add panels, commands, agents and MCP servers to wai. They run with your permissions. Install from a folder or a git URL. The **Installed** group lists each one with its version badge, permissions, any problem, the Claude plugins it suggests (**Install in terminal**), an **Enabled** switch and **Uninstall** (see [Extensions](#extensions)).
 
-**First run.** With no `default_agent`, no agent starts and wai opens Settings on **AI**, saying `Choose an AI to start a session.` Choosing a row writes `default_agent` and starts that agent. wai never picks one for you, even when only one is ready. **⌘N**, **+**, a template without an agent and an empty pane lead to the same place; the palette's **New session with <agent>** still starts a specific agent.
+The search filters the current page's rows by label (agents by name). A broken `settings.toml` shows its error banner on every wai page and makes them read-only.
+
+**Claude pages** show what Claude Code loads from `~/.claude` and the project. They read it in the background: while they load, each says `Reading ~/.claude…`. A file that does not parse is named in a banner on the pages it feeds (`~/.claude/settings.json does not parse: <error>`), and the toggles that would write it are locked. Groups start open; on a page with more than 20 rows only the first group does. A search opens every group with a match and hides the rest. Each group's **+** is a disabled **Coming soon** button.
+
+- **Plugins.** "What Claude loads from `~/.claude/plugins`: commands, skills, agents, hooks and MCP servers. A change applies to new Claude sessions." The **Learn more about Claude Code plugins** link opens the docs in your browser. **Browse** and **⋯** are Coming soon. There is one group per marketplace. A plugin is listed when it is installed for you or for this project. Each row has its name, a `v<version>` badge, its path, a summary (component counts such as `15 skills · 1 hook`, else its description, else `No components`) and a toggle. The toggle writes `enabledPlugins` in `~/.claude/settings.json` and says `Applies to new Claude sessions`. It is locked, with the reason shown, when a project or local settings file sets that plugin, for a managed install (`Managed by your organization`), or while your settings file is broken. Disabled plugins contribute nothing to the MCP, Skills, Agents and Hooks pages.
+- **MCP Servers.** "Servers that give Claude more tools. Check status shows whether each one connects." **Add server…** is Coming soon. Groups: **From plugins** (enabled plugins only), **User**, **This project** (local scope and `.mcp.json`), and **claude.ai connectors** (one Coming soon row). Each row has its name, a badge (`plugin: <name>`, `user`, `local` or `.mcp.json`), its transport (`stdio`, `HTTP`, `SSE` or `WebSocket`), its status and a toggle. The toggle is Coming soon and disabled: wai does not change Claude's MCP servers yet, and it never writes `~/.claude.json`, Claude's own state file. Turn a server off or on with `/mcp` in Claude.
+  - **Check status** runs `claude mcp list` in the project folder; it is the only thing that starts these servers, and only when you click it. The button reads `Checking…` meanwhile and the check stops after 60 s. Until then a server's status is `Not checked`. Afterwards it is `Connected`, `Needs sign-in`, `Failed to connect · <reason>`, `Pending approval` or `Off for this project`. Without a `claude` command on your PATH it says `Needs the claude CLI`.
+- **Skills.** "Reusable instructions Claude loads when a task calls for them." Groups **User**, **Project**, then one per enabled plugin. Each row has its name, its description in one line and **Open** (`SKILL.md`).
+- **Instructions.** "Files Claude reads at the start of every session (CLAUDE.md and what it includes)." Groups **User** (`~/.claude/CLAUDE.md` and its imports) and **Project** (each `CLAUDE.md`, `.claude/CLAUDE.md` and `CLAUDE.local.md` from the project folder up, and their imports). Each row has its file name, its path, a summary (its first heading, `Included by <file>`, `This project`, `Parent folder` or `Yours, not shared`) and **Open**.
+- **Agents.** "Subagents Claude can hand work to." Groups **User**, **Project**, then one per enabled plugin. Each row has its name, its path (`~/…` or `plugin: <name>`), a summary and **Open**.
+- **Hooks.** "Commands Claude Code runs on its own at set moments. They run with your permissions." Groups **User** (one row per event in `~/.claude/settings.json`), **Project** (the same, from the project's settings files) and **From plugins** (one row per enabled plugin with hooks, listing its events joined with ` · `). A row's summary is `1 hook` or `N hooks`. **Open** opens the file that declares them.
+- Files under a plugin's install folder open read-only. Your user and project files open in the editor, and can be edited there.
+
+**Other agents.** Codex, Copilot and Antigravity each have a page with its title, a **Coming soon** badge, the note `Not in wai yet`, and the text `Today wai shows what Claude uses. <X> comes next; its own settings stay in its CLI meanwhile.` Each page says what it will show: the plugins, MCP servers, skills, instructions, agents and hooks of that agent, like the Claude ones.
+
+**First run.** With no `default_agent`, no agent starts and wai opens Settings on **AI**, saying `Choose an AI to start a session.` Choosing a row writes `default_agent` and starts that agent. wai never picks one for you, even when only one is ready. **⌘N**, **+**, a template without an agent and an empty pane lead to the same place; the palette's **New session with <agent>** still starts a specific agent. A broken `settings.toml` or a missing default agent opens Settings on **AI** the same way; an approval dialog for an unapproved command opens over it.
 
 | Change | Takes effect |
 |---|---|
@@ -440,7 +469,7 @@ wai shows `This project suggests extension <id>` with **Review**. Review opens t
 
 ## Extensions
 
-The **Extensions** button opens the list of installed extensions. There you can:
+The **Extensions** button opens Settings on its **Extensions** page, the list of installed extensions. There you can:
 - turn each one on or off (**Enabled**);
 - **Uninstall** it;
 - install from a folder (**Install from folder…**) or a git URL (**Install from git URL…**, `https://` or `git@`).
