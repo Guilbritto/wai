@@ -60,7 +60,7 @@ While the agent prepares the session, its pane shows `Preparing <agent>…`. **�
     | Processing | Steps |
     |---|---|
     | **Step by step** (the default) | Each step is one folded line with an icon of its kind, its title and ✓ or ✗. A click opens a tool call's output in a box under the line; thinking shows as a `Thought` line that opens the same way |
-    | **Grouped** | The steps between two replies fold into one block, such as `3 steps · Read README.md`. A click lists the step lines, each still folded |
+    | **Grouped** | The steps between two replies fold into one block, such as `3 steps · Read README.md, Run git status`; the head names every step. A click lists the step lines, each still folded |
     | **Hidden** | No steps |
 
   - **Subagents.** Each subagent the agent runs (Claude Code's Agent tool) shows as a step card with its title, its status and, once it answers, its answer. Its tool calls stay in the transcript, as steps. Its own text and checklist are not shown.

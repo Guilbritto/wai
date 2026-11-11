@@ -257,20 +257,14 @@ impl ChatSession {
         } else {
             ToolStatus::Completed
         };
-        glass(h_flex(), cx)
+        step_line(cx)
             .id(("group", head))
-            .gap_2()
-            .px_3()
-            .py_2()
-            .rounded(px(12.))
-            .cursor_pointer()
             .child(chevron(open, cx))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .font_weight(FontWeight::MEDIUM)
                     .child(self.model.run_label(run)),
             )
             .child(status_icon(status, cx))

@@ -693,17 +693,25 @@ impl ChatModel {
         ix - before..ix + after
     }
 
-    /// A run of steps as the grouped mode heads it: `3 steps · <the latest step>`.
+    /// A run of steps as the grouped mode heads it: `3 steps · <each tool's title once>`.
     pub fn run_label(&self, run: Range<usize>) -> String {
         let steps = match run.len() {
             1 => "1 step".to_string(),
             n => format!("{n} steps"),
         };
-        let latest = match self.items.get(run.end.wrapping_sub(1)) {
-            Some(ChatItem::Tool(t)) => t.title.lines().next().unwrap_or_default(),
-            _ => "Thinking",
-        };
-        format!("{steps} · {latest}")
+        let mut titles: Vec<&str> = Vec::new();
+        for item in self.items.get(run).unwrap_or_default() {
+            if let ChatItem::Tool(t) = item {
+                let title = t.title.lines().next().unwrap_or_default().trim_matches('`');
+                if !titles.contains(&title) {
+                    titles.push(title);
+                }
+            }
+        }
+        match titles.is_empty() {
+            true => format!("{steps} · Thinking"),
+            false => format!("{steps} · {}", titles.join(", ")),
+        }
     }
 
     /// The session's own cards were resolved before this: one still open is a background
@@ -1064,7 +1072,7 @@ mod tests {
         assert_eq!(steps, [false, true, true, true, true, false]);
         assert!(!m.items[3].is_edit(), "not written yet");
         assert_eq!(m.run(2, ChatItem::is_step), 1..5);
-        assert_eq!(m.run_label(1..5), "4 steps · t");
+        assert_eq!(m.run_label(1..5), "4 steps · t, Edit /p/a");
 
         m.apply(&SessionEvent::ToolCallUpdate(ToolCallPatch {
             id: "e".into(),
@@ -1076,8 +1084,24 @@ mod tests {
         assert!(m.items[3].is_edit() && !m.items[3].is_step());
         assert_eq!(m.run(2, ChatItem::is_step), 1..3);
         assert_eq!(m.run(4, ChatItem::is_step), 4..5);
+        assert_eq!(m.run_label(1..3), "2 steps · t");
         assert_eq!(m.run_label(4..5), "1 step · t");
         assert_eq!(m.run_label(1..2), "1 step · Thinking");
+    }
+
+    #[test]
+    fn run_label_names_each_tool_once() {
+        let mut m = ChatModel::default();
+        m.push_user("go");
+        m.apply(&call(
+            "1",
+            "`git status`\nmore",
+            ToolStatus::Completed,
+            None,
+        ));
+        m.apply(&call("2", "Read README.md", ToolStatus::Completed, None));
+        m.apply(&call("3", "`git status`", ToolStatus::Completed, None));
+        assert_eq!(m.run_label(1..4), "3 steps · git status, Read README.md");
     }
 
     #[test]
