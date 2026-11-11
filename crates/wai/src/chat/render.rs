@@ -19,24 +19,19 @@ use super::{permission, question};
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::workspace::{Dragged, DraggedSession, folder_name};
 
-/// The balloon of a message you sent (`.msg.voce`).
+/// The balloon of a message you sent (`.me`).
 fn user_bubble(cx: &App) -> Div {
     let theme = cx.theme();
     let bubble = div()
-        .max_w(relative(0.88))
-        .px_3()
-        .py(px(9.))
+        .max_w(relative(0.7))
+        .px(px(14.))
+        .py(px(10.))
         .rounded(px(16.))
-        .rounded_br(px(6.))
         .border_1();
     match theme.is_dark() {
         true => bubble
-            .bg(linear_gradient(
-                160.,
-                linear_color_stop(aurora::lilas().alpha(0.32), 0.),
-                linear_color_stop(aurora::lilas().alpha(0.18), 1.),
-            ))
-            .border_color(aurora::lilas().alpha(0.35))
+            .bg(aurora::lilas().alpha(0.22))
+            .border_color(aurora::lilas().alpha(0.5))
             .text_color(aurora::tinta()),
         false => bubble.bg(theme.secondary).border_color(theme.border),
     }
@@ -89,13 +84,62 @@ fn usage_label(usage: &UsageInfo) -> String {
     }
 }
 
-/// Whether row `ix` is the first agent message of its turn, or since a message steered into it:
-/// it gets the "✦ agent" header.
-pub(crate) fn starts_reply(items: &[ChatItem], ix: usize) -> bool {
-    matches!(items.get(ix), Some(ChatItem::Agent { .. }))
-        && !(items[..ix].iter().rev())
-            .take_while(|item| !matches!(item, ChatItem::User { .. } | ChatItem::Steered { .. }))
-            .any(|item| matches!(item, ChatItem::Agent { .. }))
+/// Where a row sits in its turn's card: which segment edges it draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CardEdges {
+    pub first: bool,
+    pub last: bool,
+    /// The "✦ agent" header: once per turn, on its first card row that draws anything.
+    pub header: bool,
+}
+
+/// The card edges of row `ix`, or `None` when it is not drawn inside a card. A run of
+/// consecutive `in_card` rows is one card; rows `shown` says draw nothing do not count.
+pub(crate) fn card_edges(
+    items: &[ChatItem],
+    ix: usize,
+    shown: impl Fn(usize) -> bool,
+) -> Option<CardEdges> {
+    if !items.get(ix)?.in_card() || !shown(ix) {
+        return None;
+    }
+    let before = items[..ix].iter().rev().take_while(|i| i.in_card()).count();
+    let after = items[ix..].iter().take_while(|i| i.in_card()).count();
+    let run = ix - before..ix + after;
+    let first = !run.clone().take(ix - run.start).any(&shown);
+    let last = !(ix + 1..run.end).any(&shown);
+    let turn = (items[..run.start].iter())
+        .rposition(|i| matches!(i, ChatItem::User { .. } | ChatItem::Steered { .. }))
+        .map_or(0, |u| u + 1);
+    let header = first && !(turn..run.start).any(|j| items[j].in_card() && shown(j));
+    Some(CardEdges {
+        first,
+        last,
+        header,
+    })
+}
+
+/// A card segment: the side borders always, the top (corners, padding) on the first row and the
+/// bottom on the last. Dark: a faint fill; light: a border only.
+fn card_segment(edges: CardEdges, cx: &App) -> Div {
+    let theme = cx.theme();
+    let seg = v_flex()
+        .w_full()
+        .px(px(14.))
+        .border_l_1()
+        .border_r_1()
+        .when(edges.first, |el| {
+            el.border_t_1().rounded_t(px(14.)).pt(px(10.))
+        })
+        .when(edges.last, |el| {
+            el.border_b_1().rounded_b(px(14.)).pb(px(10.))
+        });
+    match theme.is_dark() {
+        true => seg
+            .bg(hsla(0., 0., 1., 0.035))
+            .border_color(aurora::borda()),
+        false => seg.border_color(theme.border),
+    }
 }
 
 /// `el` as glass (`.msg.claude`): a `vidro` fill and a `borda` border. Light mode: a border.
@@ -108,56 +152,88 @@ pub(super) fn glass(el: Div, cx: &App) -> Div {
     }
 }
 
-/// A tool call's status mark and its color.
+/// A step's status mark (`.step svg`): 14 px.
 fn status_icon(status: ToolStatus, cx: &App) -> Icon {
     let theme = cx.theme();
-    let done = match theme.is_dark() {
-        true => aurora::boreal(),
-        false => theme.success,
+    let dark = theme.is_dark();
+    let (icon, color) = match (status, dark) {
+        (ToolStatus::Pending, true) => (IconName::Ellipsis, aurora::nevoa_2()),
+        (ToolStatus::Pending, false) => (IconName::Ellipsis, theme.muted_foreground),
+        (ToolStatus::InProgress, true) => (IconName::Loader, aurora::nevoa()),
+        (ToolStatus::InProgress, false) => (IconName::Loader, theme.foreground),
+        (ToolStatus::Completed, true) => (IconName::Check, aurora::ok()),
+        (ToolStatus::Completed, false) => (IconName::Check, theme.success),
+        (ToolStatus::Failed, true) => (IconName::CircleX, aurora::erro()),
+        (ToolStatus::Failed, false) => (IconName::CircleX, theme.danger),
     };
-    let (icon, color) = match status {
-        ToolStatus::Pending => (IconName::Ellipsis, theme.muted_foreground),
-        ToolStatus::InProgress => (IconName::Loader, theme.foreground),
-        ToolStatus::Completed => (IconName::Check, done),
-        ToolStatus::Failed => (IconName::CircleX, theme.danger),
-    };
-    Icon::new(icon).xsmall().text_color(color)
+    Icon::new(icon).size(px(14.)).flex_none().text_color(color)
 }
 
-/// The muted color of a step line's chevron and kind icon.
-fn icon_color(cx: &App) -> Hsla {
-    match cx.theme().is_dark() {
-        true => aurora::nevoa_2(),
-        false => cx.theme().muted_foreground,
+/// `title` with its `` `code` `` spans unquoted: the text, then the byte ranges of the code in it.
+/// An unclosed backtick stays text.
+pub(crate) fn code_ranges(title: &str) -> (String, Vec<std::ops::Range<usize>>) {
+    let (mut text, mut ranges) = (String::new(), Vec::new());
+    let mut rest = title;
+    while let Some(open) = rest.find('`') {
+        let Some(len) = rest[open + 1..].find('`') else {
+            break;
+        };
+        text.push_str(&rest[..open]);
+        let start = text.len();
+        text.push_str(&rest[open + 1..open + 1 + len]);
+        ranges.push(start..text.len());
+        rest = &rest[open + len + 2..];
     }
+    text.push_str(rest);
+    (text, ranges)
 }
 
-fn chevron(open: bool, cx: &App) -> Icon {
-    let icon = match open {
-        true => IconName::ChevronDown,
-        false => IconName::ChevronRight,
+/// A step title as one line of text, its code spans highlighted (`.step code`).
+fn step_title(title: &str, cx: &App) -> impl IntoElement + use<> {
+    let theme = cx.theme();
+    let (text, ranges) = code_ranges(title);
+    let style = match theme.is_dark() {
+        true => HighlightStyle {
+            color: Some(aurora::tinta_2()),
+            background_color: Some(aurora::vidro()),
+            ..Default::default()
+        },
+        false => HighlightStyle {
+            color: Some(theme.foreground),
+            background_color: Some(theme.muted),
+            ..Default::default()
+        },
     };
-    Icon::new(icon).xsmall().text_color(icon_color(cx))
+    let mono = theme.mono_font_family.clone();
+    let overrides: Vec<_> = ranges.iter().map(|r| (r.clone(), mono.clone())).collect();
+    div().flex_1().min_w_0().truncate().child(
+        StyledText::new(text)
+            .with_highlights(ranges.into_iter().map(|r| (r, style)))
+            .with_font_family_overrides(overrides),
+    )
 }
 
-/// The icon of a tool call's kind.
-fn kind_icon(kind: &str) -> IconName {
-    match kind {
-        "execute" => IconName::SquareTerminal,
-        "read" => IconName::FileText,
-        "edit" => IconName::Replace,
-        "search" => IconName::Search,
-        "fetch" => IconName::Globe,
-        "delete" => IconName::Delete,
-        "move" => IconName::ArrowRight,
-        "subagent" => IconName::Bot,
-        "think" => IconName::Asterisk,
-        _ => IconName::Dash,
-    }
-}
-
-/// A step's one compact line (`.t`): glass, 13 px regular text, muted.
+/// A step's line (`.step`): no box, 13 px, muted and `tinta` on hover.
 pub(super) fn step_line(cx: &App) -> Div {
+    let theme = cx.theme();
+    let line = h_flex()
+        .gap(px(8.))
+        .py(px(3.))
+        .text_size(px(13.))
+        .font_weight(FontWeight::NORMAL)
+        .cursor_pointer();
+    match theme.is_dark() {
+        true => line
+            .text_color(aurora::nevoa())
+            .hover(|el| el.text_color(aurora::tinta())),
+        false => line
+            .text_color(theme.muted_foreground)
+            .hover(|el| el.text_color(theme.foreground)),
+    }
+}
+
+/// A closed card's compact line (`.t`): glass, 13 px regular text, muted.
+pub(super) fn boxed_line(cx: &App) -> Div {
     let theme = cx.theme();
     let line = h_flex()
         .gap(px(6.))
@@ -220,7 +296,7 @@ impl ChatSession {
             .child(
                 div()
                     .id("session-title")
-                    .flex_1()
+                    .flex_shrink(1.)
                     .min_w_0()
                     .truncate()
                     .cursor_grab()
@@ -235,7 +311,7 @@ impl ChatSession {
             )
             .child(self.pill(
                 "pill-folder",
-                Some(Icon::new(IconName::Folder)),
+                Some(Icon::new(IconName::Folder).xsmall().into_any_element()),
                 folder_name(&self.cwd),
                 cx,
             ))
@@ -245,9 +321,23 @@ impl ChatSession {
                 } else {
                     Icon::new(gpui_kit::assets::IconName::GitBranch)
                 };
-                (head.branch.clone()).map(|branch| self.pill("pill-branch", Some(icon), branch, cx))
+                let icon = Some(icon.xsmall().into_any_element());
+                (head.branch.clone()).map(|branch| self.pill("pill-branch", icon, branch, cx))
             }))
-            .child(self.pill("pill-agent", None, self.agent_model(), cx))
+            .child(self.pill(
+                "pill-agent",
+                // Claude's mark, as the mockup's agent pill shows it.
+                (self.agent == "claude").then(|| {
+                    div()
+                        .text_color(aurora::brasa())
+                        .child("✳")
+                        .into_any_element()
+                }),
+                self.agent_model(),
+                cx,
+            ))
+            // The pills sit by the title; the rest goes to the right.
+            .child(div().flex_1())
             .children(
                 self.pickers
                     .iter()
@@ -276,7 +366,7 @@ impl ChatSession {
     fn pill(
         &self,
         id: &'static str,
-        icon: Option<Icon>,
+        mark: Option<AnyElement>,
         text: String,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -285,7 +375,7 @@ impl ChatSession {
             .min_w_0()
             .truncate()
             .aria_label(text.clone())
-            .when_some(icon, |el, icon| el.child(icon.xsmall()))
+            .children(mark)
             .child(text)
             .test_support()
     }
@@ -302,14 +392,30 @@ impl ChatSession {
         }
     }
 
-    /// Row `ix` as the processing mode shows it; none for a step that is hidden or sits in a
-    /// folded group. Grouped, a run of steps is headed by its first row.
+    /// Whether row `ix` draws anything under the processing mode: Step by step, every row;
+    /// Hidden, no step; Grouped, a step only when it heads its run or its group is open.
+    pub(super) fn shown(&self, ix: usize) -> bool {
+        if !self.model.items[ix].is_step() {
+            return true;
+        }
+        match self.processing {
+            Processing::Steps => true,
+            Processing::Hidden => false,
+            Processing::Grouped => {
+                let run = self.model.run(ix, ChatItem::is_step);
+                ix == run.start || self.open_groups.contains(&run.start)
+            }
+        }
+    }
+
+    /// Row `ix` as the processing mode shows it; none exactly when `!shown(ix)`. Grouped, a run
+    /// of steps is headed by its first row.
     fn render_item(&mut self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.shown(ix) {
+            return None;
+        }
         if !self.model.items[ix].is_step() || self.processing == Processing::Steps {
             return Some(self.render_row(ix, cx));
-        }
-        if self.processing == Processing::Hidden {
-            return None;
         }
         let run = self.model.run(ix, ChatItem::is_step);
         let open = self.open_groups.contains(&run.start);
@@ -318,13 +424,30 @@ impl ChatSession {
             return row;
         }
         let head = self.render_group(run, open, cx);
-        Some(
-            v_flex()
-                .gap_2()
-                .child(head)
-                .children(row)
-                .into_any_element(),
-        )
+        Some(v_flex().child(head).children(row).into_any_element())
+    }
+
+    /// The "✦ agent" header of a turn's card (`.agent-h`).
+    fn card_header(&self, ix: usize, cx: &App) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        let (star, name) = match theme.is_dark() {
+            true => (aurora::brasa(), aurora::brasa()),
+            false => (theme.warning, theme.muted_foreground),
+        };
+        h_flex()
+            .id(("reply-head", ix))
+            .gap_1()
+            .mb(px(6.))
+            .text_size(px(12.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(div().text_color(star).child("✦"))
+            .child(
+                div()
+                    .text_color(name)
+                    .child(wai_settings::agent_label(&self.agent)),
+            )
+            // Registers the id so tests can find it.
+            .test_support()
     }
 
     /// The head of a run of steps: `3 steps · <each tool's title once>`, with the run's status. A click
@@ -349,7 +472,7 @@ impl ChatSession {
         };
         step_line(cx)
             .id(("group", head))
-            .child(chevron(open, cx))
+            .child(status_icon(status, cx))
             .child(
                 div()
                     .flex_1()
@@ -357,7 +480,18 @@ impl ChatSession {
                     .truncate()
                     .child(self.model.run_label(run)),
             )
-            .child(status_icon(status, cx))
+            .child(
+                Icon::new(match open {
+                    true => IconName::ChevronDown,
+                    false => IconName::ChevronRight,
+                })
+                .size(px(12.))
+                .flex_none()
+                .text_color(match cx.theme().is_dark() {
+                    true => aurora::nevoa_2(),
+                    false => cx.theme().muted_foreground,
+                }),
+            )
             .on_click(cx.listener(move |this, _, _, cx| {
                 if !this.open_groups.remove(&head) {
                     this.open_groups.insert(head);
@@ -373,26 +507,14 @@ impl ChatSession {
         let theme = cx.theme();
         let (dark, muted) = (theme.is_dark(), theme.muted_foreground);
         match &self.model.items[ix] {
-            // `.msg.voce`
+            // `.me`
             ChatItem::User { text } | ChatItem::Steered { text } => h_flex()
                 .w_full()
                 .justify_end()
                 .child(user_bubble(cx).child(text.clone()))
                 .into_any_element(),
-            // `.msg.claude`, its turn's first one headed "✦ agent" (`.msg-quem`).
+            // `.say`, inside its turn's card.
             ChatItem::Agent { .. } => {
-                let header = starts_reply(&self.model.items, ix).then(|| {
-                    let (star, name) = match dark {
-                        true => (aurora::brasa(), rgb(0xffc6a3).into()),
-                        false => (theme.warning, muted),
-                    };
-                    h_flex()
-                        .gap_1()
-                        .text_size(px(11.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(div().text_color(star).child("✦"))
-                        .child(div().text_color(name).child(self.agent.clone()))
-                });
                 // Read at click time, so a frame copies no text.
                 let session = cx.weak_entity();
                 let copy = Clipboard::new(("copy-message", ix))
@@ -423,20 +545,15 @@ impl ChatSession {
                                 )
                         })
                     });
-                glass(h_flex(), cx)
+                let say = div().flex_1().min_w_0().py(px(4.)).children(text);
+                let say = match dark {
+                    true => say.text_color(aurora::tinta()),
+                    false => say,
+                };
+                h_flex()
                     .items_start()
                     .gap_2()
-                    .p_3()
-                    .rounded(px(16.))
-                    .rounded_bl(px(6.))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
-                            .children(header)
-                            .children(text),
-                    )
+                    .child(say)
                     .child(copy)
                     .into_any_element()
             }
@@ -447,12 +564,12 @@ impl ChatSession {
                     .child(
                         step_line(cx)
                             .id(("thought", ix))
-                            .child(chevron(open, cx))
-                            .child(
-                                Icon::new(kind_icon("think"))
-                                    .xsmall()
-                                    .text_color(icon_color(cx)),
-                            )
+                            .child(Icon::new(IconName::Asterisk).size(px(14.)).text_color(
+                                match dark {
+                                    true => aurora::nevoa_2(),
+                                    false => muted,
+                                },
+                            ))
                             .child("Thought")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.open_thoughts.remove(&ix) {
@@ -557,13 +674,21 @@ impl ChatSession {
         };
         let (output, hidden) = tool.visible_text();
         let on_open = Self::on_open(cx);
-        let kind = kind_icon(if edit { "edit" } else { &tool.kind });
         let line = step_line(cx)
             .id((id, ix))
-            .child(chevron(open, cx))
-            .child(Icon::new(kind).xsmall().text_color(icon_color(cx)))
-            .child(div().flex_1().min_w_0().truncate().child(title))
             .child(status_icon(tool.status, cx))
+            .children(
+                (tool.kind == "subagent" || tool.subagent.is_some()).then(|| {
+                    Icon::new(IconName::Bot)
+                        .size(px(12.))
+                        .flex_none()
+                        .text_color(match cx.theme().is_dark() {
+                            true => aurora::nevoa_2(),
+                            false => cx.theme().muted_foreground,
+                        })
+                }),
+            )
+            .child(step_title(&title, cx))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if !this.open_steps.remove(&ix) {
                     this.open_steps.insert(ix);
@@ -785,18 +910,31 @@ impl Render for ChatSession {
                 .items_center()
                 .justify_center()
                 .child(aurora::pill(cx).child("No messages yet.")),
-            // Rows sit 8 px apart, not the scroller's 32: the scroller's gap
-            // goes and each row but the last carries its own. The scroller remeasures the row
-            // before an append, whose "last" flips.
+            // Rows sit 12 px apart, not the scroller's 32: the scroller's gap goes and each
+            // row but the last carries its own, except rows inside a card (only the card's last
+            // does). The scroller remeasures the row before an append, whose "last" flips.
             false => messages.child({
                 let scroller = MessageScroller::new(
                     "messages",
                     self.scroller.clone(),
                     cx.processor(|this, ix, _, cx| {
                         let last = ix + 1 == this.model.items.len();
+                        let edges = card_edges(&this.model.items, ix, |j| this.shown(j));
                         let row = this.render_item(ix, cx);
+                        let row = match (row, edges) {
+                            (Some(row), Some(edges)) => Some(
+                                card_segment(edges, cx)
+                                    .id(("card", ix))
+                                    .children(edges.header.then(|| this.card_header(ix, cx)))
+                                    .child(row)
+                                    .test_support()
+                                    .into_any_element(),
+                            ),
+                            (row, _) => row,
+                        };
+                        let gap = edges.is_none_or(|e| e.last);
                         div()
-                            .when(!last && row.is_some(), |el| el.pb_2())
+                            .when(!last && gap && row.is_some(), |el| el.pb(px(12.)))
                             .children(row)
                     }),
                 )
@@ -824,7 +962,7 @@ impl Render for ChatSession {
 mod tests {
     use wai_agent::ToolStatus;
 
-    use super::{starts_reply, tokens};
+    use super::{CardEdges, card_edges, code_ranges, tokens};
     use crate::chat::model::{ChatItem, ToolItem};
 
     #[test]
@@ -835,12 +973,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reply_header_once_per_turn() {
+    fn u() -> ChatItem {
+        ChatItem::User {
+            text: String::new(),
+        }
+    }
+    fn s() -> ChatItem {
+        ChatItem::Steered {
+            text: String::new(),
+        }
+    }
+    fn a() -> ChatItem {
+        ChatItem::Agent {
+            text: String::new(),
+        }
+    }
+    fn n() -> ChatItem {
+        ChatItem::Notice {
+            text: String::new(),
+            kind: crate::chat::model::NoticeKind::Info,
+        }
+    }
+    fn t() -> ChatItem {
         let text = String::new;
-        let user = || ChatItem::User { text: text() };
-        let agent = || ChatItem::Agent { text: text() };
-        let tool = ChatItem::Tool(ToolItem {
+        ChatItem::Tool(ToolItem {
             id: text(),
             title: text(),
             kind: text(),
@@ -851,16 +1007,88 @@ mod tests {
             first_sight: Vec::new(),
             expanded: false,
             subagent: None,
+        })
+    }
+
+    #[test]
+    fn card_edges_frame_each_run() {
+        let all = |_| true;
+        let e = |first, last, header| {
+            Some(CardEdges {
+                first,
+                last,
+                header,
+            })
+        };
+        let items = [u(), t(), t(), a()];
+        assert_eq!(card_edges(&items, 0, all), None);
+        assert_eq!(card_edges(&items, 1, all), e(true, false, true));
+        assert_eq!(card_edges(&items, 2, all), e(false, false, false));
+        assert_eq!(card_edges(&items, 3, all), e(false, true, false));
+        let items = [u(), a(), n(), a()];
+        assert_eq!(card_edges(&items, 1, all), e(true, true, true));
+        assert_eq!(
+            card_edges(&items, 3, all),
+            e(true, true, false),
+            "one header per turn"
+        );
+        assert_eq!(card_edges(&[a()], 0, all), e(true, true, true));
+        assert_eq!(
+            card_edges(&[u(), a(), u(), a()], 3, all),
+            e(true, true, true)
+        );
+        assert_eq!(
+            card_edges(&[u(), a(), s(), a()], 3, all),
+            e(true, true, true)
+        );
+    }
+
+    #[test]
+    fn card_edges_skip_hidden_rows() {
+        let shown = |items: &[ChatItem]| {
+            let steps: Vec<bool> = (items.iter())
+                .map(|i| !matches!(i, ChatItem::Tool(_)))
+                .collect();
+            move |j: usize| steps[j]
+        };
+        let alone = Some(CardEdges {
+            first: true,
+            last: true,
+            header: true,
         });
-        let items = [user(), agent(), tool, agent()];
-        assert!(starts_reply(&items, 1));
-        assert!(!starts_reply(&items, 3));
-        assert!(starts_reply(&[agent()], 0));
-        let items = [user(), ChatItem::Thought { text: text() }, agent()];
-        assert!(starts_reply(&items, 2));
-        assert!(!starts_reply(&items, 1));
-        assert!(starts_reply(&[user(), agent(), user(), agent()], 3));
-        let steered = ChatItem::Steered { text: text() };
-        assert!(starts_reply(&[user(), agent(), steered, agent()], 3));
+        let items = [u(), t(), t(), a()];
+        assert_eq!(card_edges(&items, 1, shown(&items)), None);
+        assert_eq!(card_edges(&items, 3, shown(&items)), alone);
+        let items = [u(), a(), t()];
+        assert_eq!(card_edges(&items, 1, shown(&items)), alone);
+        let items = [u(), t(), n(), a()];
+        assert_eq!(
+            card_edges(&items, 3, shown(&items)).map(|e| e.header),
+            Some(true),
+            "an invisible card gives no header"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn code_ranges_split_titles() {
+        assert_eq!(
+            code_ranges("Read README.md"),
+            ("Read README.md".into(), vec![])
+        );
+        assert_eq!(
+            code_ranges("`git status`"),
+            ("git status".into(), vec![0..10])
+        );
+        assert_eq!(
+            code_ranges("Run `cargo test` now"),
+            ("Run cargo test now".into(), vec![4..14])
+        );
+        assert_eq!(
+            code_ranges("a `b"),
+            ("a `b".into(), vec![]),
+            "an unclosed backtick stays text"
+        );
+        assert_eq!(code_ranges(""), (String::new(), vec![]));
     }
 }

@@ -41,7 +41,7 @@ While the agent prepares the session, its pane shows `Preparing <agent>…`. **�
   - **↑**/**↓** move, **Enter**, **Tab** or a click puts `/name ` in the box, and **Esc** closes the list and keeps the text.
   - The list closes once a space follows the name; **Enter** then sends, and the agent runs the command. During a turn, it goes into the turn or the queue like any message.
   - Until the agent sends its commands, the list reads `No commands from <agent> yet`.
-- **The status line:** while a turn runs, a line just above the prompt box says what the agent is doing (`Reading README.md…`, `Running git log…`, `Thinking…` between tool calls, `Waiting for you…` while a card waits), for how long, and `Esc to stop`. It is green while the agent works and amber while a card waits for you; its mark turns once a second, and the time and `Esc to stop` sit at its right end. It goes away when the turn ends.
+- **The status line:** while a turn runs, a line just above the prompt box says what the agent is doing (`Reading README.md…`, `Running git log…`, `Thinking…` between tool calls, `Waiting for you…` while a card waits), for how long, and `Esc to stop`. Its text is grey while the agent works and amber while a card waits for you; a green ring turns while the agent works and stands still while it waits. The time and `Esc to stop` sit at its right end. It goes away when the turn ends.
 - **Attaching files:** drop them on the prompt box, pick them with the **+** at its left (files and folders, several at once), or paste them with **⌘V**: an image you copied, such as a screenshot, or files copied in Finder. Text pastes as text. Each attachment shows as a chip above the box until you send or remove it.
   - PNG, JPEG, GIF and WebP files up to 5 MB go as images; any other file, of any kind, goes as a reference to its path, which the agent reads with its own tools.
   - A pasted image is saved in the system's temporary folder as `wai-pasted/<id>.<ext>`. A TIFF, BMP, ICO or PNM image, which agents do not take, is saved as a PNG; an SVG goes as a file.
@@ -54,12 +54,13 @@ While the agent prepares the session, its pane shows `Preparing <agent>…`. **�
 - **Model pickers:** a change applies to that session only, from then on, and wai does not keep it across relaunches. A new session starts with the **Default model** from Settings, if you set one; if the agent no longer offers it, the session says `<agent> no longer offers the model <model>; using <current>.` and keeps the agent's own choice. Resumed, forked and restored sessions keep what the agent restores. An agent that offers no such option shows no picker.
 - **The transcript:**
   - Replies stream in as Markdown.
+  - Each turn of the agent is one card headed `✦ <agent>`, holding its steps and its replies in order; your prompts are balloons on the right; a closed permission card or a notice between them splits the card.
   - Each reply has a copy button that copies its Markdown, and each code block one that copies its code.
   - The agent's steps (its tool calls and its thinking) show as the **Processing** setting says:
 
     | Processing | Steps |
     |---|---|
-    | **Step by step** (the default) | Each step is one folded line with an icon of its kind, its title and ✓ or ✗. A click opens a tool call's output in a box under the line; thinking shows as a `Thought` line that opens the same way |
+    | **Step by step** (the default) | Each step is one line in the reply's card: ✓ or ✗ (or a mark while it runs), then its title, commands in code style. A click opens a tool call's output in a box under the line; thinking shows as a `Thought` line that opens the same way |
     | **Grouped** | The steps between two replies fold into one block, such as `3 steps · Read README.md, Run git status`; the head names every step. A click lists the step lines, each still folded |
     | **Hidden** | No steps |
 

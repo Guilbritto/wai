@@ -82,6 +82,14 @@ impl ChatItem {
     pub fn is_step(&self) -> bool {
         matches!(self, ChatItem::Tool(_) | ChatItem::Thought { .. }) && !self.is_edit()
     }
+
+    /// A row drawn inside the agent turn's card: its text, its thinking and its tool calls.
+    pub fn in_card(&self) -> bool {
+        matches!(
+            self,
+            ChatItem::Agent { .. } | ChatItem::Thought { .. } | ChatItem::Tool(_)
+        )
+    }
 }
 
 /// What the status line says of a running tool call: its kind's verb, then its title without

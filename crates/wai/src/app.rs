@@ -347,6 +347,7 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 /// `WAI_SHOT_PANEL=1`: the first extension panel's tab, an enabled extension having rendered it
 /// (fase-3-panel.png).
 /// `WAI_SHOT_PALETTE=1`: the command palette open (fase-3-palette.png).
+/// `WAI_SHOT_DRAFT=1`: the new-session draft (fix-draft.png).
 /// `WAI_SHOT_HISTORY=1`, with any of the above: the sidebar's History tab.
 /// `WAI_SHOT_DRAG=left|center|right`: see `drag_open_row`.
 #[cfg(feature = "screenshot")]
@@ -365,8 +366,13 @@ fn screenshot(
                     let model = &s.read(cx).model;
                     model.state == crate::chat::TurnState::NeedsYou
                         || (model.state == crate::chat::TurnState::Idle
-                            && (model.items.iter())
-                                .any(|i| matches!(i, crate::chat::ChatItem::Edits { .. })))
+                            && (model.items.iter()).any(|i| {
+                                matches!(
+                                    i,
+                                    crate::chat::ChatItem::Edits { .. }
+                                        | crate::chat::ChatItem::Agent { .. }
+                                )
+                            }))
                 })
             };
             while !workspace.read_with(cx, needs_you) {
@@ -448,8 +454,20 @@ fn screenshot(
                     terminal.update(cx, |t, cx| t.show_history(20, 3, cx));
                 }
             });
-        } else {
+        } else if std::env::var("WAI_SHOT_DRAFT").is_err() {
             run_in_terminal(window, "echo wai", cx).await;
+        }
+        // `WAI_SHOT_DRAFT=1`: the new-session draft, nothing sent.
+        if std::env::var("WAI_SHOT_DRAFT").is_ok() {
+            window
+                .update(cx, |_, window, cx| {
+                    window.dispatch_action(Box::new(NewSession), cx)
+                })
+                .ok();
+            while workspace.read_with(cx, |w, _| w.panes[0].draft().is_none()) {
+                executor.timer(Duration::from_millis(50)).await;
+            }
+            executor.timer(Duration::from_millis(500)).await;
         }
         if std::env::var("WAI_SHOT_HISTORY").is_ok() {
             workspace.update(cx, |w, cx| {

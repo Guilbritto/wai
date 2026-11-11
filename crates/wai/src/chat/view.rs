@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::IndexPath;
@@ -128,8 +129,8 @@ pub struct ChatSession {
     pub(super) open_steps: HashSet<usize>,
     /// The unfolded runs of steps of the grouped mode, by their first row.
     pub(super) open_groups: HashSet<usize>,
-    /// While a turn runs: when it started, and the status line's one-second tick.
-    pub(super) turn: Option<(Instant, Task<()>)>,
+    /// While a turn runs: when it started, the status line's tick period and its timer.
+    pub(super) turn: Option<(Instant, Duration, Task<()>)>,
     /// Per waiting `Question` card, by request id, made when it first draws.
     pub(super) questions: HashMap<u64, QuestionForm>,
     pub(super) scroller: Entity<MessageScrollerState>,
@@ -626,33 +627,58 @@ impl ChatSession {
         result
     }
 
-    /// The status line's clock: one tick a second while a turn runs, no timer otherwise.
+    /// The status line's clock: ticks at `tick_period` while a turn runs, restarting only when
+    /// the period changes; no timer otherwise.
     fn sync_clock(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.model.state, TurnState::Working | TurnState::NeedsYou) {
+        let Some(period) = tick_period(&self.model.state) else {
             self.turn = None;
-        } else if self.turn.is_none() {
-            let tick = cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(Duration::from_secs(1)).await;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
-                        break;
-                    }
-                }
-            });
-            self.turn = Some((Instant::now(), tick));
+            return;
+        };
+        if matches!(&self.turn, Some((_, current, _)) if *current == period) {
+            return;
         }
+        let started = self.turn.as_ref().map_or_else(Instant::now, |(at, ..)| *at);
+        let tick = cx.spawn(async move |this, cx| {
+            loop {
+                let wait = until_next_tick(period, EPOCH.elapsed());
+                cx.background_executor().timer(wait).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        });
+        self.turn = Some((started, period, tick));
     }
 
     /// Appends new rows to the list and remeasures `changed`.
     pub(super) fn sync_rows(&mut self, changed: Option<usize>, cx: &mut Context<Self>) {
-        let rows = self.model.items.len();
+        let model = &self.model;
+        let rows = model.items.len();
         self.scroller.update(cx, |list, cx| {
             let known = list.item_count();
             if rows > known {
                 list.append(rows - known, cx);
+                // The card's last row may stop being last: its edges change.
+                if known > 0 && model.items[known - 1].in_card() {
+                    let run = model.run(known - 1, ChatItem::in_card);
+                    list.remeasure_items(run.start..known, cx);
+                }
             }
             if let Some(ix) = changed.filter(|ix| *ix < known) {
-                list.remeasure_items(ix..ix + 1, cx);
+                // A changed row can change its card's edges, and the header moves with them:
+                // remeasure from its card to the end of its turn.
+                let (start, end) = match model.items[ix].in_card() {
+                    true => {
+                        let turn = (model.items[ix..].iter())
+                            .position(|i| {
+                                matches!(i, ChatItem::User { .. } | ChatItem::Steered { .. })
+                            })
+                            .map_or(rows, |n| ix + n);
+                        (model.run(ix, ChatItem::in_card).start, turn)
+                    }
+                    false => (ix, ix + 1),
+                };
+                list.remeasure_items(start..end.min(known), cx);
             }
         });
     }
@@ -833,6 +859,25 @@ impl ChatSession {
     }
 }
 
+/// The clock every session's ticks align to, so they all land in the same frame.
+static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// The wait to the next multiple of `period` on the `EPOCH` clock, `since` being its reading.
+fn until_next_tick(period: Duration, since: Duration) -> Duration {
+    let period = period.as_nanos().max(1);
+    Duration::from_nanos((period - since.as_nanos() % period) as u64)
+}
+
+/// How often the status line's clock ticks: fast enough to turn its ring while the agent works,
+/// once a second while a card waits for you, never when no turn runs.
+pub(super) fn tick_period(state: &TurnState) -> Option<Duration> {
+    match state {
+        TurnState::Working => Some(Duration::from_millis(125)),
+        TurnState::NeedsYou => Some(Duration::from_secs(1)),
+        _ => None,
+    }
+}
+
 /// A tool call's diffs, each opening at its line (`open_line`).
 fn diff_views(diffs: &[FileDiff], locations: &[Location], cwd: &Path) -> Vec<DiffView> {
     let view = |k| DiffView::new(&diffs[k], cwd, open_line(locations, diffs, k));
@@ -845,7 +890,9 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::rc::Rc;
+    use std::time::Duration;
 
+    use super::{tick_period, until_next_tick};
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{ElementId, Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
@@ -1877,7 +1924,115 @@ mod tests {
         })
     }
 
-    /// A step is one compact line of its own, 8 px from the next; unfolded, its output sits in a
+    /// Every card segment of a turn touches the next.
+    fn assert_touching(session: &Entity<ChatSession>, cx: &mut VisualTestContext) {
+        let last = session.read_with(cx, |s, _| s.model.items.len() - 1);
+        for k in 1..last {
+            let (a, b) = (card_bounds(k, cx), card_bounds(k + 1, cx));
+            assert!((b.top() - a.bottom()).abs() < px(0.5), "{k}: {a:?} {b:?}");
+        }
+    }
+
+    #[test]
+    fn tick_period_follows_the_state() {
+        assert_eq!(
+            tick_period(&TurnState::Working),
+            Some(Duration::from_millis(125))
+        );
+        assert_eq!(
+            tick_period(&TurnState::NeedsYou),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(tick_period(&TurnState::Idle), None);
+        assert_eq!(tick_period(&TurnState::Error(String::new())), None);
+    }
+
+    /// The clock switches period with the state and keeps the turn's start.
+    #[gpui_kit::test]
+    fn clock_follows_the_state_and_keeps_its_start(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        let step = |state: TurnState, cx: &mut VisualTestContext| {
+            session.update(cx, |s, cx| {
+                s.model.state = state;
+                s.sync_clock(cx);
+                s.turn.as_ref().map(|(at, period, _)| (*at, *period))
+            })
+        };
+        let (at, period) = step(TurnState::Working, cx).unwrap();
+        assert_eq!(period, Duration::from_millis(125));
+        let (waiting_at, period) = step(TurnState::NeedsYou, cx).unwrap();
+        assert_eq!((waiting_at, period), (at, Duration::from_secs(1)));
+        let (again_at, period) = step(TurnState::Working, cx).unwrap();
+        assert_eq!((again_at, period), (at, Duration::from_millis(125)));
+        assert!(step(TurnState::Idle, cx).is_none());
+    }
+
+    #[test]
+    fn ticks_align_to_the_period() {
+        let p = Duration::from_millis(125);
+        let wait = |ms| until_next_tick(p, Duration::from_millis(ms));
+        assert_eq!(wait(0), p);
+        assert_eq!(wait(100), Duration::from_millis(25));
+        assert_eq!(wait(125), p);
+    }
+
+    /// A turn is one card: its segments touch, and only its first row carries the header.
+    #[gpui_kit::test]
+    fn turn_is_one_card(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--steps 2"));
+        let session = start_session(&workspace, cx);
+        turn(&session, cx);
+        let last = session.read_with(cx, |s, _| s.model.items.len() - 1);
+        assert!(shows(("reply-head", 1usize), cx));
+        assert!(!shows(("reply-head", last), cx));
+        assert_touching(&session, cx);
+    }
+
+    /// Hidden, the reply's text is the card's first segment and carries the header.
+    #[gpui_kit::test]
+    fn hidden_steps_leave_the_text_as_the_card(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let settings = processing_settings("--steps 2", Processing::Hidden);
+        let (workspace, cx) = open(cx, settings);
+        let session = start_session(&workspace, cx);
+        turn(&session, cx);
+        let last = session.read_with(cx, |s, _| s.model.items.len() - 1);
+        assert!(shows(("reply-head", last), cx));
+        assert!(!shows(("card", 2usize), cx));
+    }
+
+    /// Grouped, opening the group keeps the segments touching.
+    #[gpui_kit::test]
+    fn grouped_card_stays_contiguous(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let settings = processing_settings("--steps 2", Processing::Grouped);
+        let (workspace, cx) = open(cx, settings);
+        let session = start_session(&workspace, cx);
+        turn(&session, cx);
+        let last = session.read_with(cx, |s, _| s.model.items.len() - 1);
+        assert!(shows(("reply-head", 1usize), cx));
+        assert!(!shows(("reply-head", last), cx));
+        assert!(!shows(("card", 2usize), cx), "folded: only the head");
+        let (head, text) = (card_bounds(1, cx), card_bounds(last, cx));
+        assert!(
+            (text.top() - head.bottom()).abs() < px(0.5),
+            "{head:?} {text:?}"
+        );
+        click_edits(None, ("group", 1usize), cx);
+        assert_touching(&session, cx);
+    }
+
+    fn card_bounds(ix: usize, cx: &mut VisualTestContext) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find(("card", ix)).bounds()
+        })
+    }
+
+    /// A step is one compact line of its own, touching the next; unfolded, its output sits in a
     /// box under the line.
     #[gpui_kit::test]
     fn step_lines_are_compact_and_open_below(cx: &mut TestAppContext) {
@@ -1898,7 +2053,7 @@ mod tests {
         );
         assert_eq!(line.top(), tool.top(), "the line is the step's own box");
         assert!(
-            (next.top() - line.bottom() - px(8.)).abs() < px(0.5),
+            (next.top() - line.bottom()).abs() < px(0.5),
             "{line:?} {next:?}"
         );
         click_edits(None, ("step", 2usize), cx);
