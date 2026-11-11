@@ -85,7 +85,7 @@ Each open session has a coloured dot in the sidebar:
 
 ### Permissions and questions
 
-- **Permission cards.** When an agent asks before acting, the session shows a card with the diff of the edit (when there is one) and the agent's own choices, such as **Yes**, **Yes, always** and **No**. The session reads `Needs you` until you answer. The card waits on a glass panel just above the prompt box, not in the transcript, and the conversation scrolls on behind it. Several cards stack, the oldest on top. Once answered, a card joins the transcript as one line with your answer, where the conversation is then.
+- **Permission cards.** When an agent asks before acting, the session shows a card with the diff of the edit (when there is one) and the agent's own choices, such as **Yes**, **Yes, always** and **No**. The session reads `Needs you` until you answer. The card waits on a glass panel just above the prompt box, not in the transcript, and the conversation scrolls on behind it. Several cards stack, the oldest on top. With the prompt box empty, **1**–**9** pick the top card's choice of that number; only the top card shows numbers. Once answered, a card joins the transcript as one line with your answer, where the conversation is then.
 - **Questions.** When Claude asks a multiple-choice question, wai shows it as a form with **Submit** and **Decline**. A form wai cannot display is declined, and the transcript says so. They wait above the prompt box the same way.
 - **A subagent's card** is titled `<subagent>: <request>` and shows in the session's chat.
   - **Stop** cancels only the session's own cards.
@@ -250,6 +250,7 @@ Clicking a card shows that session in the focused pane; dragging it onto a pane 
 | Show or hide the Agents panel, while it is on the right | ⌘⌥B | ctrl-alt-b | window |
 | Stop the turn | Esc | Esc | chat session |
 | Send the prompt / new line | Enter / Shift+Enter | Enter / Shift+Enter | prompt box |
+| Answer the top permission card | 1–9 | 1–9 | prompt box, while empty |
 | In the `/` menu: move / complete / close | ↑ ↓ / Enter or Tab / Esc | ↑ ↓ / Enter or Tab / Esc | prompt box |
 | Copy the selection | ⌘C | ctrl-shift-c | terminal |
 | Paste | ⌘V | ctrl-shift-v | terminal |

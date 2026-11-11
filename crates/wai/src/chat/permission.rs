@@ -155,7 +155,7 @@ pub(super) fn frame(
 }
 
 /// A choice (`.escolha-opcao`): a full-width row behind its number badge (`.opcao-n`).
-fn choice(n: usize, choice: &PermissionChoice, highlighted: bool, cx: &App) -> Button {
+fn choice(n: Option<usize>, choice: &PermissionChoice, highlighted: bool, cx: &App) -> Button {
     let theme = cx.theme();
     let reject = matches!(
         choice.kind,
@@ -182,17 +182,19 @@ fn choice(n: usize, choice: &PermissionChoice, highlighted: bool, cx: &App) -> B
         true => (aurora::brasa().alpha(0.18), rgb(0xffb68a).into()),
         false => (theme.background, theme.muted_foreground),
     };
-    let number = div()
-        .flex_none()
-        .size(px(26.))
-        .rounded(px(8.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(badge)
-        .text_color(badge_text)
-        .font_weight(FontWeight::BOLD)
-        .child((n + 1).to_string());
+    let number = n.map(|n| {
+        div()
+            .flex_none()
+            .size(px(26.))
+            .rounded(px(8.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(badge)
+            .text_color(badge_text)
+            .font_weight(FontWeight::BOLD)
+            .child((n + 1).to_string())
+    });
     let label = div().flex_1().min_w_0().child(choice.name.clone());
     // The name is a child, not the label: it is the accessible name only when given as one.
     let button = Button::new(button_id(choice.kind)).accessibility_label(choice.name.clone());
@@ -209,17 +211,18 @@ fn choice(n: usize, choice: &PermissionChoice, highlighted: bool, cx: &App) -> B
                 .w_full()
                 .gap_3()
                 .whitespace_normal()
-                .child(number)
+                .children(number)
                 .child(label),
         )
 }
 
-/// A waiting request: title, diff preview and one row per choice.
+/// A waiting request: title, diff preview and one row per choice, numbered when `numbered`.
 pub fn card(
     request: &PermissionRequest,
     diffs: &[DiffView],
     on_choose: OnChoose,
     on_open: &OnOpen,
+    numbered: bool,
     cx: &App,
 ) -> impl IntoElement + use<> {
     let allow = (request.options.iter())
@@ -228,7 +231,7 @@ pub fn card(
         .gap_2()
         .children(request.options.iter().enumerate().map(|(n, c)| {
             let (on_choose, c) = (on_choose.clone(), c.clone());
-            choice(n, &c, allow == Some(n), cx)
+            choice(numbered.then_some(n), &c, allow == Some(n), cx)
                 .on_click(move |_, window, cx| on_choose(&c, window, cx))
         }));
     frame(

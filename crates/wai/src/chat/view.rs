@@ -726,7 +726,9 @@ mod tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{ElementId, Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
-    use wai_agent::{StopReason, SubagentState, ToolStatus};
+    use wai_agent::{
+        ChoiceKind, PermissionChoice, PermissionRequest, StopReason, SubagentState, ToolStatus,
+    };
     use wai_settings::{Change, Processing, Settings};
 
     use super::ChatSession;
@@ -1864,6 +1866,69 @@ mod tests {
 
     fn typed(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> String {
         session.read_with(cx, |s, cx| s.input.read(cx).value().to_string())
+    }
+
+    /// Review focus 1: with the prompt box empty, 1–9 answer the top card, the oldest; a click
+    /// answers the card it is on; with text in the box, a digit types.
+    #[gpui_kit::test]
+    fn number_keys_answer_the_top_permission_card(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        let request = |id: u64, session: String| PermissionRequest {
+            id,
+            session,
+            tool_call_id: "t".into(),
+            title: format!("Run {id}"),
+            diff: None,
+            subagent: None,
+            options: vec![
+                PermissionChoice {
+                    id: "y".into(),
+                    name: "Yes".into(),
+                    kind: ChoiceKind::AllowOnce,
+                },
+                PermissionChoice {
+                    id: "n".into(),
+                    name: "No".into(),
+                    kind: ChoiceKind::RejectOnce,
+                },
+            ],
+        };
+        // The broker never asked these: an answer fails, and the card closes as Cancelled.
+        let closed = |cx: &mut VisualTestContext| {
+            session.read_with(cx, |s, _| {
+                (s.model.items.iter())
+                    .filter_map(|i| match i {
+                        ChatItem::Permission { request, .. } => Some(request.id),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        session.update(cx, |s, cx| {
+            let id = s.id.clone();
+            s.handle_permission(request(100, id.clone()), cx);
+            s.handle_permission(request(101, id), cx);
+        });
+        cx.simulate_keystrokes("2");
+        assert_eq!(closed(cx), [100]);
+        assert_eq!(typed(&session, cx), "");
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window
+                .within(("waiting-permission", 101u64))
+                .click("perm-allow_once", cx);
+        });
+        assert_eq!(closed(cx), [100, 101]);
+        session.update(cx, |s, cx| {
+            let id = s.id.clone();
+            s.handle_permission(request(102, id), cx)
+        });
+        cx.simulate_input("a");
+        cx.simulate_keystrokes("1");
+        assert_eq!(typed(&session, cx), "a1");
+        assert_eq!(closed(cx), [100, 101]);
     }
 
     /// ⌘N, then the session once its agent's commands arrived.

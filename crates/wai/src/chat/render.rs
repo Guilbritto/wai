@@ -575,7 +575,7 @@ impl ChatSession {
         }
         let waiting = self.model.waiting.clone();
         let on_open = Self::on_open(cx);
-        let cards = waiting.iter().map(|card| match card {
+        let cards = waiting.iter().enumerate().map(|(k, card)| match card {
             ChatItem::Permission { request, .. } => {
                 let id = request.id;
                 let on_choose =
@@ -583,7 +583,7 @@ impl ChatSession {
                         this.answer(id, choice, cx)
                     }));
                 let diffs = self.card_diffs.get(&id).map_or(&[][..], Vec::as_slice);
-                permission::card(request, diffs, on_choose, &on_open, cx).into_any_element()
+                permission::card(request, diffs, on_choose, &on_open, k == 0, cx).into_any_element()
             }
             ChatItem::Question { request, .. } => {
                 question::card(request, &mut self.questions, window, cx)

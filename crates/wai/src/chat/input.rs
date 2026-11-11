@@ -15,7 +15,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::{AgentCaps, PromptBlock};
 
-use super::model::{NoticeKind, TurnState, elapsed};
+use super::model::{ChatItem, NoticeKind, TurnState, elapsed};
 use super::view::ChatSession;
 use crate::agents::AgentStatus;
 use crate::app::CancelTurn;
@@ -129,6 +129,30 @@ fn image(path: &Path) -> Option<PromptBlock> {
 }
 
 impl ChatSession {
+    /// D7: with the box empty, `1`-`9` answer the top card's n-th choice when it is a
+    /// permission; any other key, or a question on top, goes through to the box.
+    fn answer_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let key = &event.keystroke;
+        let Some(n) = (key.key.parse::<usize>().ok()).filter(|n| (1..=9).contains(n)) else {
+            return;
+        };
+        if key.modifiers.modified()
+            || !self.input.read(cx).value().is_empty()
+            || !self.attachments.is_empty()
+        {
+            return;
+        }
+        let Some(ChatItem::Permission { request, .. }) = self.model.waiting.first() else {
+            return;
+        };
+        let Some(choice) = request.options.get(n - 1).cloned() else {
+            return;
+        };
+        let id = request.id;
+        cx.stop_propagation();
+        self.answer(id, &choice, cx);
+    }
+
     /// Sends the prompt and the attachments: from an idle session as a prompt; during a turn
     /// into it when the agent steers, else into the queue until it ends.
     pub(super) fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -409,6 +433,7 @@ impl ChatSession {
             .pr(px(6.))
             .pb(px(6.))
             .pl(px(14.))
+            .capture_key_down(cx.listener(|this, event, _, cx| this.answer_key(event, cx)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| this.focus(window, cx)),
