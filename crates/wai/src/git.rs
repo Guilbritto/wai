@@ -34,6 +34,12 @@ pub(crate) fn command(dir: &Path) -> Command {
     c.current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null());
+    #[cfg(test)]
+    c.env(
+        "GIT_CONFIG_GLOBAL",
+        if cfg!(windows) { "NUL" } else { "/dev/null" },
+    )
+    .env("GIT_CONFIG_NOSYSTEM", "1");
     c
 }
 
@@ -165,15 +171,16 @@ pub(crate) fn create_worktree(repo: &Repo, slug: &str, base: &str) -> Result<Wor
         None
     };
     let remote = format!("origin/{base}");
-    let from = if ok(
-        root,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/remotes/{remote}"),
-        ],
-    ) {
+    let from = if fetch_failed.is_none()
+        && ok(
+            root,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/remotes/{remote}"),
+            ],
+        ) {
         remote
     } else {
         base.to_string()
@@ -210,8 +217,19 @@ pub(crate) fn create_worktree(repo: &Repo, slug: &str, base: &str) -> Result<Wor
             .map_err(|e| format!("Could not create the worktree: {e}"))?;
     }
     let path_arg = path.to_string_lossy().into_owned();
-    run(root, &["worktree", "add", "-b", &branch, &path_arg, &from])
-        .map_err(|e| format!("Could not create the worktree: {e}"))?;
+    run(
+        root,
+        &[
+            "worktree",
+            "add",
+            "--no-track",
+            "-b",
+            &branch,
+            &path_arg,
+            &from,
+        ],
+    )
+    .map_err(|e| format!("Could not create the worktree: {e}"))?;
     Ok(Worktree {
         path,
         branch,
