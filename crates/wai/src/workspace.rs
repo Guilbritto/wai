@@ -2648,7 +2648,7 @@ pub(crate) mod tests {
     use super::{Pane, Workspace};
     use crate::agents::{AgentStatus, RegistryEvent};
     use crate::app::{self, ToggleTerminal};
-    use crate::chat::{ChatEvent, ChatItem, NoticeKind, TurnState};
+    use crate::chat::{ChatEvent, ChatItem, ChatSession, NoticeKind, TurnState};
     use crate::notify;
     use crate::sidebar::canonical;
 
@@ -2704,6 +2704,32 @@ pub(crate) mod tests {
             agents: [("fake".into(), AgentConfig { command })].into(),
             ..Default::default()
         }
+    }
+
+    /// `fake_settings` whose `session/new` waits for the returned gate file to exist.
+    pub(crate) fn gated(flags: &str, dir: &Path) -> (Settings, PathBuf) {
+        let gate = dir.join("gate");
+        let flags = format!("{flags} --new-session-gate {}", wai_agent::quote(&gate));
+        (fake_settings(&flags), gate)
+    }
+
+    /// Starts a session with the default agent, without the ⌘N entry point, and waits for it.
+    #[allow(dead_code)] // the sessions tests use it
+    pub(crate) fn start_now(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<ChatSession> {
+        let before = workspace.read_with(cx, |w, _| w.sessions.len());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                let agent = w.default_agent().unwrap();
+                w.start_session(agent, None, false, None, window, cx)
+            })
+        });
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.sessions.len() > before)
+        });
+        workspace.read_with(cx, |w, _| w.sessions[before].clone())
     }
 
     /// Real agent I/O runs outside the test scheduler: sleep, run, check, for up to 10 s.
@@ -2826,9 +2852,18 @@ pub(crate) mod tests {
     #[gpui_kit::test]
     fn new_session_appears_in_open_list(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
-        let (workspace, cx) = open(cx, fake_settings(""));
+        let tmp = tempfile::tempdir().unwrap();
+        let (settings, gate) = gated("", tmp.path());
+        let (workspace, cx) = open(cx, settings);
+        let start = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                workspace.update(cx, |w, cx| {
+                    w.start_session("fake".into(), None, false, None, window, cx)
+                })
+            })
+        };
 
-        cx.simulate_keystrokes("secondary-n");
+        start(cx);
         workspace.read_with(cx, |w, _| {
             assert!(
                 matches!(&w.panes[0], Pane::Preparing { agent, .. } if agent == "fake"),
@@ -2836,8 +2871,10 @@ pub(crate) mod tests {
             )
         });
         // Ignored: the pane is already waiting for a session.
-        cx.simulate_keystrokes("secondary-n");
+        start(cx);
+        workspace.read_with(cx, |w, _| assert_eq!(w.starting.get("fake"), Some(&1)));
 
+        std::fs::write(&gate, "").unwrap();
         wait_until(cx, "the session", |cx| {
             workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
         });
@@ -2852,10 +2889,16 @@ pub(crate) mod tests {
     #[gpui_kit::test]
     fn events_before_the_session_lands_are_replayed(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
-        let (workspace, cx) = open(cx, fake_settings(""));
+        let tmp = tempfile::tempdir().unwrap();
+        let (settings, gate) = gated("", tmp.path());
+        let (workspace, cx) = open(cx, settings);
         let registry = workspace.read_with(cx, |w, _| w.registry.clone());
 
-        cx.simulate_keystrokes("secondary-n");
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.start_session("fake".into(), None, false, None, window, cx)
+            })
+        });
         let preparing = |w: &Workspace, _: &_| matches!(w.panes[0], Pane::Preparing { .. });
         assert!(workspace.read_with(cx, preparing));
         registry.update(cx, |_, cx| {
@@ -2868,6 +2911,7 @@ pub(crate) mod tests {
             }
         });
 
+        std::fs::write(&gate, "").unwrap();
         wait_until(cx, "the session", |cx| {
             workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
         });

@@ -65,6 +65,8 @@
 //!   turn it answers `injected`, and the turn's reply ends with ` Steered: <text>` for each one
 //!   (once the reply streamed; use `--chunk-delay-ms` to keep the turn running); with no turn
 //!   running it answers `promptRequired`.
+//! - `--new-session-gate <path>`: `session/new` answers only once `<path>` exists (checked every
+//!   10 ms).
 //!
 //! After `session/new` answers, an `available_commands_update` lists `init`, `review`, `compact`
 //! (with the input hint `custom instructions`) and `pr-review`.
@@ -130,6 +132,7 @@ struct Opts {
     config_mode: bool,
     reject_config: bool,
     steering: bool,
+    new_session_gate: Option<PathBuf>,
 }
 
 fn parse_args() -> Opts {
@@ -162,6 +165,7 @@ fn parse_args() -> Opts {
         config_mode: false,
         reject_config: false,
         steering: false,
+        new_session_gate: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -212,6 +216,7 @@ fn parse_args() -> Opts {
             "--config-mode" => opts.config_mode = true,
             "--reject-config" => opts.reject_config = true,
             "--steering" => opts.steering = true,
+            "--new-session-gate" => opts.new_session_gate = Some(value().into()),
             other => panic!("unknown flag {other}"),
         }
     }
@@ -809,32 +814,45 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                     if fake.opts.require_auth {
                         return responder.respond_with_error(Error::auth_required());
                     }
-                    let id = format!("fake-{}", fake.next_session.fetch_add(1, Ordering::Relaxed));
-                    fake.record_mcp(&id.clone().into(), &request.mcp_servers);
-                    let options = fake.config_options(&id.clone().into());
-                    responder.respond(
-                        acp::NewSessionResponse::new(id.clone())
-                            .modes(modes())
-                            .config_options(options),
-                    )?;
-                    // Like claude-agent-acp: the commands follow the answer.
-                    let hint = acp::UnstructuredCommandInput::new("custom instructions");
-                    let commands = vec![
-                        acp::AvailableCommand::new("init", "Initialize a CLAUDE.md file"),
-                        acp::AvailableCommand::new("review", "Review a pull request"),
-                        acp::AvailableCommand::new(
-                            "compact",
-                            "Clear the history but keep a summary",
+                    let fake = fake.clone();
+                    let cx_task = cx.clone();
+                    cx.spawn(async move {
+                        if let Some(gate) = &fake.opts.new_session_gate {
+                            while !gate.exists() {
+                                smol::Timer::after(Duration::from_millis(10)).await;
+                            }
+                        }
+                        let id =
+                            format!("fake-{}", fake.next_session.fetch_add(1, Ordering::Relaxed));
+                        fake.record_mcp(&id.clone().into(), &request.mcp_servers);
+                        let options = fake.config_options(&id.clone().into());
+                        responder.respond(
+                            acp::NewSessionResponse::new(id.clone())
+                                .modes(modes())
+                                .config_options(options),
+                        )?;
+                        // Like claude-agent-acp: the commands follow the answer.
+                        let hint = acp::UnstructuredCommandInput::new("custom instructions");
+                        let commands = vec![
+                            acp::AvailableCommand::new("init", "Initialize a CLAUDE.md file"),
+                            acp::AvailableCommand::new("review", "Review a pull request"),
+                            acp::AvailableCommand::new(
+                                "compact",
+                                "Clear the history but keep a summary",
+                            )
+                            .input(acp::AvailableCommandInput::Unstructured(hint)),
+                            acp::AvailableCommand::new(
+                                "pr-review",
+                                "Comment on the open pull request",
+                            ),
+                        ];
+                        let update = acp::AvailableCommandsUpdate::new(commands);
+                        send(
+                            &cx_task,
+                            &id.into(),
+                            acp::SessionUpdate::AvailableCommandsUpdate(update),
                         )
-                        .input(acp::AvailableCommandInput::Unstructured(hint)),
-                        acp::AvailableCommand::new("pr-review", "Comment on the open pull request"),
-                    ];
-                    let update = acp::AvailableCommandsUpdate::new(commands);
-                    send(
-                        &cx,
-                        &id.into(),
-                        acp::SessionUpdate::AvailableCommandsUpdate(update),
-                    )
+                    })
                 }
             },
             agent_client_protocol::on_receive_request!(),

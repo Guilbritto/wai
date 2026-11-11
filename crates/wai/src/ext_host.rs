@@ -377,7 +377,7 @@ pub(crate) mod tests {
     use wai_settings::{AgentConfig, Settings};
 
     use crate::chat::{ChatItem, ChatSession, TurnState};
-    use crate::workspace::tests::{fake_settings, open, wait_until};
+    use crate::workspace::tests::{fake_settings, gated, open, wait_until};
     use crate::workspace::{Pane, Workspace};
 
     /// A binary of this workspace, next to the test binary's `deps/`.
@@ -966,11 +966,10 @@ pub(crate) mod tests {
         let config = tmp.path().join("config");
         let calls = r#"--call 'sessions/open {"agent": "slow", "prompt": "theirs"}'"#;
         install(tmp.path(), &config, OPENER, calls, "");
-        let mut settings = fake_settings("");
-        // `fake`, after 2 s: the extension's session prepares that long.
+        let (mut settings, gate) = gated("", tmp.path());
+        // `fake` again: the extension's session prepares on the same gate.
         let fake = settings.agents["fake"].command.clone();
-        let slow = format!("sleep 2; exec {fake}");
-        let command = format!("/bin/sh -c {}", wai_agent::quote(slow));
+        let command = format!("/bin/sh -c {}", wai_agent::quote(format!("exec {fake}")));
         settings
             .agents
             .insert("slow".into(), AgentConfig { command });
@@ -988,6 +987,7 @@ pub(crate) mod tests {
         workspace.read_with(cx, |w, _| {
             assert!(matches!(&w.panes[1], Pane::Preparing { agent, .. } if agent == "fake"))
         });
+        std::fs::write(&gate, "").unwrap();
         let mine = pane_session(&workspace, cx);
         assert_eq!(mine.read_with(cx, |s, _| s.agent.clone()), "fake");
 
@@ -999,7 +999,9 @@ pub(crate) mod tests {
             assert!(matches!(w.panes[0], Pane::Empty(_)));
             assert_eq!(w.panes[1].session(), Some(&mine), "in no pane");
             let draft = |s: &Entity<ChatSession>| s.read(cx).draft(cx);
-            assert_eq!(draft(&w.sessions[1]), "theirs");
+            // Both land once the gate opens: their order is not fixed.
+            let theirs = w.sessions.iter().find(|s| **s != mine).unwrap();
+            assert_eq!(draft(theirs), "theirs");
         });
     }
 }

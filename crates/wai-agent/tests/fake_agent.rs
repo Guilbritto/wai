@@ -1000,3 +1000,25 @@ fn program_parses_like_the_spawn() {
     assert_eq!(program("no-such-program-xyz --acp"), None);
     assert_eq!(program(""), None);
 }
+
+#[test]
+fn new_session_waits_for_its_gate() {
+    run(async {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = dir.path().join("gate");
+        let (agent, rx) = spawn(&["--new-session-gate", gate.to_str().unwrap()]);
+        ready(&rx).await;
+        let pending = agent.new_session(cwd(), vec![]);
+        let held = smol::future::or(async { pending.await.ok().map(|_| ()) }, async {
+            smol::Timer::after(Duration::from_millis(300)).await;
+            None
+        });
+        assert_eq!(
+            held.await,
+            None,
+            "session/new answered before the gate opened"
+        );
+        std::fs::write(&gate, "").unwrap();
+        assert!(agent.new_session(cwd(), vec![]).await.is_ok());
+    });
+}
