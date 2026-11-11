@@ -682,7 +682,7 @@ mod tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{ElementId, Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
-    use wai_agent::StopReason;
+    use wai_agent::{StopReason, SubagentState, ToolStatus};
     use wai_settings::{Change, Processing, Settings};
 
     use super::ChatSession;
@@ -751,6 +751,46 @@ mod tests {
                 md.read(cx).rendered_text().as_str().trim() == "Hello from fake agent"
             })
         });
+    }
+
+    /// A subagent shows as a card with its title, status and answer; its tool call stays inline,
+    /// tagged with it; its plan does not replace the session's.
+    #[gpui_kit::test]
+    fn subagent_shows_in_the_chat(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--subagent --plan"));
+        let session = start_session(&workspace, cx);
+        let sub = session.read_with(cx, |s, _| format!("{}-sub", s.id));
+
+        send("hi", cx);
+        wait_until(cx, "the subagent to finish", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.state == TurnState::Idle
+                    && s.model
+                        .subagents
+                        .iter()
+                        .any(|a| a.id == sub && a.state == SubagentState::Done)
+            })
+        });
+        let tool = |id: &str, cx: &mut VisualTestContext| {
+            session.read_with(cx, |s, _| {
+                s.model.items.iter().find_map(|item| match item {
+                    ChatItem::Tool(t) if t.id == id => Some(t.clone()),
+                    _ => None,
+                })
+            })
+        };
+        let card = tool(&sub, cx).expect("the subagent's card");
+        assert_eq!(card.status, ToolStatus::Completed);
+        assert_eq!(card.title, "Explore the code");
+        assert_eq!(card.text, "found it");
+        let read = tool("sub-read", cx).expect("the subagent's call");
+        assert_eq!(read.subagent.as_deref(), Some(sub.as_str()));
+        assert_eq!(session.read_with(cx, |s, _| s.model.plan.len()), 3);
+        assert_eq!(
+            last_agent_text(&session, cx).as_deref(),
+            Some("Hello from fake agent")
+        );
     }
 
     #[gpui_kit::test]

@@ -15,6 +15,20 @@
 //!   once (`$/cancel_request`).
 //! - `--ask-unsupported-question`: `--ask-question` with one more field `shape` of an unknown
 //!   schema type (`_shape`).
+//! - `--subagent`: before the reply, run a subagent `Explore the code` as a child session
+//!   `<session>-sub`: announced `running` on the parent; on the child a Read tool call `sub-read`
+//!   (`Read lib.rs`), a one-entry plan (`Sub step`), the text `sub text`, then the call completed;
+//!   then on the parent its reply `found it` (a `session_message`) and `idle` (`end_turn`). Like
+//!   claude-agent-acp, only for a client that advertised `subagents`. With `--ask-permission` or
+//!   `--ask-question`, the subagent asks (on the child, after `sub-read` starts; `requires_action`
+//!   on the parent before, `running` once answered), and the turn still replies `chose:…` or
+//!   `answered:…`.
+//! - `--background`: with `--subagent`, the subagent outlives the turn: the turn streams its reply
+//!   and ends right after the subagent's tool call starts (with `--ask-permission`, the request is
+//!   on the wire before the first reply chunk, and the turn does not wait for it). The rest
+//!   follows once that request is answered, or 100 ms after the turn ends without one.
+//! - `--withdraw-permission`: with `--ask-permission`, first send the same permission request and
+//!   withdraw it at once (`$/cancel_request`).
 //! - `--crash-after <n>`: after n chunks print `fake agent crashed` to stderr and exit 3.
 //! - `--require-auth`: `session/new` fails with the ACP auth-required error.
 //! - `--require-auth-on-prompt`: `session/prompt` fails with the ACP auth-required error.
@@ -52,7 +66,9 @@
 //! `missing` it fails with the ACP session-not-found error instead.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -61,6 +77,15 @@ use agent_client_protocol::v1::{ConnectionTo, schema as acp};
 use agent_client_protocol::{Agent, Client, Error, Stdio};
 
 const PAGE: usize = 10;
+
+/// A request the user answers, as the turn reports it (`chose:…`, `answered:…`).
+type Asked = Pin<Box<dyn Future<Output = Result<String, Error>> + Send>>;
+
+/// `--subagent`: the child session and, when it asked, its open request.
+struct Sub {
+    child: acp::SessionId,
+    asked: Option<Asked>,
+}
 
 #[derive(Clone, Copy)]
 enum EditKind {
@@ -75,6 +100,9 @@ struct Opts {
     chunk_delay: Duration,
     ask_permission: bool,
     plan: bool,
+    subagent: bool,
+    background: bool,
+    withdraw_permission: bool,
     ask_question: bool,
     withdraw_question: bool,
     unsupported_question: bool,
@@ -103,6 +131,9 @@ fn parse_args() -> Opts {
         chunk_delay: Duration::ZERO,
         ask_permission: false,
         plan: false,
+        subagent: false,
+        background: false,
+        withdraw_permission: false,
         ask_question: false,
         withdraw_question: false,
         unsupported_question: false,
@@ -144,6 +175,9 @@ fn parse_args() -> Opts {
             "--chunk-delay-ms" => opts.chunk_delay = Duration::from_millis(number(value()) as u64),
             "--ask-permission" => opts.ask_permission = true,
             "--plan" => opts.plan = true,
+            "--subagent" => opts.subagent = true,
+            "--background" => opts.background = true,
+            "--withdraw-permission" => opts.withdraw_permission = true,
             "--ask-question" => opts.ask_question = true,
             "--withdraw-question" => opts.withdraw_question = true,
             "--ask-unsupported-question" => {
@@ -180,6 +214,8 @@ struct Fake {
     cancelled: Mutex<HashSet<String>>,
     /// The client advertised `elicitation.form` at initialize.
     forms: AtomicBool,
+    /// The client advertised `subagents` at initialize.
+    subagents: AtomicBool,
     /// Per session: the MCP servers it got, as `--echo-mcp` reports them.
     mcp: Mutex<HashMap<String, String>>,
     /// `--models`: per session, the chosen value of each config option.
@@ -259,7 +295,7 @@ impl Fake {
     }
 
     async fn turn(
-        &self,
+        self: &Arc<Self>,
         cx: &ConnectionTo<Client>,
         session: &acp::SessionId,
     ) -> Result<acp::StopReason, Error> {
@@ -322,6 +358,21 @@ impl Fake {
                 return Ok(reason);
             }
         }
+        // --subagent: the child asks in the turn's place; --background leaves it running.
+        let sub = match self.opts.subagent && self.subagents.load(Ordering::Relaxed) {
+            true => Some(self.subagent_start(cx, session)?),
+            false => None,
+        };
+        let (answer, background) = match sub {
+            Some(sub) if self.opts.background => (None, Some(sub)),
+            Some(sub) => {
+                let finish = self
+                    .clone()
+                    .subagent_finish(cx.clone(), session.clone(), sub);
+                (finish.await?, None)
+            }
+            None => (None, None),
+        };
         let reply = if self.opts.models {
             let options = self.config_options(session).unwrap_or_default();
             let model = options.into_iter().next().and_then(|o| match o.kind {
@@ -332,14 +383,106 @@ impl Fake {
         } else if self.opts.echo_mcp {
             let mcp = self.mcp.lock().expect("mcp poisoned");
             format!("mcp:{}", mcp.get(&*session.0).map_or("", String::as_str))
-        } else if self.opts.ask_permission {
-            format!("chose:{}", self.ask_permission(cx, session).await?)
-        } else if self.opts.ask_question {
-            format!("answered:{}", self.ask_question(cx, session).await?)
-        } else {
+        } else if let Some(answer) = answer {
+            answer
+        } else if background.is_some() || !(self.opts.ask_permission || self.opts.ask_question) {
             self.opts.reply.clone()
+        } else if self.opts.ask_permission {
+            format!("chose:{}", self.ask_permission(cx, session)?.await?)
+        } else {
+            format!("answered:{}", self.ask_question(cx, session)?.await?)
         };
-        self.stream(cx, session, &reply).await
+        let reason = self.stream(cx, session, &reply).await?;
+        if let Some(sub) = background {
+            let (fake, cx, session) = (self.clone(), cx.clone(), session.clone());
+            cx.clone()
+                .spawn(async move { fake.subagent_finish(cx, session, sub).await.map(drop) })?;
+        }
+        Ok(reason)
+    }
+
+    /// `--subagent`: the child session `<session>-sub` starts its work, announced on the parent,
+    /// and asks (`--ask-permission`, `--ask-question`) on the child.
+    fn subagent_start(
+        &self,
+        cx: &ConnectionTo<Client>,
+        session: &acp::SessionId,
+    ) -> Result<Sub, Error> {
+        let child = acp::SessionId::new(format!("{session}-sub"));
+        let announce = acp::SubagentUpdate::new(child.clone())
+            .title("Explore the code".to_string())
+            .state(acp::StateUpdate::Running(acp::RunningStateUpdate::new()));
+        send(cx, session, acp::SessionUpdate::SubagentUpdate(announce))?;
+        let call = acp::ToolCall::new("sub-read", "Read lib.rs")
+            .kind(acp::ToolKind::Read)
+            .status(acp::ToolCallStatus::InProgress);
+        send(cx, &child, acp::SessionUpdate::ToolCall(call))?;
+        let entry = acp::PlanEntry::new(
+            "Sub step",
+            acp::PlanEntryPriority::Medium,
+            acp::PlanEntryStatus::InProgress,
+        );
+        let plan = acp::SessionUpdate::Plan(acp::Plan::new(vec![entry]));
+        send(cx, &child, plan)?;
+        send(
+            cx,
+            &child,
+            acp::SessionUpdate::AgentMessageChunk(chunk("sub text")),
+        )?;
+        let asked = if self.opts.ask_permission || self.opts.ask_question {
+            let waiting = acp::StateUpdate::RequiresAction(acp::RequiresActionStateUpdate::new());
+            send(cx, session, subagent_state(&child, waiting))?;
+            Some(if self.opts.ask_permission {
+                let asked = self.ask_permission(cx, &child)?;
+                Box::pin(async move { Ok(format!("chose:{}", asked.await?)) }) as Asked
+            } else {
+                let asked = self.ask_question(cx, &child)?;
+                Box::pin(async move { Ok(format!("answered:{}", asked.await?)) })
+            })
+        } else {
+            None
+        };
+        Ok(Sub { child, asked })
+    }
+
+    /// The rest of the child's work: once its request is answered (`running` again on the
+    /// parent), the call completes, the child answers the parent and goes `idle`. Returns the
+    /// turn's reply for what was asked.
+    async fn subagent_finish(
+        self: Arc<Self>,
+        cx: ConnectionTo<Client>,
+        session: acp::SessionId,
+        sub: Sub,
+    ) -> Result<Option<String>, Error> {
+        let answer = match sub.asked {
+            Some(asked) => {
+                let answer = asked.await?;
+                let running = acp::StateUpdate::Running(acp::RunningStateUpdate::new());
+                send(&cx, &session, subagent_state(&sub.child, running))?;
+                Some(answer)
+            }
+            None => {
+                if self.opts.background {
+                    smol::Timer::after(Duration::from_millis(100)).await;
+                }
+                None
+            }
+        };
+        let fields = acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Completed);
+        let update = acp::ToolCallUpdate::new("sub-read", fields);
+        send(&cx, &sub.child, acp::SessionUpdate::ToolCallUpdate(update))?;
+        let reply = acp::SessionMessage::new("sub-reply")
+            .sender_session_id(sub.child.clone())
+            .recipient_session_id(session.clone())
+            .content(vec![text_block("found it")]);
+        send(&cx, &session, acp::SessionUpdate::SessionMessage(reply))?;
+        let idle = acp::IdleStateUpdate::new().stop_reason(acp::IdleStopReason::EndTurn);
+        send(
+            &cx,
+            &session,
+            subagent_state(&sub.child, acp::StateUpdate::Idle(idle)),
+        )?;
+        Ok(answer)
     }
 
     /// Streams `reply` one word per chunk.
@@ -456,11 +599,13 @@ impl Fake {
         send(cx, session, acp::SessionUpdate::ToolCallUpdate(update))
     }
 
-    async fn ask_permission(
+    /// Sends the `edit-1` call and its permission request on `session`; the future is the
+    /// answer: the option id, or `cancelled`.
+    fn ask_permission(
         &self,
         cx: &ConnectionTo<Client>,
         session: &acp::SessionId,
-    ) -> Result<String, Error> {
+    ) -> Result<Asked, Error> {
         let diff = acp::ToolCallContent::Diff(acp::Diff::new("notes.md", "hi\n"));
         let call = acp::ToolCall::new("edit-1", "Write notes.md")
             .kind(acp::ToolKind::Edit)
@@ -486,20 +631,29 @@ impl Fake {
             acp::ToolCallUpdate::new("edit-1", fields),
             options,
         );
-        let response = cx.send_request(request).block_task().await?;
-        Ok(match response.outcome {
-            acp::RequestPermissionOutcome::Selected(s) => s.option_id.to_string(),
-            _ => "cancelled".into(),
-        })
+        if self.opts.withdraw_permission {
+            // Dropping the sent request withdraws it with `$/cancel_request`.
+            drop(cx.send_request(request.clone()));
+        }
+        let sent = cx.send_request(request);
+        Ok(Box::pin(async move {
+            let response = sent.block_task().await?;
+            Ok(match response.outcome {
+                acp::RequestPermissionOutcome::Selected(s) => s.option_id.to_string(),
+                _ => "cancelled".into(),
+            })
+        }))
     }
 
-    async fn ask_question(
+    /// Sends the form on `session`; the future is the answer: its JSON, `declined`, `cancelled`
+    /// or `unsupported`.
+    fn ask_question(
         &self,
         cx: &ConnectionTo<Client>,
         session: &acp::SessionId,
-    ) -> Result<String, Error> {
+    ) -> Result<Asked, Error> {
         if !self.forms.load(Ordering::Relaxed) {
-            return Ok("unsupported".into());
+            return Ok(Box::pin(async { Ok("unsupported".into()) }));
         }
         let mut schema = acp::ElicitationSchema::new()
             .property(
@@ -530,15 +684,18 @@ impl Fake {
             // Dropping the sent request withdraws it with `$/cancel_request`.
             drop(cx.send_request(request.clone()));
         }
-        let response = cx.send_request(request).block_task().await?;
-        Ok(match response.action {
-            acp::ElicitationAction::Accept(accept) => {
-                serde_json::to_string(&accept.content.unwrap_or_default())
-                    .map_err(Error::into_internal_error)?
-            }
-            acp::ElicitationAction::Decline => "declined".into(),
-            _ => "cancelled".into(),
-        })
+        let sent = cx.send_request(request);
+        Ok(Box::pin(async move {
+            let response = sent.block_task().await?;
+            Ok(match response.action {
+                acp::ElicitationAction::Accept(accept) => {
+                    serde_json::to_string(&accept.content.unwrap_or_default())
+                        .map_err(Error::into_internal_error)?
+                }
+                acp::ElicitationAction::Decline => "declined".into(),
+                _ => "cancelled".into(),
+            })
+        }))
     }
 }
 
@@ -548,6 +705,11 @@ fn text_block(text: impl Into<String>) -> acp::ContentBlock {
 
 fn chunk(text: impl Into<String>) -> acp::ContentChunk {
     acp::ContentChunk::new(text_block(text))
+}
+
+/// A `subagent_update` of `child`'s state, for its parent.
+fn subagent_state(child: &acp::SessionId, state: acp::StateUpdate) -> acp::SessionUpdate {
+    acp::SessionUpdate::SubagentUpdate(acp::SubagentUpdate::new(child.clone()).state(state))
 }
 
 fn send(
@@ -582,6 +744,7 @@ fn main() -> Result<(), Error> {
         next_session: AtomicU64::new(1),
         cancelled: Mutex::default(),
         forms: AtomicBool::new(false),
+        subagents: AtomicBool::new(false),
         mcp: Mutex::default(),
         config: Mutex::default(),
     });
@@ -601,6 +764,8 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                         .elicitation
                         .is_some_and(|e| e.supports_form());
                     fake.forms.store(forms, Ordering::Relaxed);
+                    let subagents = request.client_capabilities.subagents.is_some();
+                    fake.subagents.store(subagents, Ordering::Relaxed);
                     let caps = acp::AgentCapabilities::new()
                         .load_session(!fake.opts.no_load)
                         .prompt_capabilities(acp::PromptCapabilities::new().image(true))

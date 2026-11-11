@@ -145,6 +145,32 @@ pub enum SessionEvent {
     ModeChanged(String),
     ConfigChanged(Vec<ConfigOption>),
     Commands(Vec<CommandInfo>),
+    /// A subagent of the session was announced, or changed its title or state.
+    Subagent(SubagentPatch),
+    /// A subagent's answer to the session.
+    SubagentReply {
+        id: SessionId,
+        text: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentState {
+    Running,
+    NeedsYou,
+    Done,
+    Stopped,
+    Failed,
+    Ended,
+    Unknown,
+}
+
+/// `None` means unchanged. ponytail: a `null` clear also reads as unchanged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubagentPatch {
+    pub id: SessionId,
+    pub title: Option<String>,
+    pub state: Option<SubagentState>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -155,6 +181,8 @@ pub struct ToolCallView {
     pub status: ToolStatus,
     pub content: Vec<ToolContent>,
     pub locations: Vec<Location>,
+    /// The subagent session that made the call; `None` for the session's own.
+    pub subagent: Option<SessionId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -217,6 +245,9 @@ pub struct PermissionRequest {
     pub title: String,
     pub diff: Option<FileDiff>,
     pub options: Vec<PermissionChoice>,
+    /// The subagent session that asked; then `session` is its root, the open session the card
+    /// shows in.
+    pub subagent: Option<SessionId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -240,6 +271,8 @@ pub struct QuestionRequest {
     pub session: SessionId,
     pub message: String,
     pub fields: Vec<QuestionField>,
+    /// As `PermissionRequest::subagent`.
+    pub subagent: Option<SessionId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

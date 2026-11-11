@@ -34,6 +34,7 @@ pub(crate) fn session_event(update: acp::SessionUpdate) -> Option<SessionEvent> 
             status: tool_status(t.status),
             content: tool_contents(t.content),
             locations: locations(t.locations),
+            subagent: None,
         }),
         U::ToolCallUpdate(u) => SessionEvent::ToolCallUpdate(ToolCallPatch {
             id: u.tool_call_id.to_string(),
@@ -73,6 +74,60 @@ pub(crate) fn session_event(update: acp::SessionUpdate) -> Option<SessionEvent> 
                 .collect(),
         ),
         _ => return None,
+    })
+}
+
+pub(crate) fn subagent_patch(u: acp::SubagentUpdate) -> SubagentPatch {
+    use acp::{IdleStopReason as R, StateUpdate as S};
+    let state = match u.state {
+        MaybeUndefined::Value(S::Running(_)) => Some(SubagentState::Running),
+        MaybeUndefined::Value(S::RequiresAction(_)) => Some(SubagentState::NeedsYou),
+        MaybeUndefined::Value(S::Idle(idle)) => Some(match idle.stop_reason {
+            Some(R::EndTurn) => SubagentState::Done,
+            Some(R::Cancelled) => SubagentState::Stopped,
+            Some(R::Error(_)) => SubagentState::Failed,
+            _ => SubagentState::Ended,
+        }),
+        MaybeUndefined::Value(_) => Some(SubagentState::Unknown),
+        _ => None,
+    };
+    SubagentPatch {
+        id: u.session_id.to_string(),
+        title: match u.title {
+            MaybeUndefined::Value(title) => Some(title),
+            _ => None,
+        },
+        state,
+    }
+}
+
+/// A subagent's message to `session`: its text blocks, joined. `None` for the session's own
+/// outgoing message, or one without text. ponytail: `session_message_chunk` is not read, because
+/// the adapter sends whole messages on v1.
+pub(crate) fn subagent_reply(m: acp::SessionMessage, session: &str) -> Option<SessionEvent> {
+    let id = match m.sender_session_id {
+        MaybeUndefined::Value(id) if id.0.as_ref() != session => id.to_string(),
+        _ => return None,
+    };
+    let MaybeUndefined::Value(content) = m.content else {
+        return None;
+    };
+    let text: Vec<String> = content.into_iter().filter_map(text).collect();
+    if text.is_empty() {
+        return None;
+    }
+    let text = text.join("\n");
+    // Claude Code opens the summary with `<tools-used-before-summary>…</…>`: not the answer.
+    const END: &str = "</tools-used-before-summary>";
+    let text = match text.strip_prefix("<tools-used-before-summary>") {
+        Some(rest) => rest
+            .split_once(END)
+            .map_or(text.as_str(), |(_, a)| a.trim_start()),
+        None => text.as_str(),
+    };
+    Some(SessionEvent::SubagentReply {
+        id,
+        text: text.to_string(),
     })
 }
 
@@ -143,6 +198,7 @@ pub(crate) fn permission_request(
                 },
             })
             .collect(),
+        subagent: None,
     }
 }
 
@@ -182,6 +238,7 @@ pub(crate) fn question_request(
         session,
         message: req.message,
         fields,
+        subagent: None,
     })
 }
 
@@ -388,6 +445,27 @@ pub(crate) fn content_block(block: PromptBlock) -> acp::ContentBlock {
 mod tests {
     use super::*;
 
+    /// Claude Code opens a subagent's summary with the tools it used, in its own markup; the
+    /// card shows only the answer.
+    #[test]
+    fn subagent_reply_drops_the_tools_used_markup() {
+        let reply = |t: &str| {
+            let m = acp::SessionMessage::new("m")
+                .sender_session_id(acp::SessionId::new("c"))
+                .content(vec![acp::ContentBlock::Text(acp::TextContent::new(t))]);
+            match subagent_reply(m, "r") {
+                Some(SessionEvent::SubagentReply { text, .. }) => text,
+                other => panic!("{other:?}"),
+            }
+        };
+        let tagged = "<tools-used-before-summary>Read</tools-used-before-summary>\n\nwai";
+        assert_eq!(reply(tagged), "wai");
+        assert_eq!(reply("wai"), "wai");
+        // Only a leading block is markup; the same words later are the agent's text.
+        let quoted = "see <tools-used-before-summary>x</tools-used-before-summary>";
+        assert_eq!(reply(quoted), quoted);
+    }
+
     #[test]
     fn mcp_servers_are_stdio_with_args_and_env() {
         let server = McpServer {
@@ -425,7 +503,7 @@ mod tests {
         serde_json::from_value(json).unwrap()
     }
 
-    /// The form claude-agent-acp 0.101.0 builds for AskUserQuestion
+    /// The form claude-agent-acp 0.103.0 builds for AskUserQuestion
     /// (`askUserQuestionsToCreateRequest`): a titled single-select (`oneOf`), a titled
     /// multi-select (`items.anyOf`) and a free-text "Other" per question, nothing required.
     #[test]

@@ -6,8 +6,8 @@ use async_channel::Receiver;
 use wai_agent::{
     AgentCaps, AgentError, AgentEvent, AgentHandle, AgentSpec, BrokerError, Choice, ChoiceKind,
     ConfigCategory, ConfigOption, ConfigValue, FieldKind, McpServer, PermissionRequest,
-    PromptBlock, QuestionAnswer, QuestionRequest, SessionEvent, StopReason, ToolContent, program,
-    quote,
+    PromptBlock, QuestionAnswer, QuestionRequest, SessionEvent, StopReason, SubagentPatch,
+    SubagentState, ToolContent, program, quote,
 };
 
 fn run(test: impl Future<Output = ()>) {
@@ -644,6 +644,257 @@ fn set_config_switches_the_model() {
         agent.prompt(session.id, hello());
         let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
         assert_eq!(agent_text(&events), "model:fake-large");
+    });
+}
+
+/// A subagent's traffic (`--subagent`) comes out as the parent's: its announcement and states,
+/// its tool call tagged with it, its reply; not its text or its plan.
+#[test]
+fn subagent_traffic_reaches_the_parent() {
+    run(async {
+        let (agent, rx) = spawn(&["--subagent"]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        agent.prompt(session.id.clone(), hello());
+        let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+
+        let sub = format!("{}-sub", session.id);
+        let updates: Vec<&SessionEvent> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Update { session: s, event } => {
+                    assert_eq!(*s, session.id, "{event:?}");
+                    Some(event)
+                }
+                _ => None,
+            })
+            .collect();
+        let patch = |state| {
+            SessionEvent::Subagent(SubagentPatch {
+                id: sub.clone(),
+                title: Some("Explore the code".into()),
+                state: Some(state),
+            })
+        };
+        let position = |want: &SessionEvent| updates.iter().position(|e| *e == want);
+        let running = position(&patch(SubagentState::Running)).expect("running");
+        let done = updates
+            .iter()
+            .position(|e| {
+                matches!(e, SessionEvent::Subagent(p) if p.id == sub && p.state == Some(SubagentState::Done))
+            })
+            .expect("done");
+        assert!(running < done);
+        assert!(
+            updates.iter().any(|e| matches!(e, SessionEvent::ToolCall(v)
+                if v.id == "sub-read" && v.subagent.as_deref() == Some(sub.as_str()))),
+            "{updates:?}"
+        );
+        assert!(updates.contains(&&SessionEvent::SubagentReply {
+            id: sub.clone(),
+            text: "found it".into(),
+        }));
+        assert!(!updates.iter().any(|e| matches!(e, SessionEvent::Plan(_))));
+        assert_eq!(agent_text(&events), "Hello from fake agent");
+    });
+}
+
+/// With `--subagent`, the permission is asked by the subagent: the card shows in the parent
+/// session, tagged with the subagent, and the answer reaches the agent.
+#[test]
+fn subagent_permission_reaches_the_parent() {
+    run(async {
+        let (agent, rx) = spawn(&["--subagent", "--ask-permission"]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        agent.prompt(session.id.clone(), hello());
+
+        let request = permission(&rx).await;
+        assert_eq!(request.session, session.id);
+        assert_eq!(request.subagent, Some(format!("{}-sub", session.id)));
+        assert_eq!(
+            agent.answer_permission(request.id, Some("allow-once".into())),
+            Ok(())
+        );
+        let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+        assert!(
+            agent_text(&events).contains("chose:allow-once"),
+            "{events:?}"
+        );
+    });
+}
+
+#[test]
+fn subagent_question_reaches_the_parent() {
+    run(async {
+        let (agent, rx) = spawn(&["--subagent", "--ask-question"]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        agent.prompt(session.id.clone(), hello());
+
+        let q = question(&rx).await;
+        assert_eq!(q.session, session.id);
+        assert_eq!(q.subagent, Some(format!("{}-sub", session.id)));
+        assert_eq!(agent.answer_question(q.id, QuestionAnswer::Decline), Ok(()));
+        let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+        assert!(
+            agent_text(&events).contains("answered:declined"),
+            "{events:?}"
+        );
+    });
+}
+
+fn subagent_state(e: &AgentEvent, want: SubagentState) -> bool {
+    matches!(
+        e,
+        AgentEvent::Update {
+            event: SessionEvent::Subagent(SubagentPatch { state: Some(s), .. }),
+            ..
+        } if *s == want
+    )
+}
+
+/// Review focus 2: Stop cancels only the session's own requests; a background subagent's card
+/// stays open and still answers.
+#[test]
+fn stop_leaves_a_background_subagents_request_open() {
+    run(async {
+        let reply = vec!["word"; 200].join(" ");
+        let (agent, rx) = spawn(&[
+            "--subagent",
+            "--background",
+            "--ask-permission",
+            "--reply",
+            &reply,
+            "--chunk-delay-ms",
+            "20",
+        ]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        agent.prompt(session.id.clone(), hello());
+        let request = permission(&rx).await;
+
+        agent.cancel(session.id.clone());
+        let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+        assert_eq!(
+            events.last(),
+            Some(&AgentEvent::TurnEnded {
+                session: session.id,
+                reason: StopReason::Cancelled
+            })
+        );
+        assert!(
+            !events.contains(&AgentEvent::PermissionResolved { id: request.id }),
+            "{events:?}"
+        );
+        assert_eq!(
+            agent.answer_permission(request.id, Some("allow-once".into())),
+            Ok(())
+        );
+        until(&rx, |e| subagent_state(e, SubagentState::Done)).await;
+    });
+}
+
+/// Review focus 2: the agent withdraws a permission request (`$/cancel_request`), as it does
+/// for a foreground subagent it stops; the card closes on its own.
+#[test]
+fn withdrawn_permission_resolves_on_its_own() {
+    run(async {
+        let (agent, rx) = spawn(&["--ask-permission", "--withdraw-permission"]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        agent.prompt(session.id.clone(), hello());
+        let withdrawn = permission(&rx).await;
+
+        let (mut resolved, mut next) = (false, None);
+        until(&rx, |e| {
+            match e {
+                AgentEvent::PermissionResolved { id } if *id == withdrawn.id => resolved = true,
+                AgentEvent::PermissionRequested(p) => next = Some(p.id),
+                _ => {}
+            }
+            resolved && next.is_some()
+        })
+        .await;
+        assert_eq!(
+            agent.answer_permission(withdrawn.id, Some("allow-once".into())),
+            Err(BrokerError::Stale)
+        );
+        assert_eq!(
+            agent.answer_permission(next.unwrap(), Some("allow-once".into())),
+            Ok(())
+        );
+        let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+        assert!(
+            agent_text(&events).contains("chose:allow-once"),
+            "{events:?}"
+        );
+    });
+}
+
+#[test]
+fn background_subagent_ends_after_the_turn() {
+    run(async {
+        let (agent, rx) = spawn(&["--subagent", "--background"]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        agent.prompt(session.id.clone(), hello());
+
+        let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+        assert_eq!(
+            events.last(),
+            Some(&AgentEvent::TurnEnded {
+                session: session.id,
+                reason: StopReason::EndTurn
+            })
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| subagent_state(e, SubagentState::Running))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| subagent_state(e, SubagentState::Done))
+        );
+        until(&rx, |e| subagent_state(e, SubagentState::Done)).await;
+    });
+}
+
+/// Review focus 1: a background subagent's permission outlives the turn, and its answer still
+/// reaches the agent.
+#[test]
+fn background_permission_outlives_the_turn() {
+    run(async {
+        let (agent, rx) = spawn(&["--subagent", "--background", "--ask-permission"]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        agent.prompt(session.id.clone(), hello());
+
+        let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+        let request = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::PermissionRequested(p) => Some(p.clone()),
+                _ => None,
+            })
+            .expect("the permission before the turn ended");
+        assert!(request.subagent.is_some());
+        assert!(
+            events
+                .iter()
+                .any(|e| subagent_state(e, SubagentState::NeedsYou))
+        );
+        assert!(
+            !events.contains(&AgentEvent::PermissionResolved { id: request.id }),
+            "{events:?}"
+        );
+        assert_eq!(
+            agent.answer_permission(request.id, Some("allow-once".into())),
+            Ok(())
+        );
+        until(&rx, |e| subagent_state(e, SubagentState::Done)).await;
     });
 }
 

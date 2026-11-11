@@ -678,6 +678,7 @@ mod tests {
             locations,
             first_sight: vec![],
             expanded: false,
+            subagent: None,
         }
     }
 

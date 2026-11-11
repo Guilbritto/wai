@@ -554,6 +554,7 @@ mod tests {
             locations: Vec::new(),
             first_sight: Vec::new(),
             expanded: false,
+            subagent: None,
         });
         let items = [user(), agent(), tool, agent()];
         assert!(starts_reply(&items, 1));
