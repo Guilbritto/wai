@@ -244,6 +244,27 @@ pub(crate) fn badge(text: impl Into<SharedString>, cx: &App) -> Div {
         .child(text.into())
 }
 
+/// "Coming soon": amber in dark mode, the theme's warning in light.
+pub(crate) fn soon(cx: &App) -> Div {
+    let theme = cx.theme();
+    let color = if theme.is_dark() {
+        ambar()
+    } else {
+        theme.warning
+    };
+    div()
+        .px(px(8.))
+        .py(px(2.))
+        .rounded_full()
+        .border_1()
+        .border_color(color.opacity(0.35))
+        .bg(color.opacity(0.10))
+        .text_size(px(10.5))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(color)
+        .child("Coming soon")
+}
+
 /// A selectable chip for tabs and rows (`.janela-aba`): the selected one is lilas-tinted. The
 /// caller sets size and radius. Light mode: theme tokens.
 pub(crate) fn tab(active: bool, cx: &App) -> Div {

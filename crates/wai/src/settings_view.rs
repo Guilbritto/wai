@@ -2,7 +2,8 @@
 //! shows what the workspace gives it (`set`) and says what the user changed (`SettingsEvent`);
 //! the workspace writes the user's file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::path::PathBuf;
 
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -15,12 +16,15 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::*;
+use wai_settings::claude::{ClaudeData, Stamp};
 use wai_settings::{Change, Processing, SeenModel, Settings, ThemeChoice, agent_label, builtin};
 
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::extensions_view::ExtensionsView;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+mod claude;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Section {
     Ai,
     Appearance,
@@ -28,6 +32,7 @@ pub enum Section {
     Terminal,
     Updates,
     Extensions,
+    Plugins,
 }
 
 impl Section {
@@ -39,6 +44,7 @@ impl Section {
             Section::Terminal => "Terminal",
             Section::Updates => "Updates",
             Section::Extensions => "Extensions",
+            Section::Plugins => "Plugins",
         }
     }
 
@@ -50,6 +56,7 @@ impl Section {
             Section::Terminal => "terminal",
             Section::Updates => "updates",
             Section::Extensions => "extensions",
+            Section::Plugins => "plugins",
         }
     }
 
@@ -61,22 +68,26 @@ impl Section {
             Section::Terminal => "The shell the terminal runs.",
             Section::Updates => "Whether wai looks for new versions.",
             Section::Extensions => "Programs that add panels, commands and agents to wai.",
+            Section::Plugins => "Plugins add skills, agents, hooks and MCP servers to Claude Code.",
         }
     }
 }
 
 /// The nav's groups, each with its label and sections.
-pub(crate) const NAV: &[(&str, &[Section])] = &[(
-    "wai",
-    &[
-        Section::Ai,
-        Section::Appearance,
-        Section::Conversation,
-        Section::Terminal,
-        Section::Updates,
-        Section::Extensions,
-    ],
-)];
+pub(crate) const NAV: &[(&str, &[Section])] = &[
+    (
+        "wai",
+        &[
+            Section::Ai,
+            Section::Appearance,
+            Section::Conversation,
+            Section::Terminal,
+            Section::Updates,
+            Section::Extensions,
+        ],
+    ),
+    ("Claude", &[Section::Plugins]),
+];
 
 /// 88% x 86% of the viewport; maximized, the viewport less 24 px on each axis.
 pub(crate) fn modal_size(viewport: Size<Pixels>, maximized: bool) -> Size<Pixels> {
@@ -168,12 +179,20 @@ pub struct SettingsData {
     /// The title's suffix: the default agent and the project.
     pub context: String,
     pub extensions: Option<Entity<ExtensionsView>>,
+    /// Where `~/.claude` lives: paths on the Claude pages are shown relative to it.
+    pub home: PathBuf,
 }
 
 pub enum SettingsEvent {
     Change(Change),
     OpenFile,
     Test(String),
+    /// `seen` is the settings.json stamp the switch was shown with.
+    TogglePlugin {
+        id: String,
+        on: bool,
+        seen: Stamp,
+    },
 }
 
 #[derive(Clone)]
@@ -267,6 +286,12 @@ pub struct SettingsView {
     editing: [bool; 3],
     /// `data` changed: the fields show it at the next frame.
     stale: bool,
+    /// Read off the UI thread: `None` until it lands.
+    claude: Option<ClaudeData>,
+    /// A write is out: the switches wait for it.
+    busy: bool,
+    /// Groups the user flipped from their default (open or closed), per page.
+    toggled: HashSet<(Section, usize)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -342,6 +367,9 @@ impl SettingsView {
             advanced: None,
             editing: [false; 3],
             stale: true,
+            claude: None,
+            busy: false,
+            toggled: HashSet::new(),
             _subscriptions: subscriptions,
         };
         this.sync(window, cx);
@@ -381,6 +409,7 @@ impl SettingsView {
             Section::Extensions => {
                 (self.data.extensions.as_ref()).map(|ext| ext.read(cx).store().list().len())
             }
+            Section::Plugins => self.claude.as_ref().map(|d| d.plugins.len()),
             _ => None,
         }
     }
@@ -709,6 +738,7 @@ impl Render for SettingsView {
             .collect();
         let ai = section == Section::Ai;
         let extensions = section == Section::Extensions;
+        let claude_page = section == Section::Plugins;
         let agents: Vec<_> = if ai {
             (self.data.agents.iter())
                 .filter(|a| a.label.to_lowercase().contains(&query))
@@ -759,12 +789,17 @@ impl Render for SettingsView {
             v_flex()
                 .gap_1()
                 .child(
-                    div()
+                    h_flex()
+                        .gap_1()
                         .px_2()
                         .pt_3()
                         .pb_1()
                         .text_size(px(11.))
                         .text_color(faint)
+                        .children(
+                            (*label == "Claude")
+                                .then(|| div().text_color(aurora::brasa()).child("✳")),
+                        )
                         .child(label.to_uppercase()),
                 )
                 .children(sections.iter().map(|&s| {
@@ -864,16 +899,27 @@ impl Render for SettingsView {
                             .p(px(30.))
                             .gap_4()
                             .child(
-                                v_flex()
-                                    .gap_1()
+                                h_flex()
+                                    .items_start()
+                                    .gap_4()
                                     .child(
-                                        div()
-                                            .font_family(DISPLAY_FONT)
-                                            .text_size(px(26.))
-                                            .font_weight(FontWeight::BOLD)
-                                            .child(section.title()),
+                                        v_flex()
+                                            .flex_1()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .font_family(DISPLAY_FONT)
+                                                    .text_size(px(26.))
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .child(section.title()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_color(muted)
+                                                    .child(section.description()),
+                                            ),
                                     )
-                                    .child(div().text_color(muted).child(section.description())),
+                                    .children(self.claude_actions(section, cx)),
                             )
                             .children(banner)
                             .children((!extensions).then(|| Input::new(&self.search).small()))
@@ -881,6 +927,7 @@ impl Render for SettingsView {
                             .children(project)
                             .children(agents.iter().map(|a| self.agent_row(a, cx)))
                             .children(rows.into_iter().map(|label| self.rows(label, cx)))
+                            .children(claude_page.then(|| self.claude_page(section, &query, cx)))
                             .children(advanced)
                             .children(extensions.then(|| self.data.extensions.clone()).flatten()),
                     ),
@@ -924,6 +971,7 @@ mod tests {
             agents: Vec::new(),
             project_default: None,
             extensions: None,
+            home: Default::default(),
         }
     }
 

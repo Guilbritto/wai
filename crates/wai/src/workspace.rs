@@ -160,6 +160,9 @@ pub struct Workspace {
     /// The config dir: the user's `templates.toml` (re-read on a project switch) and `scratch/`,
     /// where tool outputs open from (R21; cleared at launch).
     pub user_dir: PathBuf,
+    /// Whose `~/.claude` the Claude pages of Settings read.
+    pub(crate) claude_home: PathBuf,
+    pub(crate) claude_task: Option<Task<()>>,
     pub registry: Entity<AgentRegistry>,
     /// Every open session, shown in a pane or not, in the order they opened.
     pub sessions: Vec<Entity<ChatSession>>,
@@ -354,6 +357,8 @@ impl Workspace {
             settings,
             templates: Vec::new(),
             user_dir: config_dir(),
+            claude_home: wai_settings::claude::claude_home(),
+            claude_task: None,
             registry,
             agents,
             agents_right: false,
@@ -1978,6 +1983,7 @@ impl Workspace {
             notice,
             context: self.settings_context(),
             extensions: self.extensions.clone(),
+            home: self.claude_home.clone(),
             agents: self.agent_rows(cx),
             project_default: wai_settings::project_default_agent(&self.project)
                 .filter(|p| Some(p) == self.settings.default_agent.as_ref()),
@@ -2085,6 +2091,7 @@ impl Workspace {
         let notice = notice.map(|n| SharedString::from(n.to_string()));
         self.extensions(window, cx);
         let data = self.settings_data(notice, cx);
+        self.refresh_claude(cx);
         if let Some(view) = self.settings_view() {
             view.update(cx, |v, cx| {
                 v.show(section, window, cx);
@@ -2110,6 +2117,9 @@ impl Workspace {
                     this.open_file(path, None, window, cx)
                 }
                 SettingsEvent::Test(id) => this.test_agent(id, window, cx),
+                SettingsEvent::TogglePlugin { id, on, seen } => {
+                    this.toggle_plugin(id.clone(), *on, *seen, window, cx)
+                }
             },
         )
         .detach();
@@ -2653,7 +2663,8 @@ pub(crate) mod tests {
             .expect("open window");
         // set_project re-reads the user's templates: never the developer's.
         workspace.update(cx, |w, _| {
-            w.user_dir = std::env::temp_dir().join("wai-no-config")
+            w.user_dir = std::env::temp_dir().join("wai-no-config");
+            w.claude_home = std::env::temp_dir().join("wai-no-claude");
         });
         let window = cx.update(|cx| cx.windows()[0]);
         let cx = Box::leak(Box::new(VisualTestContext::from_window(window, cx)));
@@ -4333,7 +4344,7 @@ pub(crate) mod tests {
         cx.run_until_parked();
     }
 
-    pub(crate) fn click(id: &'static str, cx: &mut VisualTestContext) {
+    pub(crate) fn click(id: impl Into<ElementId>, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             window.render_frame(cx);
             window.click(id, cx);
