@@ -567,9 +567,24 @@ pub(crate) mod tests {
         cx.simulate_keystrokes("secondary-shift-p");
         cx.simulate_input("sample/echo");
         cx.simulate_keystrokes("enter");
+        let drafted = workspace.read_with(cx, |w, cx| {
+            let draft = w.panes.iter().find_map(|p| p.draft());
+            draft.map(|d| d.read(cx).agent.clone())
+        });
+        assert_eq!(drafted.as_deref(), Some("sample/echo"));
+        cx.simulate_input("hi");
+        cx.simulate_keystrokes("enter");
         let session = pane_session(&workspace, cx);
         assert_eq!(session.read_with(cx, |s, _| s.agent.clone()), "sample/echo");
-        assert_eq!(turn(&session, "hi", cx), "from the extension");
+        wait_until(cx, "the answer", |cx| {
+            session.read_with(cx, |s, _| s.model.state == TurnState::Idle)
+                && matches!(items(&session, cx).last(), Some(ChatItem::Agent { .. }))
+        });
+        let answer = match items(&session, cx).pop() {
+            Some(ChatItem::Agent { text }) => text,
+            other => unreachable!("{other:?}"),
+        };
+        assert_eq!(answer, "from the extension");
         let spawned_in = std::fs::read_to_string(&cwd).unwrap();
         assert_eq!(
             PathBuf::from(spawned_in),

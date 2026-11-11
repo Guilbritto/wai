@@ -994,6 +994,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn draft_row_shows_and_discards(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, fake_settings(""));
         let dialog =
             |cx: &mut VisualTestContext| cx.update(|window, cx| window.has_active_dialog(cx));
@@ -1039,6 +1040,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn session_rows_keep_their_indexes_next_to_drafts(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, fake_settings(""));
         let session = start_now(&workspace, cx);
         cx.simulate_keystrokes("secondary-n");
