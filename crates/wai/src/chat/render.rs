@@ -19,24 +19,19 @@ use super::{permission, question};
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::workspace::{Dragged, DraggedSession, folder_name};
 
-/// The balloon of a message you sent (`.msg.voce`).
+/// The balloon of a message you sent (`.me`).
 fn user_bubble(cx: &App) -> Div {
     let theme = cx.theme();
     let bubble = div()
-        .max_w(relative(0.88))
-        .px_3()
-        .py(px(9.))
+        .max_w(relative(0.7))
+        .px(px(14.))
+        .py(px(10.))
         .rounded(px(16.))
-        .rounded_br(px(6.))
         .border_1();
     match theme.is_dark() {
         true => bubble
-            .bg(linear_gradient(
-                160.,
-                linear_color_stop(aurora::lilas().alpha(0.32), 0.),
-                linear_color_stop(aurora::lilas().alpha(0.18), 1.),
-            ))
-            .border_color(aurora::lilas().alpha(0.35))
+            .bg(aurora::lilas().alpha(0.22))
+            .border_color(aurora::lilas().alpha(0.5))
             .text_color(aurora::tinta()),
         false => bubble.bg(theme.secondary).border_color(theme.border),
     }
@@ -89,13 +84,62 @@ fn usage_label(usage: &UsageInfo) -> String {
     }
 }
 
-/// Whether row `ix` is the first agent message of its turn, or since a message steered into it:
-/// it gets the "✦ agent" header.
-pub(crate) fn starts_reply(items: &[ChatItem], ix: usize) -> bool {
-    matches!(items.get(ix), Some(ChatItem::Agent { .. }))
-        && !(items[..ix].iter().rev())
-            .take_while(|item| !matches!(item, ChatItem::User { .. } | ChatItem::Steered { .. }))
-            .any(|item| matches!(item, ChatItem::Agent { .. }))
+/// Where a row sits in its turn's card: which segment edges it draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CardEdges {
+    pub first: bool,
+    pub last: bool,
+    /// The "✦ agent" header: once per turn, on its first card row that draws anything.
+    pub header: bool,
+}
+
+/// The card edges of row `ix`, or `None` when it is not drawn inside a card. A run of
+/// consecutive `in_card` rows is one card; rows `shown` says draw nothing do not count.
+pub(crate) fn card_edges(
+    items: &[ChatItem],
+    ix: usize,
+    shown: impl Fn(usize) -> bool,
+) -> Option<CardEdges> {
+    if !items.get(ix)?.in_card() || !shown(ix) {
+        return None;
+    }
+    let before = items[..ix].iter().rev().take_while(|i| i.in_card()).count();
+    let after = items[ix..].iter().take_while(|i| i.in_card()).count();
+    let run = ix - before..ix + after;
+    let first = !run.clone().take(ix - run.start).any(&shown);
+    let last = !(ix + 1..run.end).any(&shown);
+    let turn = (items[..run.start].iter())
+        .rposition(|i| matches!(i, ChatItem::User { .. } | ChatItem::Steered { .. }))
+        .map_or(0, |u| u + 1);
+    let header = first && !(turn..run.start).any(|j| items[j].in_card() && shown(j));
+    Some(CardEdges {
+        first,
+        last,
+        header,
+    })
+}
+
+/// A card segment: the side borders always, the top (corners, padding) on the first row and the
+/// bottom on the last. Dark: a faint fill; light: a border only.
+fn card_segment(edges: CardEdges, cx: &App) -> Div {
+    let theme = cx.theme();
+    let seg = v_flex()
+        .w_full()
+        .px(px(14.))
+        .border_l_1()
+        .border_r_1()
+        .when(edges.first, |el| {
+            el.border_t_1().rounded_t(px(14.)).pt(px(10.))
+        })
+        .when(edges.last, |el| {
+            el.border_b_1().rounded_b(px(14.)).pb(px(10.))
+        });
+    match theme.is_dark() {
+        true => seg
+            .bg(hsla(0., 0., 1., 0.035))
+            .border_color(aurora::borda()),
+        false => seg.border_color(theme.border),
+    }
 }
 
 /// `el` as glass (`.msg.claude`): a `vidro` fill and a `borda` border. Light mode: a border.
@@ -302,14 +346,30 @@ impl ChatSession {
         }
     }
 
-    /// Row `ix` as the processing mode shows it; none for a step that is hidden or sits in a
-    /// folded group. Grouped, a run of steps is headed by its first row.
+    /// Whether row `ix` draws anything under the processing mode: Step by step, every row;
+    /// Hidden, no step; Grouped, a step only when it heads its run or its group is open.
+    pub(super) fn shown(&self, ix: usize) -> bool {
+        if !self.model.items[ix].is_step() {
+            return true;
+        }
+        match self.processing {
+            Processing::Steps => true,
+            Processing::Hidden => false,
+            Processing::Grouped => {
+                let run = self.model.run(ix, ChatItem::is_step);
+                ix == run.start || self.open_groups.contains(&run.start)
+            }
+        }
+    }
+
+    /// Row `ix` as the processing mode shows it; none exactly when `!shown(ix)`. Grouped, a run
+    /// of steps is headed by its first row.
     fn render_item(&mut self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.shown(ix) {
+            return None;
+        }
         if !self.model.items[ix].is_step() || self.processing == Processing::Steps {
             return Some(self.render_row(ix, cx));
-        }
-        if self.processing == Processing::Hidden {
-            return None;
         }
         let run = self.model.run(ix, ChatItem::is_step);
         let open = self.open_groups.contains(&run.start);
@@ -318,13 +378,26 @@ impl ChatSession {
             return row;
         }
         let head = self.render_group(run, open, cx);
-        Some(
-            v_flex()
-                .gap_2()
-                .child(head)
-                .children(row)
-                .into_any_element(),
-        )
+        Some(v_flex().child(head).children(row).into_any_element())
+    }
+
+    /// The "✦ agent" header of a turn's card (`.agent-h`).
+    fn card_header(&self, ix: usize, cx: &App) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        let (star, name) = match theme.is_dark() {
+            true => (aurora::brasa(), aurora::brasa()),
+            false => (theme.warning, theme.muted_foreground),
+        };
+        h_flex()
+            .id(("reply-head", ix))
+            .gap_1()
+            .mb(px(6.))
+            .text_size(px(12.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(div().text_color(star).child("✦"))
+            .child(div().text_color(name).child(self.agent.clone()))
+            // Registers the id so tests can find it.
+            .test_support()
     }
 
     /// The head of a run of steps: `3 steps · <each tool's title once>`, with the run's status. A click
@@ -379,20 +452,8 @@ impl ChatSession {
                 .justify_end()
                 .child(user_bubble(cx).child(text.clone()))
                 .into_any_element(),
-            // `.msg.claude`, its turn's first one headed "✦ agent" (`.msg-quem`).
+            // `.say`, inside its turn's card.
             ChatItem::Agent { .. } => {
-                let header = starts_reply(&self.model.items, ix).then(|| {
-                    let (star, name) = match dark {
-                        true => (aurora::brasa(), rgb(0xffc6a3).into()),
-                        false => (theme.warning, muted),
-                    };
-                    h_flex()
-                        .gap_1()
-                        .text_size(px(11.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(div().text_color(star).child("✦"))
-                        .child(div().text_color(name).child(self.agent.clone()))
-                });
                 // Read at click time, so a frame copies no text.
                 let session = cx.weak_entity();
                 let copy = Clipboard::new(("copy-message", ix))
@@ -423,20 +484,15 @@ impl ChatSession {
                                 )
                         })
                     });
-                glass(h_flex(), cx)
+                let say = div().flex_1().min_w_0().py(px(4.)).children(text);
+                let say = match dark {
+                    true => say.text_color(aurora::tinta()),
+                    false => say,
+                };
+                h_flex()
                     .items_start()
                     .gap_2()
-                    .p_3()
-                    .rounded(px(16.))
-                    .rounded_bl(px(6.))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
-                            .children(header)
-                            .children(text),
-                    )
+                    .child(say)
                     .child(copy)
                     .into_any_element()
             }
@@ -785,7 +841,7 @@ impl Render for ChatSession {
                 .items_center()
                 .justify_center()
                 .child(aurora::pill(cx).child("No messages yet.")),
-            // Rows sit 8 px apart, not the scroller's 32: the scroller's gap
+            // Rows sit 12 px apart, not the scroller's 32: the scroller's gap
             // goes and each row but the last carries its own. The scroller remeasures the row
             // before an append, whose "last" flips.
             false => messages.child({
@@ -794,9 +850,22 @@ impl Render for ChatSession {
                     self.scroller.clone(),
                     cx.processor(|this, ix, _, cx| {
                         let last = ix + 1 == this.model.items.len();
+                        let edges = card_edges(&this.model.items, ix, |j| this.shown(j));
                         let row = this.render_item(ix, cx);
+                        let row = match (row, edges) {
+                            (Some(row), Some(edges)) => Some(
+                                card_segment(edges, cx)
+                                    .id(("card", ix))
+                                    .children(edges.header.then(|| this.card_header(ix, cx)))
+                                    .child(row)
+                                    .test_support()
+                                    .into_any_element(),
+                            ),
+                            (row, _) => row,
+                        };
+                        let gap = edges.is_none_or(|e| e.last);
                         div()
-                            .when(!last && row.is_some(), |el| el.pb_2())
+                            .when(!last && gap && row.is_some(), |el| el.pb(px(12.)))
                             .children(row)
                     }),
                 )
@@ -824,7 +893,7 @@ impl Render for ChatSession {
 mod tests {
     use wai_agent::ToolStatus;
 
-    use super::{starts_reply, tokens};
+    use super::{CardEdges, card_edges, tokens};
     use crate::chat::model::{ChatItem, ToolItem};
 
     #[test]
@@ -835,12 +904,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reply_header_once_per_turn() {
+    fn u() -> ChatItem {
+        ChatItem::User {
+            text: String::new(),
+        }
+    }
+    fn s() -> ChatItem {
+        ChatItem::Steered {
+            text: String::new(),
+        }
+    }
+    fn a() -> ChatItem {
+        ChatItem::Agent {
+            text: String::new(),
+        }
+    }
+    fn n() -> ChatItem {
+        ChatItem::Notice {
+            text: String::new(),
+            kind: crate::chat::model::NoticeKind::Info,
+        }
+    }
+    fn t() -> ChatItem {
         let text = String::new;
-        let user = || ChatItem::User { text: text() };
-        let agent = || ChatItem::Agent { text: text() };
-        let tool = ChatItem::Tool(ToolItem {
+        ChatItem::Tool(ToolItem {
             id: text(),
             title: text(),
             kind: text(),
@@ -851,16 +938,64 @@ mod tests {
             first_sight: Vec::new(),
             expanded: false,
             subagent: None,
+        })
+    }
+
+    #[test]
+    fn card_edges_frame_each_run() {
+        let all = |_| true;
+        let e = |first, last, header| {
+            Some(CardEdges {
+                first,
+                last,
+                header,
+            })
+        };
+        let items = [u(), t(), t(), a()];
+        assert_eq!(card_edges(&items, 0, all), None);
+        assert_eq!(card_edges(&items, 1, all), e(true, false, true));
+        assert_eq!(card_edges(&items, 2, all), e(false, false, false));
+        assert_eq!(card_edges(&items, 3, all), e(false, true, false));
+        let items = [u(), a(), n(), a()];
+        assert_eq!(card_edges(&items, 1, all), e(true, true, true));
+        assert_eq!(
+            card_edges(&items, 3, all),
+            e(true, true, false),
+            "one header per turn"
+        );
+        assert_eq!(
+            card_edges(&[u(), a(), u(), a()], 3, all),
+            e(true, true, true)
+        );
+        assert_eq!(
+            card_edges(&[u(), a(), s(), a()], 3, all),
+            e(true, true, true)
+        );
+    }
+
+    #[test]
+    fn card_edges_skip_hidden_rows() {
+        let shown = |items: &[ChatItem]| {
+            let steps: Vec<bool> = (items.iter())
+                .map(|i| !matches!(i, ChatItem::Tool(_)))
+                .collect();
+            move |j: usize| steps[j]
+        };
+        let alone = Some(CardEdges {
+            first: true,
+            last: true,
+            header: true,
         });
-        let items = [user(), agent(), tool, agent()];
-        assert!(starts_reply(&items, 1));
-        assert!(!starts_reply(&items, 3));
-        assert!(starts_reply(&[agent()], 0));
-        let items = [user(), ChatItem::Thought { text: text() }, agent()];
-        assert!(starts_reply(&items, 2));
-        assert!(!starts_reply(&items, 1));
-        assert!(starts_reply(&[user(), agent(), user(), agent()], 3));
-        let steered = ChatItem::Steered { text: text() };
-        assert!(starts_reply(&[user(), agent(), steered, agent()], 3));
+        let items = [u(), t(), t(), a()];
+        assert_eq!(card_edges(&items, 1, shown(&items)), None);
+        assert_eq!(card_edges(&items, 3, shown(&items)), alone);
+        let items = [u(), a(), t()];
+        assert_eq!(card_edges(&items, 1, shown(&items)), alone);
+        let items = [u(), t(), n(), a()];
+        assert_eq!(
+            card_edges(&items, 3, shown(&items)).map(|e| e.header),
+            Some(true),
+            "an invisible card gives no header"
+        );
     }
 }

@@ -645,14 +645,25 @@ impl ChatSession {
 
     /// Appends new rows to the list and remeasures `changed`.
     pub(super) fn sync_rows(&mut self, changed: Option<usize>, cx: &mut Context<Self>) {
-        let rows = self.model.items.len();
+        let model = &self.model;
+        let rows = model.items.len();
         self.scroller.update(cx, |list, cx| {
             let known = list.item_count();
             if rows > known {
                 list.append(rows - known, cx);
+                // The card's last row may stop being last: its edges change.
+                if known > 0 && model.items[known - 1].in_card() {
+                    let run = model.run(known - 1, ChatItem::in_card);
+                    list.remeasure_items(run.start..known, cx);
+                }
             }
             if let Some(ix) = changed.filter(|ix| *ix < known) {
-                list.remeasure_items(ix..ix + 1, cx);
+                // A changed row can change its card's edges (a step that starts to show).
+                let run = match model.items[ix].in_card() {
+                    true => model.run(ix, ChatItem::in_card),
+                    false => ix..ix + 1,
+                };
+                list.remeasure_items(run.start..run.end.min(known), cx);
             }
         });
     }
@@ -1874,6 +1885,61 @@ mod tests {
         cx.update(|window, cx| {
             window.render_frame(cx);
             window.try_find(id).is_some()
+        })
+    }
+
+    /// Every card segment of a turn touches the next.
+    fn assert_touching(session: &Entity<ChatSession>, cx: &mut VisualTestContext) {
+        let last = session.read_with(cx, |s, _| s.model.items.len() - 1);
+        for k in 1..last {
+            let (a, b) = (card_bounds(k, cx), card_bounds(k + 1, cx));
+            assert!((b.top() - a.bottom()).abs() < px(0.5), "{k}: {a:?} {b:?}");
+        }
+    }
+
+    /// A turn is one card: its segments touch, and only its first row carries the header.
+    #[gpui_kit::test]
+    fn turn_is_one_card(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--steps 2"));
+        let session = start_session(&workspace, cx);
+        turn(&session, cx);
+        let last = session.read_with(cx, |s, _| s.model.items.len() - 1);
+        assert!(shows(("reply-head", 1usize), cx));
+        assert!(!shows(("reply-head", last), cx));
+        assert_touching(&session, cx);
+    }
+
+    /// Hidden, the reply's text is the card's first segment and carries the header.
+    #[gpui_kit::test]
+    fn hidden_steps_leave_the_text_as_the_card(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let settings = processing_settings("--steps 2", Processing::Hidden);
+        let (workspace, cx) = open(cx, settings);
+        let session = start_session(&workspace, cx);
+        turn(&session, cx);
+        let last = session.read_with(cx, |s, _| s.model.items.len() - 1);
+        assert!(shows(("reply-head", last), cx));
+        assert!(!shows(("card", 2usize), cx));
+    }
+
+    /// Grouped, opening the group keeps the segments touching.
+    #[gpui_kit::test]
+    fn grouped_card_stays_contiguous(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let settings = processing_settings("--steps 2", Processing::Grouped);
+        let (workspace, cx) = open(cx, settings);
+        let session = start_session(&workspace, cx);
+        turn(&session, cx);
+        assert!(shows(("reply-head", 1usize), cx));
+        click_edits(None, ("group", 1usize), cx);
+        assert_touching(&session, cx);
+    }
+
+    fn card_bounds(ix: usize, cx: &mut VisualTestContext) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find(("card", ix)).bounds()
         })
     }
 
