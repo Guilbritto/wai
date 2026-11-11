@@ -463,3 +463,102 @@ fn steer_a_running_turn() {
         std::fs::remove_dir_all(&dir).ok();
     });
 }
+
+/// In `default` mode an Edit, a Bash command and leaving plan mode each arrive as a permission
+/// request, and the allow answer reaches the agent (the edit and the command take effect).
+#[test]
+#[ignore = "needs network, npx and a Claude Code login"]
+fn permission_requests_in_default_mode() {
+    run(async {
+        let dir: PathBuf =
+            std::env::temp_dir().join(format!("wai-real-claude-perm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = wai_settings::canonical(&dir);
+        std::fs::write(dir.join("note.txt"), "before\n").unwrap();
+        // The developer's user settings may allow Edit and Bash outright; `ask` outranks `allow`.
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        std::fs::write(
+            dir.join(".claude/settings.json"),
+            r#"{"permissions": {"ask": ["Edit", "Write", "Bash"]}}"#,
+        )
+        .unwrap();
+
+        let (agent, rx) = spawn();
+        ready(&rx).await;
+        let session = agent
+            .new_session(dir.clone(), vec![])
+            .await
+            .expect("new_session");
+
+        let steps = [
+            (
+                "default",
+                "Use your Edit tool to replace the word before with after in note.txt. Reply with one short sentence.",
+            ),
+            (
+                "default",
+                "Run the shell command `touch ran.txt` with your Bash tool. Reply with one short sentence.",
+            ),
+            (
+                "plan",
+                "Plan a one-line change: add a line to note.txt. Then call ExitPlanMode with the plan. Reply with one short sentence afterwards.",
+            ),
+        ];
+        let mut titles = Vec::new();
+        for (mode, prompt) in steps {
+            agent
+                .set_mode(session.id.clone(), mode.into())
+                .await
+                .expect("set_mode");
+            agent.prompt(session.id.clone(), vec![PromptBlock::Text(prompt.into())]);
+            let mut asked = Vec::new();
+            let reason = loop {
+                match rx.recv().await.expect("event channel closed") {
+                    AgentEvent::PermissionRequested(request) => {
+                        println!(
+                            "[{mode}] permission requested: {:?} diff={} options={:?}",
+                            request.title,
+                            request.diff.is_some(),
+                            request.options
+                        );
+                        asked.push(request.title.clone());
+                        let allow = request
+                            .options
+                            .iter()
+                            .find(|o| o.kind == ChoiceKind::AllowOnce)
+                            .expect("an allow-once option")
+                            .id
+                            .clone();
+                        agent.answer_permission(request.id, Some(allow)).unwrap();
+                    }
+                    AgentEvent::TurnEnded { reason, .. } => break reason,
+                    AgentEvent::AuthRequired { .. } => panic!("not signed in to Claude Code"),
+                    AgentEvent::Exited { error } => panic!("agent exited mid-turn: {error:?}"),
+                    _ => {}
+                }
+            };
+            println!("[{mode}] turn ended {reason:?}, requests: {asked:?}");
+            assert_eq!(reason, StopReason::EndTurn);
+            assert!(
+                !asked.is_empty(),
+                "no permission request in step {prompt:?}"
+            );
+            titles.extend(asked);
+        }
+        println!("all permission titles: {titles:?}");
+
+        assert!(titles.iter().any(|t| t == "Approve Plan"), "{titles:?}");
+        let note = std::fs::read_to_string(dir.join("note.txt")).unwrap();
+        assert!(
+            note.contains("after"),
+            "the allowed edit did not apply: {note:?}"
+        );
+        assert!(
+            dir.join("ran.txt").exists(),
+            "the allowed command did not run"
+        );
+
+        agent.shutdown().await;
+        std::fs::remove_dir_all(&dir).ok();
+    });
+}
