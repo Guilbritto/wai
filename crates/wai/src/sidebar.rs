@@ -660,6 +660,7 @@ impl Workspace {
     ) -> PopupMenu {
         let s = session.read(cx);
         let (agent, id, cwd) = (s.agent.clone(), s.id.clone(), s.cwd.clone());
+        let agent_id = agent.clone();
         let title = s.model.shown_title().map(str::to_string);
         let current = self.group_of(&id);
         let renamed = session.clone();
@@ -673,6 +674,14 @@ impl Workspace {
                     let (agent, id, title) = (agent.clone(), id.clone(), title.clone());
                     w.fork(agent, id, title, cwd.clone(), window, cx)
                 }))
+            })
+            .when(agent_id == "claude", |menu| {
+                let session = session.clone();
+                menu.item(item(
+                    workspace,
+                    "Continue in terminal",
+                    move |w, window, cx| w.continue_in_terminal(&session, window, cx),
+                ))
             })
             .separator();
         let groups = self.groups.iter().enumerate();

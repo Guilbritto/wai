@@ -152,6 +152,15 @@ pub(crate) fn still_working(n: usize) -> String {
 }
 
 /// Whether the batch names `path`, or lost track of what changed.
+/// What the terminal runs to open Claude Code session `id` again; the shell may be anywhere.
+pub(crate) fn resume_command(cwd: &Path, id: &str) -> String {
+    format!(
+        "cd {} && claude --resume {}",
+        wai_agent::quote(cwd),
+        wai_agent::quote(id)
+    )
+}
+
 fn touches(batch: &[FsChange], path: &Path) -> bool {
     batch.iter().any(|change| match change {
         FsChange::Rescan => true,
@@ -1693,6 +1702,22 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         session.read(cx).stop();
+        let (agent, id) = {
+            let s = session.read(cx);
+            (s.agent.clone(), s.id.clone())
+        };
+        let closable = matches!(
+            self.registry.read(cx).status(&agent),
+            Some(AgentStatus::Ready(caps)) if caps.close
+        );
+        if closable && let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) {
+            cx.background_spawn(async move {
+                if let Err(e) = handle.close_session(id).await {
+                    eprintln!("could not close the {agent} session: {e}");
+                }
+            })
+            .detach();
+        }
         self.sessions.retain(|s| s != session);
         self.ungroup(&session.read(cx).id);
         self.sync_agents(cx);
@@ -1702,6 +1727,37 @@ impl Workspace {
                 self.save_state(cx);
                 cx.notify();
             }
+        }
+    }
+
+    /// Ends `session` and types the shell command that resumes it in Claude Code at the
+    /// terminal's prompt, after asking when its turn is still going.
+    pub(crate) fn continue_in_terminal(
+        &mut self,
+        session: &Entity<ChatSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (id, cwd, busy) = {
+            let s = session.read(cx);
+            (s.id.clone(), s.cwd.clone(), s.busy())
+        };
+        let session = session.clone();
+        let run = move |w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
+            w.end_session(&session, window, cx);
+            w.type_in_terminal(&resume_command(&cwd, &id), window, cx)
+        };
+        if busy {
+            self.confirm(
+                "This session is still working".into(),
+                "Ending it stops its turn. End it anyway?",
+                "Continue in terminal",
+                run,
+                window,
+                cx,
+            )
+        } else {
+            run(self, window, cx)
         }
     }
 
@@ -4712,6 +4768,85 @@ pub(crate) mod tests {
         click_close(cx);
         assert!(!asked(cx));
         assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
+    }
+
+    #[test]
+    fn resume_command_quotes_the_folder_and_id() {
+        assert_eq!(
+            super::resume_command(Path::new("/tmp/it's here"), "abc"),
+            r"cd '/tmp/it'\''s here' && claude --resume 'abc'"
+        );
+    }
+
+    fn closes_file(dir: &Path) -> (PathBuf, String) {
+        let file = dir.join("closed");
+        let flag = format!("--close-file {}", wai_agent::quote(&file));
+        (file, flag)
+    }
+
+    fn closed(file: &Path) -> bool {
+        std::fs::read_to_string(file).is_ok_and(|s| s.contains("fake-1"))
+    }
+
+    #[gpui_kit::test]
+    fn ending_a_session_closes_it_in_the_agent(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let (file, flag) = closes_file(dir.path());
+        let (workspace, cx) = open(cx, fake_settings(&flag));
+        start_now(&workspace, cx);
+
+        click_close(cx);
+        wait_until(cx, "the close", |_| closed(&file));
+    }
+
+    #[gpui_kit::test]
+    fn continue_in_terminal_ends_the_session_and_types_the_resume(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent and the shell are real processes
+        let dir = tempfile::tempdir().unwrap();
+        let (file, flag) = closes_file(dir.path());
+        let mut settings = fake_settings(&flag);
+        let fake = settings.agents.remove("fake").unwrap();
+        settings.agents = [("claude".into(), fake)].into();
+        settings.default_agent = Some("claude".into());
+        let (workspace, cx) = open(cx, settings);
+        start_now(&workspace, cx);
+
+        menu_item(("open", 0usize), "Continue in terminal", cx);
+
+        assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
+        wait_until(cx, "the close", |_| closed(&file));
+        assert!(workspace.read_with(cx, |w, _| w.terminal_visible));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().unwrap());
+        wait_until(cx, "the typed command", |cx| {
+            terminal.read_with(cx, |t, _| {
+                t.snapshot.rows.iter().any(|row| {
+                    let text: String = row.iter().map(|run| run.text.as_str()).collect();
+                    text.contains("claude --resume 'fake-1'")
+                })
+            })
+        });
+    }
+
+    #[gpui_kit::test]
+    fn continue_in_terminal_is_only_for_claude(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestQueryExt as _;
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        start_now(&workspace, cx);
+
+        let at = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find(("open", 0usize)).bounds().center()
+        });
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find_by_label("Continue in terminal").is_none());
+            assert!(window.try_find_by_label("Rename").is_some());
+        });
     }
 
     fn click_close(cx: &mut VisualTestContext) {

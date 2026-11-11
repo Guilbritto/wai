@@ -67,6 +67,8 @@
 //!   running it answers `promptRequired`.
 //! - `--new-session-gate <path>`: `session/new` answers only once `<path>` exists (checked every
 //!   10 ms).
+//! - `--close-file <path>`: advertise `session/close`; each closed id is appended to `<path>`, one
+//!   per line.
 //!
 //! After `session/new` answers, an `available_commands_update` lists `init`, `review`, `compact`
 //! (with the input hint `custom instructions`) and `pr-review`.
@@ -133,6 +135,7 @@ struct Opts {
     reject_config: bool,
     steering: bool,
     new_session_gate: Option<PathBuf>,
+    close_file: Option<PathBuf>,
 }
 
 fn parse_args() -> Opts {
@@ -166,6 +169,7 @@ fn parse_args() -> Opts {
         reject_config: false,
         steering: false,
         new_session_gate: None,
+        close_file: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -217,6 +221,7 @@ fn parse_args() -> Opts {
             "--reject-config" => opts.reject_config = true,
             "--steering" => opts.steering = true,
             "--new-session-gate" => opts.new_session_gate = Some(value().into()),
+            "--close-file" => opts.close_file = Some(value().into()),
             other => panic!("unknown flag {other}"),
         }
     }
@@ -784,14 +789,16 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                     fake.forms.store(forms, Ordering::Relaxed);
                     let subagents = request.client_capabilities.subagents.is_some();
                     fake.subagents.store(subagents, Ordering::Relaxed);
+                    let mut sessions = acp::SessionCapabilities::new()
+                        .list(acp::SessionListCapabilities::new())
+                        .fork(acp::SessionForkCapabilities::new());
+                    if fake.opts.close_file.is_some() {
+                        sessions = sessions.close(acp::SessionCloseCapabilities::new());
+                    }
                     let caps = acp::AgentCapabilities::new()
                         .load_session(!fake.opts.no_load)
                         .prompt_capabilities(acp::PromptCapabilities::new().image(true))
-                        .session_capabilities(
-                            acp::SessionCapabilities::new()
-                                .list(acp::SessionListCapabilities::new())
-                                .fork(acp::SessionForkCapabilities::new()),
-                        );
+                        .session_capabilities(sessions);
                     let meta = serde_json::json!({"steering": {"supported": true}});
                     let meta = meta.as_object().filter(|_| fake.opts.steering).cloned();
                     responder.respond(
@@ -909,6 +916,24 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                             .modes(modes())
                             .config_options(options),
                     )
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let fake = fake.clone();
+                async move |request: acp::CloseSessionRequest, responder, _cx| {
+                    if let Some(path) = &fake.opts.close_file {
+                        use std::io::Write;
+                        let mut file = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)
+                            .expect("--close-file");
+                        writeln!(file, "{}", request.session_id).expect("--close-file");
+                    }
+                    responder.respond(acp::CloseSessionResponse::new())
                 }
             },
             agent_client_protocol::on_receive_request!(),
