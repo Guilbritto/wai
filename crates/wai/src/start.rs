@@ -119,7 +119,7 @@ impl Workspace {
                 })
             }
             (Some(repo), false, Some(branch)) if Some(&branch) != repo.current.as_ref() => {
-                if let Some(error) = self.shared_folder(&draft, &folder, &branch, cx) {
+                if let Some(error) = self.shared_folder(&draft, &repo.root, &branch, cx) {
                     return draft
                         .update(cx, |d, cx| d.fail(Some(error), String::new(), window, cx));
                 }
@@ -321,6 +321,7 @@ impl Workspace {
                         }
                     });
                 }
+                chat.update(cx, |chat, cx| chat.send_first(cx));
                 this.drafts.retain(|d| *d != draft);
                 let pane = this.panes.iter().position(|p| p.draft() == Some(&draft));
                 if let Some(ix) = pane {
@@ -344,18 +345,20 @@ impl Workspace {
     fn shared_folder(
         &self,
         draft: &Entity<DraftView>,
-        folder: &Path,
+        root: &Path,
         branch: &str,
         cx: &App,
     ) -> Option<String> {
-        let folder = canonical(folder);
+        let folder = canonical(root);
+        let worktrees = folder.join(".worktrees");
         let sessions = self.sessions.iter().map(|s| s.read(cx).cwd.clone());
         let starting = (self.drafts.iter())
             .filter(|d| *d != draft)
             .filter_map(|d| d.read(cx).starting.as_ref().map(|c| c.read(cx).cwd.clone()));
-        let used = sessions
-            .chain(starting)
-            .any(|cwd| canonical(&cwd) == folder);
+        let used = sessions.chain(starting).any(|cwd| {
+            let cwd = canonical(&cwd);
+            cwd.starts_with(&folder) && !cwd.starts_with(&worktrees)
+        });
         let name = folder.file_name().map_or_else(
             || folder.display().to_string(),
             |name| name.to_string_lossy().into_owned(),
@@ -436,7 +439,9 @@ mod tests {
     use crate::git::{self, SUBMODULE_HINT};
     use crate::sidebar::canonical;
     use crate::workspace::Workspace;
-    use crate::workspace::tests::{fake_settings, gated, live, open, start_now, wait_until};
+    use crate::workspace::tests::{
+        fake_live, fake_settings, gated, live, open, start_now, wait_until,
+    };
     use wai_agent::ToolStatus;
 
     fn mkdir(dir: &Path, name: &str) -> PathBuf {
@@ -677,7 +682,7 @@ mod tests {
         git(&one, &["checkout", "main"]);
         let two = repo_with(&dir.path().join("two"), &["other"]);
         git(&two, &["checkout", "main"]);
-        let (workspace, cx) = open(cx, fake_settings(""));
+        let (workspace, cx, _user) = fake_live(cx, "");
         let draft = repo_draft(&workspace, cx, &one);
         draft.update(cx, |d, cx| {
             d.set_worktree(true, cx);
@@ -969,7 +974,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = repo_with(&dir.path().join("r"), &["feature"]);
         git(&root, &["checkout", "main"]);
-        let (workspace, cx) = open(cx, fake_settings(""));
+        let (workspace, cx, _user) = fake_live(cx, "");
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| w.set_project(root.clone(), window, cx))
         });

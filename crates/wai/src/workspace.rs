@@ -2047,6 +2047,7 @@ impl Workspace {
                 .id("confirm-heading")
                 .debug_selector(|| "confirm-title".into())
                 .aria_label(title.clone())
+                .test_support()
                 .child(title.clone());
             dialog.title(heading).child(body).footer(
                 DialogFooter::new()
@@ -4771,6 +4772,23 @@ pub(crate) mod tests {
             })
         });
         (workspace, cx, dir)
+    }
+
+    /// `live` with the fake agent also in the settings file, so `set_project`'s reload keeps it.
+    pub(crate) fn fake_live<'a>(
+        cx: &'a mut TestAppContext,
+        flag: &str,
+    ) -> (
+        Entity<Workspace>,
+        &'a mut VisualTestContext,
+        tempfile::TempDir,
+    ) {
+        let settings = fake_settings(flag);
+        let file = format!(
+            "default_agent = \"fake\"\n[agents.fake]\ncommand = \'\'\'{}\'\'\'\n",
+            settings.agents["fake"].command
+        );
+        live(cx, settings, Some(&file))
     }
 
     #[gpui_kit::test]

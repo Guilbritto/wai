@@ -104,6 +104,10 @@ pub struct ChatSession {
     pub(super) queued: Vec<Message>,
     /// The message of a session that is starting; it goes out once the session exists.
     first: Option<Message>,
+    /// Model and mode changes in flight: the first message waits for them.
+    settling: usize,
+    /// A history resume or restore is replaying: not a turn, whatever the state says.
+    loading: bool,
     /// Queued text going back to the prompt box at the next frame (which has the window).
     pub(super) unsent: Option<String>,
     /// The `/` menu's selected row, its scroll, and whether Esc closed it.
@@ -182,6 +186,8 @@ impl ChatSession {
             attachments: Vec::new(),
             queued: Vec::new(),
             first: None,
+            settling: 0,
+            loading: false,
             unsent: None,
             menu_ix: 0,
             menu_scroll: ScrollHandle::new(),
@@ -254,8 +260,8 @@ impl ChatSession {
         cx.notify();
     }
 
-    /// The agent started the session: it takes the id, modes and options, and the first message
-    /// goes out (its bubble is already in the list).
+    /// The agent started the session: it takes the id, modes and options (its first message goes
+    /// out with `send_first`).
     pub fn started(
         &mut self,
         started: SessionStarted,
@@ -264,11 +270,19 @@ impl ChatSession {
     ) {
         self.id = started.id.clone();
         self.take_started(started, window, cx);
+        cx.notify();
+    }
+
+    /// Sends the first message (its bubble is already in the list), once the picked model and
+    /// mode are in place.
+    pub fn send_first(&mut self, cx: &mut Context<Self>) {
+        if self.settling > 0 || self.id.is_empty() {
+            return;
+        }
         if let Some(message) = self.first.take() {
             let blocks = self.blocks(&message, cx);
             self.handle.prompt(self.id.clone(), blocks);
         }
-        cx.notify();
     }
 
     /// What the user typed here while the session started, and the messages queued: it goes back
@@ -361,9 +375,11 @@ impl ChatSession {
         let previous = std::mem::replace(&mut found.current, value.clone());
         let name = found.name.clone();
         let (handle, id, option) = (self.handle.clone(), self.id.clone(), option.to_string());
+        self.settling += 1;
         cx.spawn(async move |this, cx| {
             let set = handle.set_config(id, option.clone(), value).await;
             this.update(cx, |this, cx| {
+                this.settling -= 1;
                 match set {
                     Ok(options) => this.model.config = options,
                     Err(e) => {
@@ -376,6 +392,7 @@ impl ChatSession {
                     }
                 }
                 this.pickers_stale = true;
+                this.send_first(cx);
                 cx.notify();
             })
             .ok();
@@ -465,12 +482,12 @@ impl ChatSession {
 
     /// Whether a turn is running or waits on the user.
     pub fn busy(&self) -> bool {
-        matches!(self.model.state, TurnState::Working | TurnState::NeedsYou)
+        !self.loading && matches!(self.model.state, TurnState::Working | TurnState::NeedsYou)
     }
 
     /// Cancels a running turn: a closed session must not keep working out of sight.
     pub fn stop(&self) {
-        if self.busy() {
+        if matches!(self.model.state, TurnState::Working | TurnState::NeedsYou) {
             self.handle.cancel(self.id.clone());
         }
     }
@@ -705,17 +722,21 @@ impl ChatSession {
     pub(crate) fn set_mode(&mut self, mode: String, cx: &mut Context<Self>) {
         let previous = self.model.current_mode.replace(mode.clone());
         let (handle, id) = (self.handle.clone(), self.id.clone());
+        self.settling += 1;
         cx.spawn(async move |this, cx| {
-            if let Err(e) = handle.set_mode(id, mode).await {
-                this.update(cx, |this, cx| {
+            let set = handle.set_mode(id, mode).await;
+            this.update(cx, |this, cx| {
+                this.settling -= 1;
+                if let Err(e) = set {
                     this.model.current_mode = previous;
                     this.model
                         .notice(format!("Could not switch mode: {e}"), NoticeKind::Error);
                     this.sync_rows(None, cx);
-                    cx.notify();
-                })
-                .ok();
-            }
+                }
+                this.send_first(cx);
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
         cx.notify();
@@ -743,10 +764,12 @@ impl ChatSession {
         self.questions.clear();
         self.scroller.update(cx, |list, cx| list.reset(0, cx));
         self.update_model(cx, |m| m.state = TurnState::Working);
+        self.loading = true;
         let (id, cwd, registry) = (self.id.clone(), self.cwd.clone(), self.registry.clone());
         cx.spawn_in(window, async move |this, cx| {
             let loaded = handle.load_session(id, cwd, mcp).await;
             this.update_in(cx, |this, window, cx| {
+                this.loading = false;
                 let agent = this.agent.clone();
                 match loaded {
                     Ok(started) => {
@@ -814,8 +837,8 @@ mod tests {
     use crate::notify;
     use crate::sidebar::canonical;
     use crate::workspace::tests::{
-        click, fake_settings, history_settings, launch, live, load_history, open, open_at,
-        start_now, wait_until,
+        click, fake_live, fake_settings, history_settings, launch, live, load_history, open,
+        open_at, start_now, wait_until,
     };
     use crate::workspace::{Pane, Workspace};
 
@@ -2307,7 +2330,9 @@ mod tests {
     fn pill(id: &'static str, cx: &mut VisualTestContext) -> Option<String> {
         cx.update(|window, cx| {
             window.render_frame(cx);
-            window.find(id).label().map(str::to_owned)
+            window
+                .try_find(id)
+                .and_then(|e| e.label().map(str::to_owned))
         })
     }
 
@@ -2316,7 +2341,7 @@ mod tests {
         cx.executor().allow_parking(); // the fake agent is a real process
         let dir = tempfile::tempdir().unwrap();
         let root = repo_with(&dir.path().join("r"), &["feature"]);
-        let (workspace, cx) = open(cx, fake_settings("--models"));
+        let (workspace, cx, _user) = fake_live(cx, "--models");
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| w.set_project(root.clone(), window, cx))
         });
@@ -2370,8 +2395,6 @@ mod tests {
         let (workspace, cx) = open(cx, fake_settings(""));
         let session = start_session(&workspace, cx);
         // Let the (empty) read land before looking.
-        cx.run_until_parked();
-        std::thread::sleep(std::time::Duration::from_millis(200));
         cx.run_until_parked();
         assert!(session.read_with(cx, |s, _| s.head.is_none()));
         assert!(pill("pill-folder", cx).is_some());
