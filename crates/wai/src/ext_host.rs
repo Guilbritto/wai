@@ -377,7 +377,7 @@ pub(crate) mod tests {
     use wai_settings::{AgentConfig, Settings};
 
     use crate::chat::{ChatItem, ChatSession, TurnState};
-    use crate::workspace::tests::{fake_settings, gated, open, wait_until};
+    use crate::workspace::tests::{fake_settings, gated, open, start_now, wait_until};
     use crate::workspace::{Pane, Workspace};
 
     /// A binary of this workspace, next to the test binary's `deps/`.
@@ -603,8 +603,7 @@ pub(crate) mod tests {
         let (workspace, cx) = workspace_at(&config, fake_settings("--echo-mcp"), cx);
         let jira = format!("mcp:jira={}", dir.join("bin/jira-mcp").display());
 
-        cx.simulate_keystrokes("secondary-n");
-        let session = pane_session(&workspace, cx);
+        let session = start_now(&workspace, cx);
         assert_eq!(turn(&session, "hi", cx), jira);
 
         cx.update(|window, cx| session.update(cx, |s, cx| s.load(false, window, cx)));
@@ -618,13 +617,7 @@ pub(crate) mod tests {
         );
 
         disable_first(&workspace, cx);
-        cx.simulate_keystrokes("secondary-n");
-        wait_until(cx, "a second session", |cx| {
-            workspace.read_with(cx, |w, _| {
-                w.panes[0].session().is_some_and(|s| *s != session)
-            })
-        });
-        let second = pane_session(&workspace, cx);
+        let second = start_now(&workspace, cx);
         assert_eq!(turn(&second, "hi", cx), "mcp:");
     }
 
@@ -656,8 +649,7 @@ pub(crate) mod tests {
             "{servers:?}"
         );
 
-        cx.simulate_keystrokes("secondary-n");
-        let session = pane_session(&workspace, cx);
+        let session = start_now(&workspace, cx);
         let want = format!("mcp:playwright={}", npx.display());
         assert_eq!(turn(&session, "hi", cx), want);
     }
@@ -754,8 +746,7 @@ pub(crate) mod tests {
         // The session opens first; the extension starts after it.
         let (workspace, cx) = open(cx, fake_settings(""));
         cx.executor().allow_parking();
-        cx.simulate_keystrokes("secondary-n");
-        let session = pane_session(&workspace, cx);
+        let session = start_now(&workspace, cx);
         workspace.update(cx, |w, cx| {
             w.user_dir = config.clone();
             w.start_extensions(cx);
@@ -804,8 +795,7 @@ pub(crate) mod tests {
         initialized(cx, "reader");
         initialized(cx, "blind");
 
-        cx.simulate_keystrokes("secondary-n");
-        let session = pane_session(&workspace, cx);
+        let session = start_now(&workspace, cx);
         turn(&session, "hi", cx);
         let file = tmp.path().join("notes.md");
         std::fs::write(&file, "notes\n").unwrap();
@@ -958,7 +948,7 @@ pub(crate) mod tests {
     }
 
     /// R56: the user's ⌘N is never refused while an extension's session prepares: in that pane
-    /// (once the user is in it; R61: it prepares beside the focused pane) ⌘N takes it, and the
+    /// (once the user is in it; R61: it prepares beside the focused pane) it opens a draft, and the
     /// extension's session still opens (in the open list, in no pane).
     #[gpui_kit::test]
     fn new_session_takes_over_an_extensions_preparing_pane(cx: &mut TestAppContext) {
@@ -985,23 +975,19 @@ pub(crate) mod tests {
         workspace.update(cx, |w, _| w.focused_pane = 1);
         cx.simulate_keystrokes("secondary-n");
         workspace.read_with(cx, |w, _| {
-            assert!(matches!(&w.panes[1], Pane::Preparing { agent, .. } if agent == "fake"))
+            assert_eq!(w.panes[1].draft(), w.drafts.first());
+            assert!(w.panes[1].draft().is_some());
         });
         std::fs::write(&gate, "").unwrap();
-        let mine = pane_session(&workspace, cx);
-        assert_eq!(mine.read_with(cx, |s, _| s.agent.clone()), "fake");
 
         let theirs = reply(&log, 1, cx)["result"].clone();
         assert_eq!(theirs["agent"], "slow");
         workspace.read_with(cx, |w, cx| {
-            assert_eq!(w.sessions.len(), 2, "the extension's session opens too");
+            assert_eq!(w.sessions.len(), 1, "the extension's session opens too");
             assert_eq!(w.panes.len(), 2);
             assert!(matches!(w.panes[0], Pane::Empty(_)));
-            assert_eq!(w.panes[1].session(), Some(&mine), "in no pane");
-            let draft = |s: &Entity<ChatSession>| s.read(cx).draft(cx);
-            // Both land once the gate opens: their order is not fixed.
-            let theirs = w.sessions.iter().find(|s| **s != mine).unwrap();
-            assert_eq!(draft(theirs), "theirs");
+            assert!(w.panes[1].draft().is_some(), "the draft keeps its pane");
+            assert_eq!(w.sessions[0].read(cx).draft(cx), "theirs");
         });
     }
 }

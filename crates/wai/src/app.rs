@@ -239,7 +239,7 @@ fn send_prompt(
             })
             .ok();
         // ponytail: a script-only wait; the product never polls.
-        while workspace.read_with(cx, |w, _| w.panes[0].session().is_none()) {
+        while workspace.read_with(cx, |w, _| w.panes[0].draft().is_none()) {
             executor.timer(Duration::from_millis(50)).await;
         }
         window

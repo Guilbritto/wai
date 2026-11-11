@@ -845,7 +845,7 @@ mod tests {
     use crate::workspace::Workspace;
     use crate::workspace::tests::{
         click, fake_settings, history_settings, launch, load_history, menu_item, open, open_at,
-        question, wait_until,
+        question, start_now,
     };
     use crate::{app, aurora};
 
@@ -897,20 +897,21 @@ mod tests {
         assert!(hint.is_some());
     }
 
-    /// A click on the Sessions tab only shows it; a double click starts a new session.
+    /// A click on the Sessions tab only shows it; a double click opens a draft.
     #[gpui_kit::test]
-    fn double_click_on_sessions_tab_starts_a_session(cx: &mut TestAppContext) {
+    fn double_click_on_sessions_tab_opens_a_draft(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, fake_settings(""));
         press("tab-sessions", cx);
-        assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 0);
+        assert_eq!(workspace.read_with(cx, |w, _| w.drafts.len()), 0);
 
         cx.update(|window, cx| {
             window.render_frame(cx);
             window.double_click("tab-sessions", cx);
         });
-        wait_until(cx, "the session", |cx| {
-            workspace.read_with(cx, |w, _| w.sessions.len() == 1)
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.drafts.len(), 1);
+            assert!(w.sessions.is_empty());
         });
     }
 
@@ -1225,10 +1226,7 @@ mod tests {
         while question(&workspace, cx).is_some() {
             click("approval-allow", cx);
         }
-        cx.simulate_keystrokes("secondary-n");
-        wait_until(cx, "the session", |cx| {
-            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
-        });
+        start_now(&workspace, cx);
 
         menu_item(open_row(0), "Rename", cx);
         type_name("Mine", "enter", cx);

@@ -17,6 +17,7 @@ mod settings_view;
 #[cfg(target_os = "macos")]
 mod shell_path;
 mod sidebar;
+mod start;
 mod terminal_view;
 mod topbar;
 mod update;

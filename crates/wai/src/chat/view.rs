@@ -719,20 +719,16 @@ mod tests {
     use crate::notify;
     use crate::sidebar::canonical;
     use crate::workspace::tests::{
-        click, fake_settings, history_settings, live, load_history, open, wait_until,
+        click, fake_settings, history_settings, live, load_history, open, start_now, wait_until,
     };
     use crate::workspace::{Pane, Workspace};
 
-    /// ⌘N, then the session that lands in pane 0.
+    /// The session that lands in pane 0.
     fn start_session(
         workspace: &Entity<Workspace>,
         cx: &mut VisualTestContext,
     ) -> Entity<ChatSession> {
-        cx.simulate_keystrokes("secondary-n");
-        wait_until(cx, "a session", |cx| {
-            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
-        });
-        workspace.read_with(cx, |w, _| w.panes[0].session().cloned().unwrap())
+        start_now(workspace, cx)
     }
 
     fn send(prompt: &str, cx: &mut VisualTestContext) {
@@ -1805,7 +1801,11 @@ mod tests {
         let rows = load_history(&workspace, 1, cx);
 
         // Pane 0 prepares a session; meanwhile a history row opens to the side and takes focus.
-        cx.simulate_keystrokes("secondary-n");
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.start_session("fake".into(), None, false, None, window, cx)
+            })
+        });
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], true, window, cx)));
         let side = workspace.read_with(cx, |w, _| w.panes[1].session().cloned().unwrap());
 
