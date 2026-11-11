@@ -16,6 +16,7 @@ use wai_settings::SessionGroup;
 pub use wai_settings::canonical;
 
 use crate::agents::AgentStatus;
+use crate::app::NewSession;
 use crate::aurora;
 use crate::chat::{ChatSession, TurnState};
 use crate::workspace::{Dragged, DraggedSession, MAX_PANES, Renamed, Workspace};
@@ -170,11 +171,15 @@ impl Workspace {
                     .text_size(px(12.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(label)
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         this.sidebar_tab = tab;
                         if tab == SidebarTab::Search {
                             let focus = this.search.read(cx).query_focus(cx);
                             window.focus(&focus, cx);
+                        }
+                        // A double click on Sessions starts a new session.
+                        if tab == SidebarTab::Sessions && event.click_count() > 1 {
+                            this.new_session(&NewSession, window, cx);
                         }
                         cx.notify();
                     }))
@@ -285,6 +290,34 @@ impl Workspace {
             let id = session.read(cx).id.clone();
             self.move_to_group(&id, to, cx);
         }
+    }
+
+    /// An open session dropped on `target`'s row takes its place and joins its group: from above
+    /// it lands after it, from below before it. The Agents cards and the saved state follow.
+    fn reorder(
+        &mut self,
+        dragged: &DraggedSession,
+        target: &Entity<ChatSession>,
+        cx: &mut Context<Self>,
+    ) {
+        let Dragged::Open(session) = &dragged.source else {
+            return;
+        };
+        let at = |s: &Entity<ChatSession>| self.sessions.iter().position(|x| x == s);
+        let (Some(from), Some(to)) = (at(session), at(target)) else {
+            return;
+        };
+        if from == to {
+            return;
+        }
+        let moved = self.sessions.remove(from);
+        self.sessions.insert(to, moved);
+        self.sync_agents(cx);
+        let (id, group) = (
+            session.read(cx).id.clone(),
+            self.group_of(&target.read(cx).id),
+        );
+        self.move_to_group(&id, group, cx);
     }
 
     /// Session `id` joins group `to`, leaving the one it was in; `None` only takes it out.
@@ -540,8 +573,19 @@ impl Workspace {
             title: title.clone().into(),
             source: Dragged::Open(session.clone()),
         };
+        let (over, target) = (session.clone(), session.clone());
         row(active, cx)
             .id(("open-row", ix))
+            // Another open row dropped here takes this one's place.
+            .drag_over(
+                move |style, dragged: &DraggedSession, _, cx| match &dragged.source {
+                    Dragged::Open(s) if *s != over => aurora::drop_target(style, cx),
+                    _ => style,
+                },
+            )
+            .on_drop(cx.listener(move |this, dragged: &DraggedSession, _, cx| {
+                this.reorder(dragged, &target, cx)
+            }))
             .child(
                 h_flex()
                     .id(("open", ix))
@@ -842,6 +886,23 @@ mod tests {
         assert!(hint.is_some());
     }
 
+    /// A click on the Sessions tab only shows it; a double click starts a new session.
+    #[gpui_kit::test]
+    fn double_click_on_sessions_tab_starts_a_session(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        press("tab-sessions", cx);
+        assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 0);
+
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.double_click("tab-sessions", cx);
+        });
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.sessions.len() == 1)
+        });
+    }
+
     /// A workspace with `n` sessions open, resumed from the history: "Session 0", "Session 1"…
     fn with_sessions(
         n: usize,
@@ -1110,6 +1171,36 @@ mod tests {
         press(("open-close", 1usize), cx);
         assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 1);
         assert_eq!(groups(&workspace, cx), [named("A", &[]), named("B", &[])]);
+    }
+
+    /// An open row dropped on another takes its place (after it from above, before it from
+    /// below) and joins its group; the Agents cards follow the order.
+    #[gpui_kit::test]
+    fn rows_reorder_by_dragging(cx: &mut TestAppContext) {
+        let (workspace, cx) = with_sessions(3, cx);
+        let ids: Vec<String> = workspace.read_with(cx, |w, cx| {
+            w.sessions.iter().map(|s| s.read(cx).id.clone()).collect()
+        });
+        let order = |cx: &mut VisualTestContext| -> Vec<String> {
+            (0..3).map(|ix| label(open_row(ix), cx).unwrap()).collect()
+        };
+
+        drag(open_row(0), open_row(2), cx);
+        assert_eq!(order(cx), ["Session 1", "Session 2", "Session 0"]);
+        press("tab-agents", cx);
+        let card = label(("agent-card", 0usize), cx).unwrap();
+        assert!(card.starts_with("Session 1"), "{card:?}");
+        press("tab-sessions", cx);
+
+        drag(open_row(2), open_row(0), cx);
+        assert_eq!(order(cx), ["Session 0", "Session 1", "Session 2"]);
+
+        press("new-group", cx);
+        type_name("A", "enter", cx);
+        menu_item(open_row(2), "Move to A", cx);
+        drag(open_row(0), open_row(2), cx);
+        assert_eq!(order(cx), ["Session 1", "Session 2", "Session 0"]);
+        assert_eq!(groups(&workspace, cx), [named("A", &[&ids[2], &ids[0]])]);
     }
 
     /// A session's name and the groups are kept in `state.json` and come back on a relaunch.
