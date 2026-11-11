@@ -13,6 +13,7 @@ use wai_settings::{SeenModel, agent_label, builtin, canonical, shown};
 use super::input::{Attachment, attach_button, paste_into, pick_paths, send_button};
 use super::view::ChatSession;
 use crate::aurora::{self, DISPLAY_FONT};
+use crate::git::{self, Repo};
 use crate::workspace::{Dragged, DraggedSession, START_KEY};
 
 pub enum DraftEvent {
@@ -37,12 +38,16 @@ pub struct DraftData {
 
 const OPEN_FOLDER: &str = "\0open-folder";
 const FOOTER: &str = "\0footer";
+const CURRENT: &str = "\0current";
+const LOCAL: &str = "local";
+const WORKTREE: &str = "worktree";
 
 #[derive(Clone)]
 enum Lead {
     None,
     Folder,
     Glyph(&'static str),
+    Icon(gpui_kit::assets::IconName),
 }
 
 /// A row of any of the three menus.
@@ -53,6 +58,10 @@ struct Pick {
     detail: Option<SharedString>,
     lead: Lead,
     tag: Option<&'static str>,
+    /// What the closed chip reads, when it differs from the row's title.
+    chip: Option<SharedString>,
+    /// An `ambar` pill beside the chip's text.
+    count: Option<usize>,
     disabled: bool,
 }
 
@@ -64,7 +73,16 @@ impl Pick {
             detail: None,
             lead: Lead::None,
             tag: None,
+            chip: None,
+            count: None,
             disabled: false,
+        }
+    }
+
+    fn section(text: &str) -> Self {
+        Self {
+            disabled: true,
+            ..Self::new(format!("\0{text}"), text.to_string())
         }
     }
 
@@ -91,11 +109,25 @@ impl Pick {
         let row = match self.lead {
             Lead::Folder => row.child(Icon::new(IconName::Folder).xsmall()),
             Lead::Glyph(glyph) => row.child(glyph),
+            Lead::Icon(icon) => row.child(Icon::new(icon).xsmall()),
             Lead::None => row,
         };
-        let row = row.child(div().truncate().child(self.title.clone()));
+        let title = match (full, &self.chip) {
+            (false, Some(chip)) => chip.clone(),
+            _ => self.title.clone(),
+        };
+        let row = row.child(div().truncate().child(title));
         if !full {
-            return row;
+            return row.when_some(self.count, |el, count| {
+                let pill = div()
+                    .px(px(6.))
+                    .rounded_full()
+                    .text_xs()
+                    .text_color(aurora::ambar())
+                    .bg(aurora::ambar().opacity(0.16))
+                    .child(count.to_string());
+                el.child(pill)
+            });
         }
         row.when(self.disabled, |el| el.text_xs().text_color(aurora::nevoa()))
             .when_some(self.detail.clone(), |el, detail| {
@@ -155,6 +187,14 @@ pub struct DraftView {
     pub agent: String,
     pub folder: PathBuf,
     pub model: Option<String>,
+    /// The folder's repository; `None` while it is read, or when the folder is not one.
+    pub(crate) repo: Option<Repo>,
+    /// A `read_repo` is running.
+    pub(crate) reading: bool,
+    /// Work in a new worktree instead of the folder itself.
+    pub(crate) worktree: bool,
+    /// Local: the branch to check out (`None` stays on the current one). Worktree: the base.
+    pub(crate) branch: Option<String>,
     pub notice: Option<String>,
     /// The chat of a send in flight: the draft shows it until the session starts.
     pub starting: Option<Entity<ChatSession>>,
@@ -167,6 +207,9 @@ pub struct DraftView {
     folders: Menu,
     agents: Menu,
     models: Menu,
+    places: Menu,
+    branches: Menu,
+    _read: Option<Task<()>>,
     /// The menus' items and selections are rebuilt at the next frame (it has the window).
     menus_stale: bool,
     _check: Option<Task<()>>,
@@ -204,6 +247,7 @@ impl DraftView {
             menu(false, window, cx),
             menu(false, window, cx),
         );
+        let (places, branches) = (menu(false, window, cx), menu(true, window, cx));
         let subscriptions = vec![
             cx.subscribe_in(&input, window, |_, _, event: &InputEvent, _, cx| {
                 match event {
@@ -227,6 +271,19 @@ impl DraftView {
                     this.set_agent(agent.clone(), cx);
                 }
             }),
+            cx.subscribe(&places, |this, _, event: &SelectEvent<Vec<Pick>>, cx| {
+                if let SelectEvent::Confirm(Some(place)) = event {
+                    this.set_worktree(place == WORKTREE, cx);
+                }
+            }),
+            cx.subscribe(&branches, |this, _, event: &SelectEvent<Vec<Pick>>, cx| {
+                let SelectEvent::Confirm(Some(value)) = event else {
+                    return;
+                };
+                let current = this.repo.as_ref().and_then(|r| r.current.as_ref());
+                let stay = value == CURRENT || (!this.worktree && Some(value) == current);
+                this.set_branch((!stay).then(|| value.clone()), cx);
+            }),
             cx.subscribe(&models, |this, _, event: &SelectEvent<Vec<Pick>>, cx| {
                 if let SelectEvent::Confirm(Some(model)) = event {
                     this.set_model(Some(model.clone()), cx);
@@ -237,6 +294,10 @@ impl DraftView {
             model: data.default_models.get(&agent).cloned(),
             agent,
             folder,
+            repo: None,
+            reading: false,
+            worktree: false,
+            branch: None,
             notice: None,
             starting: None,
             input,
@@ -247,11 +308,15 @@ impl DraftView {
             folders,
             agents,
             models,
+            places,
+            branches,
+            _read: None,
             menus_stale: true,
             _check: None,
             _subscriptions: subscriptions,
         };
         this.check_installed(cx);
+        this.read_repo(cx);
         this
     }
 
@@ -269,9 +334,78 @@ impl DraftView {
         self.menus_stale = true;
         if folder != self.folder {
             self.folder = folder;
+            self.read_repo(cx);
             cx.emit(DraftEvent::Changed);
         }
         cx.notify();
+    }
+
+    /// Reads the folder's repository off the UI thread; the chips wait for it.
+    pub fn read_repo(&mut self, cx: &mut Context<Self>) {
+        self.repo = None;
+        self.reading = true;
+        self.menus_stale = true;
+        let folder = self.folder.clone();
+        let read = cx.background_spawn(async move { git::repo(&folder) });
+        // A newer read replaces this one: dropping the task cancels it.
+        self._read = Some(cx.spawn(async move |this, cx| {
+            let repo = read.await;
+            this.update(cx, |this, cx| {
+                this.reading = false;
+                this.menus_stale = true;
+                let blocked = repo
+                    .as_ref()
+                    .is_none_or(|r| git::worktree_blocked(r).is_some());
+                if blocked {
+                    this.worktree = false;
+                }
+                this.branch = match &repo {
+                    Some(repo) if this.worktree => Some(repo.default.clone()),
+                    _ => None,
+                };
+                this.repo = repo;
+                cx.emit(DraftEvent::Changed);
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Why New worktree is off in this folder.
+    pub fn worktree_blocked(&self) -> Option<&'static str> {
+        self.repo.as_ref().and_then(git::worktree_blocked)
+    }
+
+    /// Refused while the repository is unknown or blocks worktrees.
+    pub fn set_worktree(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on && (self.repo.is_none() || self.worktree_blocked().is_some()) {
+            return;
+        }
+        self.worktree = on;
+        self.branch = self.repo.as_ref().filter(|_| on).map(|r| r.default.clone());
+        self.menus_stale = true;
+        cx.emit(DraftEvent::Changed);
+        cx.notify();
+    }
+
+    pub fn set_branch(&mut self, branch: Option<String>, cx: &mut Context<Self>) {
+        self.branch = branch;
+        self.menus_stale = true;
+        cx.emit(DraftEvent::Changed);
+        cx.notify();
+    }
+
+    /// A send created the worktree at `cwd` for the draft's `from` folder: the draft moves
+    /// there, so a retry reuses it.
+    pub(crate) fn use_worktree(&mut self, from: &Path, cwd: PathBuf, cx: &mut Context<Self>) {
+        if self.folder != from || !self.worktree {
+            return;
+        }
+        self.folder = cwd;
+        self.worktree = false;
+        self.read_repo(cx);
+        cx.emit(DraftEvent::Changed);
     }
 
     /// The model goes back to what Settings starts the agent with.
@@ -367,6 +501,8 @@ impl DraftView {
             select.set_selected_value(&current, window, cx);
         });
 
+        self.sync_git_menus(window, cx);
+
         let seen = self.data.models.get(&self.agent).into_iter().flatten();
         let mut items: Vec<Pick> = seen
             .map(|m| Pick::new(m.id.clone(), m.name.clone()))
@@ -382,6 +518,86 @@ impl DraftView {
                 Some(model) => select.set_selected_value(model, window, cx),
                 None => select.set_selected_index(None, window, cx),
             }
+        });
+    }
+
+    fn sync_git_menus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(repo) = self.repo.clone() else {
+            return;
+        };
+        let blocked = self.worktree_blocked();
+        let place = |value: &str, icon, title: &str, detail: &str| Pick {
+            lead: Lead::Icon(icon),
+            detail: Some(detail.to_string().into()),
+            ..Pick::new(value, title.to_string())
+        };
+        let local = place(
+            LOCAL,
+            gpui_kit::assets::IconName::Monitor,
+            "Local",
+            "Works in the folder already on this computer",
+        );
+        let new = Pick {
+            disabled: blocked.is_some(),
+            ..place(
+                WORKTREE,
+                gpui_kit::assets::IconName::GitFork,
+                "New worktree",
+                blocked.unwrap_or("Creates a separate copy for this session, on send"),
+            )
+        };
+        let current = if self.worktree { WORKTREE } else { LOCAL };
+        self.places.update(cx, |select, cx| {
+            select.set_items(vec![local, new], window, cx);
+            select.set_selected_value(&current.to_string(), window, cx);
+        });
+
+        let worktree = self.worktree;
+        let pick = |branch: &str| Pick {
+            chip: worktree.then(|| format!("from {branch}").into()),
+            ..Pick::new(branch, branch.to_string())
+        };
+        let mut items = Vec::new();
+        if !worktree {
+            let title = repo
+                .current
+                .clone()
+                .unwrap_or_else(|| "Detached HEAD".into());
+            let detail = match repo.dirty {
+                0 => "Current".to_string(),
+                1 => "Current · 1 uncommitted file".to_string(),
+                n => format!("Current · {n} uncommitted files"),
+            };
+            items.push(Pick {
+                detail: Some(detail.into()),
+                count: (repo.dirty > 0).then_some(repo.dirty),
+                ..Pick::new(CURRENT, title)
+            });
+        }
+        items.push(Pick::section("Default branch"));
+        items.push(pick(&repo.default));
+        let rest: Vec<_> = (repo.branches.iter())
+            .filter(|b| **b != repo.default && (worktree || Some(*b) != repo.current.as_ref()))
+            .collect();
+        if !rest.is_empty() {
+            items.push(Pick::section("Branches"));
+            items.extend(rest.into_iter().map(|b| pick(b)));
+        }
+        items.push(Pick::footer(
+            match worktree {
+                true => "The new worktree starts from this branch.",
+                false => "Picking another branch checks it out when the session starts.",
+            }
+            .into(),
+        ));
+        let selected = match (&self.branch, worktree) {
+            (Some(branch), _) => branch.clone(),
+            (None, true) => repo.default.clone(),
+            (None, false) => CURRENT.to_string(),
+        };
+        self.branches.update(cx, |select, cx| {
+            select.set_items(items, window, cx);
+            select.set_selected_value(&selected, window, cx);
         });
     }
 
@@ -584,7 +800,17 @@ impl Render for DraftView {
                 220.,
                 Some("Search projects"),
             ))
-            .child(chip("draft-agent", &self.agents, 150., None));
+            .child(chip("draft-agent", &self.agents, 150., None))
+            .when(self.repo.is_some(), |el| {
+                let places = chip("draft-workspace", &self.places, 170., None);
+                let branches = chip(
+                    "draft-branch",
+                    &self.branches,
+                    200.,
+                    Some("Filter branches"),
+                );
+                el.child(places).child(branches)
+            });
         let model = (!self
             .data
             .models

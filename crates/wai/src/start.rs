@@ -6,6 +6,7 @@ use wai_settings::{agent_label, shown};
 
 use crate::agents::AgentStatus;
 use crate::chat::{ChatEvent, ChatSession, DraftData, DraftEvent, DraftView, signed_out};
+use crate::git::{self, Repo};
 use crate::sidebar::canonical;
 use crate::workspace::{Pane, Workspace};
 
@@ -91,6 +92,7 @@ impl Workspace {
         }
         let (agent, folder, model) = (d.agent.clone(), d.folder.clone(), d.model.clone());
         let (text, attachments) = d.message(cx);
+        let (repo, worktree, branch) = (d.repo.clone(), d.worktree, d.branch.clone());
         if !folder.is_dir() {
             let error = format!("The folder {} no longer exists.", shown(&folder));
             return draft.update(cx, |d, cx| d.fail(Some(error), String::new(), window, cx));
@@ -98,6 +100,28 @@ impl Workspace {
         let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
             let error = format!("No agent named {agent} in the settings or extensions.");
             return draft.update(cx, |d, cx| d.fail(Some(error), String::new(), window, cx));
+        };
+        let job = match (repo, worktree, branch) {
+            (None, true, _) => {
+                let error = "Still reading the repository. Try again in a moment.".to_string();
+                return draft.update(cx, |d, cx| d.fail(Some(error), String::new(), window, cx));
+            }
+            (Some(repo), true, base) => {
+                let base = base.unwrap_or_else(|| repo.default.clone());
+                Some(GitJob::Worktree {
+                    slug: git::slug(&text),
+                    repo,
+                    base,
+                })
+            }
+            (Some(repo), false, Some(branch)) if Some(&branch) != repo.current.as_ref() => {
+                if let Some(error) = self.shared_folder(&draft, &folder, &branch, cx) {
+                    return draft
+                        .update(cx, |d, cx| d.fail(Some(error), String::new(), window, cx));
+                }
+                Some(GitJob::Checkout { branch })
+            }
+            _ => None,
         };
         let mcp = self.registry.read(cx).mcp_servers();
         let registry = self.registry.downgrade();
@@ -141,9 +165,101 @@ impl Workspace {
             chat.update(cx, |chat, cx| chat.focus(window, cx));
         }
         let label = agent_label(&agent);
-        let step = chat.update(cx, |chat, cx| chat.step(format!("Starting {label}"), cx));
-        *self.starting.entry(agent.clone()).or_default() += 1;
+        let git_step = job.as_ref().map(|job| {
+            let title = match job {
+                GitJob::Worktree { .. } => "Creating worktree".to_string(),
+                GitJob::Checkout { branch } => format!("Checking out {branch}"),
+            };
+            chat.update(cx, |chat, cx| chat.step(title, cx))
+        });
+        let mut start_step = None;
+        if job.is_none() {
+            start_step =
+                Some(chat.update(cx, |chat, cx| chat.step(format!("Starting {label}"), cx)));
+            *self.starting.entry(agent.clone()).or_default() += 1;
+        }
         cx.spawn_in(window, async move |this, cx| {
+            let (mut folder, mut step) = (folder, start_step);
+            if let Some(job) = job {
+                let (base, root) = match &job {
+                    GitJob::Worktree { repo, base, .. } => (base.clone(), repo.root.clone()),
+                    GitJob::Checkout { branch } => (branch.clone(), PathBuf::new()),
+                };
+                let run = cx.background_spawn({
+                    let folder = folder.clone();
+                    async move {
+                        match job {
+                            GitJob::Worktree { repo, slug, base } => {
+                                git::create_worktree(&repo, &slug, &base).map(Some)
+                            }
+                            GitJob::Checkout { branch } => {
+                                git::checkout(&folder, &branch).map(|()| None)
+                            }
+                        }
+                    }
+                });
+                let done = run.await;
+                let next = this
+                    .update_in(cx, |this, window, cx| {
+                        let current = draft.read(cx).starting.as_ref() == Some(&chat);
+                        let ix = git_step.unwrap_or_default();
+                        let cwd = match done {
+                            Err(error) => {
+                                if current {
+                                    this.revert_draft(&draft, Some(error), window, cx);
+                                }
+                                return None;
+                            }
+                            Ok(Some(wt)) => {
+                                let sub = canonical(&folder);
+                                let sub = sub.strip_prefix(&root).unwrap_or(Path::new(""));
+                                let cwd = wt.path.join(sub);
+                                // A retry reuses the worktree, even after Esc.
+                                draft.update(cx, |d, cx| d.use_worktree(&folder, cwd.clone(), cx));
+                                if !current {
+                                    return None;
+                                }
+                                chat.update(cx, |chat, cx| {
+                                    if let Some(why) = &wt.fetch_failed {
+                                        let note = format!(
+                                            "Could not fetch origin/{base} ({why}); started from the local {base}"
+                                        );
+                                        let note_ix = chat.step(note.clone(), cx);
+                                        chat.end_step(note_ix, note, false, cx);
+                                    }
+                                    let title = format!(
+                                        "Created worktree {} on branch {} from {}",
+                                        shown(&wt.path),
+                                        wt.branch,
+                                        wt.from
+                                    );
+                                    chat.end_step(ix, title, false, cx);
+                                    chat.cwd = cwd.clone();
+                                });
+                                cwd
+                            }
+                            Ok(None) => {
+                                if !current {
+                                    return None;
+                                }
+                                let title = format!("Checked out {base}");
+                                chat.update(cx, |chat, cx| chat.end_step(ix, title, false, cx));
+                                folder.clone()
+                            }
+                        };
+                        *this.starting.entry(agent.clone()).or_default() += 1;
+                        let title = format!("Starting {label}");
+                        let step = chat.update(cx, |chat, cx| chat.step(title, cx));
+                        Some((cwd, step))
+                    })
+                    .ok()
+                    .flatten();
+                let Some((cwd, next)) = next else {
+                    return;
+                };
+                (folder, step) = (cwd, Some(next));
+            }
+            let step = step.unwrap_or_default();
             let started = handle.new_session(folder.clone(), mcp).await;
             this.update_in(cx, |this, window, cx| {
                 let early = this.landed(&agent, started.as_ref().ok().map(|s| s.id.as_str()));
@@ -189,6 +305,34 @@ impl Workspace {
         .detach();
     }
 
+    /// D27: why a Local branch switch is refused, when another session (or a draft that is
+    /// starting) already works in `folder`.
+    fn shared_folder(
+        &self,
+        draft: &Entity<DraftView>,
+        folder: &Path,
+        branch: &str,
+        cx: &App,
+    ) -> Option<String> {
+        let folder = canonical(folder);
+        let sessions = self.sessions.iter().map(|s| s.read(cx).cwd.clone());
+        let starting = (self.drafts.iter())
+            .filter(|d| *d != draft)
+            .filter_map(|d| d.read(cx).starting.as_ref().map(|c| c.read(cx).cwd.clone()));
+        let used = sessions
+            .chain(starting)
+            .any(|cwd| canonical(&cwd) == folder);
+        let name = folder.file_name().map_or_else(
+            || folder.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        used.then(|| {
+            format!(
+                "Can't switch to {branch}: another open session works in {name}. Pick New worktree instead."
+            )
+        })
+    }
+
     /// Gives a starting draft back to editing; its chat goes away, its typed text stays.
     fn revert_draft(
         &mut self,
@@ -206,6 +350,18 @@ impl Workspace {
             draft.update(cx, |d, cx| d.focus(window, cx));
         }
     }
+}
+
+/// The git work a send does before the agent starts.
+enum GitJob {
+    Worktree {
+        repo: Repo,
+        slug: String,
+        base: String,
+    },
+    Checkout {
+        branch: String,
+    },
 }
 
 /// `Started <Label> in <folder> · <mode> · <model>`, without the parts the agent did not name.
@@ -230,7 +386,9 @@ mod tests {
     use gpui_kit::{ElementId, Entity, TestAppContext, VisualTestContext};
     use wai_settings::Settings;
 
-    use crate::chat::{ChatItem, DraftView, TurnState};
+    use crate::chat::{ChatItem, ChatSession, DraftView, TurnState, signed_out};
+    use crate::git::tests::{cloned, git, repo_with};
+    use crate::git::{self, SUBMODULE_HINT};
     use crate::sidebar::canonical;
     use crate::workspace::Workspace;
     use crate::workspace::tests::{fake_settings, gated, open, start_now, wait_until};
@@ -507,6 +665,305 @@ mod tests {
             assert_eq!(row.label(), Some("build it"));
             let pane = window.within(ElementId::View(session.entity_id()));
             assert_eq!(pane.find("session-title").label(), Some("build it"));
+        });
+    }
+
+    fn repo_draft(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+        folder: &Path,
+    ) -> Entity<DraftView> {
+        let draft = new_draft(workspace, cx);
+        draft.update(cx, |d, cx| d.set_folder(folder.to_path_buf(), cx));
+        wait_until(cx, "the repository", |cx| {
+            draft.read_with(cx, |d, _| d.repo.is_some())
+        });
+        draft
+    }
+
+    fn type_and_send(cx: &mut VisualTestContext, text: &str) {
+        cx.simulate_input(text);
+        cx.simulate_keystrokes("enter");
+    }
+
+    /// The step lines of a chat: title and whether the step is complete.
+    fn steps(chat: &Entity<ChatSession>, cx: &mut VisualTestContext) -> Vec<(String, bool)> {
+        chat.read_with(cx, |c, _| {
+            (c.model.items.iter())
+                .filter_map(|item| match item {
+                    ChatItem::Tool(t) => Some((t.title.clone(), t.status == ToolStatus::Completed)),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    fn one_session(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<ChatSession> {
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.sessions.len() == 1)
+        });
+        workspace.read_with(cx, |w, _| w.sessions[0].clone())
+    }
+
+    fn worktrees(root: &Path) -> usize {
+        std::fs::read_dir(root.join(".worktrees")).unwrap().count()
+    }
+
+    #[gpui_kit::test]
+    fn git_chips_hidden_outside_a_repository(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let draft = new_draft(&workspace, cx);
+        wait_until(cx, "the read", |cx| draft.read_with(cx, |d, _| !d.reading));
+        let shown = cx.update(|window, cx| {
+            window.render_frame(cx);
+            (
+                window.try_find("draft-workspace").is_some(),
+                window.try_find("draft-branch").is_some(),
+            )
+        });
+        assert_eq!(shown, (false, false));
+    }
+
+    #[gpui_kit::test]
+    fn git_data_is_read_off_the_ui_thread(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = repo_with(&dir.path().join("r"), &[]);
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let draft = new_draft(&workspace, cx);
+        draft.update(cx, |d, cx| d.set_folder(root.clone(), cx));
+        draft.read_with(cx, |d, _| assert!(d.repo.is_none()));
+        wait_until(cx, "the repository", |cx| {
+            draft.read_with(cx, |d, _| {
+                d.repo.as_ref().and_then(|r| r.current.as_deref()) == Some("main")
+            })
+        });
+        let shown = cx.update(|window, cx| {
+            window.render_frame(cx);
+            (
+                window.try_find("draft-workspace").is_some(),
+                window.try_find("draft-branch").is_some(),
+            )
+        });
+        assert_eq!(shown, (true, true));
+    }
+
+    #[gpui_kit::test]
+    fn local_send_on_another_branch_checks_it_out(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let root = repo_with(&dir.path().join("r"), &["feature"]);
+        git(&root, &["checkout", "main"]);
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let draft = repo_draft(&workspace, cx, &root);
+        draft.update(cx, |d, cx| d.set_branch(Some("feature".into()), cx));
+        type_and_send(cx, "hi");
+        let session = one_session(&workspace, cx);
+        session.read_with(cx, |s, _| assert_eq!(canonical(&s.cwd), root));
+        let current = git::repo(&root).unwrap().current;
+        assert_eq!(current.as_deref(), Some("feature"));
+        let steps = steps(&session, cx);
+        assert!(steps.contains(&("Checked out feature".to_string(), true)));
+        leave(&workspace, cx);
+    }
+
+    #[gpui_kit::test]
+    fn local_switch_refuses_uncommitted_files(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let root = repo_with(&dir.path().join("r"), &["feature"]);
+        git(&root, &["checkout", "main"]);
+        std::fs::write(root.join("wip.txt"), "wip").unwrap();
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let draft = repo_draft(&workspace, cx, &root);
+        draft.update(cx, |d, cx| d.set_branch(Some("feature".into()), cx));
+        type_and_send(cx, "hi");
+        wait_until(cx, "the refusal", |cx| {
+            draft.read_with(cx, |d, _| d.starting.is_none() && d.notice.is_some())
+        });
+        draft.read_with(cx, |d, _| {
+            let notice = d.notice.as_deref().unwrap();
+            assert!(notice.contains("uncommitted files"), "{notice}");
+        });
+        let current = git::repo(&root).unwrap().current;
+        assert_eq!(current.as_deref(), Some("main"));
+        workspace.read_with(cx, |w, _| assert!(w.sessions.is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn local_switch_refuses_a_folder_another_session_uses(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let root = repo_with(&dir.path().join("r"), &["feature"]);
+        git(&root, &["checkout", "main"]);
+        let (workspace, cx) = open(cx, fake_settings(""));
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.set_project(root.clone(), window, cx))
+        });
+        start_now(&workspace, cx);
+        let draft = new_draft(&workspace, cx);
+        wait_until(cx, "the repository", |cx| {
+            draft.read_with(cx, |d, _| d.repo.is_some())
+        });
+        draft.update(cx, |d, cx| d.set_branch(Some("feature".into()), cx));
+        type_and_send(cx, "hi");
+        let name = root.file_name().unwrap().to_string_lossy().into_owned();
+        draft.read_with(cx, |d, _| {
+            let want = format!(
+                "Can't switch to feature: another open session works in {name}. Pick New worktree instead."
+            );
+            assert_eq!(d.notice.as_deref(), Some(want.as_str()));
+        });
+        leave(&workspace, cx);
+    }
+
+    #[gpui_kit::test]
+    fn new_worktree_send_creates_it_from_the_fetched_base(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let (bare, clone) = cloned(dir.path());
+        let src = dir.path().join("src");
+        std::fs::write(src.join("b.txt"), "b").unwrap();
+        git(&src, &["add", "."]);
+        git(&src, &["commit", "-m", "second"]);
+        git(&src, &["push", bare.to_str().unwrap(), "main"]);
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let draft = repo_draft(&workspace, cx, &clone);
+        draft.update(cx, |d, cx| {
+            d.set_worktree(true, cx);
+            d.set_branch(Some("main".into()), cx);
+        });
+        type_and_send(cx, "Add tag filter");
+        let session = one_session(&workspace, cx);
+        let want = clone.join(".worktrees/add-tag-filter");
+        session.read_with(cx, |s, _| assert_eq!(canonical(&s.cwd), want));
+        let head = git::head(&want).unwrap();
+        assert_eq!(head.branch.as_deref(), Some("wai/add-tag-filter"));
+        assert_eq!(
+            git(&want, &["rev-parse", "HEAD"]),
+            git(&bare, &["rev-parse", "main"])
+        );
+        assert!(
+            steps(&session, cx)
+                .iter()
+                .any(|(t, _)| t.starts_with("Created worktree"))
+        );
+        leave(&workspace, cx);
+    }
+
+    #[gpui_kit::test]
+    fn offline_fetch_still_starts_the_session(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let (_, clone) = cloned(dir.path());
+        let missing = dir.path().join("missing.git");
+        git(
+            &clone,
+            &["remote", "set-url", "origin", missing.to_str().unwrap()],
+        );
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let draft = repo_draft(&workspace, cx, &clone);
+        draft.update(cx, |d, cx| d.set_worktree(true, cx));
+        type_and_send(cx, "Work offline");
+        let session = one_session(&workspace, cx);
+        let steps = steps(&session, cx);
+        let fetch = steps
+            .iter()
+            .find(|(t, _)| t.starts_with("Could not fetch origin/main"));
+        assert_eq!(fetch.map(|(_, done)| *done), Some(true), "{steps:?}");
+        leave(&workspace, cx);
+    }
+
+    #[gpui_kit::test]
+    fn worktree_keeps_the_subfolder(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let root = repo_with(&dir.path().join("r"), &[]);
+        let sub = mkdir(&root, "sub");
+        std::fs::write(sub.join("f.txt"), "f").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-m", "sub"]);
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let draft = repo_draft(&workspace, cx, &sub);
+        draft.update(cx, |d, cx| d.set_worktree(true, cx));
+        type_and_send(cx, "sub work");
+        let session = one_session(&workspace, cx);
+        let want = root.join(".worktrees/sub-work/sub");
+        session.read_with(cx, |s, _| assert_eq!(canonical(&s.cwd), want));
+        leave(&workspace, cx);
+    }
+
+    #[gpui_kit::test]
+    fn retry_after_a_created_worktree_reuses_it(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let root = repo_with(&dir.path().join("r"), &[]);
+        let (workspace, cx) = open(cx, fake_settings("--require-auth"));
+        let draft = repo_draft(&workspace, cx, &root);
+        draft.update(cx, |d, cx| d.set_worktree(true, cx));
+        type_and_send(cx, "do it");
+        let reverted = |cx: &mut VisualTestContext| {
+            draft.read_with(cx, |d, _| d.starting.is_none() && d.notice.is_some())
+        };
+        wait_until(cx, "the sign-in notice", reverted);
+        let wt = root.join(".worktrees/do-it");
+        draft.read_with(cx, |d, _| {
+            assert_eq!(d.notice.as_deref(), Some(signed_out("fake").as_str()));
+            assert!(!d.worktree);
+            assert_eq!(d.folder, wt);
+        });
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "the second refusal", reverted);
+        assert_eq!(worktrees(&root), 1);
+    }
+
+    #[gpui_kit::test]
+    fn escape_after_the_worktree_keeps_it_for_the_retry(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = repo_with(&dir.path().join("r"), &[]);
+        let (settings, gate) = gated("", tmp.path());
+        let (workspace, cx) = open(cx, settings);
+        let draft = repo_draft(&workspace, cx, &root);
+        draft.update(cx, |d, cx| d.set_worktree(true, cx));
+        type_and_send(cx, "Fix it");
+        wait_until(cx, "the worktree step", |cx| {
+            let chat = draft.read_with(cx, |d, _| d.starting.clone());
+            chat.is_some_and(|chat| {
+                steps(&chat, cx)
+                    .iter()
+                    .any(|(t, _)| t.starts_with("Created worktree"))
+            })
+        });
+        cx.simulate_keystrokes("escape");
+        let wt = root.join(".worktrees/fix-it");
+        draft.read_with(cx, |d, _| {
+            assert!(d.starting.is_none());
+            assert_eq!(d.folder, wt);
+            assert!(!d.worktree);
+        });
+        std::fs::write(&gate, "").unwrap();
+        cx.simulate_keystrokes("enter");
+        let session = one_session(&workspace, cx);
+        session.read_with(cx, |s, _| assert_eq!(canonical(&s.cwd), wt));
+        assert_eq!(worktrees(&root), 1);
+        leave(&workspace, cx);
+    }
+
+    #[gpui_kit::test]
+    fn submodule_repo_disables_new_worktree(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = repo_with(&dir.path().join("r"), &[]);
+        std::fs::write(root.join(".gitmodules"), "").unwrap();
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let draft = repo_draft(&workspace, cx, &root);
+        draft.update(cx, |d, cx| d.set_worktree(true, cx));
+        draft.read_with(cx, |d, _| {
+            assert_eq!(d.worktree_blocked(), Some(SUBMODULE_HINT));
+            assert!(!d.worktree);
         });
     }
 }

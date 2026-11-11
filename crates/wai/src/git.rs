@@ -298,7 +298,7 @@ pub(crate) mod tests {
     }
 
     /// A bare origin (HEAD main) and a clone of it.
-    fn cloned(tmp: &Path) -> (PathBuf, PathBuf) {
+    pub(crate) fn cloned(tmp: &Path) -> (PathBuf, PathBuf) {
         let src = repo_with(&tmp.join("src"), &[]);
         let bare = tmp.join("origin.git");
         git(
