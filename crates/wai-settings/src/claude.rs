@@ -646,21 +646,31 @@ fn hook_group(group: &str, settings: Option<&Value>, path: PathBuf, out: &mut Ve
 }
 
 /// Skills, agents, instructions and hooks; the plugin ones only from enabled plugins.
-fn fill_entries(data: &mut ClaudeData, home: &Path, project: &Path, settings: [Option<&Value>; 3]) {
+fn fill_entries(
+    data: &mut ClaudeData,
+    home: &Path,
+    project: &Path,
+    settings: [Option<&Value>; 3],
+    at_home: bool,
+) {
     let [user, shared, local] = settings;
     let (user_dir, project_dir) = (home.join(".claude"), project.join(".claude"));
 
     data.skills = skill_group("User", skill_files(&user_dir.join("skills")), false);
-    data.skills.extend(skill_group(
-        "Project",
-        skill_files(&project_dir.join("skills")),
-        false,
-    ));
+    if !at_home {
+        data.skills.extend(skill_group(
+            "Project",
+            skill_files(&project_dir.join("skills")),
+            false,
+        ));
+    }
     let mut user_agents = Vec::new();
     md_paths(&user_dir.join("agents"), true, 3, &mut user_agents);
     data.agents = agent_group("User", user_agents, false);
     let mut project_agents = Vec::new();
-    md_paths(&project_dir.join("agents"), true, 3, &mut project_agents);
+    if !at_home {
+        md_paths(&project_dir.join("agents"), true, 3, &mut project_agents);
+    }
     data.agents
         .extend(agent_group("Project", project_agents, false));
 
@@ -679,7 +689,7 @@ fn fill_entries(data: &mut ClaudeData, home: &Path, project: &Path, settings: [O
         for (file, mine) in [
             (dir.join("CLAUDE.md"), "This project"),
             (dir.join(".claude/CLAUDE.md"), "This project"),
-            (dir.join("CLAUDE.local.md"), "This project, yours only"),
+            (dir.join("CLAUDE.local.md"), "Yours, not shared"),
         ] {
             let summary = if here { mine } else { "Parent folder" };
             instruction(
@@ -699,6 +709,12 @@ fn fill_entries(data: &mut ClaudeData, home: &Path, project: &Path, settings: [O
         user_dir.join("settings.json"),
         &mut data.hooks,
     );
+    // Opened at home, the project's files are the user's own.
+    let (shared, local) = if at_home {
+        (None, None)
+    } else {
+        (shared, local)
+    };
     hook_group(
         "Project",
         shared,
@@ -771,8 +787,7 @@ pub fn parse_mcp_list(text: &str) -> BTreeMap<String, McpStatus> {
         let Some((name, rest)) = line.split_once(": ") else {
             continue;
         };
-        let marked =
-            |at: &usize| rest[at + 3..].starts_with(|c| matches!(c, '✔' | '!' | '✘' | '⏸' | '⊘'));
+        let marked = |at: &usize| rest[at + 3..].starts_with(['✔', '!', '✘', '⏸', '⊘']);
         let Some(at) = rest.rmatch_indices(" - ").map(|(at, _)| at).find(marked) else {
             continue;
         };
@@ -804,13 +819,18 @@ pub fn read_claude(home: &Path, project: &Path) -> ClaudeData {
     let user_settings = load(&home.join(".claude/settings.json"), home, false, problems);
     data.settings_stamp = user_settings.stamp;
     let project_dir = project.join(".claude");
-    let project_local = load(
-        &project_dir.join("settings.local.json"),
-        home,
-        false,
-        problems,
-    );
-    let project_shared = load(&project_dir.join("settings.json"), home, false, problems);
+    // Opened at home (Finder, Dock), the project's .claude is the user's own.
+    let at_home = canonical(project) == canonical(home);
+    let mut project_file = |name: &str| match at_home {
+        true => Loaded {
+            value: None,
+            stamp: Stamp::default(),
+            broken: false,
+        },
+        false => load(&project_dir.join(name), home, false, problems),
+    };
+    let project_local = project_file("settings.local.json");
+    let project_shared = project_file("settings.json");
     let root_local = match root.as_deref() {
         Some(r) if r != project => {
             load(
@@ -967,6 +987,7 @@ pub fn read_claude(home: &Path, project: &Path) -> ClaudeData {
             project_shared.value.as_ref(),
             project_local.value.as_ref(),
         ],
+        at_home,
     );
     data
 }
@@ -1347,6 +1368,29 @@ l: https://l.test (SSE) - ⊘ Disabled for this project (re-enable via /mcp)\n";
     }
 
     #[test]
+    fn project_at_home_is_not_a_second_user() {
+        let (_t, home, project) = setup();
+        put_json(
+            home.join(".claude/settings.json"),
+            json!({"enabledPlugins":{"alpha@m":true},"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"x"}]}]}}),
+        );
+        put(
+            home.join(".claude/skills/mine/SKILL.md"),
+            "---\nname: mine\n---\n",
+        );
+        let _ = project;
+        let d = read_claude(&home, &home);
+        assert_eq!(
+            d.plugins.iter().find(|p| p.id == "alpha@m").unwrap().locked,
+            None
+        );
+        let mine = |g: &str| d.skills.iter().filter(|e| e.group == g).count();
+        assert_eq!((mine("User"), mine("Project")), (1, 0));
+        let hooks = d.hooks.iter().filter(|e| e.name == "SessionStart").count();
+        assert_eq!(hooks, 1);
+    }
+
+    #[test]
     fn manifest_paths_add_or_replace() {
         let (_t, home, project) = setup();
         let a = home.join(".claude/plugins/cache/m/alpha/1.2.0");
@@ -1599,7 +1643,7 @@ l: https://l.test (SSE) - ⊘ Disabled for this project (re-enable via /mcp)\n";
                 "Parent folder",
                 "This project",
                 "This project",
-                "This project, yours only"
+                "Yours, not shared"
             ]
         );
     }
@@ -1734,7 +1778,7 @@ l: https://l.test (SSE) - ⊘ Disabled for this project (re-enable via /mcp)\n";
         let p = settings_path(t.path());
         put(
             &p,
-            "{\n  \"numStartups\": 3,\n  \"lastCost\": 0.123456,\n  \"enabledPlugins\": {\n    \"a@m\": true,\n    \"b@m\": false\n  },\n  \"hooks\": {\"Stop\": []}\n}\n",
+            "{\n  \"numStartups\": 3,\n  \"lastCost\": 0.123456,\n  \"enabledPlugins\": {\n    \"a@m\": true,\n    \"b@m\": false\n  },\n  \"hooks\": {\n    \"Stop\": []\n  }\n}\n",
         );
         let original = fs::read(&p).unwrap();
         let orig_v: Value = serde_json::from_slice(&original).unwrap();
