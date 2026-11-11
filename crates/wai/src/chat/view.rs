@@ -866,7 +866,7 @@ mod tests {
             state(&session, cx) == TurnState::Idle
         });
         let items = session.read_with(cx, |s, _| s.model.items.clone());
-        let at = |f: &dyn Fn(&ChatItem) -> bool| items.iter().position(|i| f(i)).unwrap();
+        let at = |f: &dyn Fn(&ChatItem) -> bool| items.iter().position(f).unwrap();
         let card = at(&|i| matches!(i, ChatItem::Permission { .. }));
         let steer = at(&|i| *i == also);
         let reply = at(&|i| matches!(i, ChatItem::Agent { .. }));
@@ -1858,7 +1858,8 @@ mod tests {
             state(&session, cx) == TurnState::NeedsYou
         });
         assert!(shows("perm-allow_once", cx), "the card shows");
-        // Rows: the prompt, the thought, the Read call, the edit, the edit (its card waits above the prompt box).
+        // Rows: the prompt, the thought, the Read call, the edit
+        // (its card waits above the prompt box).
         assert!(!shows(("edited", 3usize), cx), "not written yet");
         click_edits(None, "perm-allow_once", cx);
         wait_until(cx, "the Edits block", |cx| {

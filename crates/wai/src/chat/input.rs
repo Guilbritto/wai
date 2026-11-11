@@ -129,7 +129,7 @@ fn image(path: &Path) -> Option<PromptBlock> {
 }
 
 impl ChatSession {
-    /// D7: with the box empty, `1`-`9` answer the top card's n-th choice when it is a
+    /// With the box empty, `1`-`9` answer the top card's n-th choice when it is a
     /// permission; any other key, or a question on top, goes through to the box.
     fn answer_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let key = &event.keystroke;

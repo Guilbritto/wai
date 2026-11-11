@@ -66,7 +66,7 @@ pub(super) fn pinned_message(
             user_bubble(cx)
                 .opacity(0.75)
                 .child(caption)
-                .child(div().line_clamp(3).child(text.to_string())),
+                .child(div().line_clamp(3).text_ellipsis().child(text.to_string())),
         )
 }
 
@@ -283,7 +283,7 @@ impl ChatSession {
         )
     }
 
-    /// The head of a run of steps: `3 steps · <the latest>`, with the run's status. A click
+    /// The head of a run of steps: `3 steps · <each tool's title once>`, with the run's status. A click
     /// unfolds the run into its step lines.
     fn render_group(
         &self,
@@ -436,13 +436,17 @@ impl ChatSession {
                 answered.as_deref().unwrap_or_default(),
                 cx,
             )
+            // Registers the id so tests can find it.
+            .test_support()
             .into_any_element(),
             ChatItem::Question { request, answered } => permission::closed(
                 ("question", ix).into(),
-                &request.message,
+                request.message.lines().next().unwrap_or_default(),
                 answered.as_deref().unwrap_or_default(),
                 cx,
             )
+            // Registers the id so tests can find it.
+            .test_support()
             .into_any_element(),
             ChatItem::Notice { text, kind } => {
                 let restart = *kind == NoticeKind::Error
@@ -632,6 +636,9 @@ impl ChatSession {
                     .tooltip("Back to the prompt box")
                     .accessibility_label("Back to the prompt box")
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        if ix >= this.queued.len() {
+                            return;
+                        }
                         let message = this.queued.remove(ix);
                         this.take_back(message);
                         cx.notify();

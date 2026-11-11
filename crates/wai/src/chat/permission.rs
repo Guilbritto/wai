@@ -259,7 +259,8 @@ pub fn closed(id: ElementId, title: &str, answer: &str, cx: &App) -> Stateful<Di
     };
     step_line(cx)
         .id(id)
-        .child(div().flex_1().truncate().child(title.to_string()))
+        .cursor_default()
+        .child(div().flex_1().min_w_0().truncate().child(title.to_string()))
         .child(
             div()
                 .flex_none()
