@@ -38,6 +38,9 @@ pub enum Section {
     Instructions,
     Agents,
     Hooks,
+    Codex,
+    Copilot,
+    Antigravity,
 }
 
 impl Section {
@@ -55,6 +58,9 @@ impl Section {
             Section::Instructions => "Instructions",
             Section::Agents => "Agents",
             Section::Hooks => "Hooks",
+            Section::Codex => "Codex",
+            Section::Copilot => "Copilot",
+            Section::Antigravity => "Antigravity",
         }
     }
 
@@ -72,6 +78,9 @@ impl Section {
             Section::Instructions => "instructions",
             Section::Agents => "agents",
             Section::Hooks => "hooks",
+            Section::Codex => "codex",
+            Section::Copilot => "copilot",
+            Section::Antigravity => "antigravity",
         }
     }
 
@@ -92,11 +101,37 @@ impl Section {
             Section::Hooks => {
                 "Commands Claude Code runs on its own at set moments. They run with your permissions."
             }
+            Section::Codex => {
+                "Plugins, MCP servers, skills, instructions, agents and hooks of Codex, like the Claude ones."
+            }
+            Section::Copilot => {
+                "Plugins, MCP servers, skills, instructions, agents and hooks of Copilot, like the Claude ones."
+            }
+            Section::Antigravity => {
+                "Plugins, MCP servers, skills, instructions, agents and hooks of Antigravity, like the Claude ones."
+            }
             Section::Mcp => {
                 "Servers that give Claude more tools. Turning one off applies to this project, in new Claude sessions, and keeps its configuration."
             }
         }
     }
+}
+
+impl Section {
+    fn is_soon(self) -> bool {
+        matches!(
+            self,
+            Section::Codex | Section::Copilot | Section::Antigravity
+        )
+    }
+}
+
+/// What a Coming soon page says under "Not in wai yet".
+pub(crate) fn soon_text(section: Section) -> String {
+    let x = section.title();
+    format!(
+        "Today wai shows what Claude uses. {x} comes next; its own settings stay in its CLI meanwhile."
+    )
 }
 
 /// The nav's groups, each with its label and sections.
@@ -122,6 +157,10 @@ pub(crate) const NAV: &[(&str, &[Section])] = &[
             Section::Agents,
             Section::Hooks,
         ],
+    ),
+    (
+        "Other agents",
+        &[Section::Codex, Section::Copilot, Section::Antigravity],
     ),
 ];
 
@@ -786,6 +825,7 @@ impl Render for SettingsView {
             .collect();
         let ai = section == Section::Ai;
         let extensions = section == Section::Extensions;
+        let soon_page = section.is_soon();
         let claude_page = matches!(
             section,
             Section::Plugins
@@ -869,6 +909,7 @@ impl Render for SettingsView {
                         .justify_between()
                         .child(s.title())
                         .children(count.map(|n| div().text_color(faint).child(n.to_string())))
+                        .children(s.is_soon().then(|| div().text_color(faint).child("Soon")))
                         .on_click(cx.listener(move |this, _, window, cx| this.show(s, window, cx)))
                         .test_support()
                 }))
@@ -978,11 +1019,30 @@ impl Render for SettingsView {
                                     .children(self.claude_actions(section, cx)),
                             )
                             .children(banner)
-                            .children((!extensions).then(|| Input::new(&self.search).small()))
+                            .children(
+                                (!extensions && !soon_page)
+                                    .then(|| Input::new(&self.search).small()),
+                            )
                             .children(notice)
                             .children(project)
                             .children(agents.iter().map(|a| self.agent_row(a, cx)))
                             .children(rows.into_iter().map(|label| self.rows(label, cx)))
+                            .children(soon_page.then(|| {
+                                v_flex()
+                                    .debug_selector(|| "settings-soon-page".into())
+                                    .items_center()
+                                    .gap_2()
+                                    .py(px(40.))
+                                    .child(aurora::soon(cx))
+                                    .child(
+                                        div()
+                                            .font_family(DISPLAY_FONT)
+                                            .text_size(px(20.))
+                                            .font_weight(FontWeight::BOLD)
+                                            .child("Not in wai yet"),
+                                    )
+                                    .child(div().text_color(muted).child(soon_text(section)))
+                            }))
                             .children(claude_page.then(|| self.claude_page(section, &query, cx)))
                             .children(advanced)
                             .children(extensions.then(|| self.data.extensions.clone()).flatten()),
@@ -1303,6 +1363,42 @@ mod tests {
         let name = crate::workspace::folder_name(&project);
         let shown = view(&workspace, cx).read_with(cx, |v, _| v.context().to_string());
         assert_eq!(shown, format!("({name})"));
+    }
+
+    #[test]
+    fn nav_groups_match_the_spec() {
+        use Section::*;
+        let want: &[(&str, &[Section])] = &[
+            (
+                "wai",
+                &[Ai, Appearance, Conversation, Terminal, Updates, Extensions],
+            ),
+            (
+                "Claude",
+                &[Plugins, Mcp, Skills, Instructions, Agents, Hooks],
+            ),
+            ("Other agents", &[Codex, Copilot, Antigravity]),
+        ];
+        assert_eq!(super::NAV, want);
+    }
+
+    #[gpui_kit::test]
+    fn other_agents_are_coming_soon(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Ai, None, window, cx)
+        });
+        click("settings-nav-codex", cx);
+        assert!(cx.debug_bounds("settings-soon-page").is_some());
+        let view = view(&workspace, cx);
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.nav_count(Section::Codex, cx)),
+            None
+        );
+        assert_eq!(
+            super::soon_text(Section::Codex),
+            "Today wai shows what Claude uses. Codex comes next; its own settings stay in its CLI meanwhile."
+        );
     }
 
     #[gpui_kit::test]
