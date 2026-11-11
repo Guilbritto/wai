@@ -3464,9 +3464,9 @@ pub(crate) mod tests {
         let rows = load_history(&workspace, 3, cx);
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
 
-        // The sidebar offers Fork on the history rows and on the open session.
+        // A history row's menu offers Fork, and so does an open session's row.
         cx.update(|window, cx| window.click("tab-history", cx));
-        cx.update(|window, cx| window.click(("history-fork", 1usize), cx));
+        menu_item(("history", 1usize), "Fork", cx);
         wait_until(cx, "the fork", |cx| {
             workspace.read_with(cx, |w, _| w.panes.len() == 2)
         });
@@ -3495,7 +3495,7 @@ pub(crate) mod tests {
 
         // An open session forks too, by its row.
         cx.update(|window, cx| window.click("tab-sessions", cx));
-        cx.update(|window, cx| window.click(("open-fork", 0usize), cx));
+        menu_item(("open", 0usize), "Fork", cx);
         wait_until(cx, "the second fork", |cx| {
             workspace.read_with(cx, |w, _| w.panes.len() == 3)
         });
@@ -3517,7 +3517,7 @@ pub(crate) mod tests {
         load_history(&workspace, 2, cx);
 
         cx.update(|window, cx| window.click("tab-history", cx));
-        cx.update(|window, cx| window.click(("history-fork", 0usize), cx));
+        menu_item(("history", 0usize), "Fork", cx);
         wait_until(cx, "the notice", |cx| {
             cx.update(|window, cx| !window.notifications(cx).is_empty())
         });
@@ -4384,6 +4384,25 @@ pub(crate) mod tests {
             })
         });
         assert_eq!(cx.update(|window, cx| window.notifications(cx).len()), 1);
+    }
+
+    /// Right-clicks the element `target`, then clicks the item labelled `item` in its menu.
+    pub(crate) fn menu_item(target: impl Into<ElementId>, item: &str, cx: &mut VisualTestContext) {
+        use gpui_kit::test::TestQueryExt as _;
+        let at = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find(target).bounds().center()
+        });
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        let item = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find_by_label(item).bounds().center()
+        });
+        cx.simulate_mouse_move(item, None, Modifiers::none());
+        cx.simulate_click(item, Modifiers::none());
+        cx.run_until_parked();
     }
 
     pub(crate) fn click(id: &'static str, cx: &mut VisualTestContext) {

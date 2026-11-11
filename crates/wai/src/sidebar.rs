@@ -5,6 +5,7 @@ use std::ops::Range;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -249,7 +250,7 @@ impl Workspace {
                                     .tooltip("New group")
                                     .accessibility_label("New group")
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.new_group(window, cx)
+                                        this.new_group(None, window, cx)
                                     })),
                             ),
                     )
@@ -272,35 +273,51 @@ impl Workspace {
         }
     }
 
-    /// An open session dropped on group `to`'s header joins it, leaving the one it was in;
-    /// dropped on the ungrouped rows (`None`), it only leaves.
+    /// An open session dropped on group `to`'s header joins it; dropped on the ungrouped rows
+    /// (`None`), it leaves its group.
     fn group_session(
         &mut self,
         dragged: &DraggedSession,
         to: Option<usize>,
         cx: &mut Context<Self>,
     ) {
-        let Dragged::Open(session) = &dragged.source else {
-            return;
-        };
-        let id = session.read(cx).id.clone();
-        self.ungroup(&id);
+        if let Dragged::Open(session) = &dragged.source {
+            let id = session.read(cx).id.clone();
+            self.move_to_group(&id, to, cx);
+        }
+    }
+
+    /// Session `id` joins group `to`, leaving the one it was in; `None` only takes it out.
+    fn move_to_group(&mut self, id: &str, to: Option<usize>, cx: &mut Context<Self>) {
+        self.ungroup(id);
         if let Some(group) = to.and_then(|ix| self.groups.get_mut(ix)) {
-            group.sessions.push(id);
+            group.sessions.push(id.to_string());
         }
         self.save_state(cx);
         cx.notify();
     }
 
-    /// A group named "New group" at the end of the list, its name being typed.
-    fn new_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// A group named "New group" at the end of the list, holding session `with` if given, its
+    /// name being typed.
+    fn new_group(&mut self, with: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = with {
+            self.ungroup(id);
+        }
         self.groups.push(SessionGroup {
             name: "New group".into(),
             collapsed: false,
-            sessions: Vec::new(),
+            sessions: with.map(str::to_string).into_iter().collect(),
         });
         self.save_state(cx);
         self.rename(Renamed::Group(self.groups.len() - 1), window, cx);
+    }
+
+    /// Deletes group `ix`; its sessions stay open, in no group.
+    fn delete_group(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.renaming = None;
+        self.groups.remove(ix);
+        self.save_state(cx);
+        cx.notify();
     }
 
     /// Turns a session's title or a group's name into an input holding it: Enter, or the focus
@@ -364,8 +381,8 @@ impl Workspace {
         (renamed == what).then(|| Input::new(input).xsmall().flex_1())
     }
 
-    /// A group's header: its chevron, name and session count, then rename and delete. An open
-    /// session dropped on it joins the group.
+    /// A group's header: its chevron, name and session count; its menu renames or deletes it.
+    /// An open session dropped on it joins the group.
     fn group_header(
         &self,
         ix: usize,
@@ -379,7 +396,9 @@ impl Workspace {
         };
         let input = self.renaming(&Renamed::Group(ix));
         let name = group.name.clone();
+        let workspace = cx.entity().downgrade();
         row(false, cx)
+            .id(("group-row", ix))
             .pl_1()
             .child(
                 Button::new(("group-toggle", ix))
@@ -435,24 +454,21 @@ impl Workspace {
                     // Registers the id so tests can find it and drop on it.
                     .test_support(),
             )
-            .child(rename_button(("group-rename", ix)).on_click(
-                cx.listener(move |this, _, window, cx| this.rename(Renamed::Group(ix), window, cx)),
-            ))
-            .child(
-                Button::new(("group-delete", ix))
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Close)
-                    .tooltip("Delete group")
-                    .accessibility_label("Delete group")
-                    // Its sessions stay open, in no group.
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.renaming = None;
-                        this.groups.remove(ix);
-                        this.save_state(cx);
-                        cx.notify();
-                    })),
-            )
+            .context_menu(move |menu, _, _| {
+                let (rename, delete) = (workspace.clone(), workspace.clone());
+                menu.item(
+                    PopupMenuItem::new("Rename group").on_click(move |_, window, cx| {
+                        rename
+                            .update(cx, |w, cx| w.rename(Renamed::Group(ix), window, cx))
+                            .ok();
+                    }),
+                )
+                .item(
+                    PopupMenuItem::new("Delete group").on_click(move |_, _, cx| {
+                        delete.update(cx, |w, cx| w.delete_group(ix, cx)).ok();
+                    }),
+                )
+            })
     }
 
     fn render_history(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
@@ -517,16 +533,15 @@ impl Workspace {
         let title = s.model.shown_title().unwrap_or("New session").to_string();
         let active = self.panes[self.focused_pane].session() == Some(session);
         let (open, side, end) = (session.clone(), session.clone(), session.clone());
-        let rename = session.clone();
+        let menu_session = session.clone();
+        let workspace = cx.entity().downgrade();
         let input = self.renaming(&Renamed::Session(session.clone()));
         let dragged = DraggedSession {
             title: title.clone().into(),
             source: Dragged::Open(session.clone()),
         };
-        let (agent, id, cwd) = (s.agent.clone(), s.id.clone(), s.cwd.clone());
-        let forkable = self.can_fork(&agent, cx);
-        let fork_title = s.model.shown_title().map(str::to_string);
         row(active, cx)
+            .id(("open-row", ix))
             .child(
                 h_flex()
                     .id(("open", ix))
@@ -565,28 +580,9 @@ impl Workspace {
                     // Registers the id so tests can find and drag it.
                     .test_support(),
             )
-            .child(rename_button(("open-rename", ix)).on_click(cx.listener(
-                move |this, _, window, cx| {
-                    this.rename(Renamed::Session(rename.clone()), window, cx)
-                },
-            )))
             .when(self.panes.len() < MAX_PANES, |el| {
                 el.child(side_button(("open-side", ix)).on_click(cx.listener(
                     move |this, _, window, cx| this.show(side.clone(), true, window, cx),
-                )))
-            })
-            .when(forkable, |el| {
-                el.child(fork_button(("open-fork", ix)).on_click(cx.listener(
-                    move |this, _, window, cx| {
-                        this.fork(
-                            agent.clone(),
-                            id.clone(),
-                            fork_title.clone(),
-                            cwd.clone(),
-                            window,
-                            cx,
-                        )
-                    },
                 )))
             })
             .child(
@@ -600,6 +596,60 @@ impl Workspace {
                         cx.listener(move |this, _, window, cx| this.end_session(&end, window, cx)),
                     ),
             )
+            .context_menu(move |menu, _, cx| {
+                let Some(w) = workspace.upgrade() else {
+                    return menu;
+                };
+                w.read(cx).session_menu(menu, &w, &menu_session, cx)
+            })
+    }
+
+    /// An open session's menu: rename, fork, and moving it between groups.
+    fn session_menu(
+        &self,
+        menu: PopupMenu,
+        workspace: &Entity<Self>,
+        session: &Entity<ChatSession>,
+        cx: &App,
+    ) -> PopupMenu {
+        let s = session.read(cx);
+        let (agent, id, cwd) = (s.agent.clone(), s.id.clone(), s.cwd.clone());
+        let title = s.model.shown_title().map(str::to_string);
+        let current = self.group_of(&id);
+        let renamed = session.clone();
+        let menu = menu
+            .item(item(workspace, "Rename", move |w, window, cx| {
+                w.rename(Renamed::Session(renamed.clone()), window, cx)
+            }))
+            .when(self.can_fork(&agent, cx), |menu| {
+                let (id, cwd) = (id.clone(), cwd.clone());
+                menu.item(item(workspace, "Fork", move |w, window, cx| {
+                    let (agent, id, title) = (agent.clone(), id.clone(), title.clone());
+                    w.fork(agent, id, title, cwd.clone(), window, cx)
+                }))
+            })
+            .separator();
+        let groups = self.groups.iter().enumerate();
+        let menu = groups
+            .filter(|(ix, _)| Some(*ix) != current)
+            .fold(menu, |menu, (ix, group)| {
+                let id = id.clone();
+                let label = format!("Move to {}", group.name);
+                menu.item(item(workspace, label, move |w, _, cx| {
+                    w.move_to_group(&id, Some(ix), cx)
+                }))
+            });
+        let new = id.clone();
+        menu.item(item(
+            workspace,
+            "New group with this session",
+            move |w, window, cx| w.new_group(Some(&new), window, cx),
+        ))
+        .when(current.is_some(), |menu| {
+            menu.item(item(workspace, "Remove from group", move |w, _, cx| {
+                w.move_to_group(&id, None, cx)
+            }))
+        })
     }
 
     fn history_row(
@@ -610,6 +660,7 @@ impl Workspace {
     ) -> impl IntoElement + use<> {
         let title = summary.title.clone().unwrap_or_else(|| summary.id.clone());
         let (open, side, source) = (summary.clone(), summary.clone(), summary.clone());
+        let workspace = cx.entity().downgrade();
         let dragged = DraggedSession {
             title: title.clone().into(),
             source: Dragged::History(summary.clone()),
@@ -618,6 +669,7 @@ impl Workspace {
             .default_agent()
             .is_some_and(|agent| self.can_fork(&agent, cx));
         row(false, cx)
+            .id(("history-row", ix))
             .child(
                 div()
                     .id(("history", ix))
@@ -639,17 +691,22 @@ impl Workspace {
                     cx.listener(move |this, _, window, cx| this.resume(&side, true, window, cx)),
                 ))
             })
-            .when(forkable, |el| {
-                el.child(fork_button(("history-fork", ix)).on_click(cx.listener(
-                    move |this, _, window, cx| {
+            .context_menu(move |menu, _, _| {
+                let (workspace, source) = (workspace.clone(), source.clone());
+                menu.when(forkable, |menu| {
+                    menu.item(PopupMenuItem::new("Fork").on_click(move |_, window, cx| {
                         let (id, title, cwd) =
                             (source.id.clone(), source.title.clone(), source.cwd.clone());
-                        let Some(agent) = this.default_agent() else {
-                            return;
-                        };
-                        this.fork(agent, id, title, cwd, window, cx)
-                    },
-                )))
+                        workspace
+                            .update(cx, |w, cx| {
+                                let Some(agent) = w.default_agent() else {
+                                    return;
+                                };
+                                w.fork(agent, id, title, cwd, window, cx)
+                            })
+                            .ok();
+                    }))
+                })
             })
     }
 }
@@ -696,14 +753,16 @@ fn light(
     }
 }
 
-// ponytail: the bundled icons have no pencil; a pencil needs wai's own asset source.
-fn rename_button(id: impl Into<ElementId>) -> Button {
-    Button::new(id)
-        .ghost()
-        .xsmall()
-        .icon(IconName::ALargeSmall)
-        .tooltip("Rename")
-        .accessibility_label("Rename")
+/// A menu item that runs `f` on the workspace.
+fn item(
+    workspace: &Entity<Workspace>,
+    label: impl Into<SharedString>,
+    f: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+) -> PopupMenuItem {
+    let workspace = workspace.downgrade();
+    PopupMenuItem::new(label).on_click(move |_, window, cx| {
+        workspace.update(cx, |w, cx| f(w, window, cx)).ok();
+    })
 }
 
 fn side_button(id: impl Into<ElementId>) -> Button {
@@ -712,14 +771,6 @@ fn side_button(id: impl Into<ElementId>) -> Button {
         .xsmall()
         .icon(IconName::PanelRightOpen)
         .tooltip("Open to the side")
-}
-
-fn fork_button(id: impl Into<ElementId>) -> Button {
-    Button::new(id)
-        .ghost()
-        .xsmall()
-        .icon(IconName::Copy)
-        .tooltip("Fork")
 }
 
 #[cfg(test)]
@@ -738,8 +789,8 @@ mod tests {
     use crate::agents::RegistryEvent;
     use crate::workspace::Workspace;
     use crate::workspace::tests::{
-        click, fake_settings, history_settings, launch, load_history, open, open_at, question,
-        wait_until,
+        click, fake_settings, history_settings, launch, load_history, menu_item, open, open_at,
+        question, wait_until,
     };
     use crate::{app, aurora};
 
@@ -884,7 +935,7 @@ mod tests {
         let name = |cx: &mut VisualTestContext| session.read_with(cx, |s, _| s.model.name.clone());
         assert_eq!(label(open_row(0), cx).as_deref(), Some("Session 0"));
 
-        press(("open-rename", 0usize), cx);
+        menu_item(open_row(0), "Rename", cx);
         type_name("Mine", "enter", cx);
         assert_eq!(name(cx).as_deref(), Some("Mine"));
         assert_eq!(label(open_row(0), cx).as_deref(), Some("Mine"));
@@ -925,7 +976,7 @@ mod tests {
         assert!(workspace.read_with(cx, |w, _| w.renaming.is_none()));
         assert_eq!(name(cx).as_deref(), Some("Mine"));
 
-        press(("open-rename", 0usize), cx);
+        menu_item(open_row(0), "Rename", cx);
         type_name("", "enter", cx);
         assert_eq!(name(cx), None);
         assert_eq!(label(open_row(0), cx).as_deref(), Some("From the agent"));
@@ -946,8 +997,8 @@ mod tests {
         assert_eq!(groups(&workspace, cx), [named("Review", &[])]);
         assert_eq!(label(group(0), cx).as_deref(), Some("Review, 0"));
 
-        // Renamed from its button and by a double click; an empty name keeps the old one.
-        press(("group-rename", 0usize), cx);
+        // Renamed from its menu and by a double click; an empty name keeps the old one.
+        menu_item(group(0), "Rename group", cx);
         type_name("Later", "enter", cx);
         assert_eq!(groups(&workspace, cx), [named("Later", &[])]);
         cx.update(|window, cx| {
@@ -956,7 +1007,7 @@ mod tests {
         });
         cx.run_until_parked();
         type_name("", "enter", cx);
-        press(("group-rename", 0usize), cx);
+        menu_item(group(0), "Rename group", cx);
         type_name("Gone", "escape", cx);
         assert_eq!(groups(&workspace, cx), [named("Later", &[])]);
 
@@ -972,10 +1023,58 @@ mod tests {
         press(("group-toggle", 0usize), cx);
         assert!(label(open_row(1), cx).is_some());
 
-        press(("group-delete", 0usize), cx);
+        menu_item(group(0), "Delete group", cx);
         assert_eq!(groups(&workspace, cx), []);
         assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 2);
         assert!(label(open_row(1), cx).is_some());
+    }
+
+    /// A row's menu moves its session into a group, into a new group, and out; rows and group
+    /// headers carry no inline rename, fork or delete buttons.
+    #[gpui_kit::test]
+    fn row_menu_groups_sessions(cx: &mut TestAppContext) {
+        let (workspace, cx) = with_sessions(2, cx);
+        let ids: Vec<String> = workspace.read_with(cx, |w, cx| {
+            w.sessions.iter().map(|s| s.read(cx).id.clone()).collect()
+        });
+        press("new-group", cx);
+        type_name("A", "enter", cx);
+
+        menu_item(open_row(0), "Move to A", cx);
+        assert_eq!(groups(&workspace, cx), [named("A", &[&ids[0]])]);
+        menu_item(open_row(1), "New group with this session", cx);
+        assert!(workspace.read_with(cx, |w, _| w.renaming.is_some()));
+        type_name("B", "enter", cx);
+        assert_eq!(
+            groups(&workspace, cx),
+            [named("A", &[&ids[0]]), named("B", &[&ids[1]])]
+        );
+        menu_item(open_row(0), "Move to B", cx);
+        assert_eq!(
+            groups(&workspace, cx),
+            [named("A", &[]), named("B", &[&ids[1], &ids[0]])]
+        );
+        menu_item(open_row(0), "Remove from group", cx);
+        assert_eq!(
+            groups(&workspace, cx),
+            [named("A", &[]), named("B", &[&ids[1]])]
+        );
+
+        press("tab-history", cx);
+        assert!(label(("history", 0usize), cx).is_some());
+        assert!(
+            label(("history-fork", 0usize), cx).is_none(),
+            "Fork is inline"
+        );
+        press("tab-sessions", cx);
+        for id in [
+            ElementId::from(("open-rename", 0usize)),
+            ("open-fork", 0usize).into(),
+            ("group-rename", 0usize).into(),
+            ("group-delete", 0usize).into(),
+        ] {
+            assert!(label(id.clone(), cx).is_none(), "{id:?} is inline");
+        }
     }
 
     /// A row dropped on a group's header joins that group only; dropped on the ungrouped rows,
@@ -1029,7 +1128,7 @@ mod tests {
             workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
         });
 
-        press(("open-rename", 0usize), cx);
+        menu_item(open_row(0), "Rename", cx);
         type_name("Mine", "enter", cx);
         press("new-group", cx);
         type_name("Review", "enter", cx);
