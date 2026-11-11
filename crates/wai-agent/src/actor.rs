@@ -39,6 +39,10 @@ enum Command {
         mcp: Vec<McpServer>,
         reply: Reply<SessionStarted>,
     },
+    CloseSession {
+        session: SessionId,
+        reply: Reply<()>,
+    },
     ListSessions {
         cursor: Option<String>,
         reply: Reply<Page>,
@@ -148,6 +152,12 @@ impl AgentHandle {
             reply,
         })
         .await
+    }
+
+    /// Tells the agent to free `session` (the agent must advertise `AgentCaps::close`).
+    pub async fn close_session(&self, session: SessionId) -> Result<(), AgentError> {
+        self.request(|reply| Command::CloseSession { session, reply })
+            .await
     }
 
     /// Lists every session the agent knows, following `next_cursor` to the end.
@@ -532,6 +542,17 @@ pub fn program(command: &str) -> Option<PathBuf> {
     find(&AcpAgent::from_str(command).ok()?.into_config())
 }
 
+/// The program `command` names, as written: what the "not installed" notice says is missing.
+pub fn program_name(command: &str) -> Option<PathBuf> {
+    Some(
+        AcpAgent::from_str(command)
+            .ok()?
+            .into_config()
+            .command()
+            .to_path_buf(),
+    )
+}
+
 /// Runs the connection; `Ok(true)` means wai asked it to stop.
 async fn connect(
     spec: &AgentSpec,
@@ -617,6 +638,7 @@ async fn actor_loop(
             load_session: caps.load_session,
             list_sessions: caps.session_capabilities.list.is_some(),
             fork: caps.session_capabilities.fork.is_some(),
+            close: caps.session_capabilities.close.is_some(),
             images: caps.prompt_capabilities.image,
             steering: init
                 .meta
@@ -671,6 +693,13 @@ async fn actor_loop(
                 acp::ForkSessionRequest::new(id, cwd).mcp_servers(convert::mcp_servers(mcp)),
                 reply,
                 |r| convert::session_started(r.session_id.to_string(), r.modes, r.config_options),
+            )?,
+            Command::CloseSession { session, reply } => request(
+                &cx,
+                broker,
+                acp::CloseSessionRequest::new(session),
+                reply,
+                |_| (),
             )?,
             Command::ListSessions { cursor, reply } => request(
                 &cx,

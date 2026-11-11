@@ -106,6 +106,7 @@ fn streams_agent_text_and_ends_turn() {
                         load_session: true,
                         list_sessions: true,
                         fork: true,
+                        close: false,
                         images: true,
                         steering: false,
                     }
@@ -999,4 +1000,43 @@ fn program_parses_like_the_spawn() {
     }
     assert_eq!(program("no-such-program-xyz --acp"), None);
     assert_eq!(program(""), None);
+}
+
+#[test]
+fn close_session_reaches_the_agent() {
+    run(async {
+        let file = std::env::temp_dir().join(format!("wai-close-{}", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let (agent, rx) = spawn(&["--close-file", file.to_str().unwrap()]);
+        match ready(&rx).await {
+            AgentEvent::Ready { caps, .. } => assert!(caps.close),
+            other => unreachable!("{other:?}"),
+        }
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        assert!(agent.close_session(session.id).await.is_ok());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "fake-1\n");
+        let _ = std::fs::remove_file(&file);
+    })
+}
+
+#[test]
+fn new_session_waits_for_its_gate() {
+    run(async {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = dir.path().join("gate");
+        let (agent, rx) = spawn(&["--new-session-gate", gate.to_str().unwrap()]);
+        ready(&rx).await;
+        let pending = agent.new_session(cwd(), vec![]);
+        let held = smol::future::or(async { pending.await.ok().map(|_| ()) }, async {
+            smol::Timer::after(Duration::from_millis(300)).await;
+            None
+        });
+        assert_eq!(
+            held.await,
+            None,
+            "session/new answered before the gate opened"
+        );
+        std::fs::write(&gate, "").unwrap();
+        assert!(agent.new_session(cwd(), vec![]).await.is_ok());
+    });
 }

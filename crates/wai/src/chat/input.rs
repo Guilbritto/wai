@@ -16,7 +16,7 @@ use gpui_kit::*;
 use wai_agent::{AgentCaps, PromptBlock};
 
 use super::model::{ChatItem, NoticeKind, TurnState, elapsed};
-use super::view::ChatSession;
+use super::view::{ChatEvent, ChatSession};
 use crate::agents::AgentStatus;
 use crate::app::CancelTurn;
 use crate::aurora;
@@ -24,6 +24,7 @@ use crate::aurora;
 const IMAGE_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
 /// A file dropped, pasted or picked, ready to go out with the next prompt.
+#[derive(Clone)]
 pub struct Attachment {
     pub(super) name: String,
     path: PathBuf,
@@ -128,6 +129,81 @@ fn image(path: &Path) -> Option<PromptBlock> {
     })
 }
 
+/// ⌘V of files copied in Finder or of an image attaches them; `false` lets text paste.
+pub(super) fn paste_into(
+    attachments: &mut Vec<Attachment>,
+    item: &ClipboardItem,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    for entry in item.entries() {
+        match entry {
+            ClipboardEntry::ExternalPaths(paths) => {
+                attachments.extend(paths.paths().iter().map(|path| Attachment::new(path)));
+                return true;
+            }
+            ClipboardEntry::Image(image) => {
+                match Attachment::pasted(image) {
+                    Ok(attachment) => attachments.push(attachment),
+                    Err(e) => window.push_notification(
+                        Notification::warning(format!("Could not attach the image: {e}")),
+                        cx,
+                    ),
+                }
+                return true;
+            }
+            ClipboardEntry::String(_) => {}
+        }
+    }
+    false
+}
+
+/// The round send button (`.chat-enviar`); the caller sets its click.
+pub(super) fn send_button(disabled: bool, cx: &App) -> Button {
+    let dark = cx.theme().is_dark();
+    let send = Button::new("send")
+        .icon(IconName::ArrowUp)
+        .tooltip("Send")
+        .accessibility_label("Send")
+        .disabled(disabled);
+    match (dark, disabled) {
+        // A disabled button replays these over its own disabled colors.
+        (true, true) => send.bg(aurora::vidro()).text_color(aurora::nevoa()),
+        (true, false) => aurora::filled(
+            send,
+            aurora::boreal(),
+            aurora::boreal().blend(hsla(0., 0., 1., 0.2)),
+            rgb(0x0b1024).into(),
+            cx,
+        ),
+        (false, _) => send.primary(),
+    }
+    .size(px(36.))
+    .rounded(px(18.))
+}
+
+/// The paperclip; the caller sets its click.
+pub(super) fn attach_button() -> Button {
+    Button::new("attach")
+        .ghost()
+        .icon(IconName::Plus)
+        .tooltip("Attach files (or paste, or drop them here)")
+        .accessibility_label("Attach files")
+        .size(px(36.))
+        .rounded(px(18.))
+}
+
+/// What the paperclip opens: the system's file picker, files and folders, several at once.
+pub(super) fn pick_paths(cx: &mut App) -> impl Future<Output = Option<Vec<PathBuf>>> + use<> {
+    let picked = cx.prompt_for_paths(PathPromptOptions {
+        files: true,
+        directories: true,
+        multiple: true,
+        prompt: None,
+    });
+    async move { picked.await.ok()?.ok()? }
+}
+
 impl ChatSession {
     /// With the box empty, `1`-`9` answer the top card's n-th choice when it is a
     /// permission; any other key, or a question on top, goes through to the box.
@@ -156,7 +232,7 @@ impl ChatSession {
     /// Sends the prompt and the attachments: from an idle session as a prompt; during a turn
     /// into it when the agent steers, else into the queue until it ends.
     pub(super) fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.model.in_turn && self.model.state != TurnState::Idle {
+        if self.is_starting() || (!self.model.in_turn && self.model.state != TurnState::Idle) {
             return;
         }
         let text = self.input.read(cx).value().trim().to_string();
@@ -183,7 +259,7 @@ impl ChatSession {
     }
 
     /// What `message` sends: its text, then each attachment.
-    fn blocks(&self, message: &Message, cx: &App) -> Vec<PromptBlock> {
+    pub(super) fn blocks(&self, message: &Message, cx: &App) -> Vec<PromptBlock> {
         let images = self.caps(cx).is_some_and(|c| c.images);
         let text = (!message.text.is_empty()).then(|| PromptBlock::Text(message.text.clone()));
         let files = message.attachments.iter().map(|a| prompt_block(a, images));
@@ -309,6 +385,9 @@ impl ChatSession {
     }
 
     pub(super) fn cancel(&mut self, _: &CancelTurn, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_starting() {
+            return cx.emit(ChatEvent::StopStart);
+        }
         match self.model.state {
             TurnState::Working | TurnState::NeedsYou => self.handle.cancel(self.id.clone()),
             _ => cx.propagate(),
@@ -325,41 +404,18 @@ impl ChatSession {
         cx.notify();
     }
 
-    /// ⌘V of files copied in Finder or of an image attaches them; `false` lets text paste.
     fn paste(&mut self, item: &ClipboardItem, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        for entry in item.entries() {
-            match entry {
-                ClipboardEntry::ExternalPaths(paths) => {
-                    self.attach_paths(paths.paths(), cx);
-                    return true;
-                }
-                ClipboardEntry::Image(image) => {
-                    match Attachment::pasted(image) {
-                        Ok(attachment) => self.attachments.push(attachment),
-                        Err(e) => window.push_notification(
-                            Notification::warning(format!("Could not attach the image: {e}")),
-                            cx,
-                        ),
-                    }
-                    cx.notify();
-                    return true;
-                }
-                ClipboardEntry::String(_) => {}
-            }
+        let pasted = paste_into(&mut self.attachments, item, window, cx);
+        if pasted {
+            cx.notify();
         }
-        false
+        pasted
     }
 
-    /// The paperclip: the system's file picker, files and folders, several at once.
     fn pick_files(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: true,
-            multiple: true,
-            prompt: None,
-        });
+        let picked = pick_paths(cx);
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = picked.await {
+            if let Some(paths) = picked.await {
                 this.update(cx, |this, cx| this.attach_paths(&paths, cx))
                     .ok();
             }
@@ -420,26 +476,8 @@ impl ChatSession {
         // During a turn too: the message goes into the turn, or waits in the queue.
         let empty = self.input.read(cx).value().trim().is_empty() && self.attachments.is_empty();
         let disabled = empty || !(self.model.in_turn || self.model.state == TurnState::Idle);
-        let send = Button::new("send")
-            .icon(IconName::ArrowUp)
-            .tooltip("Send")
-            .accessibility_label("Send")
-            .disabled(disabled)
+        let send = send_button(disabled, cx)
             .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)));
-        let send = match (dark, disabled) {
-            // A disabled button replays these over its own disabled colors.
-            (true, true) => send.bg(aurora::vidro()).text_color(aurora::nevoa()),
-            (true, false) => aurora::filled(
-                send,
-                aurora::boreal(),
-                aurora::boreal().blend(hsla(0., 0., 1., 0.2)),
-                rgb(0x0b1024).into(),
-                cx,
-            ),
-            (false, _) => send.primary(),
-        }
-        .size(px(36.))
-        .rounded(px(18.));
         // R83: the textarea draws no ring of its own, so the pill shows the focus, and a press
         // anywhere on it, its padding included, puts the caret in the textarea.
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
@@ -503,14 +541,8 @@ impl ChatSession {
                 // Registers the id so tests can find it.
                 .test_support()
         });
-        let attach = Button::new("attach")
-            .ghost()
-            .icon(IconName::Plus)
-            .tooltip("Attach files (or paste, or drop them here)")
-            .accessibility_label("Attach files")
-            .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx)))
-            .size(px(36.))
-            .rounded(px(18.));
+        let attach = attach_button()
+            .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx)));
         let this = cx.entity().downgrade();
         let textarea =
             Textarea::new(&self.input)

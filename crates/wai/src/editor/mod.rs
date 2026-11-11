@@ -333,13 +333,8 @@ mod tests {
         cx.simulate_input("edit ");
 
         cx.simulate_keystrokes("secondary-n");
-        wait_until(cx, "the session", |cx| {
-            workspace.read_with(cx, |w, _| {
-                w.panes.get(1).is_some_and(|p| p.session().is_some())
-            })
-        });
         workspace.read_with(cx, |w, _| {
-            assert!(matches!(w.panes[0], Pane::Editor(_)));
+            assert!(matches!(w.panes[..], [Pane::Editor(_), Pane::Draft(_)]));
             assert_eq!(w.focused_pane, 1);
         });
         assert_eq!(text(&active_tab(&workspace, cx), cx), "edit a");

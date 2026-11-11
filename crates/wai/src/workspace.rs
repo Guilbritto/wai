@@ -22,7 +22,7 @@ use wai_ext::{CommandSpec, ExtEvent, ExtId, HostEvent, Reply};
 use wai_project::{FsChange, ProjectWatcher};
 use wai_settings::SessionGroup;
 use wai_settings::{
-    AgentConfig, AppState, Approval, Change, OpenSession, SeenModel, Settings, Template,
+    AgentConfig, AppState, Approval, Change, OpenSession, SeenModel, SeenModes, Settings, Template,
     agent_label, config_dir, is_approved, load_templates, seed_approved, shown, unapproved,
     write_change,
 };
@@ -35,11 +35,12 @@ use crate::app::{
     theme_mode,
 };
 use crate::aurora;
-use crate::chat::{ChatEvent, ChatSession, TurnState, signed_out};
+use crate::chat::{ChatEvent, ChatSession, DraftView, TurnState, signed_out};
 use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved, recovery};
 use crate::ext_host::{ExtHost, SessionCall};
 use crate::extensions_view::{ExtensionsView, InstallPlugin};
 use crate::files::{FileTree, OpenFile};
+use crate::git;
 use crate::layout::{self, Slot, Zone};
 use crate::notify::{self, should_notify};
 use crate::search_view::{OpenMatch, SearchView};
@@ -56,7 +57,7 @@ const TERMINAL_HEIGHT: f32 = 260.;
 pub const MAX_PANES: usize = 4;
 /// Events kept per session id that is not open yet (see `Workspace::early`).
 const EARLY_EVENTS: usize = 1_000;
-const START_KEY: &str = if cfg!(target_os = "macos") {
+pub(crate) const START_KEY: &str = if cfg!(target_os = "macos") {
     "⌘N"
 } else {
     "Ctrl+N"
@@ -76,12 +77,21 @@ pub enum Pane {
     Session(Entity<ChatSession>),
     /// Open files in tabs; one pane at most. Not kept between runs.
     Editor(Entity<EditorPane>),
+    /// A session that starts when sent; its view is also in `Workspace::drafts`.
+    Draft(Entity<DraftView>),
 }
 
 impl Pane {
     pub fn session(&self) -> Option<&Entity<ChatSession>> {
         match self {
             Pane::Session(session) => Some(session),
+            _ => None,
+        }
+    }
+
+    pub fn draft(&self) -> Option<&Entity<DraftView>> {
+        match self {
+            Pane::Draft(draft) => Some(draft),
             _ => None,
         }
     }
@@ -97,6 +107,8 @@ pub(crate) struct DraggedSession {
 #[derive(Clone)]
 pub(crate) enum Dragged {
     Open(Entity<ChatSession>),
+    /// A draft in the Open list, moved as an open session is.
+    Draft(Entity<DraftView>),
     /// Resumed where it drops, as a click on its row resumes it.
     History(SessionSummary),
 }
@@ -139,7 +151,24 @@ pub(crate) enum Leave {
     Open(PathBuf),
 }
 
+/// The title of the dialog that asks before quitting or closing with `n` busy sessions.
+pub(crate) fn still_working(n: usize) -> String {
+    match n {
+        1 => "1 session is still working".into(),
+        n => format!("{n} sessions are still working"),
+    }
+}
+
 /// Whether the batch names `path`, or lost track of what changed.
+/// What the terminal runs to open Claude Code session `id` again; the shell may be anywhere.
+pub(crate) fn resume_command(cwd: &Path, id: &str) -> String {
+    format!(
+        "cd {} && claude --resume {}",
+        wai_agent::quote(cwd),
+        wai_agent::quote(id)
+    )
+}
+
 fn touches(batch: &[FsChange], path: &Path) -> bool {
     batch.iter().any(|change| match change {
         FsChange::Rescan => true,
@@ -205,7 +234,7 @@ pub struct Workspace {
     pub(crate) applied: usize,
     next_ticket: u64,
     /// `new_session` calls in flight, per agent.
-    starting: HashMap<String, usize>,
+    pub(crate) starting: HashMap<String, usize>,
     /// Events for session ids not open yet, per agent: an agent may describe a session (title,
     /// usage, commands) before `new_session` returns. Kept, `EARLY_EVENTS` per id, only while a
     /// session of that agent is starting.
@@ -217,6 +246,14 @@ pub struct Workspace {
     state_path: Option<PathBuf>,
     /// Agent id -> the models its last Test saw; kept in `state.json`.
     pub models_seen: BTreeMap<String, Vec<SeenModel>>,
+    /// Agent id -> the modes its last session reported; kept in `state.json`.
+    pub modes_seen: BTreeMap<String, SeenModes>,
+    /// Agent id -> the model its last draft sent with; kept in `state.json`.
+    pub last_models: BTreeMap<String, String>,
+    /// Repository root -> the base its last worktree draft sent from; kept in `state.json`.
+    pub last_bases: BTreeMap<PathBuf, String>,
+    /// The Open list's drafts, in the order opened; never saved.
+    pub drafts: Vec<Entity<DraftView>>,
     /// The Open list's groups, each with its sessions' ids; kept in `state.json`.
     pub groups: Vec<SessionGroup>,
     /// The Open row or group being renamed, with its input.
@@ -258,6 +295,7 @@ impl Workspace {
             // A state from before approvals, or none kept (tests): today's values are approved.
             _ => seed_approved(&settings),
         };
+        let remembered = state.flatten();
         let configs = approved_configs(&Settings::default().agents, &settings, &approved);
         let registry = cx.new(|_| AgentRegistry::new(configs));
         let shell = settings
@@ -301,11 +339,11 @@ impl Workspace {
         let this = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             let ask = |this: &mut Self, cx: &mut Context<Self>| {
-                let clean = this.dirty_tabs(cx).is_empty();
-                if !clean {
+                let ask = !this.dirty_tabs(cx).is_empty() || this.busy_sessions(cx) > 0;
+                if ask {
                     this.leave(Leave::Close, window, cx);
                 }
-                clean
+                !ask
             };
             this.update(cx, ask).unwrap_or(true)
         });
@@ -390,7 +428,20 @@ impl Workspace {
             starting: HashMap::new(),
             early: HashMap::new(),
             ext_sessions: HashMap::new(),
-            models_seen: state.flatten().map(|s| s.models_seen).unwrap_or_default(),
+            modes_seen: remembered
+                .as_ref()
+                .map(|s| s.modes_seen.clone())
+                .unwrap_or_default(),
+            last_models: remembered
+                .as_ref()
+                .map(|s| s.last_models.clone())
+                .unwrap_or_default(),
+            last_bases: remembered
+                .as_ref()
+                .map(|s| s.last_bases.clone())
+                .unwrap_or_default(),
+            models_seen: remembered.map(|s| s.models_seen).unwrap_or_default(),
+            drafts: Vec::new(),
             groups: Vec::new(),
             renaming: None,
             approved,
@@ -548,6 +599,7 @@ impl Workspace {
             self.start_agent(cx);
             self.refresh_history(cx);
         }
+        self.sync_drafts(cx);
         self.sync_settings_view(cx);
         cx.notify();
     }
@@ -836,6 +888,9 @@ impl Workspace {
             approved: Some(self.approved.clone()),
             models_seen: self.models_seen.clone(),
             groups: self.groups.clone(),
+            last_models: self.last_models.clone(),
+            last_bases: self.last_bases.clone(),
+            modes_seen: self.modes_seen.clone(),
         };
         // ponytail: a few hundred bytes on the UI thread; move to the background executor if
         // it ever shows in a frame.
@@ -1020,8 +1075,49 @@ impl Workspace {
             cx.notify();
         })
         .detach();
+        if session.read(cx).head.is_none() {
+            let cwd = session.read(cx).cwd.clone();
+            let head = cx.background_spawn(async move { git::head(&cwd) });
+            let target = session.clone();
+            cx.spawn(async move |_, cx| {
+                let head = head.await;
+                target.update(cx, |s, cx| {
+                    s.head = head;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         self.sessions.push(session);
         self.sync_agents(cx);
+        self.sync_drafts(cx);
+    }
+
+    /// A started session joins the Open list: its early events replay, `model` (else the
+    /// settings' model for its agent) applies, and the models its agent reported are kept.
+    pub(crate) fn land(
+        &mut self,
+        session: Entity<ChatSession>,
+        early: Vec<SessionEvent>,
+        model: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let agent = session.read(cx).agent.clone();
+        session.update(cx, |s, cx| early.iter().for_each(|e| s.handle_event(e, cx)));
+        let seen = seen_models(&session.read(cx).model.config);
+        if !seen.is_empty() {
+            self.models_seen.insert(agent.clone(), seen);
+            self.sync_settings_view(cx);
+        }
+        if let Some(seen) = seen_modes(session.read(cx)) {
+            self.modes_seen.insert(agent.clone(), seen);
+        }
+        if let Some(model) = model.or_else(|| self.settings.models.get(&agent).cloned()) {
+            session.update(cx, |s, cx| s.apply_default_model(&model, cx));
+        }
+        self.add_session(session, window, cx);
+        self.refresh_history(cx);
     }
 
     /// The Agents tab follows the open sessions.
@@ -1035,6 +1131,7 @@ impl Workspace {
         match &self.panes[ix] {
             Pane::Session(session) => session.update(cx, |s, cx| s.focus(window, cx)),
             Pane::Editor(pane) => pane.update(cx, |p, cx| p.focus(window, cx)),
+            Pane::Draft(draft) => draft.update(cx, |d, cx| d.focus(window, cx)),
             _ => window.focus(&self.focus, cx),
         }
         cx.notify();
@@ -1042,7 +1139,7 @@ impl Workspace {
 
     /// The workspace follows the user to a session in another folder, as Open folder does. Run
     /// where the user moves the focus, not in `focus_pane`: `set_project` focuses too.
-    fn follow_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn follow_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.panes[self.focused_pane].session() else {
             return;
         };
@@ -1085,9 +1182,73 @@ impl Workspace {
         self.save_state(cx);
     }
 
+    /// Shows `draft` as `show` shows a session: a pane that already shows it takes the focus.
+    pub(crate) fn show_draft(
+        &mut self,
+        draft: Entity<DraftView>,
+        side: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ix = match self.panes.iter().position(|p| p.draft() == Some(&draft)) {
+            Some(ix) => ix,
+            None => {
+                let empty = matches!(self.panes[self.focused_pane], Pane::Empty(_));
+                let ix = if side && !empty && self.panes.len() < MAX_PANES {
+                    self.panes.push(Pane::Empty(None));
+                    self.panes.len() - 1
+                } else {
+                    self.session_pane()
+                };
+                self.panes[ix] = Pane::Draft(draft);
+                ix
+            }
+        };
+        self.focus_pane(ix, window, cx);
+        self.follow_session(window, cx);
+        self.save_state(cx);
+    }
+
+    /// A draft row's ×: discards `draft`, after asking when it holds text or attachments.
+    pub(crate) fn close_draft(
+        &mut self,
+        draft: &Entity<DraftView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let d = draft.read(cx);
+        if d.text(cx).is_empty() && d.attachments.is_empty() {
+            return self.discard_draft(draft, window, cx);
+        }
+        let draft = draft.clone();
+        self.confirm(
+            "Discard this draft?".into(),
+            "What you typed is lost.",
+            "Discard",
+            move |this, window, cx| this.discard_draft(&draft, window, cx),
+            window,
+            cx,
+        );
+    }
+
+    pub(crate) fn discard_draft(
+        &mut self,
+        draft: &Entity<DraftView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.drafts.retain(|d| d != draft);
+        // A send in flight ends: its session is closed in the agent when it answers.
+        draft.update(cx, |d, _| d.starting = None);
+        match self.panes.iter().position(|p| p.draft() == Some(draft)) {
+            Some(ix) => self.drop_pane(ix, window, cx),
+            None => cx.notify(),
+        }
+    }
+
     /// The pane a session takes: the focused one, unless it is the editor pane (its unsaved edits
     /// would go with it); then a new pane to the right, or at `MAX_PANES` the next pane.
-    fn session_pane(&mut self) -> usize {
+    pub(crate) fn session_pane(&mut self) -> usize {
         if !matches!(self.panes[self.focused_pane], Pane::Editor(_)) {
             self.focused_pane
         } else if self.panes.len() < MAX_PANES {
@@ -1177,18 +1338,23 @@ impl Workspace {
         if ix >= self.panes.len() {
             return;
         }
-        let (session, fresh) = match &dragged.source {
-            Dragged::Open(session) if self.sessions.contains(session) => (session.clone(), false),
-            Dragged::Open(_) => return,
+        let (session, draft, fresh) = match &dragged.source {
+            Dragged::Open(open) if self.sessions.contains(open) => {
+                (Some(open.clone()), None, false)
+            }
+            Dragged::Draft(d) if self.drafts.contains(d) => (None, Some(d.clone()), false),
+            Dragged::Open(_) | Dragged::Draft(_) => return,
             Dragged::History(row) => match self.resumed(row, window, cx) {
-                Some((resumed, fresh)) => (resumed, fresh),
+                Some((resumed, fresh)) => (Some(resumed), None, fresh),
                 None => return,
             },
         };
-        let from = self
-            .panes
-            .iter()
-            .position(|p| p.session() == Some(&session));
+        let holds = |p: &Pane| match (&session, &draft) {
+            (Some(session), _) => p.session() == Some(session),
+            (_, Some(draft)) => p.draft() == Some(draft),
+            _ => false,
+        };
+        let from = self.panes.iter().position(holds);
         let empty = matches!(self.panes[ix], Pane::Empty(_));
         let locked = matches!(self.panes[ix], Pane::Editor(_)) && !self.dirty_tabs(cx).is_empty();
         if let Some(slots) = layout::place(self.panes.len(), from, ix, zone, empty, locked) {
@@ -1196,20 +1362,21 @@ impl Workspace {
             self.panes = (slots.into_iter())
                 .map(|slot| match slot {
                     Slot::Old(ix) => old[ix].take().expect("each pane lands once"),
-                    Slot::Dropped => Pane::Session(session.clone()),
+                    Slot::Dropped => match (&session, &draft) {
+                        (Some(session), _) => Pane::Session(session.clone()),
+                        (_, Some(draft)) => Pane::Draft(draft.clone()),
+                        _ => unreachable!("a dropped pane is a session or a draft"),
+                    },
                 })
                 .collect();
             self.save_state(cx);
         }
-        let shown = self
-            .panes
-            .iter()
-            .position(|p| p.session() == Some(&session));
+        let shown = self.panes.iter().position(holds);
         if let Some(ix) = shown {
             self.focus_pane(ix, window, cx);
             self.follow_session(window, cx);
         }
-        if fresh {
+        if let (true, Some(session)) = (fresh, &session) {
             session.update(cx, |s, cx| s.load(false, window, cx));
         }
     }
@@ -1223,8 +1390,12 @@ impl Workspace {
             Dragged::History(row) => self
                 .default_agent()
                 .and_then(|agent| self.session(&agent, &row.id, cx)),
+            Dragged::Draft(_) => None,
         };
-        let from = session.and_then(|s| self.panes.iter().position(|p| p.session() == Some(&s)));
+        let from = match &dragged.source {
+            Dragged::Draft(draft) => (self.panes.iter()).position(|p| p.draft() == Some(draft)),
+            _ => session.and_then(|s| self.panes.iter().position(|p| p.session() == Some(&s))),
+        };
         let empty = matches!(self.panes.get(ix)?, Pane::Empty(_));
         (from != Some(ix)).then(|| layout::only_center(self.panes.len(), from, empty))
     }
@@ -1330,9 +1501,8 @@ impl Workspace {
         Some(session)
     }
 
-    /// Starts a session in the focused pane (beside the editor pane, see `session_pane`), which
-    /// shows `Preparing <agent>…` until the agent answers. A second ⌘N on that pane waits for
-    /// the first.
+    /// Opens a draft of a session with the default agent in the focused pane (beside the editor
+    /// pane, see `session_pane`). Nothing starts until the draft is sent.
     pub(crate) fn new_session(
         &mut self,
         _: &NewSession,
@@ -1342,7 +1512,7 @@ impl Workspace {
         let Some(agent) = self.default_agent() else {
             return self.open_settings(Section::Ai, Some(CHOOSE_AI), window, cx);
         };
-        self.start_session(agent, None, false, None, window, cx)
+        self.open_draft(agent, None, window, cx)
     }
 
     /// The user's and the project's templates, then the enabled extensions'.
@@ -1376,7 +1546,7 @@ impl Workspace {
             )));
             return cx.notify();
         }
-        self.start_session(agent, Some(template.prompt), false, None, window, cx)
+        self.open_draft(agent, Some(template.prompt), window, cx)
     }
 
     /// A palette command: a prompt-only one starts a session with its prompt pre-filled, the
@@ -1393,7 +1563,7 @@ impl Workspace {
                 let Some(agent) = self.default_agent() else {
                     return self.open_settings(Section::Ai, Some(CHOOSE_AI), window, cx);
                 };
-                self.start_session(agent, Some(prompt), false, None, window, cx)
+                self.open_draft(agent, Some(prompt), window, cx)
             }
             None => self.ext_host.read(cx).run_command(ext, &command.id),
         }
@@ -1405,6 +1575,7 @@ impl Workspace {
         let (agents, mcp) = (host.agents(), host.mcp_servers());
         self.registry
             .update(cx, |r, _| r.set_extensions(agents, mcp));
+        self.sync_drafts(cx);
     }
 
     /// R51: an extension's session request, already checked against its permissions.
@@ -1538,11 +1709,6 @@ impl Workspace {
                         // A session that starts proves the agent works (signed in again, say).
                         this.registry.update(cx, |r, cx| r.mark_ready(&agent, cx));
                         let id = started.id.clone();
-                        let seen = seen_models(&started.config);
-                        if !seen.is_empty() {
-                            this.models_seen.insert(agent.clone(), seen);
-                            this.sync_settings_view(cx);
-                        }
                         let session = cx.new(|cx| {
                             ChatSession::new(
                                 agent.clone(),
@@ -1554,13 +1720,8 @@ impl Workspace {
                                 cx,
                             )
                         });
-                        session
-                            .update(cx, |s, cx| early.iter().for_each(|e| s.handle_event(e, cx)));
-                        if let Some(model) = this.settings.models.get(&agent) {
-                            session.update(cx, |s, cx| s.apply_default_model(model, cx));
-                        }
                         // Routed and followed before a sent prompt changes its state.
-                        this.add_session(session.clone(), window, cx);
+                        this.land(session.clone(), early, None, window, cx);
                         if let Some(text) = prompt {
                             session.update(cx, |s, cx| {
                                 if !(send && s.send_text(&text, cx)) {
@@ -1574,7 +1735,6 @@ impl Workspace {
                         if let Some(ext) = ext {
                             this.ext_sessions.insert(ext, session.entity_id());
                         }
-                        this.refresh_history(cx);
                         Pane::Session(session)
                     }
                     // The empty pane shows the sign-in message.
@@ -1660,7 +1820,7 @@ impl Workspace {
     /// one still opens there. R20: in an editor pane it closes the
     /// active tab instead (the pane goes with the last one). R87: a pane's × runs it on its own
     /// pane, focused or not.
-    fn close_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Pane::Editor(pane) = &self.panes[ix] {
             return pane.update(cx, |p, cx| p.close(p.active, window, cx));
         }
@@ -1670,6 +1830,22 @@ impl Workspace {
 
     /// An Open row's ×: drops `session` from the open list and from its pane, if one shows it
     /// (the agent keeps it in its history).
+    /// Frees session `id` in its agent, when the agent can.
+    pub(crate) fn close_in_agent(&mut self, agent: String, id: String, cx: &mut Context<Self>) {
+        let closable = matches!(
+            self.registry.read(cx).status(&agent),
+            Some(AgentStatus::Ready(caps)) if caps.close
+        );
+        if closable && let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) {
+            cx.background_spawn(async move {
+                if let Err(e) = handle.close_session(id).await {
+                    eprintln!("could not close the {agent} session: {e}");
+                }
+            })
+            .detach();
+        }
+    }
+
     pub(crate) fn end_session(
         &mut self,
         session: &Entity<ChatSession>,
@@ -1677,6 +1853,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         session.read(cx).stop();
+        let (agent, id) = {
+            let s = session.read(cx);
+            (s.agent.clone(), s.id.clone())
+        };
+        self.close_in_agent(agent, id, cx);
         self.sessions.retain(|s| s != session);
         self.ungroup(&session.read(cx).id);
         self.sync_agents(cx);
@@ -1689,9 +1870,40 @@ impl Workspace {
         }
     }
 
+    /// Ends `session` and types the shell command that resumes it in Claude Code at the
+    /// terminal's prompt, after asking when its turn is still going.
+    pub(crate) fn continue_in_terminal(
+        &mut self,
+        session: &Entity<ChatSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (id, cwd, busy) = {
+            let s = session.read(cx);
+            (s.id.clone(), s.cwd.clone(), s.busy())
+        };
+        let session = session.clone();
+        let run = move |w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
+            w.end_session(&session, window, cx);
+            w.type_in_terminal(&resume_command(&cwd, &id), window, cx)
+        };
+        if busy {
+            self.confirm(
+                "This session is still working".into(),
+                "Ending it stops its turn. End it anyway?",
+                "Continue in terminal",
+                run,
+                window,
+                cx,
+            )
+        } else {
+            run(self, window, cx)
+        }
+    }
+
     /// A `new_session` of `agent` returned (`id`: the session it started): the events that came
     /// for that session before. None are kept once no session of the agent is starting.
-    fn landed(&mut self, agent: &str, id: Option<&str>) -> Vec<SessionEvent> {
+    pub(crate) fn landed(&mut self, agent: &str, id: Option<&str>) -> Vec<SessionEvent> {
         let early = id.and_then(|id| self.early.remove(&(agent.into(), id.into())));
         let starting = self.starting.entry(agent.into()).or_default();
         *starting = starting.saturating_sub(1);
@@ -1784,11 +1996,92 @@ impl Workspace {
     }
 
     fn proceed(&mut self, then: Leave, window: &mut Window, cx: &mut Context<Self>) {
+        let busy = self.busy_sessions(cx);
         match then {
-            Leave::Quit => cx.quit(),
-            Leave::Close => window.remove_window(),
             Leave::Open(project) => self.set_project(project, window, cx),
+            Leave::Quit if busy == 0 => cx.quit(),
+            Leave::Close if busy == 0 => window.remove_window(),
+            Leave::Quit => self.confirm(
+                still_working(busy),
+                "Quitting ends their turns. End them anyway?",
+                "Quit anyway",
+                |_, _, cx| cx.quit(),
+                window,
+                cx,
+            ),
+            Leave::Close => self.confirm(
+                still_working(busy),
+                "Closing the window ends their turns. End them anyway?",
+                "Close anyway",
+                |_, window, _| window.remove_window(),
+                window,
+                cx,
+            ),
         }
+    }
+
+    /// How many open sessions have a turn running or waiting on the user.
+    pub(crate) fn busy_sessions(&self, cx: &App) -> usize {
+        let starting = self.drafts.iter().filter(|d| d.read(cx).starting.is_some());
+        self.sessions.iter().filter(|s| s.read(cx).busy()).count() + starting.count()
+    }
+
+    /// A dialog asking `body`; Confirm closes it, then runs `then`.
+    pub(crate) fn confirm(
+        &mut self,
+        title: String,
+        body: &'static str,
+        confirm: &'static str,
+        then: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let this = cx.entity().downgrade();
+        let then = std::rc::Rc::new(then);
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (this, then) = (this.clone(), then.clone());
+            let heading = div()
+                .id("confirm-heading")
+                .debug_selector(|| "confirm-title".into())
+                .aria_label(title.clone())
+                .test_support()
+                .child(title.clone());
+            dialog.title(heading).child(body).footer(
+                DialogFooter::new()
+                    .child(
+                        Button::new("cancel")
+                            .label("Cancel")
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(Button::new("confirm").danger().label(confirm).on_click(
+                        move |_, window, cx| {
+                            window.close_dialog(cx);
+                            this.update(cx, |this, cx| then(this, window, cx)).ok();
+                        },
+                    )),
+            )
+        });
+    }
+
+    /// An Open row's ×: ends `session`, after asking when its turn is still going.
+    pub(crate) fn close_session(
+        &mut self,
+        session: &Entity<ChatSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !session.read(cx).busy() {
+            return self.end_session(session, window, cx);
+        }
+        let session = session.clone();
+        self.confirm(
+            "This session is still working".into(),
+            "Ending it stops its turn. End it anyway?",
+            "End session",
+            move |this, window, cx| this.end_session(&session, window, cx),
+            window,
+            cx,
+        );
     }
 
     /// ⌘S: saves the focused editor pane's active tab.
@@ -2054,7 +2347,11 @@ impl Workspace {
                 match started {
                     Ok(started) => {
                         this.registry.update(cx, |r, cx| r.mark_ready(&id, cx));
+                        if let Some(seen) = started_modes(&started) {
+                            this.modes_seen.insert(id.clone(), seen);
+                        }
                         this.models_seen.insert(id, seen_models(&started.config));
+                        this.sync_drafts(cx);
                         this.save_state(cx);
                     }
                     Err(AgentError::AuthRequired) => this
@@ -2492,6 +2789,7 @@ impl Render for Workspace {
                 .child(match pane {
                     Pane::Session(session) => session.clone().into_any_element(),
                     Pane::Editor(pane) => pane.clone().into_any_element(),
+                    Pane::Draft(draft) => draft.clone().into_any_element(),
                     Pane::Preparing { agent, .. } => v_flex()
                         .size_full()
                         .items_center()
@@ -2599,6 +2897,48 @@ fn seen_models(config: &[wai_agent::ConfigOption]) -> Vec<SeenModel> {
         .collect()
 }
 
+fn mode_values(
+    modes: &[wai_agent::ModeInfo],
+    config: &[wai_agent::ConfigOption],
+    current: Option<String>,
+) -> Option<SeenModes> {
+    if !modes.is_empty() {
+        let modes = modes.iter().map(|m| SeenModel {
+            id: m.id.clone(),
+            name: m.name.clone(),
+        });
+        return Some(SeenModes {
+            modes: modes.collect(),
+            current,
+        });
+    }
+    let option = (config.iter()).find(|o| o.category == wai_agent::ConfigCategory::Mode)?;
+    let modes = (option.values.iter())
+        .map(|v| SeenModel {
+            id: v.id.clone(),
+            name: v.name.clone(),
+        })
+        .collect::<Vec<_>>();
+    (!modes.is_empty()).then(|| SeenModes {
+        modes,
+        current: Some(option.current.clone()),
+    })
+}
+
+/// The modes a session offers, from `modes` or else the Mode config option.
+fn seen_modes(session: &ChatSession) -> Option<SeenModes> {
+    let m = &session.model;
+    mode_values(&m.modes, &m.config, m.current_mode.clone())
+}
+
+pub(crate) fn started_modes(started: &wai_agent::SessionStarted) -> Option<SeenModes> {
+    mode_values(
+        &started.modes,
+        &started.config,
+        started.current_mode.clone(),
+    )
+}
+
 fn fork_failure(error: &AgentError) -> String {
     format!("Could not fork session: {error}")
 }
@@ -2630,20 +2970,22 @@ pub(crate) mod tests {
     use std::time::{Duration, Instant};
 
     use gpui_kit::component::{ActiveTheme as _, WindowExt as _};
-    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
     use gpui_kit::{
         AppContext as _, ElementId, Entity, Modifiers, MouseButton, Pixels, Point, TestAppContext,
         VisualTestContext, point, px, size,
     };
     use wai_agent::{AgentError, PromptBlock, SessionEvent, SessionSummary};
     use wai_settings::{
-        AgentConfig, AppState, Change, OpenSession, Settings, ThemeChoice, unapproved,
+        AgentConfig, AppState, Change, OpenSession, Settings, ThemeChoice, shown, unapproved,
     };
 
     use super::{Pane, Workspace};
     use crate::agents::{AgentStatus, RegistryEvent};
     use crate::app::{self, ToggleTerminal};
-    use crate::chat::{ChatEvent, ChatItem, NoticeKind, TurnState};
+    use crate::chat::{
+        Attachment, ChatEvent, ChatItem, ChatSession, NoticeKind, TurnState, signed_out,
+    };
     use crate::notify;
     use crate::sidebar::canonical;
 
@@ -2701,6 +3043,36 @@ pub(crate) mod tests {
             agents: [("fake".into(), AgentConfig { command })].into(),
             ..Default::default()
         }
+    }
+
+    /// `fake_settings` whose `session/new` waits for the returned gate file to exist.
+    pub(crate) fn gated(flags: &str, dir: &Path) -> (Settings, PathBuf) {
+        let gate = dir.join("gate");
+        let flags = format!("{flags} --new-session-gate {}", wai_agent::quote(&gate));
+        (fake_settings(&flags), gate)
+    }
+
+    /// Starts a session with the default agent, without the ⌘N entry point or any wait.
+    pub(crate) fn start_unwaited(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                let agent = w.default_agent().unwrap();
+                w.start_session(agent, None, false, None, window, cx)
+            })
+        });
+    }
+
+    /// Starts a session with the default agent, without the ⌘N entry point, and waits for it.
+    pub(crate) fn start_now(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<ChatSession> {
+        let before = workspace.read_with(cx, |w, _| w.sessions.len());
+        start_unwaited(workspace, cx);
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.sessions.len() > before)
+        });
+        workspace.read_with(cx, |w, _| w.sessions[before].clone())
     }
 
     /// Real agent I/O runs outside the test scheduler: sleep, run, check, for up to 10 s.
@@ -2761,6 +3133,194 @@ pub(crate) mod tests {
     }
 
     #[gpui_kit::test]
+    fn new_session_opens_a_draft_without_starting_anything(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let pid = dir.path().join("pid");
+        let flag = format!("--pid-file {}", wai_agent::quote(&pid));
+        let (workspace, cx) = open(cx, fake_settings(&flag));
+
+        cx.simulate_keystrokes("secondary-n");
+        cx.run_until_parked();
+        workspace.read_with(cx, |w, cx| {
+            assert!(matches!(w.panes[0], Pane::Draft(_)));
+            assert_eq!(w.drafts.len(), 1);
+            assert!(w.sessions.is_empty());
+            assert!(w.registry.read(cx).status("fake").is_none());
+        });
+        assert!(!pid.exists(), "no agent process started");
+    }
+
+    #[gpui_kit::test]
+    fn every_entry_point_opens_a_draft(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        workspace.update(cx, |w, _| {
+            w.templates = vec![template("t", Some("fake"), "Write tests")]
+        });
+        let drafts = |cx: &mut VisualTestContext| workspace.read_with(cx, |w, _| w.drafts.len());
+        let last = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, cx| w.drafts.last().unwrap().read(cx).text(cx))
+        };
+        let untouched = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, cx| {
+                w.sessions.is_empty() && w.registry.read(cx).status("fake").is_none()
+            })
+        };
+
+        click("sidebar-new", cx);
+        assert_eq!(drafts(cx), 1);
+        assert!(untouched(cx));
+
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.double_click("tab-sessions", cx);
+        });
+        assert_eq!(drafts(cx), 2);
+        assert!(untouched(cx));
+
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.start_template(0, window, cx)));
+        assert_eq!(drafts(cx), 3);
+        assert_eq!(last(cx), "Write tests");
+        assert!(untouched(cx));
+
+        let ext = wai_ext::ExtId::new("opener").unwrap();
+        let command = wai_ext::CommandSpec {
+            id: "review".into(),
+            title: "Review".into(),
+            prompt: Some("Review".into()),
+        };
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.run_ext_command(&ext, command, window, cx))
+        });
+        assert_eq!(drafts(cx), 4);
+        assert_eq!(last(cx), "Review");
+        assert!(untouched(cx));
+    }
+
+    #[gpui_kit::test]
+    fn new_session_twice_gives_two_drafts(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
+        cx.simulate_keystrokes("secondary-n secondary-n");
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.drafts.len(), 2);
+            assert_eq!(w.panes[0].draft(), Some(&w.drafts[1]));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn sending_a_draft_starts_one_session_in_its_folder(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        cx.simulate_keystrokes("secondary-n");
+        cx.simulate_input("hello");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.sessions.len() == 1)
+        });
+        let session = workspace.read_with(cx, |w, _| {
+            assert!(w.drafts.is_empty());
+            assert_eq!(w.panes[0].session(), w.sessions.first());
+            w.sessions[0].clone()
+        });
+        session.read_with(cx, |s, _| {
+            assert_eq!(canonical(&s.cwd), canonical(&std::env::temp_dir()));
+            assert_eq!(
+                s.model.items[0],
+                ChatItem::User {
+                    text: "hello".into()
+                }
+            );
+        });
+        wait_until(cx, "the reply", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.items.iter().any(
+                    |i| matches!(i, ChatItem::Agent { text } if text.contains("Hello from fake agent")),
+                )
+            })
+        });
+    }
+
+    #[gpui_kit::test]
+    fn failed_start_keeps_the_draft(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "a").unwrap();
+        let (workspace, cx) = open(cx, fake_settings("--require-auth"));
+        cx.simulate_keystrokes("secondary-n");
+        let draft = workspace.read_with(cx, |w, _| w.drafts[0].clone());
+        draft.update(cx, |d, cx| {
+            d.attachments.push(Attachment::new(&file));
+            cx.notify();
+        });
+        cx.simulate_input("hello");
+        cx.simulate_keystrokes("enter");
+
+        wait_until(cx, "the notice", |cx| {
+            draft.read_with(cx, |d, _| d.notice == Some(signed_out("fake")))
+        });
+        draft.read_with(cx, |d, cx| {
+            assert!(d.starting.is_none());
+            assert_eq!(d.text(cx), "hello");
+            assert_eq!(d.attachments.len(), 1);
+        });
+        workspace.read_with(cx, |w, _| {
+            assert!(w.sessions.is_empty());
+            assert_eq!(w.panes[0].draft(), Some(&draft));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn send_to_a_missing_folder_keeps_the_draft(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("gone");
+        let (workspace, cx) = open(cx, fake_settings(""));
+        cx.simulate_keystrokes("secondary-n");
+        let draft = workspace.read_with(cx, |w, _| w.drafts[0].clone());
+        draft.update(cx, |d, _| d.folder = gone.clone());
+        cx.simulate_input("hello");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        draft.read_with(cx, |d, cx| {
+            let want = format!("The folder {} no longer exists.", shown(&gone));
+            assert_eq!(d.notice.as_deref(), Some(want.as_str()));
+            assert!(d.starting.is_none());
+            assert_eq!(d.text(cx), "hello");
+        });
+        workspace.read_with(cx, |w, cx| {
+            assert!(w.registry.read(cx).status("fake").is_none());
+        });
+    }
+
+    /// A draft is never saved: the state has no session for it and a relaunch has none.
+    #[gpui_kit::test]
+    fn drafts_are_not_saved(cx: &mut TestAppContext, relaunch: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(path.clone()));
+        launch(&workspace, cx);
+        while question(&workspace, cx).is_some() {
+            click("approval-allow", cx);
+        }
+        cx.simulate_keystrokes("secondary-n");
+        cx.simulate_input("x");
+        workspace.read_with(cx, |w, cx| w.save_state(cx));
+        assert!(AppState::load(&path).open_sessions.is_empty());
+
+        relaunch.executor().allow_parking();
+        let (workspace, cx) = open_at(relaunch, fake_settings(""), Some(path));
+        launch(&workspace, cx);
+        workspace.read_with(cx, |w, _| {
+            assert!(w.drafts.is_empty());
+            assert!(matches!(w.panes[..], [Pane::Empty(None)]));
+        });
+    }
+
+    #[gpui_kit::test]
     fn choosing_a_default_clears_the_notice(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let settings = Settings {
@@ -2804,17 +3364,27 @@ pub(crate) mod tests {
             })
         });
         cx.simulate_keystrokes("secondary-n");
-        wait_until(cx, "the session", |cx| {
-            workspace.read_with(cx, |w, _| w.sessions.len() == 1)
+        workspace.read_with(cx, |w, cx| {
+            let draft = w.panes[0].draft().expect("a draft");
+            assert_eq!(draft.read(cx).agent, "fake");
         });
     }
 
     #[gpui_kit::test]
     fn new_session_appears_in_open_list(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
-        let (workspace, cx) = open(cx, fake_settings(""));
+        let tmp = tempfile::tempdir().unwrap();
+        let (settings, gate) = gated("", tmp.path());
+        let (workspace, cx) = open(cx, settings);
+        let start = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                workspace.update(cx, |w, cx| {
+                    w.start_session("fake".into(), None, false, None, window, cx)
+                })
+            })
+        };
 
-        cx.simulate_keystrokes("secondary-n");
+        start(cx);
         workspace.read_with(cx, |w, _| {
             assert!(
                 matches!(&w.panes[0], Pane::Preparing { agent, .. } if agent == "fake"),
@@ -2822,8 +3392,10 @@ pub(crate) mod tests {
             )
         });
         // Ignored: the pane is already waiting for a session.
-        cx.simulate_keystrokes("secondary-n");
+        start(cx);
+        workspace.read_with(cx, |w, _| assert_eq!(w.starting.get("fake"), Some(&1)));
 
+        std::fs::write(&gate, "").unwrap();
         wait_until(cx, "the session", |cx| {
             workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
         });
@@ -2838,10 +3410,16 @@ pub(crate) mod tests {
     #[gpui_kit::test]
     fn events_before_the_session_lands_are_replayed(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
-        let (workspace, cx) = open(cx, fake_settings(""));
+        let tmp = tempfile::tempdir().unwrap();
+        let (settings, gate) = gated("", tmp.path());
+        let (workspace, cx) = open(cx, settings);
         let registry = workspace.read_with(cx, |w, _| w.registry.clone());
 
-        cx.simulate_keystrokes("secondary-n");
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.start_session("fake".into(), None, false, None, window, cx)
+            })
+        });
         let preparing = |w: &Workspace, _: &_| matches!(w.panes[0], Pane::Preparing { .. });
         assert!(workspace.read_with(cx, preparing));
         registry.update(cx, |_, cx| {
@@ -2854,6 +3432,7 @@ pub(crate) mod tests {
             }
         });
 
+        std::fs::write(&gate, "").unwrap();
         wait_until(cx, "the session", |cx| {
             workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
         });
@@ -2871,11 +3450,12 @@ pub(crate) mod tests {
         cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, fake_settings(""));
 
-        cx.simulate_keystrokes("secondary-n secondary-w");
+        start_unwaited(&workspace, cx);
+        cx.simulate_keystrokes("secondary-w");
         workspace.read_with(cx, |w, _| {
             assert!(matches!(w.panes[..], [Pane::Empty(None)]))
         });
-        cx.simulate_keystrokes("secondary-n");
+        start_unwaited(&workspace, cx);
         wait_until(cx, "both sessions to land", |cx| {
             workspace.read_with(cx, |w, _| {
                 w.starting.get("fake") == Some(&0) && w.panes[0].session().is_some()
@@ -3029,10 +3609,7 @@ pub(crate) mod tests {
         };
         assert!(!close(cx));
 
-        cx.simulate_keystrokes("secondary-n");
-        wait_until(cx, "the session", |cx| {
-            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
-        });
+        start_now(&workspace, cx);
         workspace.update(cx, |w, _| w.panes.push(Pane::Empty(None)));
         assert!(close(cx));
         cx.update(|window, cx| window.click("pane-close", cx));
@@ -3054,7 +3631,7 @@ pub(crate) mod tests {
     /// Drags from `from` to `x` of the way across pane `ix`, at its middle. Each event has its
     /// own update, as on a real window (`window.drag` sends them all in one): a pane's
     /// mouse-down focus, deferred, lands before the drop.
-    fn drag_to_pane(from: Point<Pixels>, ix: usize, x: f32, cx: &mut VisualTestContext) {
+    pub(crate) fn drag_to_pane(from: Point<Pixels>, ix: usize, x: f32, cx: &mut VisualTestContext) {
         let pane = cx
             .debug_bounds(format!("pane-{ix}").leak())
             .expect("pane drawn");
@@ -3272,15 +3849,11 @@ pub(crate) mod tests {
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| w.start_template(0, window, cx));
         });
-        wait_until(cx, "the session", |cx| {
-            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
-        });
         workspace.read_with(cx, |w, cx| {
-            let session = w.panes[0].session().unwrap().read(cx);
-            assert_eq!(session.agent, "fake");
-            assert_eq!(session.draft(cx), "Review this diff\nline 2");
-            assert!(session.model.items.is_empty(), "nothing was sent");
-            assert_eq!(session.model.state, TurnState::Idle);
+            let draft = w.panes[0].draft().unwrap().read(cx);
+            assert_eq!(draft.agent, "fake");
+            assert_eq!(draft.text(cx), "Review this diff\nline 2");
+            assert!(w.sessions.is_empty(), "nothing started");
         });
     }
 
@@ -3648,7 +4221,7 @@ pub(crate) mod tests {
         let (workspace, cx) = open(cx, fake_settings("--require-auth"));
         let registry = workspace.read_with(cx, |w, _| w.registry.clone());
 
-        cx.simulate_keystrokes("secondary-n");
+        start_unwaited(&workspace, cx);
 
         wait_until(cx, "SignedOut", |cx| {
             registry.read_with(cx, |r, _| r.status("fake") == Some(&AgentStatus::SignedOut))
@@ -3663,13 +4236,7 @@ pub(crate) mod tests {
         let (workspace, cx) = open(cx, fake_settings("--require-auth-on-prompt"));
         let registry = workspace.read_with(cx, |w, _| w.registry.clone());
 
-        cx.simulate_keystrokes("secondary-n");
-        wait_until(cx, "a session", |cx| {
-            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
-        });
-        let session = workspace.read_with(cx, |w, cx| {
-            w.panes[0].session().unwrap().read(cx).id.clone()
-        });
+        let session = start_now(&workspace, cx).read_with(cx, |s, _| s.id.clone());
         let handle = registry.update(cx, |r, cx| r.handle("fake", cx)).unwrap();
         handle.prompt(session, vec![PromptBlock::Text("hi".into())]);
         wait_until(cx, "SignedOut", |cx| {
@@ -3684,7 +4251,7 @@ pub(crate) mod tests {
             )
         );
 
-        cx.simulate_keystrokes("secondary-n");
+        start_now(&workspace, cx);
         wait_until(cx, "Ready", |cx| {
             registry.read_with(cx, |r, _| {
                 matches!(r.status("fake"), Some(AgentStatus::Ready(_)))
@@ -3891,10 +4458,7 @@ pub(crate) mod tests {
             click("approval-allow", cx);
         }
 
-        cx.simulate_keystrokes("secondary-n");
-        wait_until(cx, "the session", |cx| {
-            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
-        });
+        start_now(&workspace, cx);
 
         let state = AppState::load(&path);
         assert_eq!(
@@ -4075,11 +4639,7 @@ pub(crate) mod tests {
     fn extension_opens_never_replace_user_sessions(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, fake_settings(""));
-        cx.simulate_keystrokes("secondary-n");
-        wait_until(cx, "the user's session", |cx| {
-            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
-        });
-        let mine = pane_session(&workspace, 0, cx);
+        let mine = start_now(&workspace, cx);
         let ext = wai_ext::ExtId::new("opener").unwrap();
         let theirs = |prompt: &str, cx: &mut VisualTestContext| {
             let n = workspace.read_with(cx, |w, _| w.sessions.len());
@@ -4170,6 +4730,23 @@ pub(crate) mod tests {
             })
         });
         (workspace, cx, dir)
+    }
+
+    /// `live` with the fake agent also in the settings file, so `set_project`'s reload keeps it.
+    pub(crate) fn fake_live<'a>(
+        cx: &'a mut TestAppContext,
+        flag: &str,
+    ) -> (
+        Entity<Workspace>,
+        &'a mut VisualTestContext,
+        tempfile::TempDir,
+    ) {
+        let settings = fake_settings(flag);
+        let file = format!(
+            "default_agent = \"fake\"\n[agents.fake]\ncommand = \'\'\'{}\'\'\'\n",
+            settings.agents["fake"].command
+        );
+        live(cx, settings, Some(&file))
     }
 
     #[gpui_kit::test]
@@ -4454,6 +5031,174 @@ pub(crate) mod tests {
             super::approval_text(&hidden),
             "Terminal shell: system default → /bin/sh\\u{202e}\\u{200b}x"
         );
+    }
+
+    fn asked(cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| window.render_frame(cx));
+        cx.debug_bounds("confirm-title").is_some()
+    }
+
+    fn working(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        open(
+            cx,
+            fake_settings("--reply 'a b c d e f g h i j' --chunk-delay-ms 1000"),
+        )
+    }
+
+    fn work(session: &Entity<ChatSession>, cx: &mut VisualTestContext) {
+        session.update(cx, |s, cx| s.send_text("go", cx));
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn quit_asks_while_a_session_works(cx: &mut TestAppContext) {
+        let (workspace, cx) = working(cx);
+        let session = start_now(&workspace, cx);
+
+        cx.simulate_keystrokes("secondary-q");
+        assert!(!asked(cx), "an idle session does not stop a quit");
+
+        work(&session, cx);
+        cx.simulate_keystrokes("secondary-q");
+        assert!(asked(cx));
+        cx.update(|window, _| window.find_by_label("1 session is still working"));
+        click("cancel", cx);
+        assert!(!asked(cx));
+        assert_eq!(
+            session.read_with(cx, |s, _| s.status().clone()),
+            TurnState::Working
+        );
+    }
+
+    #[gpui_kit::test]
+    fn closing_the_window_asks_while_a_session_works(cx: &mut TestAppContext) {
+        let (workspace, cx) = working(cx);
+        let session = start_now(&workspace, cx);
+        work(&session, cx);
+
+        assert!(!cx.simulate_close());
+        assert!(asked(cx));
+        click("cancel", cx);
+        assert!(!cx.cx.update(|app| app.windows().is_empty()));
+
+        assert!(!cx.simulate_close());
+        click("confirm", cx);
+        assert!(cx.cx.update(|app| app.windows().is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn open_row_close_asks_while_its_session_works(cx: &mut TestAppContext) {
+        let (workspace, cx) = working(cx);
+        let session = start_now(&workspace, cx);
+        work(&session, cx);
+
+        click_close(cx);
+        assert!(asked(cx));
+        cx.update(|window, _| window.find_by_label("This session is still working"));
+        click("cancel", cx);
+        assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 1);
+
+        click_close(cx);
+        click("confirm", cx);
+        assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn idle_session_row_close_does_not_ask(cx: &mut TestAppContext) {
+        let (workspace, cx) = working(cx);
+        start_now(&workspace, cx);
+
+        click_close(cx);
+        assert!(!asked(cx));
+        assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
+    }
+
+    #[test]
+    fn resume_command_quotes_the_folder_and_id() {
+        assert_eq!(
+            super::resume_command(Path::new("/tmp/it's here"), "abc"),
+            r"cd '/tmp/it'\''s here' && claude --resume 'abc'"
+        );
+    }
+
+    fn closes_file(dir: &Path) -> (PathBuf, String) {
+        let file = dir.join("closed");
+        let flag = format!("--close-file {}", wai_agent::quote(&file));
+        (file, flag)
+    }
+
+    fn closed(file: &Path) -> bool {
+        std::fs::read_to_string(file).is_ok_and(|s| s.contains("fake-1"))
+    }
+
+    #[gpui_kit::test]
+    fn ending_a_session_closes_it_in_the_agent(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let (file, flag) = closes_file(dir.path());
+        let (workspace, cx) = open(cx, fake_settings(&flag));
+        start_now(&workspace, cx);
+
+        click_close(cx);
+        wait_until(cx, "the close", |_| closed(&file));
+    }
+
+    #[gpui_kit::test]
+    fn continue_in_terminal_ends_the_session_and_types_the_resume(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent and the shell are real processes
+        let dir = tempfile::tempdir().unwrap();
+        let (file, flag) = closes_file(dir.path());
+        let mut settings = fake_settings(&flag);
+        let fake = settings.agents.remove("fake").unwrap();
+        settings.agents = [("claude".into(), fake)].into();
+        settings.default_agent = Some("claude".into());
+        let (workspace, cx) = open(cx, settings);
+        start_now(&workspace, cx);
+
+        menu_item(("open", 0usize), "Continue in terminal", cx);
+
+        assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
+        wait_until(cx, "the close", |_| closed(&file));
+        assert!(workspace.read_with(cx, |w, _| w.terminal_visible));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().unwrap());
+        wait_until(cx, "the typed command", |cx| {
+            terminal.read_with(cx, |t, _| {
+                t.snapshot.rows.iter().any(|row| {
+                    let text: String = row.iter().map(|run| run.text.as_str()).collect();
+                    text.contains("claude --resume 'fake-1'")
+                })
+            })
+        });
+    }
+
+    #[gpui_kit::test]
+    fn continue_in_terminal_is_only_for_claude(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestQueryExt as _;
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        start_now(&workspace, cx);
+
+        let at = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find(("open", 0usize)).bounds().center()
+        });
+        cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find_by_label("Continue in terminal").is_none());
+            assert!(window.try_find_by_label("Rename").is_some());
+        });
+    }
+
+    fn click_close(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.click(("open-close", 0usize), cx);
+        });
+        cx.run_until_parked();
     }
 
     fn status(

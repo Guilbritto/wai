@@ -9,6 +9,7 @@ mod ext_host;
 mod ext_panel;
 mod extensions_view;
 mod files;
+mod git;
 mod layout;
 mod notify;
 mod palette;
@@ -17,6 +18,7 @@ mod settings_view;
 #[cfg(target_os = "macos")]
 mod shell_path;
 mod sidebar;
+mod start;
 mod terminal_view;
 mod topbar;
 mod update;

@@ -303,7 +303,40 @@ fn split_content(content: &[ToolContent]) -> (String, Vec<FileDiff>) {
 impl ChatModel {
     /// What the session is called: the user's name for it, else the agent's title.
     pub fn shown_title(&self) -> Option<&str> {
-        self.name.as_deref().or(self.title.as_deref())
+        let first_message = || {
+            self.items.iter().find_map(|item| match item {
+                ChatItem::User { text } => text.lines().next(),
+                _ => None,
+            })
+        };
+        (self.name.as_deref().or(self.title.as_deref())).or_else(first_message)
+    }
+
+    /// A step line of a session that is starting: an ordinary tool row, in progress.
+    pub fn push_step(&mut self, title: String) -> usize {
+        let id = format!("wai-step-{}", self.items.len());
+        self.push(ChatItem::Tool(ToolItem {
+            id,
+            title,
+            kind: "other".into(),
+            status: ToolStatus::InProgress,
+            text: String::new(),
+            diffs: Vec::new(),
+            locations: Vec::new(),
+            first_sight: Vec::new(),
+            expanded: false,
+            subagent: None,
+        }))
+    }
+
+    pub fn end_step(&mut self, ix: usize, title: String, failed: bool) {
+        if let Some(ChatItem::Tool(t)) = self.items.get_mut(ix) {
+            t.title = title;
+            t.status = match failed {
+                true => ToolStatus::Failed,
+                false => ToolStatus::Completed,
+            };
+        }
     }
 
     fn push(&mut self, item: ChatItem) -> usize {

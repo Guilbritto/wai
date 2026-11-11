@@ -463,3 +463,36 @@ fn steer_a_running_turn() {
         std::fs::remove_dir_all(&dir).ok();
     });
 }
+
+#[test]
+#[ignore = "needs network, npx and a Claude Code login"]
+fn new_session_id_names_the_claude_code_transcript() {
+    run(async {
+        let dir = std::env::temp_dir().join(format!("wai-real-claude-id-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = wai_settings::canonical(&dir);
+        let (agent, rx) = spawn();
+        ready(&rx).await;
+        let session = agent.new_session(dir, vec![]).await.expect("new_session");
+        agent.prompt(
+            session.id.clone(),
+            vec![PromptBlock::Text("Reply with the word ok.".into())],
+        );
+        loop {
+            match rx.recv().await.expect("event channel closed") {
+                AgentEvent::TurnEnded { .. } => break,
+                AgentEvent::AuthRequired { .. } => panic!("not signed in to Claude Code"),
+                AgentEvent::Exited { error } => panic!("agent exited mid-turn: {error:?}"),
+                _ => {}
+            }
+        }
+        let projects = PathBuf::from(std::env::var("HOME").unwrap()).join(".claude/projects");
+        let name = format!("{}.jsonl", session.id);
+        let found = std::fs::read_dir(&projects)
+            .unwrap()
+            .flatten()
+            .any(|p| p.path().join(&name).exists());
+        agent.shutdown().await;
+        assert!(found, "no {name} under {}", projects.display());
+    })
+}

@@ -346,7 +346,7 @@ mod tests {
     use wai_agent::SubagentState;
 
     use crate::workspace::Workspace;
-    use crate::workspace::tests::{click, fake_settings, open, open_at, wait_until};
+    use crate::workspace::tests::{click, fake_settings, open, open_at, start_now, wait_until};
 
     #[test]
     fn plan_rows_are_capped() {
@@ -403,10 +403,8 @@ mod tests {
     }
 
     fn new_session(workspace: &Entity<Workspace>, n: usize, cx: &mut VisualTestContext) {
-        cx.simulate_keystrokes("secondary-n");
-        wait_until(cx, "a session", |cx| {
-            workspace.read_with(cx, |w, _| w.sessions.len() == n)
-        });
+        start_now(workspace, cx);
+        assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), n);
     }
 
     #[gpui_kit::test]

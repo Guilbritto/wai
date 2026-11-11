@@ -145,9 +145,7 @@ impl Workspace {
             Entry::Settings => self.open_settings(Section::Ai, None, window, cx),
             Entry::Template(ix) => self.start_template(ix, window, cx),
             Entry::Command(ext, command) => self.run_ext_command(&ext, command, window, cx),
-            Entry::NewSessionWith(agent) => {
-                self.start_session(agent, None, false, None, window, cx)
-            }
+            Entry::NewSessionWith(agent) => self.open_draft(agent, None, window, cx),
         }
     }
 }
@@ -164,7 +162,7 @@ mod tests {
     use crate::settings_view::Section;
     use crate::sidebar::SidebarTab;
     use crate::workspace::Workspace;
-    use crate::workspace::tests::{fake_settings, open, wait_until};
+    use crate::workspace::tests::{fake_settings, open};
 
     const MANIFEST: &str = "id = \"sample\"\nname = \"Sample\"\nversion = \"1.0.0\"\n\
         permissions = [\"process\"]\n[process]\ncommand = \"bin/run\"\n\
@@ -335,14 +333,31 @@ mod tests {
         let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
 
         run("review the diff", cx);
-        wait_until(cx, "the session", |cx| {
-            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
-        });
-        let session = workspace.read_with(cx, |w, _| w.panes[0].session().cloned().unwrap());
+        let draft = workspace.read_with(cx, |w, _| w.panes[0].draft().cloned().unwrap());
         assert_eq!(
-            session.read_with(cx, |s, cx| s.draft(cx)),
+            draft.read_with(cx, |d, cx| d.text(cx)),
             "Review the open diff"
         );
-        assert!(session.read_with(cx, |s, _| s.model.items.is_empty()));
+        assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
+    }
+
+    /// "New session with X" opens a draft of X; nothing starts.
+    #[gpui_kit::test]
+    fn palette_new_session_with_opens_a_draft(cx: &mut TestAppContext) {
+        let mut settings = fake_settings("");
+        let agent = settings.agents["fake"].clone();
+        settings.agents.insert("b".into(), agent);
+        let (workspace, cx) = open(cx, settings);
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.run_entry(super::Entry::NewSessionWith("b".into()), window, cx)
+            })
+        });
+        workspace.read_with(cx, |w, cx| {
+            let draft = w.panes[0].draft().expect("a draft");
+            assert_eq!(draft.read(cx).agent, "b");
+            assert!(w.sessions.is_empty());
+            assert!(w.registry.read(cx).status("b").is_none());
+        });
     }
 }

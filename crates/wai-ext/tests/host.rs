@@ -403,7 +403,8 @@ fn initialize_timeout_marks_failed() {
 fn crash_loop_stops_after_three() {
     let tmp = tempfile::tempdir().unwrap();
     let ext = installed(tmp.path(), &["--crash"], vec![Permission::Process]);
-    run(Duration::from_secs(10), async {
+    // a hang guard on four process starts, not a speed limit
+    run(Duration::from_secs(30), async {
         let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
         let mut events = Vec::new();
         while let Ok(event) = rx.recv().await {

@@ -10,14 +10,14 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use wai_agent::{PermissionChoice, ToolStatus};
+use wai_agent::{ConfigCategory, PermissionChoice, ToolStatus};
 use wai_settings::Processing;
 
 use super::model::{ChatItem, NoticeKind, ToolItem, TurnState, UsageInfo, show_label};
 use super::view::{ChatEvent, ChatSession, Mode};
 use super::{permission, question};
 use crate::aurora::{self, DISPLAY_FONT};
-use crate::workspace::{Dragged, DraggedSession};
+use crate::workspace::{Dragged, DraggedSession, folder_name};
 
 /// The balloon of a message you sent (`.msg.voce`).
 fn user_bubble(cx: &App) -> Div {
@@ -233,6 +233,21 @@ impl ChatSession {
                     // Registers the id so tests can find and drag it.
                     .test_support(),
             )
+            .child(self.pill(
+                "pill-folder",
+                Some(Icon::new(IconName::Folder)),
+                folder_name(&self.cwd),
+                cx,
+            ))
+            .children(self.head.as_ref().and_then(|head| {
+                let icon = if head.worktree {
+                    Icon::new(gpui_kit::assets::IconName::GitFork)
+                } else {
+                    Icon::new(gpui_kit::assets::IconName::GitBranch)
+                };
+                (head.branch.clone()).map(|branch| self.pill("pill-branch", Some(icon), branch, cx))
+            }))
+            .child(self.pill("pill-agent", None, self.agent_model(), cx))
             .children(
                 self.pickers
                     .iter()
@@ -256,6 +271,35 @@ impl ChatSession {
                     .accessibility_label("Close pane")
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(ChatEvent::Hide))),
             )
+    }
+
+    fn pill(
+        &self,
+        id: &'static str,
+        icon: Option<Icon>,
+        text: String,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        aurora::pill(cx)
+            .id(id)
+            .min_w_0()
+            .truncate()
+            .aria_label(text.clone())
+            .when_some(icon, |el, icon| el.child(icon.xsmall()))
+            .child(text)
+            .test_support()
+    }
+
+    /// The agent's name, then the model it works with once it reports one.
+    fn agent_model(&self) -> String {
+        let agent = wai_settings::agent_label(&self.agent);
+        let model = (self.model.config.iter())
+            .find(|o| o.category == ConfigCategory::Model)
+            .and_then(|o| o.values.iter().find(|v| v.id == o.current));
+        match model {
+            Some(model) => format!("{agent} · {}", model.name),
+            None => agent,
+        }
     }
 
     /// Row `ix` as the processing mode shows it; none for a step that is hidden or sits in a

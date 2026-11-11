@@ -20,6 +20,7 @@ use super::model::{ChatItem, ChatModel, NoticeKind, TurnState, UNSUPPORTED_QUEST
 use super::permission::DiffView;
 use super::question::QuestionForm;
 use crate::agents::AgentRegistry;
+use crate::git::Head;
 
 /// How often a streaming message takes its new text. Each push costs a parse and a window
 /// redraw (~4 ms); pushing every token cost 12–18% of a core at 40 tokens/s.
@@ -48,6 +49,8 @@ pub enum ChatEvent {
     },
     /// R87: the header's ×, to take the pane showing this session off the screen.
     Hide,
+    /// Esc or Stop in a chat whose session has not started: back to the draft.
+    StopStart,
 }
 
 /// A message's markdown and how many bytes of it the view already handed over.
@@ -91,12 +94,20 @@ pub struct ChatSession {
     pub agent: String,
     pub id: String,
     pub cwd: PathBuf,
+    /// The branch `cwd` is on, read in the background once the session is open.
+    pub head: Option<Head>,
     pub model: ChatModel,
     pub(super) handle: AgentHandle,
     pub(super) input: Entity<TextareaState>,
     pub(super) attachments: Vec<Attachment>,
     /// Sent during a turn to an agent that cannot steer: they go out when it ends.
     pub(super) queued: Vec<Message>,
+    /// The message of a session that is starting; it goes out once the session exists.
+    first: Option<Message>,
+    /// Model and mode changes in flight: the first message waits for them.
+    settling: usize,
+    /// A history resume or restore is replaying: not a turn, whatever the state says.
+    loading: bool,
     /// Queued text going back to the prompt box at the next frame (which has the window).
     pub(super) unsent: Option<String>,
     /// The `/` menu's selected row, its scroll, and whether Esc closed it.
@@ -173,10 +184,14 @@ impl ChatSession {
             agent,
             id: started.id,
             cwd,
+            head: None,
             handle,
             input,
             attachments: Vec::new(),
             queued: Vec::new(),
+            first: None,
+            settling: 0,
+            loading: false,
             unsent: None,
             menu_ix: 0,
             menu_scroll: ScrollHandle::new(),
@@ -203,6 +218,106 @@ impl ChatSession {
         this.model.config = started.config;
         this.sync_pickers(window, cx);
         this
+    }
+
+    /// A chat for a session that has not started: it shows `text` at once and prompts it when
+    /// `started` gives the session its id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pending(
+        agent: String,
+        cwd: PathBuf,
+        handle: AgentHandle,
+        registry: WeakEntity<AgentRegistry>,
+        text: String,
+        attachments: Vec<Attachment>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let none = SessionStarted {
+            id: String::new(),
+            modes: Vec::new(),
+            current_mode: None,
+            config: Vec::new(),
+        };
+        let mut this = Self::new(agent, none, cwd, handle, registry, window, cx);
+        let message = Message { text, attachments };
+        let ix = this.update_model(cx, |m| m.push_user(&message.shown()));
+        this.first = Some(message);
+        this.sync_rows(Some(ix), cx);
+        this
+    }
+
+    /// Whether the agent has not given this session an id yet.
+    pub fn is_starting(&self) -> bool {
+        self.id.is_empty()
+    }
+
+    /// Adds a step line to the transcript; `end_step` closes it.
+    pub fn step(&mut self, title: String, cx: &mut Context<Self>) -> usize {
+        let ix = self.update_model(cx, |m| m.push_step(title));
+        self.sync_rows(Some(ix), cx);
+        cx.notify();
+        ix
+    }
+
+    pub fn end_step(&mut self, ix: usize, title: String, failed: bool, cx: &mut Context<Self>) {
+        self.update_model(cx, |m| m.end_step(ix, title, failed));
+        self.sync_rows(Some(ix), cx);
+        cx.notify();
+    }
+
+    /// The agent started the session: it takes the id, modes and options (its first message goes
+    /// out with `send_first`).
+    pub fn started(
+        &mut self,
+        started: SessionStarted,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.id = started.id.clone();
+        self.take_started(started, window, cx);
+        cx.notify();
+    }
+
+    /// Sends the first message (its bubble is already in the list), once the picked model and
+    /// mode are in place.
+    pub fn send_first(&mut self, cx: &mut Context<Self>) {
+        if self.settling > 0 || self.id.is_empty() {
+            return;
+        }
+        if let Some(message) = self.first.take() {
+            let blocks = self.blocks(&message, cx);
+            self.handle.prompt(self.id.clone(), blocks);
+        }
+    }
+
+    /// What the user typed here while the session started, and the messages queued: it goes back
+    /// to the draft.
+    pub fn leftover(&self, cx: &App) -> String {
+        let typed = self.input.read(cx).value().trim().to_string();
+        let queued = self.queued.iter().map(|m| m.text.clone());
+        let parts: Vec<String> = std::iter::once(typed)
+            .chain(queued)
+            .filter(|t| !t.is_empty())
+            .collect();
+        parts.join("\n\n")
+    }
+
+    /// Takes what a started or loaded session reports, unless the pane already has it (a
+    /// history row learns its modes and options here).
+    fn take_started(
+        &mut self,
+        started: SessionStarted,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.modes.is_none() {
+            self.set_modes(started.modes, started.current_mode, window, cx);
+        }
+        if self.model.config.is_empty() {
+            self.model.config = started.config;
+            self.pickers_stale = true;
+        }
     }
 
     /// One picker per model, effort and mode option; reused while the option stays.
@@ -266,9 +381,11 @@ impl ChatSession {
         let previous = std::mem::replace(&mut found.current, value.clone());
         let name = found.name.clone();
         let (handle, id, option) = (self.handle.clone(), self.id.clone(), option.to_string());
+        self.settling += 1;
         cx.spawn(async move |this, cx| {
             let set = handle.set_config(id, option.clone(), value).await;
             this.update(cx, |this, cx| {
+                this.settling -= 1;
                 match set {
                     Ok(options) => this.model.config = options,
                     Err(e) => {
@@ -281,6 +398,7 @@ impl ChatSession {
                     }
                 }
                 this.pickers_stale = true;
+                this.send_first(cx);
                 cx.notify();
             })
             .ok();
@@ -381,6 +499,11 @@ impl ChatSession {
     /// Puts the caret in the prompt box.
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// Whether a turn is running or waits on the user.
+    pub fn busy(&self) -> bool {
+        !self.loading && matches!(self.model.state, TurnState::Working | TurnState::NeedsYou)
     }
 
     /// Cancels a running turn: a closed session must not keep working out of sight.
@@ -616,20 +739,24 @@ impl ChatSession {
         cx.notify();
     }
 
-    fn set_mode(&mut self, mode: String, cx: &mut Context<Self>) {
+    pub(crate) fn set_mode(&mut self, mode: String, cx: &mut Context<Self>) {
         let previous = self.model.current_mode.replace(mode.clone());
         let (handle, id) = (self.handle.clone(), self.id.clone());
+        self.settling += 1;
         cx.spawn(async move |this, cx| {
-            if let Err(e) = handle.set_mode(id, mode).await {
-                this.update(cx, |this, cx| {
+            let set = handle.set_mode(id, mode).await;
+            this.update(cx, |this, cx| {
+                this.settling -= 1;
+                if let Err(e) = set {
                     this.model.current_mode = previous;
                     this.model
                         .notice(format!("Could not switch mode: {e}"), NoticeKind::Error);
                     this.sync_rows(None, cx);
-                    cx.notify();
-                })
-                .ok();
-            }
+                }
+                this.send_first(cx);
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
         cx.notify();
@@ -660,22 +787,17 @@ impl ChatSession {
         self.questions.clear();
         self.scroller.update(cx, |list, cx| list.reset(0, cx));
         self.update_model(cx, |m| m.state = TurnState::Working);
+        self.loading = true;
         let (id, cwd, registry) = (self.id.clone(), self.cwd.clone(), self.registry.clone());
         cx.spawn_in(window, async move |this, cx| {
             let loaded = handle.load_session(id, cwd, mcp).await;
             this.update_in(cx, |this, window, cx| {
+                this.loading = false;
                 let agent = this.agent.clone();
                 match loaded {
                     Ok(started) => {
                         registry.update(cx, |r, cx| r.mark_ready(&agent, cx)).ok();
-                        // A history row learns its modes here.
-                        if this.modes.is_none() {
-                            this.set_modes(started.modes, started.current_mode, window, cx);
-                        }
-                        if this.model.config.is_empty() {
-                            this.model.config = started.config;
-                            this.pickers_stale = true;
-                        }
+                        this.take_started(started, window, cx);
                         this.update_model(cx, |m| m.state = TurnState::Idle);
                     }
                     Err(AgentError::AuthRequired) => {
@@ -730,29 +852,27 @@ mod tests {
     use wai_agent::{
         ChoiceKind, PermissionChoice, PermissionRequest, StopReason, SubagentState, ToolStatus,
     };
-    use wai_settings::{Change, Processing, Settings};
+    use wai_settings::{AppState, Change, OpenSession, Processing, Settings};
 
     use super::ChatSession;
     use crate::agents::RegistryEvent;
     use crate::chat::input::{Attachment, Message};
     use crate::chat::model::{ChatItem, EditedFile, NoticeKind, TurnState, UNSUPPORTED_QUESTION};
+    use crate::git::tests::repo_with;
     use crate::notify;
     use crate::sidebar::canonical;
     use crate::workspace::tests::{
-        fake_settings, history_settings, live, load_history, open, wait_until,
+        click, fake_live, fake_settings, history_settings, launch, live, load_history, open,
+        open_at, start_now, wait_until,
     };
     use crate::workspace::{Pane, Workspace};
 
-    /// ⌘N, then the session that lands in pane 0.
+    /// The session that lands in pane 0.
     fn start_session(
         workspace: &Entity<Workspace>,
         cx: &mut VisualTestContext,
     ) -> Entity<ChatSession> {
-        cx.simulate_keystrokes("secondary-n");
-        wait_until(cx, "a session", |cx| {
-            workspace.read_with(cx, |w, _| w.panes[0].session().is_some())
-        });
-        workspace.read_with(cx, |w, _| w.panes[0].session().cloned().unwrap())
+        start_now(workspace, cx)
     }
 
     fn send(prompt: &str, cx: &mut VisualTestContext) {
@@ -2154,7 +2274,11 @@ mod tests {
         let rows = load_history(&workspace, 1, cx);
 
         // Pane 0 prepares a session; meanwhile a history row opens to the side and takes focus.
-        cx.simulate_keystrokes("secondary-n");
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.start_session("fake".into(), None, false, None, window, cx)
+            })
+        });
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], true, window, cx)));
         let side = workspace.read_with(cx, |w, _| w.panes[1].session().cloned().unwrap());
 
@@ -2329,6 +2453,7 @@ mod tests {
             window.render_frame(cx);
             window.click(("open-close", 1usize), cx);
         });
+        click("confirm", cx);
 
         workspace.read_with(cx, |w, _| {
             assert!(
@@ -2547,5 +2672,86 @@ mod tests {
             s.pickers[0].1.read(cx).selected_value().cloned()
         });
         assert_eq!(picked.as_deref(), Some("fake-small"));
+    }
+
+    /// Stops the project's watcher before its folder goes.
+    fn leave(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.set_project("/nonexistent".into(), window, cx))
+        });
+    }
+
+    fn pill(id: &'static str, cx: &mut VisualTestContext) -> Option<String> {
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window
+                .try_find(id)
+                .and_then(|e| e.label().map(str::to_owned))
+        })
+    }
+
+    #[gpui_kit::test]
+    fn header_pills_show_folder_branch_and_agent_model(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let root = repo_with(&dir.path().join("r"), &["feature"]);
+        let (workspace, cx, _user) = fake_live(cx, "--models");
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.set_project(root.clone(), window, cx))
+        });
+        let session = start_session(&workspace, cx);
+        wait_until(cx, "the branch", |cx| {
+            session.read_with(cx, |s, _| s.head.is_some())
+        });
+        let name = root.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(pill("pill-folder", cx), Some(name));
+        assert_eq!(pill("pill-branch", cx).as_deref(), Some("feature"));
+        assert_eq!(pill("pill-agent", cx).as_deref(), Some("fake · Fake Small"));
+        leave(&workspace, cx);
+    }
+
+    #[gpui_kit::test]
+    fn restored_session_shows_its_pills(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let root = repo_with(&dir.path().join("r"), &[]);
+        let path = dir.path().join("state.json");
+        let state = AppState {
+            open_sessions: vec![OpenSession {
+                agent: "fake".into(),
+                session_id: "abc".into(),
+                cwd: root.clone(),
+                pane: 0,
+                name: None,
+            }],
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(path));
+        cx.deactivate_window();
+
+        launch(&workspace, cx);
+
+        wait_until(cx, "the branch", |cx| {
+            workspace.read_with(cx, |w, cx| {
+                w.sessions
+                    .first()
+                    .is_some_and(|s| s.read(cx).head.is_some())
+            })
+        });
+        assert_eq!(pill("pill-branch", cx).as_deref(), Some("main"));
+        leave(&workspace, cx);
+    }
+
+    #[gpui_kit::test]
+    fn no_branch_pill_outside_a_repository(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        // Let the (empty) read land before looking.
+        cx.run_until_parked();
+        assert!(session.read_with(cx, |s, _| s.head.is_none()));
+        assert!(pill("pill-folder", cx).is_some());
+        assert_eq!(pill("pill-branch", cx), None);
     }
 }

@@ -87,6 +87,8 @@ pub struct AgentCaps {
     pub load_session: bool,
     pub list_sessions: bool,
     pub fork: bool,
+    /// `AgentHandle::close_session` frees a session's resources in the agent.
+    pub close: bool,
     pub images: bool,
     /// Takes a message into a running turn (`AgentHandle::steer`).
     pub steering: bool,
