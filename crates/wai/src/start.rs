@@ -1,11 +1,11 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui_kit::*;
-use wai_agent::AgentError;
-use wai_settings::shown;
+use wai_agent::{AgentError, ConfigCategory, SessionStarted};
+use wai_settings::{agent_label, shown};
 
 use crate::agents::AgentStatus;
-use crate::chat::{ChatSession, DraftData, DraftEvent, DraftView, signed_out};
+use crate::chat::{ChatEvent, ChatSession, DraftData, DraftEvent, DraftView, signed_out};
 use crate::sidebar::canonical;
 use crate::workspace::{Pane, Workspace};
 
@@ -76,8 +76,9 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Starts the session of a draft and sends its text and attachments. A failed start keeps the
-    /// draft as it was, with the reason above the prompt.
+    /// Sends a draft: its chat shows at once, with the steps of the start, and the session
+    /// starts behind it. A failed start, Esc or Stop gives the draft back as it was (what was
+    /// typed in the chat goes after its text); a failure also says why above the prompt.
     pub(crate) fn send_draft(
         &mut self,
         draft: Entity<DraftView>,
@@ -90,57 +91,90 @@ impl Workspace {
         }
         let (agent, folder, model) = (d.agent.clone(), d.folder.clone(), d.model.clone());
         let (text, attachments) = d.message(cx);
-        let fail = |error: String, cx: &mut Context<Self>| {
-            draft.update(cx, |d, cx| d.fail(Some(error), cx))
-        };
         if !folder.is_dir() {
-            return fail(
-                format!("The folder {} no longer exists.", shown(&folder)),
-                cx,
-            );
+            let error = format!("The folder {} no longer exists.", shown(&folder));
+            return draft.update(cx, |d, cx| d.fail(Some(error), String::new(), window, cx));
         }
         let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
-            return fail(
-                format!("No agent named {agent} in the settings or extensions."),
-                cx,
-            );
+            let error = format!("No agent named {agent} in the settings or extensions.");
+            return draft.update(cx, |d, cx| d.fail(Some(error), String::new(), window, cx));
         };
         let mcp = self.registry.read(cx).mcp_servers();
+        let registry = self.registry.downgrade();
+        let chat = cx.new(|cx| {
+            let (agent, folder, handle) = (agent.clone(), folder.clone(), handle.clone());
+            ChatSession::pending(
+                agent,
+                folder,
+                handle,
+                registry.clone(),
+                text,
+                attachments,
+                window,
+                cx,
+            )
+        });
+        let weak = draft.downgrade();
+        cx.subscribe_in(&chat, window, move |this, _, event, window, cx| {
+            let Some(draft) = weak.upgrade() else {
+                return;
+            };
+            match event {
+                ChatEvent::StopStart => this.revert_draft(&draft, None, window, cx),
+                ChatEvent::Hide => {
+                    let pane = this.panes.iter().position(|p| p.draft() == Some(&draft));
+                    if let Some(ix) = pane {
+                        this.close_pane(ix, window, cx);
+                    }
+                }
+                _ => {}
+            }
+        })
+        .detach();
         draft.update(cx, |d, cx| {
-            d.starting = true;
+            d.starting = Some(chat.clone());
             d.notice = None;
             cx.emit(DraftEvent::Changed);
             cx.notify();
         });
+        if self.panes[self.focused_pane].draft() == Some(&draft) {
+            chat.update(cx, |chat, cx| chat.focus(window, cx));
+        }
+        let label = agent_label(&agent);
+        let step = chat.update(cx, |chat, cx| chat.step(format!("Starting {label}"), cx));
         *self.starting.entry(agent.clone()).or_default() += 1;
-        let registry = self.registry.downgrade();
         cx.spawn_in(window, async move |this, cx| {
             let started = handle.new_session(folder.clone(), mcp).await;
             this.update_in(cx, |this, window, cx| {
                 let early = this.landed(&agent, started.as_ref().ok().map(|s| s.id.as_str()));
+                // Esc, Stop or a discarded draft ended the send while the agent worked.
+                let current = draft.read(cx).starting.as_ref() == Some(&chat);
                 let started = match started {
+                    Ok(started) if !current => {
+                        return this.close_in_agent(agent, started.id, cx);
+                    }
+                    Err(_) if !current => return,
                     Ok(started) => started,
                     Err(AgentError::AuthRequired) => {
                         this.registry
                             .update(cx, |r, cx| r.set_status(&agent, AgentStatus::SignedOut, cx));
-                        let error = signed_out(&agent);
-                        return draft.update(cx, |d, cx| d.fail(Some(error), cx));
+                        let error = Some(signed_out(&agent));
+                        return this.revert_draft(&draft, error, window, cx);
                     }
                     Err(e) => {
-                        let error = format!("Could not start a {agent} session: {e}");
-                        return draft.update(cx, |d, cx| d.fail(Some(error), cx));
+                        let error = Some(format!("Could not start a {agent} session: {e}"));
+                        return this.revert_draft(&draft, error, window, cx);
                     }
                 };
+                let title = started_title(&label, &folder, &started);
+                chat.update(cx, |chat, cx| chat.end_step(step, title, false, cx));
                 this.registry.update(cx, |r, cx| r.mark_ready(&agent, cx));
-                let session = cx.new(|cx| {
-                    ChatSession::new(agent.clone(), started, folder, handle, registry, window, cx)
-                });
-                this.land(session.clone(), early, model, window, cx);
-                session.update(cx, |s, cx| s.send_with(text, attachments, cx));
+                chat.update(cx, |chat, cx| chat.started(started, window, cx));
+                this.land(chat.clone(), early, model, window, cx);
                 this.drafts.retain(|d| *d != draft);
                 let pane = this.panes.iter().position(|p| p.draft() == Some(&draft));
                 if let Some(ix) = pane {
-                    this.panes[ix] = Pane::Session(session);
+                    this.panes[ix] = Pane::Session(chat);
                     // Only the focused pane takes the caret and the workspace's follow.
                     if ix == this.focused_pane {
                         this.focus_pane(ix, window, cx);
@@ -154,20 +188,53 @@ impl Workspace {
         })
         .detach();
     }
+
+    /// Gives a starting draft back to editing; its chat goes away, its typed text stays.
+    fn revert_draft(
+        &mut self,
+        draft: &Entity<DraftView>,
+        error: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chat) = draft.read(cx).starting.clone() else {
+            return;
+        };
+        let leftover = chat.read(cx).leftover(cx);
+        draft.update(cx, |d, cx| d.fail(error, leftover, window, cx));
+        if self.panes[self.focused_pane].draft() == Some(draft) {
+            draft.update(cx, |d, cx| d.focus(window, cx));
+        }
+    }
+}
+
+/// `Started <Label> in <folder> · <mode> · <model>`, without the parts the agent did not name.
+fn started_title(label: &str, folder: &Path, started: &SessionStarted) -> String {
+    let mode = (started.modes.iter())
+        .find(|m| Some(&m.id) == started.current_mode.as_ref())
+        .map(|m| m.name.clone());
+    let model = (started.config.iter())
+        .find(|o| o.category == ConfigCategory::Model)
+        .and_then(|o| o.values.iter().find(|v| v.id == o.current))
+        .map(|v| v.name.clone());
+    let head = format!("Started {label} in {}", shown(folder));
+    let parts = std::iter::once(head).chain(mode).chain(model);
+    parts.collect::<Vec<_>>().join(" · ")
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{Entity, TestAppContext, VisualTestContext};
+    use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
+    use gpui_kit::{ElementId, Entity, TestAppContext, VisualTestContext};
     use wai_settings::Settings;
 
     use crate::chat::{ChatItem, DraftView, TurnState};
     use crate::sidebar::canonical;
     use crate::workspace::Workspace;
-    use crate::workspace::tests::{fake_settings, open, start_now, wait_until};
+    use crate::workspace::tests::{fake_settings, gated, open, start_now, wait_until};
+    use wai_agent::ToolStatus;
 
     fn mkdir(dir: &Path, name: &str) -> PathBuf {
         let path = dir.join(name);
@@ -327,5 +394,119 @@ mod tests {
             window.try_find("draft-model").is_some()
         });
         assert!(!shown);
+    }
+
+    fn send_text(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Entity<DraftView> {
+        let draft = new_draft(workspace, cx);
+        cx.simulate_input("build it");
+        cx.simulate_keystrokes("enter");
+        draft
+    }
+
+    #[gpui_kit::test]
+    fn sending_shows_the_chat_at_once(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let tmp = tempfile::tempdir().unwrap();
+        let (settings, gate) = gated("", tmp.path());
+        let (workspace, cx) = open(cx, settings);
+        let draft = send_text(&workspace, cx);
+
+        let chat = draft.read_with(cx, |d, _| d.starting.clone().expect("starting"));
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes[0].draft(), Some(&draft));
+            assert!(w.sessions.is_empty());
+        });
+        chat.read_with(cx, |c, _| {
+            assert!(matches!(
+                c.model.items.as_slice(),
+                [
+                    ChatItem::User { text },
+                    ChatItem::Tool(step),
+                ] if text == "build it"
+                    && step.title == "Starting fake"
+                    && step.status == ToolStatus::InProgress
+            ));
+            assert_eq!(c.model.activity().as_deref(), Some("Starting fake…"));
+        });
+
+        std::fs::write(&gate, "").unwrap();
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.sessions.len() == 1)
+        });
+        let session = workspace.read_with(cx, |w, _| {
+            assert!(w.drafts.is_empty());
+            w.sessions[0].clone()
+        });
+        session.read_with(cx, |s, _| {
+            assert!(matches!(&s.model.items[0], ChatItem::User { text } if text == "build it"));
+            let ChatItem::Tool(step) = &s.model.items[1] else {
+                panic!("the second row is the step");
+            };
+            assert_eq!(step.status, ToolStatus::Completed);
+            assert!(step.title.starts_with("Started fake in "), "{}", step.title);
+        });
+        wait_until(cx, "the reply", |cx| {
+            session.read_with(cx, |s, _| {
+                (s.model.items.iter()).any(
+                    |i| matches!(i, ChatItem::Agent { text } if text == "Hello from fake agent"),
+                )
+            })
+        });
+    }
+
+    #[gpui_kit::test]
+    fn escape_before_the_session_starts_returns_to_the_draft(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let tmp = tempfile::tempdir().unwrap();
+        let (file, flag) = (tmp.path().join("closed"), "--close-file");
+        let flag = format!("{flag} {}", wai_agent::quote(&file));
+        let (settings, gate) = gated(&flag, tmp.path());
+        let (workspace, cx) = open(cx, settings);
+        let draft = send_text(&workspace, cx);
+        cx.simulate_input("and tests");
+        cx.simulate_keystrokes("escape");
+
+        draft.read_with(cx, |d, cx| {
+            assert!(d.starting.is_none());
+            assert!(d.notice.is_none());
+            assert_eq!(d.text(cx), "build it\n\nand tests");
+        });
+        std::fs::write(&gate, "").unwrap();
+        wait_until(cx, "the close", |_| {
+            std::fs::read_to_string(&file).is_ok_and(|s| s.contains("fake-1"))
+        });
+        workspace.read_with(cx, |w, _| assert!(w.sessions.is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn starting_draft_counts_as_working(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let tmp = tempfile::tempdir().unwrap();
+        let (settings, gate) = gated("", tmp.path());
+        let (workspace, cx) = open(cx, settings);
+        send_text(&workspace, cx);
+        workspace.read_with(cx, |w, cx| assert_eq!(w.busy_sessions(cx), 1));
+
+        cx.simulate_keystrokes("secondary-q");
+        cx.update(|window, _| window.find_by_label("1 session is still working"));
+        std::fs::write(&gate, "").unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn untitled_session_shows_its_first_message(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        send_text(&workspace, cx);
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.sessions.len() == 1)
+        });
+        let session = workspace.read_with(cx, |w, _| w.sessions[0].clone());
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            let row = window.try_find(("open", 0usize)).unwrap();
+            assert_eq!(row.label(), Some("build it"));
+            let pane = window.within(ElementId::View(session.entity_id()));
+            assert_eq!(pane.find("session-title").label(), Some("build it"));
+        });
     }
 }

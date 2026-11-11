@@ -48,6 +48,8 @@ pub enum ChatEvent {
     },
     /// R87: the header's ×, to take the pane showing this session off the screen.
     Hide,
+    /// Esc or Stop in a chat whose session has not started: back to the draft.
+    StopStart,
 }
 
 /// A message's markdown and how many bytes of it the view already handed over.
@@ -97,6 +99,8 @@ pub struct ChatSession {
     pub(super) attachments: Vec<Attachment>,
     /// Sent during a turn to an agent that cannot steer: they go out when it ends.
     pub(super) queued: Vec<Message>,
+    /// The message of a session that is starting; it goes out once the session exists.
+    first: Option<Message>,
     /// Queued text going back to the prompt box at the next frame (which has the window).
     pub(super) unsent: Option<String>,
     /// The `/` menu's selected row, its scroll, and whether Esc closed it.
@@ -173,6 +177,7 @@ impl ChatSession {
             input,
             attachments: Vec::new(),
             queued: Vec::new(),
+            first: None,
             unsent: None,
             menu_ix: 0,
             menu_scroll: ScrollHandle::new(),
@@ -197,6 +202,98 @@ impl ChatSession {
         this.model.config = started.config;
         this.sync_pickers(window, cx);
         this
+    }
+
+    /// A chat for a session that has not started: it shows `text` at once and prompts it when
+    /// `started` gives the session its id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pending(
+        agent: String,
+        cwd: PathBuf,
+        handle: AgentHandle,
+        registry: WeakEntity<AgentRegistry>,
+        text: String,
+        attachments: Vec<Attachment>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let none = SessionStarted {
+            id: String::new(),
+            modes: Vec::new(),
+            current_mode: None,
+            config: Vec::new(),
+        };
+        let mut this = Self::new(agent, none, cwd, handle, registry, window, cx);
+        let message = Message { text, attachments };
+        let ix = this.update_model(cx, |m| m.push_user(&message.shown()));
+        this.first = Some(message);
+        this.sync_rows(Some(ix), cx);
+        this
+    }
+
+    /// Whether the agent has not given this session an id yet.
+    pub fn is_starting(&self) -> bool {
+        self.id.is_empty()
+    }
+
+    /// Adds a step line to the transcript; `end_step` closes it.
+    pub fn step(&mut self, title: String, cx: &mut Context<Self>) -> usize {
+        let ix = self.update_model(cx, |m| m.push_step(title));
+        self.sync_rows(Some(ix), cx);
+        cx.notify();
+        ix
+    }
+
+    pub fn end_step(&mut self, ix: usize, title: String, failed: bool, cx: &mut Context<Self>) {
+        self.update_model(cx, |m| m.end_step(ix, title, failed));
+        self.sync_rows(Some(ix), cx);
+        cx.notify();
+    }
+
+    /// The agent started the session: it takes the id, modes and options, and the first message
+    /// goes out (its bubble is already in the list).
+    pub fn started(
+        &mut self,
+        started: SessionStarted,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.id = started.id.clone();
+        self.take_started(started, window, cx);
+        if let Some(message) = self.first.take() {
+            let blocks = self.blocks(&message, cx);
+            self.handle.prompt(self.id.clone(), blocks);
+        }
+        cx.notify();
+    }
+
+    /// What the user typed here while the session started, and the messages queued: it goes back
+    /// to the draft.
+    pub fn leftover(&self, cx: &App) -> String {
+        let typed = self.input.read(cx).value().trim().to_string();
+        let queued = self.queued.iter().map(|m| m.text.clone());
+        let parts: Vec<String> = std::iter::once(typed)
+            .chain(queued)
+            .filter(|t| !t.is_empty())
+            .collect();
+        parts.join("\n\n")
+    }
+
+    /// Takes what a started or loaded session reports, unless the pane already has it (a
+    /// history row learns its modes and options here).
+    fn take_started(
+        &mut self,
+        started: SessionStarted,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.modes.is_none() {
+            self.set_modes(started.modes, started.current_mode, window, cx);
+        }
+        if self.model.config.is_empty() {
+            self.model.config = started.config;
+            self.pickers_stale = true;
+        }
     }
 
     /// One picker per model, effort and mode option; reused while the option stays.
@@ -650,14 +747,7 @@ impl ChatSession {
                 match loaded {
                     Ok(started) => {
                         registry.update(cx, |r, cx| r.mark_ready(&agent, cx)).ok();
-                        // A history row learns its modes here.
-                        if this.modes.is_none() {
-                            this.set_modes(started.modes, started.current_mode, window, cx);
-                        }
-                        if this.model.config.is_empty() {
-                            this.model.config = started.config;
-                            this.pickers_stale = true;
-                        }
+                        this.take_started(started, window, cx);
                         this.update_model(cx, |m| m.state = TurnState::Idle);
                     }
                     Err(AgentError::AuthRequired) => {

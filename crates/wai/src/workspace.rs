@@ -1192,6 +1192,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.drafts.retain(|d| d != draft);
+        // A send in flight ends: its session is closed in the agent when it answers.
+        draft.update(cx, |d, _| d.starting = None);
         match self.panes.iter().position(|p| p.draft() == Some(draft)) {
             Some(ix) => self.drop_pane(ix, window, cx),
             None => cx.notify(),
@@ -1782,7 +1784,7 @@ impl Workspace {
     /// one still opens there; a Settings pane just goes. R20: in an editor pane it closes the
     /// active tab instead (the pane goes with the last one). R87: a pane's × runs it on its own
     /// pane, focused or not.
-    fn close_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Pane::Editor(pane) = &self.panes[ix] {
             return pane.update(cx, |p, cx| p.close(p.active, window, cx));
         }
@@ -1792,17 +1794,8 @@ impl Workspace {
 
     /// An Open row's ×: drops `session` from the open list and from its pane, if one shows it
     /// (the agent keeps it in its history).
-    pub(crate) fn end_session(
-        &mut self,
-        session: &Entity<ChatSession>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        session.read(cx).stop();
-        let (agent, id) = {
-            let s = session.read(cx);
-            (s.agent.clone(), s.id.clone())
-        };
+    /// Frees session `id` in its agent, when the agent can.
+    pub(crate) fn close_in_agent(&mut self, agent: String, id: String, cx: &mut Context<Self>) {
         let closable = matches!(
             self.registry.read(cx).status(&agent),
             Some(AgentStatus::Ready(caps)) if caps.close
@@ -1815,6 +1808,20 @@ impl Workspace {
             })
             .detach();
         }
+    }
+
+    pub(crate) fn end_session(
+        &mut self,
+        session: &Entity<ChatSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        session.read(cx).stop();
+        let (agent, id) = {
+            let s = session.read(cx);
+            (s.agent.clone(), s.id.clone())
+        };
+        self.close_in_agent(agent, id, cx);
         self.sessions.retain(|s| s != session);
         self.ungroup(&session.read(cx).id);
         self.sync_agents(cx);
@@ -1979,7 +1986,8 @@ impl Workspace {
 
     /// How many open sessions have a turn running or waiting on the user.
     pub(crate) fn busy_sessions(&self, cx: &App) -> usize {
-        self.sessions.iter().filter(|s| s.read(cx).busy()).count()
+        let starting = self.drafts.iter().filter(|d| d.read(cx).starting.is_some());
+        self.sessions.iter().filter(|s| s.read(cx).busy()).count() + starting.count()
     }
 
     /// A dialog asking `body`; Confirm closes it, then runs `then`.
@@ -3174,7 +3182,7 @@ pub(crate) mod tests {
             draft.read_with(cx, |d, _| d.notice == Some(signed_out("fake")))
         });
         draft.read_with(cx, |d, cx| {
-            assert!(!d.starting);
+            assert!(d.starting.is_none());
             assert_eq!(d.text(cx), "hello");
             assert_eq!(d.attachments.len(), 1);
         });
@@ -3200,7 +3208,7 @@ pub(crate) mod tests {
         draft.read_with(cx, |d, cx| {
             let want = format!("The folder {} no longer exists.", shown(&gone));
             assert_eq!(d.notice.as_deref(), Some(want.as_str()));
-            assert!(!d.starting);
+            assert!(d.starting.is_none());
             assert_eq!(d.text(cx), "hello");
         });
         workspace.read_with(cx, |w, cx| {

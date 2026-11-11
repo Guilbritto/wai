@@ -664,8 +664,12 @@ impl Workspace {
         let theme = cx.theme();
         let active = self.panes[self.focused_pane].draft() == Some(draft);
         let (open, end) = (draft.clone(), draft.clone());
+        let starting = draft.read(cx).starting.as_ref().map(|chat| chat.read(cx));
+        let title = starting.and_then(|s| s.model.shown_title());
+        let title = title.unwrap_or("New session").to_string();
+        let dot = starting.map(|s| status_color(s.status(), theme));
         let dragged = DraggedSession {
-            title: "New session".into(),
+            title: title.clone().into(),
             source: Dragged::Draft(draft.clone()),
         };
         row(active, cx)
@@ -677,23 +681,31 @@ impl Workspace {
                     .min_w_0()
                     .h_full()
                     .gap_2()
-                    .child(
-                        div()
+                    .child(match dot {
+                        Some(dot) => div()
+                            .flex_none()
+                            .size(px(8.))
+                            .rounded_full()
+                            .bg(dot)
+                            .shadow(vec![
+                                BoxShadow::new(px(0.), px(0.), dot.alpha(0.7)).blur_radius(px(4.)),
+                            ]),
+                        None => div()
                             .flex_none()
                             .size(px(8.))
                             .rounded_full()
                             .border_1()
                             .border_dashed()
                             .border_color(aurora::nevoa()),
-                    )
-                    .aria_label("New session")
-                    .child(div().flex_1().min_w_0().truncate().child("New session"))
-                    .child(
+                    })
+                    .aria_label(title.clone())
+                    .child(div().flex_1().min_w_0().truncate().child(title))
+                    .children(dot.is_none().then(|| {
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child("Draft"),
-                    )
+                            .child("Draft")
+                    }))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.show_draft(open.clone(), false, window, cx)
                     }))

@@ -16,7 +16,7 @@ use gpui_kit::*;
 use wai_agent::{AgentCaps, PromptBlock};
 
 use super::model::{NoticeKind, TurnState, elapsed};
-use super::view::ChatSession;
+use super::view::{ChatEvent, ChatSession};
 use crate::agents::AgentStatus;
 use crate::app::CancelTurn;
 use crate::aurora;
@@ -88,7 +88,7 @@ pub(super) struct Message {
 
 impl Message {
     /// What the transcript shows of it: the text, then `Attached: <names>`.
-    fn shown(&self) -> String {
+    pub(super) fn shown(&self) -> String {
         if self.attachments.is_empty() {
             return self.text.clone();
         }
@@ -208,7 +208,7 @@ impl ChatSession {
     /// Sends the prompt and the attachments: from an idle session as a prompt; during a turn
     /// into it when the agent steers, else into the queue until it ends.
     pub(super) fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.model.in_turn && self.model.state != TurnState::Idle {
+        if self.is_starting() || (!self.model.in_turn && self.model.state != TurnState::Idle) {
             return;
         }
         let text = self.input.read(cx).value().trim().to_string();
@@ -229,23 +229,13 @@ impl ChatSession {
         }
     }
 
-    /// Sends `text` and `attachments` as a prompt, leaving the prompt box alone (a draft's send).
-    pub fn send_with(
-        &mut self,
-        text: String,
-        attachments: Vec<Attachment>,
-        cx: &mut Context<Self>,
-    ) {
-        self.send_message(Message { text, attachments }, cx);
-    }
-
     fn send_message(&mut self, message: Message, cx: &mut Context<Self>) {
         let blocks = self.blocks(&message, cx);
         self.submit(blocks, &message.shown(), cx);
     }
 
     /// What `message` sends: its text, then each attachment.
-    fn blocks(&self, message: &Message, cx: &App) -> Vec<PromptBlock> {
+    pub(super) fn blocks(&self, message: &Message, cx: &App) -> Vec<PromptBlock> {
         let images = self.caps(cx).is_some_and(|c| c.images);
         let text = (!message.text.is_empty()).then(|| PromptBlock::Text(message.text.clone()));
         let files = message.attachments.iter().map(|a| prompt_block(a, images));
@@ -352,6 +342,9 @@ impl ChatSession {
     }
 
     pub(super) fn cancel(&mut self, _: &CancelTurn, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_starting() {
+            return cx.emit(ChatEvent::StopStart);
+        }
         match self.model.state {
             TurnState::Working | TurnState::NeedsYou => self.handle.cancel(self.id.clone()),
             _ => cx.propagate(),

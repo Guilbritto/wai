@@ -59,6 +59,8 @@ impl Workspace {
                 _ => (w, n),
             }
         });
+        let starting = self.drafts.iter().filter(|d| d.read(cx).starting.is_some());
+        let working = working + starting.count();
         let (on, off, warn) = if dark {
             (aurora::boreal(), aurora::nevoa_2(), aurora::ambar())
         } else {

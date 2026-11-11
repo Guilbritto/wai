@@ -11,6 +11,7 @@ use gpui_kit::*;
 use wai_settings::{SeenModel, agent_label, builtin, canonical, shown};
 
 use super::input::{Attachment, attach_button, paste_into, pick_paths, send_button};
+use super::view::ChatSession;
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::workspace::{Dragged, DraggedSession, START_KEY};
 
@@ -155,8 +156,8 @@ pub struct DraftView {
     pub folder: PathBuf,
     pub model: Option<String>,
     pub notice: Option<String>,
-    /// A send is in flight (Task 8: the pending `ChatSession`).
-    pub starting: bool,
+    /// The chat of a send in flight: the draft shows it until the session starts.
+    pub starting: Option<Entity<ChatSession>>,
     pub(super) input: Entity<TextareaState>,
     pub(crate) attachments: Vec<Attachment>,
     pub(crate) data: DraftData,
@@ -237,7 +238,7 @@ impl DraftView {
             agent,
             folder,
             notice: None,
-            starting: false,
+            starting: None,
             input,
             attachments: Vec::new(),
             data,
@@ -386,6 +387,9 @@ impl DraftView {
 
     /// Puts the caret in the prompt box.
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(chat) = &self.starting {
+            return chat.update(cx, |chat, cx| chat.focus(window, cx));
+        }
         self.input.update(cx, |input, cx| input.focus(window, cx));
     }
 
@@ -394,7 +398,7 @@ impl DraftView {
     }
 
     pub fn can_send(&self, cx: &App) -> bool {
-        !self.starting && self.installed() != Some(false) && !self.text(cx).is_empty()
+        self.starting.is_none() && self.installed() != Some(false) && !self.text(cx).is_empty()
     }
 
     /// What goes out: the draft keeps both, in case the start fails.
@@ -402,9 +406,23 @@ impl DraftView {
         (self.text(cx), self.attachments.clone())
     }
 
-    /// Back to editing, with `error` (if any) shown above the prompt.
-    pub fn fail(&mut self, error: Option<String>, cx: &mut Context<Self>) {
-        self.starting = false;
+    /// Back to editing, with `error` (if any) shown above the prompt and what was typed in the
+    /// chat meanwhile (`leftover`) after the draft's own text.
+    pub fn fail(
+        &mut self,
+        error: Option<String>,
+        leftover: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.starting = None;
+        if !leftover.is_empty() {
+            let text = [self.text(cx), leftover];
+            let text = text.iter().filter(|t| !t.is_empty());
+            let text = text.cloned().collect::<Vec<_>>().join("\n\n");
+            self.input
+                .update(cx, |input, cx| input.set_value(text, window, cx));
+        }
         self.notice = error;
         cx.emit(DraftEvent::Changed);
         cx.notify();
@@ -435,6 +453,9 @@ impl DraftView {
 impl Render for DraftView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_menus(window, cx);
+        if let Some(chat) = &self.starting {
+            return chat.clone().into_any_element();
+        }
         let theme = cx.theme();
         let dark = theme.is_dark();
         let muted = match dark {
@@ -662,5 +683,6 @@ impl Render for DraftView {
                     .p_4()
                     .child(body),
             )
+            .into_any_element()
     }
 }
