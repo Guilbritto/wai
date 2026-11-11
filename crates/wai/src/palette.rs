@@ -159,6 +159,7 @@ mod tests {
     use wai_settings::{Settings, Template};
 
     use crate::ext_host::tests::{bodies, install, log_path, logged, workspace_at};
+    use crate::settings_view::Section;
     use crate::sidebar::SidebarTab;
     use crate::workspace::Workspace;
     use crate::workspace::tests::{fake_settings, open};
@@ -251,11 +252,15 @@ mod tests {
             workspace.read_with(cx, |w, _| w.sidebar_tab),
             SidebarTab::Files
         );
-        run("extensions", cx);
-        assert_eq!(
-            workspace.read_with(cx, |w, _| w.sidebar_tab),
-            SidebarTab::Extensions
-        );
+        cx.simulate_keystrokes("secondary-shift-p");
+        cx.simulate_input("extensions");
+        cx.simulate_keystrokes("enter");
+        workspace.read_with(cx, |w, cx| {
+            let section = w.settings_view().map(|v| v.read(cx).section());
+            assert_eq!(section, Some(Section::Extensions));
+        });
+        cx.simulate_keystrokes("escape");
+        assert!(!dialog(cx));
         // Moved to the right, "Agents" shows the panel: the sidebar has no such tab.
         run("move agents", cx);
         assert!(workspace.read_with(cx, |w, _| w.agents_right));
@@ -263,7 +268,7 @@ mod tests {
         run("agents", cx);
         workspace.read_with(cx, |w, _| {
             assert!(!w.agents_collapsed);
-            assert_eq!(w.sidebar_tab, SidebarTab::Extensions);
+            assert_eq!(w.sidebar_tab, SidebarTab::Files);
         });
         let (_, wai) = labels(&workspace, cx).remove(0);
         assert!(wai.contains(&"Move Agents to the sidebar".to_string()));

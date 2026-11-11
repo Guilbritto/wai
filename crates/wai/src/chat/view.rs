@@ -117,8 +117,10 @@ pub struct ChatSession {
     pub(super) registry: WeakEntity<AgentRegistry>,
     /// Per `Agent`/`Thought` row.
     pub(super) texts: HashMap<usize, Markdown>,
-    /// Per `Tool`/`Permission` row.
+    /// Per `Tool` row.
     pub(super) diffs: HashMap<usize, Vec<DiffView>>,
+    /// Per waiting `Permission` card, by request id.
+    pub(super) card_diffs: HashMap<u64, Vec<DiffView>>,
     pub(super) open_thoughts: HashSet<usize>,
     /// How the steps show (`conversation.processing`).
     pub(super) processing: Processing,
@@ -128,9 +130,11 @@ pub struct ChatSession {
     pub(super) open_groups: HashSet<usize>,
     /// While a turn runs: when it started, and the status line's one-second tick.
     pub(super) turn: Option<(Instant, Task<()>)>,
-    /// Per open `Question` row, made when it first draws.
-    pub(super) questions: HashMap<usize, QuestionForm>,
+    /// Per waiting `Question` card, by request id, made when it first draws.
+    pub(super) questions: HashMap<u64, QuestionForm>,
     pub(super) scroller: Entity<MessageScrollerState>,
+    /// The pinned stack's height at the last paint; 0 while nothing waits.
+    pub(super) waiting_height: Pixels,
     pub(super) modes: Option<Entity<SelectState<Vec<Mode>>>>,
     /// The header's pickers of the model, effort and mode options, in that order.
     pub(super) pickers: Vec<(String, Entity<SelectState<Vec<Choice>>>)>,
@@ -195,6 +199,7 @@ impl ChatSession {
             registry,
             texts: HashMap::new(),
             diffs: HashMap::new(),
+            card_diffs: HashMap::new(),
             open_thoughts: HashSet::new(),
             processing: Processing::default(),
             open_steps: HashSet::new(),
@@ -202,6 +207,7 @@ impl ChatSession {
             turn: None,
             questions: HashMap::new(),
             scroller: cx.new(|cx| MessageScrollerState::new(0, cx)),
+            waiting_height: px(0.),
             modes: None,
             pickers: Vec::new(),
             pickers_stale: false,
@@ -471,6 +477,21 @@ impl ChatSession {
         });
     }
 
+    /// Records the pinned stack's height: the list's bottom inset follows it.
+    pub(super) fn set_waiting_height(&mut self, height: Pixels, cx: &mut Context<Self>) {
+        if self.waiting_height == height {
+            return;
+        }
+        self.waiting_height = height;
+        let last = self.model.items.len();
+        let following = self.scroller.read(cx).is_following_tail();
+        self.remeasure(last.saturating_sub(1)..last, cx);
+        if following {
+            self.scroller.update(cx, |list, cx| list.scroll_to_end(cx));
+        }
+        cx.notify();
+    }
+
     pub fn status(&self) -> &TurnState {
         &self.model.state
     }
@@ -522,21 +543,22 @@ impl ChatSession {
     }
 
     pub fn handle_permission(&mut self, req: PermissionRequest, cx: &mut Context<Self>) {
-        let ix = self.update_model(cx, |m| m.on_permission(req));
-        self.sync_row(ix, cx);
-        self.sync_rows(Some(ix), cx);
+        let diffs = self.permission_diffs(&req);
+        self.card_diffs.insert(req.id, diffs);
+        self.update_model(cx, |m| m.on_permission(req));
         cx.notify();
     }
 
     /// Resolutions reach every session of the agent; the model ignores ids it does not hold.
     pub fn handle_permission_resolved(&mut self, id: u64, cx: &mut Context<Self>) {
         self.update_model(cx, |m| m.on_permission_resolved(id));
+        self.card_diffs.remove(&id);
+        self.sync_rows(None, cx);
         cx.notify();
     }
 
     pub fn handle_question(&mut self, req: QuestionRequest, cx: &mut Context<Self>) {
-        let ix = self.update_model(cx, |m| m.on_question(req));
-        self.sync_rows(Some(ix), cx);
+        self.update_model(cx, |m| m.on_question(req));
         cx.notify();
     }
 
@@ -551,13 +573,8 @@ impl ChatSession {
     /// Like permissions, resolutions reach every session of the agent.
     pub fn handle_question_resolved(&mut self, id: u64, cx: &mut Context<Self>) {
         self.update_model(cx, |m| m.on_question_resolved(id));
-        let items = &self.model.items;
-        self.questions.retain(|ix, _| {
-            matches!(
-                items.get(*ix),
-                Some(ChatItem::Question { answered: None, .. })
-            )
-        });
+        self.questions.remove(&id);
+        self.sync_rows(None, cx);
         cx.notify();
     }
 
@@ -680,26 +697,27 @@ impl ChatSession {
                 let diffs = diff_views(&tool.diffs, &tool.locations, &self.cwd);
                 self.diffs.insert(ix, diffs);
             }
-            // R5: the request's own diff, else the diffs of its tool call.
-            ChatItem::Permission { request, .. } => {
-                let tool = self.model.items.iter().rev().find_map(|item| match item {
-                    ChatItem::Tool(t) if t.id == request.tool_call_id => Some(t),
-                    _ => None,
-                });
-                let locations = tool.map_or(&[][..], |t| &t.locations[..]);
-                let diffs = match &request.diff {
-                    Some(diff) => std::slice::from_ref(diff),
-                    None => tool.map_or(&[][..], |t| &t.diffs[..]),
-                };
-                let diffs = diff_views(diffs, locations, &self.cwd);
-                self.diffs.insert(ix, diffs);
-            }
+            ChatItem::Permission { .. } => {}
             ChatItem::User { .. }
             | ChatItem::Steered { .. }
             | ChatItem::Question { .. }
             | ChatItem::Notice { .. }
             | ChatItem::Edits { .. } => {}
         }
+    }
+
+    /// R5: the request's own diff, else the diffs of its tool call.
+    fn permission_diffs(&self, request: &PermissionRequest) -> Vec<DiffView> {
+        let tool = self.model.items.iter().rev().find_map(|item| match item {
+            ChatItem::Tool(t) if t.id == request.tool_call_id => Some(t),
+            _ => None,
+        });
+        let locations = tool.map_or(&[][..], |t| &t.locations[..]);
+        let diffs = match &request.diff {
+            Some(diff) => std::slice::from_ref(diff),
+            None => tool.map_or(&[][..], |t| &t.diffs[..]),
+        };
+        diff_views(diffs, locations, &self.cwd)
     }
 
     pub(super) fn answer(
@@ -716,6 +734,8 @@ impl ChatSession {
             // Already resolved on the agent's side (cancelled, say).
             Err(_) => m.on_permission_resolved(request),
         });
+        self.card_diffs.remove(&request);
+        self.sync_rows(None, cx);
         cx.notify();
     }
 
@@ -756,8 +776,11 @@ impl ChatSession {
         };
         self.handle = handle.clone();
         self.model.items.clear();
+        self.model.waiting.clear();
+        self.model.steering.clear();
         self.texts.clear();
         self.diffs.clear();
+        self.card_diffs.clear();
         self.open_thoughts.clear();
         self.open_steps.clear();
         self.open_groups.clear();
@@ -826,7 +849,9 @@ mod tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{ElementId, Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
-    use wai_agent::{StopReason, SubagentState, ToolStatus};
+    use wai_agent::{
+        ChoiceKind, PermissionChoice, PermissionRequest, StopReason, SubagentState, ToolStatus,
+    };
     use wai_settings::{AppState, Change, OpenSession, Processing, Settings};
 
     use super::ChatSession;
@@ -902,7 +927,7 @@ mod tests {
     }
 
     /// With an agent that steers, a message sent during a turn joins it: it shows as the user's
-    /// at once, the turn's reply takes it in, and no second prompt goes out.
+    /// once the turn reads it, the turn's reply takes it in, and no second prompt goes out.
     #[gpui_kit::test]
     fn message_sent_during_a_turn_steers_it(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
@@ -929,6 +954,50 @@ mod tests {
         let words: Vec<String> = (0..20).map(|i| format!("w{i}")).collect();
         let reply = format!("{} Steered: also this", words.join(" "));
         assert_eq!(agent_texts(&session, cx), reply);
+    }
+
+    /// A message steered while a card waits stays pinned until the agent reads it, then joins
+    /// the chat after the answered card and before the reply to it.
+    #[gpui_kit::test]
+    fn steered_message_stays_pinned_until_read(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--steering --ask-permission"));
+        let session = start_session(&workspace, cx);
+        send("edit", cx);
+        wait_until(cx, "the permission card", |cx| {
+            state(&session, cx) == TurnState::NeedsYou
+        });
+        send("also", cx);
+        wait_until(cx, "the steer taken", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.steering.first().is_some_and(|s| s.injected)
+            })
+        });
+        let also = ChatItem::Steered {
+            text: "also".into(),
+        };
+        assert!(cx.update(|w, cx| {
+            w.render_frame(cx);
+            w.within("waiting").try_find(("steering", 0usize)).is_some()
+        }));
+        assert!(!session.read_with(cx, |s, _| s.model.items.contains(&also)));
+        click_edits(None, "perm-allow_once", cx);
+        wait_until(cx, "the turn's end", |cx| {
+            state(&session, cx) == TurnState::Idle
+        });
+        let items = session.read_with(cx, |s, _| s.model.items.clone());
+        let at = |f: &dyn Fn(&ChatItem) -> bool| items.iter().position(f).unwrap();
+        let card = at(&|i| matches!(i, ChatItem::Permission { .. }));
+        let steer = at(&|i| *i == also);
+        let reply = at(&|i| matches!(i, ChatItem::Agent { .. }));
+        assert!(card < steer && steer < reply, "{items:?}");
+        assert_eq!(
+            items[reply],
+            ChatItem::Agent {
+                text: "chose:allow-once Steered: also".into()
+            }
+        );
+        assert!(!shows(("steering", 0usize), cx));
     }
 
     /// A steer that finds no turn running (it ended meanwhile) goes out as a prompt.
@@ -976,16 +1045,55 @@ mod tests {
             send(message, cx);
         }
         assert_eq!(typed(&session, cx), "");
-        assert!(shows(("queued", 2usize), cx));
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .within("waiting")
+                    .try_find(("queued", 2usize))
+                    .is_some()
+            );
+            let (waiting, input) = (
+                window.find("waiting").bounds(),
+                window.find("input-state").bounds(),
+            );
+            assert!(waiting.bottom() <= input.top());
+        });
         click_edits(None, ("queued-remove", 1usize), cx);
+        cx.update(|window, cx| window.render_frame(cx));
+        assert_eq!(typed(&session, cx), "second", "back in the prompt box");
         assert!(!shows(("queued", 2usize), cx));
         assert!(shows(("queued", 1usize), cx));
+        // Review focus 2: a long message shows at most 3 lines.
+        let long: Vec<String> = (1..=10).map(|i| format!("line {i}")).collect();
+        session.update(cx, |s, cx| {
+            s.queued.push(Message {
+                text: long.join("\n"),
+                attachments: Vec::new(),
+            });
+            cx.notify()
+        });
+        let height = |ix: usize, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.find(("queued", ix)).bounds().size.height
+            })
+        };
+        assert!(
+            height(2, cx) < height(0, cx) * 3.,
+            "the long balloon is not clamped"
+        );
+        session.update(cx, |s, cx| {
+            s.queued.pop();
+            cx.notify()
+        });
 
         wait_until(cx, "the queued prompt's reply", |cx| {
             state(&session, cx) == TurnState::Idle && user_texts(&session, cx).len() == 2
         });
         assert_eq!(user_texts(&session, cx), ["go", "first\n\nthird"]);
-        assert!(!shows(("queued", 0usize), cx));
+        assert!(!shows("waiting", cx));
+        assert_eq!(typed(&session, cx), "second");
     }
 
     /// Stop with messages queued: nothing goes out; their text and attachments go back into the
@@ -1193,9 +1301,43 @@ mod tests {
         wait_until(cx, "the permission card", |cx| {
             state(&session, cx) == TurnState::NeedsYou
         });
+        assert!(session.read_with(cx, |s, _| {
+            !s.model
+                .items
+                .iter()
+                .any(|i| matches!(i, ChatItem::Permission { .. }))
+        }));
         cx.update(|window, cx| {
             window.render_frame(cx);
-            assert!(window.try_find("perm-allow_once").is_some(), "no card");
+            assert!(
+                window
+                    .within("waiting")
+                    .try_find("perm-allow_once")
+                    .is_some(),
+                "the card is pinned"
+            );
+            let bounds = |id: &'static str| window.find(id).bounds();
+            let (waiting, list, input) = (
+                bounds("waiting"),
+                bounds("transcript"),
+                bounds("input-state"),
+            );
+            // O1: the stack lies over the list's bottom, inside its area, not below it.
+            assert!(
+                list.top() < waiting.top() && waiting.bottom() <= list.bottom(),
+                "{waiting:?} is not over {list:?}"
+            );
+            assert!(
+                list.bottom() - waiting.bottom() <= px(9.),
+                "{waiting:?} does not sit at the list's bottom"
+            );
+            assert!(
+                waiting.bottom() <= input.top(),
+                "{waiting:?} is not above {input:?}"
+            );
+        });
+        cx.update(|window, cx| {
+            window.render_frame(cx);
             window.click("perm-allow_once", cx);
         });
 
@@ -1204,6 +1346,14 @@ mod tests {
         });
         let reply = last_agent_text(&session, cx).unwrap_or_default();
         assert!(reply.starts_with("chose:"), "{reply}");
+        let items = session.read_with(cx, |s, _| s.model.items.clone());
+        let card = items
+            .iter()
+            .position(|i| matches!(i, ChatItem::Permission { .. }))
+            .unwrap();
+        assert!(matches!(&items[card + 1], ChatItem::Agent { text } if text.starts_with("chose:")));
+        assert!(shows(("permission", card), cx), "the closed line");
+        assert!(!shows("waiting", cx));
         let answered = session.read_with(cx, |s, _| {
             s.model.items.iter().find_map(|item| match item {
                 ChatItem::Permission { answered, .. } => answered.clone(),
@@ -1215,6 +1365,69 @@ mod tests {
             window.render_frame(cx);
             assert!(window.try_find("perm-allow_once").is_none(), "buttons stay");
         });
+    }
+
+    /// O1: while a card waits, the list's last row scrolls clear of the stack (the list's bottom
+    /// inset follows the stack's height); once nothing waits, the inset goes.
+    #[gpui_kit::test]
+    fn list_scrolls_clear_of_the_pinned_stack(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let reply = dir.path().join("long.md");
+        let lines: Vec<String> = (1..=80).map(|i| format!("line {i}")).collect();
+        fs::write(&reply, lines.join("\n\n")).unwrap();
+        // With --ask-permission the reply streams before the tool call: the list overflows.
+        let flags = format!("--ask-permission --reply-file {}", wai_agent::quote(&reply));
+        let (workspace, cx) = open(cx, fake_settings(&flags));
+        let session = start_session(&workspace, cx);
+        send("edit", cx);
+        wait_until(cx, "the permission card", |cx| {
+            state(&session, cx) == TurnState::NeedsYou
+        });
+        // The canvas reports the height in prepaint: the inset lands on the next frame.
+        let frame = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.render_frame(cx);
+            });
+        };
+        frame(cx);
+        let last = session.read_with(cx, |s, _| s.model.items.len() - 1); // the edit's tool row
+        let clear = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| {
+                let (row, stack) = (
+                    window.find(("tool", last)).bounds(),
+                    window.find("waiting").bounds(),
+                );
+                (row.bottom() <= stack.top() + px(0.5), stack.size.height)
+            })
+        };
+        let height = session.read_with(cx, |s, _| s.waiting_height);
+        let (is_clear, stack) = clear(cx);
+        assert!(
+            (height - stack).abs() <= px(2.),
+            "inset {height:?} vs stack {stack:?}"
+        );
+        assert!(is_clear, "at the tail, the last row sits above the stack");
+        // Scrolled up and back: the last row is still reachable, clear of the stack.
+        cx.update(|window, cx| {
+            let delta = gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(600.)));
+            window.scroll("transcript", delta, cx);
+        });
+        session.update(cx, |s, cx| {
+            s.scroller.update(cx, |list, cx| list.scroll_to_end(cx))
+        });
+        frame(cx);
+        assert!(clear(cx).0, "the last row scrolls clear of the stack");
+        // Nothing waits: no inset.
+        click_edits(None, "perm-allow_once", cx);
+        wait_until(cx, "the turn's end", |cx| {
+            state(&session, cx) == TurnState::Idle
+        });
+        frame(cx);
+        assert!(!shows("waiting", cx));
+        assert_eq!(session.read_with(cx, |s, _| s.waiting_height), px(0.));
     }
 
     /// The choice rows and the icon-only Stop are named for assistive tech: the rows' text is a
@@ -1249,6 +1462,10 @@ mod tests {
         wait_until(cx, "the question card", |cx| {
             state(&session, cx) == TurnState::NeedsYou
         });
+        assert!(cx.update(|w, cx| {
+            w.render_frame(cx);
+            w.within("waiting").try_find("question-submit").is_some()
+        }));
         cx.update(|window, cx| window.click("question-submit", cx));
         assert_eq!(
             state(&session, cx),
@@ -1384,6 +1601,37 @@ mod tests {
             }
         });
         cx.run_until_parked();
+    }
+
+    /// Each agent message copies its Markdown; each code block, its code.
+    #[gpui_kit::test]
+    fn copy_buttons_copy_the_message_and_its_code(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let reply = dir.path().join("reply.md");
+        fs::write(&reply, "Run this:\n\n```sh\ncargo test\n```\n").unwrap();
+        let flags = format!("--reply-file {}", wai_agent::quote(&reply));
+        let (workspace, cx) = open(cx, fake_settings(&flags));
+        let session = start_session(&workspace, cx);
+        turn(&session, cx);
+        wait_until(cx, "the markdown", |cx| {
+            session.read_with(cx, |s, cx| {
+                s.texts.get(&1).is_some_and(|md| {
+                    md.state
+                        .read(cx)
+                        .rendered_text()
+                        .as_str()
+                        .contains("cargo test")
+                })
+            })
+        });
+        let message = last_agent_text(&session, cx).unwrap();
+        click_edits(None, ("copy-message", 1usize), cx);
+        let copied = cx.read_from_clipboard().and_then(|c| c.text());
+        assert_eq!(copied.unwrap(), message);
+        click_edits(None, "copy-code", cx);
+        let code = cx.read_from_clipboard().and_then(|c| c.text());
+        assert_eq!(code.unwrap().trim_end(), "cargo test");
     }
 
     /// Sends `edit` and allows the fake agent's `n` edits, one permission card at a time (it
@@ -1629,6 +1877,38 @@ mod tests {
         })
     }
 
+    /// A step is one compact line of its own, 8 px from the next; unfolded, its output sits in a
+    /// box under the line.
+    #[gpui_kit::test]
+    fn step_lines_are_compact_and_open_below(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--steps 2"));
+        let session = start_session(&workspace, cx);
+        turn(&session, cx);
+        let bounds = |id: (&'static str, usize), cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.find(id).bounds()
+            })
+        };
+        let (tool, line, next) = (
+            bounds(("tool", 2), cx),
+            bounds(("step", 2), cx),
+            bounds(("step", 3), cx),
+        );
+        assert_eq!(line.top(), tool.top(), "the line is the step's own box");
+        assert!(
+            (next.top() - line.bottom() - px(8.)).abs() < px(0.5),
+            "{line:?} {next:?}"
+        );
+        click_edits(None, ("step", 2usize), cx);
+        let (line, output) = (bounds(("step", 2), cx), bounds(("step-output", 2), cx));
+        assert!(
+            output.top() >= line.bottom(),
+            "{output:?} is not under {line:?}"
+        );
+    }
+
     /// `--steps 2` is a thought (row 1) and two Read calls (rows 2 and 3). Step by step, each is
     /// one folded line; a click unfolds a call's output.
     #[gpui_kit::test]
@@ -1698,7 +1978,8 @@ mod tests {
             state(&session, cx) == TurnState::NeedsYou
         });
         assert!(shows("perm-allow_once", cx), "the card shows");
-        // Rows: the prompt, the thought, the Read call, the edit, its card.
+        // Rows: the prompt, the thought, the Read call, the edit
+        // (its card waits above the prompt box).
         assert!(!shows(("edited", 3usize), cx), "not written yet");
         click_edits(None, "perm-allow_once", cx);
         wait_until(cx, "the Edits block", |cx| {
@@ -1736,6 +2017,16 @@ mod tests {
             })
         });
         assert!(shows("turn-status", cx));
+        let (line, time) = cx.update(|window, _| {
+            (
+                window.find("turn-status").bounds(),
+                window.find("turn-status-time").bounds(),
+            )
+        });
+        assert!(
+            line.right() - time.right() <= px(13.),
+            "the time sits at the line's end"
+        );
         assert!(session.read_with(cx, |s, _| s.turn.is_some()));
         wait_until(cx, "the reply's first chunk", |cx| {
             last_agent_text(&session, cx).is_some()
@@ -1780,6 +2071,69 @@ mod tests {
 
     fn typed(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> String {
         session.read_with(cx, |s, cx| s.input.read(cx).value().to_string())
+    }
+
+    /// Review focus 1: with the prompt box empty, 1–9 answer the top card, the oldest; a click
+    /// answers the card it is on; with text in the box, a digit types.
+    #[gpui_kit::test]
+    fn number_keys_answer_the_top_permission_card(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        let request = |id: u64, session: String| PermissionRequest {
+            id,
+            session,
+            tool_call_id: "t".into(),
+            title: format!("Run {id}"),
+            diff: None,
+            subagent: None,
+            options: vec![
+                PermissionChoice {
+                    id: "y".into(),
+                    name: "Yes".into(),
+                    kind: ChoiceKind::AllowOnce,
+                },
+                PermissionChoice {
+                    id: "n".into(),
+                    name: "No".into(),
+                    kind: ChoiceKind::RejectOnce,
+                },
+            ],
+        };
+        // The broker never asked these: an answer fails, and the card closes as Cancelled.
+        let closed = |cx: &mut VisualTestContext| {
+            session.read_with(cx, |s, _| {
+                (s.model.items.iter())
+                    .filter_map(|i| match i {
+                        ChatItem::Permission { request, .. } => Some(request.id),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        session.update(cx, |s, cx| {
+            let id = s.id.clone();
+            s.handle_permission(request(100, id.clone()), cx);
+            s.handle_permission(request(101, id), cx);
+        });
+        cx.simulate_keystrokes("2");
+        assert_eq!(closed(cx), [100]);
+        assert_eq!(typed(&session, cx), "");
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window
+                .within(("waiting-permission", 101u64))
+                .click("perm-allow_once", cx);
+        });
+        assert_eq!(closed(cx), [100, 101]);
+        session.update(cx, |s, cx| {
+            let id = s.id.clone();
+            s.handle_permission(request(102, id), cx)
+        });
+        cx.simulate_input("a");
+        cx.simulate_keystrokes("1");
+        assert_eq!(typed(&session, cx), "a1");
+        assert_eq!(closed(cx), [100, 101]);
     }
 
     /// ⌘N, then the session once its agent's commands arrived.

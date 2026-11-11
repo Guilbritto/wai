@@ -31,8 +31,6 @@ pub enum SidebarTab {
     Files,
     Search,
     Agents,
-    /// Opened from the top bar's Extensions button; it has no tab.
-    Extensions,
     /// An extension's panel, by its view. When the panel goes, the sessions show again.
     Panel(EntityId),
 }
@@ -135,10 +133,6 @@ impl Workspace {
             SidebarTab::Files => self.files.clone().into_any_element(),
             SidebarTab::Search => self.search.clone().into_any_element(),
             SidebarTab::Agents => self.render_agents(cx).into_any_element(),
-            SidebarTab::Extensions => div()
-                .size_full()
-                .children(self.extensions.clone())
-                .into_any_element(),
         };
         let built_in = TABS.map(|(tab, id, label)| (tab, ElementId::from(id), label.into()));
         // On the right, Agents has no tab.

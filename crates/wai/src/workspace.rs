@@ -45,7 +45,7 @@ use crate::layout::{self, Slot, Zone};
 use crate::notify::{self, should_notify};
 use crate::search_view::{OpenMatch, SearchView};
 use crate::settings_view::{
-    AgentRow, RowStatus, Section, SettingsData, SettingsEvent, SettingsView,
+    AgentRow, RowStatus, Section, SettingsData, SettingsEvent, SettingsView, open_modal,
 };
 use crate::sidebar::{SidebarTab, canonical};
 use crate::terminal_view::{self, TerminalView};
@@ -77,8 +77,6 @@ pub enum Pane {
     Session(Entity<ChatSession>),
     /// Open files in tabs; one pane at most. Not kept between runs.
     Editor(Entity<EditorPane>),
-    /// The settings screen; one at most. Not kept between runs.
-    Settings(Entity<SettingsView>),
     /// A session that starts when sent; its view is also in `Workspace::drafts`.
     Draft(Entity<DraftView>),
 }
@@ -113,8 +111,6 @@ pub(crate) enum Dragged {
     Draft(Entity<DraftView>),
     /// Resumed where it drops, as a click on its row resumes it.
     History(SessionSummary),
-    /// The Settings pane, moved as an open session is.
-    Settings,
 }
 
 impl DraggedSession {
@@ -193,6 +189,11 @@ pub struct Workspace {
     /// The config dir: the user's `templates.toml` (re-read on a project switch) and `scratch/`,
     /// where tool outputs open from (R21; cleared at launch).
     pub user_dir: PathBuf,
+    /// Whose `~/.claude` the Claude pages of Settings read.
+    pub(crate) claude_home: PathBuf,
+    pub(crate) claude_task: Option<Task<()>>,
+    /// The `claude` that `mcp list` runs; none means the one on PATH.
+    pub(crate) claude_program: Option<PathBuf>,
     pub registry: Entity<AgentRegistry>,
     /// Every open session, shown in a pane or not, in the order they opened.
     pub sessions: Vec<Entity<ChatSession>>,
@@ -222,6 +223,8 @@ pub struct Workspace {
     /// project cannot be watched.
     watch: Option<(ProjectWatcher, Task<()>)>,
     settings_watch: Option<(ProjectWatcher, Task<()>)>,
+    /// The open Settings modal; the dialog owns the view.
+    settings_view: Option<WeakEntity<SettingsView>>,
     /// The load notices already shown: a reload pushes only new ones.
     load_notices: Vec<String>,
     /// The last run's sessions `restore` could not reopen (their agent is not in the settings, or
@@ -394,6 +397,9 @@ impl Workspace {
             settings,
             templates: Vec::new(),
             user_dir: config_dir(),
+            claude_home: wai_settings::claude::claude_home(),
+            claude_task: None,
+            claude_program: None,
             registry,
             agents,
             agents_right: false,
@@ -413,6 +419,7 @@ impl Workspace {
             ext_host,
             watch: None,
             settings_watch: None,
+            settings_view: None,
             load_notices: Vec::new(),
             unrestored: Vec::new(),
             #[cfg(test)]
@@ -1331,28 +1338,23 @@ impl Workspace {
         if ix >= self.panes.len() {
             return;
         }
-        let (mut session, mut draft, mut fresh) = (None, None, false);
-        match &dragged.source {
-            Dragged::Open(open) if self.sessions.contains(open) => session = Some(open.clone()),
-            Dragged::Draft(d) if self.drafts.contains(d) => draft = Some(d.clone()),
+        let (session, draft, fresh) = match &dragged.source {
+            Dragged::Open(open) if self.sessions.contains(open) => {
+                (Some(open.clone()), None, false)
+            }
+            Dragged::Draft(d) if self.drafts.contains(d) => (None, Some(d.clone()), false),
             Dragged::Open(_) | Dragged::Draft(_) => return,
             Dragged::History(row) => match self.resumed(row, window, cx) {
-                Some((resumed, new)) => (session, fresh) = (Some(resumed), new),
+                Some((resumed, fresh)) => (Some(resumed), None, fresh),
                 None => return,
             },
-            Dragged::Settings => {}
         };
-        let from = match (&session, &draft) {
-            (Some(session), _) => self.panes.iter().position(|p| p.session() == Some(session)),
-            (_, Some(draft)) => self.panes.iter().position(|p| p.draft() == Some(draft)),
-            _ => self
-                .panes
-                .iter()
-                .position(|p| matches!(p, Pane::Settings(_))),
+        let holds = |p: &Pane| match (&session, &draft) {
+            (Some(session), _) => p.session() == Some(session),
+            (_, Some(draft)) => p.draft() == Some(draft),
+            _ => false,
         };
-        if session.is_none() && draft.is_none() && from.is_none() {
-            return;
-        }
+        let from = self.panes.iter().position(holds);
         let empty = matches!(self.panes[ix], Pane::Empty(_));
         let locked = matches!(self.panes[ix], Pane::Editor(_)) && !self.dirty_tabs(cx).is_empty();
         if let Some(slots) = layout::place(self.panes.len(), from, ix, zone, empty, locked) {
@@ -1369,11 +1371,7 @@ impl Workspace {
                 .collect();
             self.save_state(cx);
         }
-        let shown = self.panes.iter().position(|p| match (&session, &draft) {
-            (Some(session), _) => p.session() == Some(session),
-            (_, Some(draft)) => p.draft() == Some(draft),
-            _ => matches!(p, Pane::Settings(_)),
-        });
+        let shown = self.panes.iter().position(holds);
         if let Some(ix) = shown {
             self.focus_pane(ix, window, cx);
             self.follow_session(window, cx);
@@ -1392,10 +1390,9 @@ impl Workspace {
             Dragged::History(row) => self
                 .default_agent()
                 .and_then(|agent| self.session(&agent, &row.id, cx)),
-            Dragged::Draft(_) | Dragged::Settings => None,
+            Dragged::Draft(_) => None,
         };
         let from = match &dragged.source {
-            Dragged::Settings => (self.panes.iter()).position(|p| matches!(p, Pane::Settings(_))),
             Dragged::Draft(draft) => (self.panes.iter()).position(|p| p.draft() == Some(draft)),
             _ => session.and_then(|s| self.panes.iter().position(|p| p.session() == Some(&s))),
         };
@@ -1820,7 +1817,7 @@ impl Workspace {
     }
 
     /// Takes pane `ix` off the screen. A session in it stays open, in the sidebar; a "Preparing…"
-    /// one still opens there; a Settings pane just goes. R20: in an editor pane it closes the
+    /// one still opens there. R20: in an editor pane it closes the
     /// active tab instead (the pane goes with the last one). R87: a pane's × runs it on its own
     /// pane, focused or not.
     pub(crate) fn close_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -2146,7 +2143,7 @@ impl Workspace {
     }
 
     /// `open_file`; a `scratch` file (a tool's output) is read-only whatever its size.
-    fn open(
+    pub(crate) fn open(
         &mut self,
         path: PathBuf,
         line: Option<u32>,
@@ -2280,9 +2277,21 @@ impl Workspace {
             settings: self.settings.clone(),
             error: self.settings_error.clone(),
             notice,
+            context: self.settings_context(),
+            extensions: self.extensions.clone(),
+            home: self.claude_home.clone(),
             agents: self.agent_rows(cx),
             project_default: wai_settings::project_default_agent(&self.project)
                 .filter(|p| Some(p) == self.settings.default_agent.as_ref()),
+        }
+    }
+
+    /// The Settings title's suffix: the default agent and the project.
+    fn settings_context(&self) -> String {
+        let project = folder_name(&self.project);
+        match self.default_agent() {
+            Some(agent) => format!("({} · {project})", wai_settings::agent_label(&agent)),
+            None => format!("({project})"),
         }
     }
 
@@ -2359,9 +2368,24 @@ impl Workspace {
         .detach();
     }
 
-    /// Shows the settings at `section`, with `notice` in it. Its pane is focused when there is
-    /// one; else the focused pane takes it when empty, else a new pane to the right, else (at
-    /// `MAX_PANES`) the next pane that is not the editor, whose session stays in the open list.
+    /// The open Settings modal, if any.
+    pub(crate) fn settings_view(&self) -> Option<Entity<SettingsView>> {
+        self.settings_view.as_ref().and_then(|v| v.upgrade())
+    }
+
+    /// Closes the Settings modal when it is open.
+    pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .settings_view
+            .take()
+            .and_then(|v| v.upgrade())
+            .is_some()
+        {
+            window.close_dialog(cx);
+        }
+    }
+
+    /// Shows the settings modal at `section`, with `notice` in it; one already open follows.
     pub fn open_settings(
         &mut self,
         section: Section,
@@ -2370,68 +2394,47 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let notice = notice.map(|n| SharedString::from(n.to_string()));
-        let found = (self.panes.iter()).position(|p| matches!(p, Pane::Settings(_)));
-        let ix = match found {
-            Some(ix) => ix,
-            None => {
-                let data = self.settings_data(notice.clone(), cx);
-                let view = cx.new(|cx| SettingsView::new(section, data, window, cx));
-                cx.subscribe_in(
-                    &view,
-                    window,
-                    |this, _, event: &SettingsEvent, window, cx| match event {
-                        SettingsEvent::Change(change) => {
-                            this.change_setting(change.clone(), window, cx)
-                        }
-                        SettingsEvent::OpenFile => {
-                            let path = this.user_dir.join("settings.toml");
-                            // Created when missing (a first run): the editor opens only files
-                            // that exist. If this fails, `open_file` reports why.
-                            std::fs::create_dir_all(&this.user_dir).ok();
-                            (std::fs::OpenOptions::new().create(true).append(true))
-                                .open(&path)
-                                .ok();
-                            this.open_file(path, None, window, cx)
-                        }
-                        SettingsEvent::Test(id) => this.test_agent(id, window, cx),
-                    },
-                )
-                .detach();
-                let focused = self.focused_pane;
-                let ix = if matches!(self.panes[focused], Pane::Empty(_)) {
-                    focused
-                } else if self.panes.len() < MAX_PANES {
-                    self.panes.push(Pane::Empty(None));
-                    self.panes.len() - 1
-                } else {
-                    let len = self.panes.len();
-                    (1..len)
-                        .map(|n| (focused + n) % len)
-                        .find(|&ix| !matches!(self.panes[ix], Pane::Editor(_)))
-                        .unwrap_or(focused)
-                };
-                self.panes[ix] = Pane::Settings(view);
-                self.save_state(cx);
-                ix
-            }
-        };
-        if let Pane::Settings(view) = &self.panes[ix] {
-            let data = self.settings_data(notice, cx);
+        self.extensions(window, cx);
+        let data = self.settings_data(notice, cx);
+        self.refresh_claude(cx);
+        if let Some(view) = self.settings_view() {
             view.update(cx, |v, cx| {
-                v.show(section, cx);
+                v.show(section, window, cx);
                 v.set(data, cx);
             });
+            return;
         }
-        self.focus_pane(ix, window, cx);
-    }
-
-    /// The top bar's Settings button: takes the Settings pane off the screen when there is one,
-    /// else opens it.
-    pub(crate) fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match (self.panes.iter()).position(|p| matches!(p, Pane::Settings(_))) {
-            Some(ix) => self.close_pane(ix, window, cx),
-            None => self.open_settings(Section::Ai, None, window, cx),
-        }
+        let view = cx.new(|cx| SettingsView::new(section, data, window, cx));
+        cx.subscribe_in(
+            &view,
+            window,
+            |this, _, event: &SettingsEvent, window, cx| match event {
+                SettingsEvent::Change(change) => this.change_setting(change.clone(), window, cx),
+                SettingsEvent::OpenFile => {
+                    let path = this.user_dir.join("settings.toml");
+                    // Created when missing (a first run): the editor opens only files
+                    // that exist. If this fails, `open_file` reports why.
+                    std::fs::create_dir_all(&this.user_dir).ok();
+                    (std::fs::OpenOptions::new().create(true).append(true))
+                        .open(&path)
+                        .ok();
+                    this.close_settings(window, cx);
+                    this.open_file(path, None, window, cx)
+                }
+                SettingsEvent::Test(id) => this.test_agent(id, window, cx),
+                SettingsEvent::CheckMcp => this.check_mcp(cx),
+                SettingsEvent::Open { path, read_only } => {
+                    this.close_settings(window, cx);
+                    this.open(path.clone(), None, *read_only, window, cx)
+                }
+                SettingsEvent::TogglePlugin { id, on, seen } => {
+                    this.toggle_plugin(id.clone(), *on, *seen, window, cx)
+                }
+            },
+        )
+        .detach();
+        self.settings_view = Some(view.downgrade());
+        open_modal(view, window, cx);
     }
 
     /// Writes `change` to the user's file; the watcher applies it. A command or shell not
@@ -2471,12 +2474,10 @@ impl Workspace {
     /// The settings screen follows `self.settings`. Its "Choose an AI" notice goes once one is
     /// chosen.
     pub fn sync_settings_view(&self, cx: &mut Context<Self>) {
-        for pane in &self.panes {
-            if let Pane::Settings(view) = pane {
-                let notice = (view.read(cx).notice()).filter(|_| self.default_agent().is_none());
-                let data = self.settings_data(notice, cx);
-                view.update(cx, |v, cx| v.set(data, cx));
-            }
+        if let Some(view) = self.settings_view() {
+            let notice = (view.read(cx).notice()).filter(|_| self.default_agent().is_none());
+            let data = self.settings_data(notice, cx);
+            view.update(cx, |v, cx| v.set(data, cx));
         }
     }
 
@@ -2537,6 +2538,7 @@ impl Workspace {
             &view,
             window,
             |this, _, InstallPlugin(command), window, cx| {
+                this.close_settings(window, cx);
                 this.type_in_terminal(command, window, cx)
             },
         )
@@ -2556,14 +2558,13 @@ impl Workspace {
         self.sync_contributions(cx);
     }
 
-    /// Shows the Extensions view in the sidebar.
+    /// Opens the settings modal on Extensions.
     pub(crate) fn show_extensions(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<ExtensionsView> {
-        self.sidebar_tab = SidebarTab::Extensions;
-        cx.notify();
+        self.open_settings(Section::Extensions, None, window, cx);
         self.extensions(window, cx)
     }
 
@@ -2788,7 +2789,6 @@ impl Render for Workspace {
                 .child(match pane {
                     Pane::Session(session) => session.clone().into_any_element(),
                     Pane::Editor(pane) => pane.clone().into_any_element(),
-                    Pane::Settings(view) => view.clone().into_any_element(),
                     Pane::Draft(draft) => draft.clone().into_any_element(),
                     Pane::Preparing { agent, .. } => v_flex()
                         .size_full()
@@ -3018,7 +3018,9 @@ pub(crate) mod tests {
             .expect("open window");
         // set_project re-reads the user's templates: never the developer's.
         workspace.update(cx, |w, _| {
-            w.user_dir = std::env::temp_dir().join("wai-no-config")
+            w.user_dir = std::env::temp_dir().join("wai-no-config");
+            w.claude_home = std::env::temp_dir().join("wai-no-claude");
+            w.claude_program = Some(std::env::temp_dir().join("wai-no-claude/claude"));
         });
         let window = cx.update(|cx| cx.windows()[0]);
         let cx = Box::leak(Box::new(VisualTestContext::from_window(window, cx)));
@@ -3122,18 +3124,10 @@ pub(crate) mod tests {
         let (workspace, cx) = open(cx, settings);
         cx.simulate_keystrokes("secondary-n");
         workspace.read_with(cx, |w, cx| {
-            let Pane::Settings(view) = &w.panes[0] else {
-                panic!("expected the Settings pane");
-            };
+            let view = w.settings_view().expect("the settings modal");
             assert_eq!(view.read(cx).section(), crate::settings_view::Section::Ai);
             assert_eq!(view.read(cx).notice().as_deref(), Some(super::CHOOSE_AI));
-            assert_eq!(
-                w.panes
-                    .iter()
-                    .filter(|p| matches!(p, Pane::Settings(_)))
-                    .count(),
-                1
-            );
+            assert!(matches!(w.panes.as_slice(), [Pane::Empty(_)]));
             assert!(w.registry.read(cx).status("fake").is_none());
         });
     }
@@ -3335,10 +3329,7 @@ pub(crate) mod tests {
         };
         let (workspace, cx) = open(cx, settings);
         cx.simulate_keystrokes("secondary-n");
-        let view = workspace.read_with(cx, |w, _| match &w.panes[0] {
-            Pane::Settings(view) => view.clone(),
-            _ => panic!("expected the Settings pane"),
-        });
+        let view = workspace.read_with(cx, |w, _| w.settings_view().expect("the settings modal"));
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| {
                 w.apply_settings(fake_settings(""), vec![], window, cx)
@@ -3567,10 +3558,10 @@ pub(crate) mod tests {
         });
     }
 
-    /// ⌘W on the Settings pane removes it (it is not a session, nothing keeps running); the open
-    /// session keeps its pane and stays in the Open list.
+    /// The Settings modal leaves the panes alone: the open session keeps its pane and stays in the
+    /// Open list, and Escape closes the modal.
     #[gpui_kit::test]
-    fn close_settings_keeps_the_sessions(cx: &mut TestAppContext) {
+    fn settings_modal_leaves_the_panes_alone(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, history_settings(1));
         let rows = load_history(&workspace, 1, cx);
@@ -3579,30 +3570,29 @@ pub(crate) mod tests {
 
         cx.simulate_keystrokes("secondary-,");
         workspace.read_with(cx, |w, _| {
-            assert_eq!(w.panes.len(), 2);
-            assert!(matches!(w.panes[w.focused_pane], Pane::Settings(_)));
+            assert!(w.settings_view().is_some());
+            assert_eq!(w.panes.len(), 1);
+            assert_eq!(w.panes[0].session(), Some(&session));
         });
-        cx.simulate_keystrokes("secondary-w");
+        cx.simulate_keystrokes("escape");
         workspace.read_with(cx, |w, _| {
-            assert!(!w.panes.iter().any(|p| matches!(p, Pane::Settings(_))));
+            assert!(w.settings_view().is_none());
             assert_eq!(w.panes.len(), 1);
             assert_eq!(w.panes[0].session(), Some(&session));
             assert_eq!(w.sessions, std::slice::from_ref(&session));
         });
     }
 
-    /// The top bar's Settings button is a toggle: a second click takes the pane off the screen.
+    /// The top bar's Settings button opens the modal; Escape closes it.
     #[gpui_kit::test]
-    fn settings_button_toggles_the_pane(cx: &mut TestAppContext) {
+    fn settings_button_opens_the_modal(cx: &mut TestAppContext) {
         let (workspace, cx) = open(cx, Settings::default());
         let shown = |cx: &mut VisualTestContext| {
-            workspace.read_with(cx, |w, _| {
-                w.panes.iter().any(|p| matches!(p, Pane::Settings(_)))
-            })
+            workspace.read_with(cx, |w, _| w.settings_view().is_some())
         };
         click("topbar-settings", cx);
         assert!(shown(cx));
-        click("topbar-settings", cx);
+        cx.simulate_keystrokes("escape");
         assert!(!shown(cx));
     }
 
@@ -3732,38 +3722,6 @@ pub(crate) mod tests {
             assert_eq!(w.panes.len(), 2);
             assert_eq!(w.panes[0].session(), Some(&second));
             assert_eq!(w.panes[1].session(), Some(&first));
-            assert_eq!(w.focused_pane, 1);
-        });
-    }
-
-    /// The Settings title drags like a session header: dropped on a pane's right quarter, it
-    /// moves there and the panes reorder.
-    #[gpui_kit::test]
-    fn drag_settings_to_right_edge_splits(cx: &mut TestAppContext) {
-        cx.executor().allow_parking(); // the fake agent is a real process
-        let (workspace, cx) = open(cx, history_settings(1));
-        let rows = load_history(&workspace, 1, cx);
-        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
-        cx.update(|window, cx| {
-            workspace.update(cx, |w, cx| {
-                w.open_settings(super::Section::Ai, None, window, cx);
-                w.panes.swap(0, 1);
-                cx.notify();
-            })
-        });
-        cx.run_until_parked();
-        workspace.read_with(cx, |w, _| {
-            assert!(matches!(w.panes[0], Pane::Settings(_)));
-            assert!(w.panes[1].session().is_some());
-        });
-
-        let from = center_of("settings-title", cx);
-        drag_to_pane(from, 1, 0.9, cx);
-
-        workspace.read_with(cx, |w, _| {
-            assert_eq!(w.panes.len(), 2);
-            assert!(w.panes[0].session().is_some());
-            assert!(matches!(w.panes[1], Pane::Settings(_)));
             assert_eq!(w.focused_pane, 1);
         });
     }
@@ -4416,7 +4374,7 @@ pub(crate) mod tests {
         }
         let request = |ix: usize, cx: &mut VisualTestContext| {
             sessions[ix].read_with(cx, |s, _| {
-                s.model.items.iter().find_map(|item| match item {
+                (s.model.waiting.iter().chain(&s.model.items)).find_map(|item| match item {
                     ChatItem::Permission { request, answered } => {
                         Some((request.id, answered.clone()))
                     }
@@ -4977,7 +4935,7 @@ pub(crate) mod tests {
         cx.run_until_parked();
     }
 
-    pub(crate) fn click(id: &'static str, cx: &mut VisualTestContext) {
+    pub(crate) fn click(id: impl Into<ElementId>, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
             window.render_frame(cx);
             window.click(id, cx);

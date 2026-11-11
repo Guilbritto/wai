@@ -1,10 +1,13 @@
-//! The Settings pane: a section list, a search over the rows and the rows of the sections. It
+//! The Settings modal: a section nav, a search over the page and the rows of the sections. It
 //! shows what the workspace gives it (`set`) and says what the user changed (`SettingsEvent`);
 //! the workspace writes the user's file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::path::PathBuf;
 
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogEntrance;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::radio::Radio;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
@@ -13,29 +16,34 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::*;
+use wai_settings::claude::{ClaudeData, Stamp};
 use wai_settings::{Change, Processing, SeenModel, Settings, ThemeChoice, agent_label, builtin};
 
 use crate::aurora::{self, DISPLAY_FONT};
-use crate::workspace::{Dragged, DraggedSession};
+use crate::extensions_view::ExtensionsView;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) mod claude;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Section {
     Ai,
     Appearance,
     Conversation,
     Terminal,
     Updates,
+    Extensions,
+    Plugins,
+    Mcp,
+    Skills,
+    Instructions,
+    Agents,
+    Hooks,
+    Codex,
+    Copilot,
+    Antigravity,
 }
 
 impl Section {
-    const ALL: [Section; 5] = [
-        Section::Ai,
-        Section::Appearance,
-        Section::Conversation,
-        Section::Terminal,
-        Section::Updates,
-    ];
-
     fn title(self) -> &'static str {
         match self {
             Section::Ai => "AI",
@@ -43,8 +51,150 @@ impl Section {
             Section::Conversation => "Conversation",
             Section::Terminal => "Terminal",
             Section::Updates => "Updates",
+            Section::Extensions => "Extensions",
+            Section::Plugins => "Plugins",
+            Section::Mcp => "MCP Servers",
+            Section::Skills => "Skills",
+            Section::Instructions => "Instructions",
+            Section::Agents => "Agents",
+            Section::Hooks => "Hooks",
+            Section::Codex => "Codex",
+            Section::Copilot => "Copilot",
+            Section::Antigravity => "Antigravity",
         }
     }
+
+    fn key(self) -> &'static str {
+        match self {
+            Section::Ai => "ai",
+            Section::Appearance => "appearance",
+            Section::Conversation => "conversation",
+            Section::Terminal => "terminal",
+            Section::Updates => "updates",
+            Section::Extensions => "extensions",
+            Section::Plugins => "plugins",
+            Section::Mcp => "mcp",
+            Section::Skills => "skills",
+            Section::Instructions => "instructions",
+            Section::Agents => "agents",
+            Section::Hooks => "hooks",
+            Section::Codex => "codex",
+            Section::Copilot => "copilot",
+            Section::Antigravity => "antigravity",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Section::Ai => "Which AI starts new sessions, and how wai runs each one.",
+            Section::Appearance => "How wai looks.",
+            Section::Conversation => {
+                "What a conversation shows while the agent works. Permission cards, questions and file edits always show."
+            }
+            Section::Terminal => "The terminal under the panes.",
+            Section::Updates => "wai checks GitHub releases once a day, only when you turn it on.",
+            Section::Extensions => {
+                "Extensions add panels, commands, agents and MCP servers to wai. They run with your permissions."
+            }
+            Section::Plugins => {
+                "What Claude loads from ~/.claude/plugins: commands, skills, agents, hooks and MCP servers. A change applies to new Claude sessions."
+            }
+            Section::Skills => {
+                "Instructions Claude loads on its own when a task fits. They come with plugins; turn the plugin off to drop its skills."
+            }
+            Section::Instructions => {
+                "Files Claude reads at the start of every session (CLAUDE.md and what it includes)."
+            }
+            Section::Agents => "Subagents Claude can hand work to.",
+            Section::Hooks => {
+                "Commands Claude Code runs on its own at set moments. They run with your permissions."
+            }
+            Section::Codex => {
+                "Plugins, MCP servers, skills, instructions, agents and hooks of Codex, like the Claude ones."
+            }
+            Section::Copilot => {
+                "Plugins, MCP servers, skills, instructions, agents and hooks of Copilot, like the Claude ones."
+            }
+            Section::Antigravity => {
+                "Plugins, MCP servers, skills, instructions, agents and hooks of Antigravity, like the Claude ones."
+            }
+            Section::Mcp => {
+                "Servers that give Claude more tools. Turning one off applies to this project, in new Claude sessions, and keeps its configuration."
+            }
+        }
+    }
+}
+
+impl Section {
+    fn is_soon(self) -> bool {
+        matches!(
+            self,
+            Section::Codex | Section::Copilot | Section::Antigravity
+        )
+    }
+}
+
+/// What a Coming soon page says under "Not in wai yet".
+pub(crate) fn soon_text(section: Section) -> String {
+    let x = section.title();
+    format!(
+        "Today wai shows what Claude uses. {x} comes next; its own settings stay in its CLI meanwhile."
+    )
+}
+
+/// The nav's groups, each with its label and sections.
+pub(crate) const NAV: &[(&str, &[Section])] = &[
+    (
+        "wai",
+        &[
+            Section::Ai,
+            Section::Appearance,
+            Section::Conversation,
+            Section::Terminal,
+            Section::Updates,
+            Section::Extensions,
+        ],
+    ),
+    (
+        "Claude",
+        &[
+            Section::Plugins,
+            Section::Mcp,
+            Section::Skills,
+            Section::Instructions,
+            Section::Agents,
+            Section::Hooks,
+        ],
+    ),
+    (
+        "Other agents",
+        &[Section::Codex, Section::Copilot, Section::Antigravity],
+    ),
+];
+
+/// 88% x 86% of the viewport; maximized, the viewport less 24 px on each axis.
+pub(crate) fn modal_size(viewport: Size<Pixels>, maximized: bool) -> Size<Pixels> {
+    let (w, h) = (f32::from(viewport.width), f32::from(viewport.height));
+    if maximized {
+        size(px(w - 24.), px(h - 24.))
+    } else {
+        size(px((w * 0.88).round()), px((h * 0.86).round()))
+    }
+}
+
+/// Opens the modal. The dialog builder holds the only strong handle: closing it drops the view.
+pub(crate) fn open_modal(view: Entity<SettingsView>, window: &mut Window, cx: &mut App) {
+    window.open_dialog(cx, move |dialog, window, cx| {
+        let size = modal_size(window.viewport_size(), view.read(cx).maximized());
+        dialog
+            .w(size.width)
+            .h(size.height)
+            .centered()
+            .close_button(false)
+            .entrance(DialogEntrance::None)
+            .p_0()
+            .child(view.clone())
+    });
 }
 
 /// Every row with its section and label: what the search matches.
@@ -109,12 +259,28 @@ pub struct SettingsData {
     /// Why `settings.toml` cannot be read: the screen is read-only then.
     pub error: Option<String>,
     pub notice: Option<SharedString>,
+    /// The title's suffix: the default agent and the project.
+    pub context: String,
+    pub extensions: Option<Entity<ExtensionsView>>,
+    /// Where `~/.claude` lives: paths on the Claude pages are shown relative to it.
+    pub home: PathBuf,
 }
 
 pub enum SettingsEvent {
     Change(Change),
     OpenFile,
     Test(String),
+    CheckMcp,
+    Open {
+        path: PathBuf,
+        read_only: bool,
+    },
+    /// `seen` is the settings.json stamp the switch was shown with.
+    TogglePlugin {
+        id: String,
+        on: bool,
+        seen: Stamp,
+    },
 }
 
 #[derive(Clone)]
@@ -190,6 +356,7 @@ fn model_choices(row: &AgentRow) -> Vec<ModelChoice> {
 
 pub struct SettingsView {
     section: Section,
+    maximized: bool,
     data: SettingsData,
     pub(crate) search: Entity<InputState>,
     theme: Entity<SelectState<Vec<Theme>>>,
@@ -207,6 +374,15 @@ pub struct SettingsView {
     editing: [bool; 3],
     /// `data` changed: the fields show it at the next frame.
     stale: bool,
+    /// Read off the UI thread: `None` until it lands.
+    claude: Option<ClaudeData>,
+    /// A write is out: the switches wait for it.
+    busy: bool,
+    mcp_check: claude::McpCheck,
+    /// The running `claude mcp list`; dropping the view kills it.
+    pub(crate) mcp_task: Option<Task<()>>,
+    /// Groups the user flipped from their default (open or closed), per page.
+    toggled: HashSet<(Section, usize)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -219,7 +395,8 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
+        let placeholder = format!("Search {}…", section.title().to_lowercase());
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         let choices = vec![Theme(ThemeChoice::Dark), Theme(ThemeChoice::Light)];
         let theme = cx.new(|cx| SelectState::new(choices, None, window, cx));
         let choices = [Processing::Steps, Processing::Grouped, Processing::Hidden];
@@ -269,6 +446,7 @@ impl SettingsView {
         );
         let mut this = Self {
             section,
+            maximized: false,
             data,
             search,
             theme,
@@ -280,6 +458,11 @@ impl SettingsView {
             advanced: None,
             editing: [false; 3],
             stale: true,
+            claude: None,
+            busy: false,
+            mcp_check: Default::default(),
+            mcp_task: None,
+            toggled: HashSet::new(),
             _subscriptions: subscriptions,
         };
         this.sync(window, cx);
@@ -293,9 +476,40 @@ impl SettingsView {
         cx.notify();
     }
 
-    pub fn show(&mut self, section: Section, cx: &mut Context<Self>) {
+    /// Shows `section`'s page with an empty search.
+    pub fn show(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
         self.section = section;
+        let placeholder = format!("Search {}…", section.title().to_lowercase());
+        self.search.update(cx, |s, cx| {
+            s.set_value("", window, cx);
+            s.set_placeholder(placeholder, window, cx);
+        });
         cx.notify();
+    }
+
+    pub(crate) fn maximized(&self) -> bool {
+        self.maximized
+    }
+
+    pub(crate) fn context(&self) -> &str {
+        &self.data.context
+    }
+
+    /// The count the nav shows beside `section`.
+    pub(crate) fn nav_count(&self, section: Section, cx: &App) -> Option<usize> {
+        match section {
+            Section::Ai => Some(self.data.agents.len()),
+            Section::Extensions => {
+                (self.data.extensions.as_ref()).map(|ext| ext.read(cx).store().list().len())
+            }
+            Section::Plugins => self.claude.as_ref().map(|d| d.plugins.len()),
+            Section::Mcp => self.claude.as_ref().map(|d| d.mcp.len()),
+            Section::Skills => self.claude.as_ref().map(|d| d.skills.len()),
+            Section::Instructions => self.claude.as_ref().map(|d| d.instructions.len()),
+            Section::Agents => self.claude.as_ref().map(|d| d.agents.len()),
+            Section::Hooks => self.claude.as_ref().map(|d| d.hooks.len()),
+            _ => None,
+        }
     }
 
     #[cfg(test)]
@@ -613,38 +827,43 @@ impl Render for SettingsView {
             self.sync(window, cx);
         }
         let query = self.search.read(cx).value().trim().to_lowercase();
-        let searching = !query.is_empty();
         let (warning, danger) = (cx.theme().warning, cx.theme().danger);
-        let sections = Section::ALL.into_iter().filter_map(|section| {
-            let rows: Vec<_> = (ROWS.iter())
-                .filter(|(s, label)| *s == section && label.to_lowercase().contains(&query))
-                .map(|(_, label)| *label)
-                .collect();
-            let shown = if searching {
-                !rows.is_empty()
-            } else {
-                section == self.section
-            };
-            let agents: Vec<_> = if section == Section::Ai {
-                (self.data.agents.iter())
-                    .filter(|a| a.label.to_lowercase().contains(&query))
-                    .cloned()
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            (shown || (searching && !agents.is_empty())).then_some((section, rows, agents))
-        });
-        let sections: Vec<_> = sections
-            .map(|(section, rows, agents)| {
-                let project = (section == Section::Ai)
-                    .then(|| self.data.project_default.as_deref().map(agent_label))
-                    .flatten()
-                    .map(|a| div().child(format!("This project uses {a}.")));
-                let notice = (section == Section::Ai)
-                    .then(|| self.notice())
-                    .flatten()
-                    .map(|n| div().text_color(warning).child(n));
+        let (muted, faint) = (cx.theme().muted_foreground, aurora::nevoa_2());
+        let section = self.section;
+        let rows: Vec<_> = (ROWS.iter())
+            .filter(|(s, label)| *s == section && label.to_lowercase().contains(&query))
+            .map(|(_, label)| *label)
+            .collect();
+        let ai = section == Section::Ai;
+        let extensions = section == Section::Extensions;
+        let soon_page = section.is_soon();
+        let claude_page = matches!(
+            section,
+            Section::Plugins
+                | Section::Mcp
+                | Section::Skills
+                | Section::Instructions
+                | Section::Agents
+                | Section::Hooks
+        );
+        let agents: Vec<_> = if ai {
+            (self.data.agents.iter())
+                .filter(|a| a.label.to_lowercase().contains(&query))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let project = ai
+            .then(|| self.data.project_default.as_deref().map(agent_label))
+            .flatten()
+            .map(|a| div().child(format!("This project uses {a}.")));
+        let notice = ai
+            .then(|| self.notice())
+            .flatten()
+            .map(|n| div().text_color(warning).child(n));
+        let advanced =
+            (ai && "settings.toml".contains(&query)).then(|| {
                 v_flex()
                     .gap_1()
                     .child(
@@ -652,30 +871,60 @@ impl Render for SettingsView {
                             .font_family(DISPLAY_FONT)
                             .text_size(px(16.))
                             .font_weight(FontWeight::BOLD)
-                            .child(section.title()),
+                            .child("Advanced"),
                     )
-                    .children(notice)
-                    .children(project)
-                    .children(agents.iter().map(|a| self.agent_row(a, cx)))
-                    .children(rows.into_iter().map(|label| self.rows(label, cx)))
-            })
-            .collect();
-        let list =
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .gap_4()
+                            .py_2()
+                            .child(v_flex().child(div().child("settings.toml")).child(
+                                div().text_color(muted).child("Everything above, as a file"),
+                            ))
+                            .child(
+                                Button::new("settings-open-file")
+                                    .small()
+                                    .label("Open")
+                                    .on_click(
+                                        cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::OpenFile)),
+                                    ),
+                            ),
+                    )
+            });
+        let nav = NAV.iter().map(|(label, sections)| {
             v_flex()
-                .w(px(140.))
-                .flex_none()
-                .p_2()
                 .gap_1()
-                .children(Section::ALL.into_iter().map(|section| {
-                    aurora::tab(!searching && section == self.section, cx)
-                        .id(section.title())
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .px_2()
+                        .pt_3()
+                        .pb_1()
+                        .text_size(px(11.))
+                        .text_color(faint)
+                        .children(
+                            (*label == "Claude")
+                                .then(|| div().text_color(aurora::brasa()).child("✳")),
+                        )
+                        .child(label.to_uppercase()),
+                )
+                .children(sections.iter().map(|&s| {
+                    let count = self.nav_count(s, cx);
+                    aurora::tab(s == section, cx)
+                        .id(ElementId::Name(format!("settings-nav-{}", s.key()).into()))
                         .px_2()
                         .py_1()
                         .rounded(px(8.))
                         .cursor_pointer()
-                        .child(section.title())
-                        .on_click(cx.listener(move |this, _, _, cx| this.show(section, cx)))
-                }));
+                        .justify_between()
+                        .child(s.title())
+                        .children(count.map(|n| div().text_color(faint).child(n.to_string())))
+                        .children(s.is_soon().then(|| div().text_color(faint).child("Soon")))
+                        .on_click(cx.listener(move |this, _, window, cx| this.show(s, window, cx)))
+                        .test_support()
+                }))
+        });
         let banner = self.banner().map(|text| {
             h_flex()
                 .justify_between()
@@ -693,53 +942,123 @@ impl Render for SettingsView {
         });
         v_flex()
             .size_full()
+            .debug_selector(|| "settings-modal".into())
             .child(
                 aurora::card_bar(cx)
-                    .px_3()
-                    .py_2()
+                    .h(px(48.))
+                    .px_4()
                     .gap_3()
-                    // The title drags the pane to another place, as a session's does.
+                    .items_center()
                     .child(
                         div()
                             .id("settings-title")
                             .flex_none()
-                            .cursor_grab()
                             .font_family(DISPLAY_FONT)
                             .text_size(px(14.))
                             .font_weight(FontWeight::BOLD)
                             .child("Settings")
-                            .on_drag(
-                                DraggedSession {
-                                    title: "Settings".into(),
-                                    source: Dragged::Settings,
-                                },
-                                DraggedSession::preview,
-                            )
                             .test_support(),
                     )
-                    .child(div().flex_1().child(Input::new(&self.search).small())),
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .text_color(muted)
+                            .child(self.context().to_string()),
+                    )
+                    .child(
+                        Button::new("settings-maximize")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Maximize)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.maximized = !this.maximized;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("settings-close")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Close)
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    ),
             )
-            .children(banner)
             .child(
-                h_flex().flex_1().min_h_0().child(list).child(
-                    v_flex()
-                        .id("settings-rows")
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_y_scroll()
-                        .p_3()
-                        .gap_4()
-                        .children(sections),
-                ),
-            )
-            .child(
-                h_flex().flex_none().justify_end().p_2().child(
-                    Button::new("settings-open-file")
-                        .ghost()
-                        .small()
-                        .label("Open settings.toml")
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::OpenFile))),
-                ),
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        v_flex()
+                            .id("settings-nav")
+                            .w(px(230.))
+                            .flex_none()
+                            .overflow_y_scroll()
+                            .p_2()
+                            .gap_1()
+                            .children(nav),
+                    )
+                    .child(
+                        v_flex()
+                            .id("settings-content")
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_y_scroll()
+                            .p(px(30.))
+                            .gap_4()
+                            .child(
+                                h_flex()
+                                    .items_start()
+                                    .gap_4()
+                                    .child(
+                                        v_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .font_family(DISPLAY_FONT)
+                                                    .text_size(px(26.))
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .child(section.title()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_color(muted)
+                                                    .child(section.description()),
+                                            ),
+                                    )
+                                    .children(self.claude_actions(section, cx)),
+                            )
+                            .children(banner)
+                            .children(
+                                (!extensions && !soon_page)
+                                    .then(|| Input::new(&self.search).small()),
+                            )
+                            .children(notice)
+                            .children(project)
+                            .children(agents.iter().map(|a| self.agent_row(a, cx)))
+                            .children(rows.into_iter().map(|label| self.rows(label, cx)))
+                            .children(soon_page.then(|| {
+                                v_flex()
+                                    .debug_selector(|| "settings-soon-page".into())
+                                    .items_center()
+                                    .gap_2()
+                                    .py(px(40.))
+                                    .child(aurora::soon(cx))
+                                    .child(
+                                        div()
+                                            .font_family(DISPLAY_FONT)
+                                            .text_size(px(20.))
+                                            .font_weight(FontWeight::BOLD)
+                                            .child("Not in wai yet"),
+                                    )
+                                    .child(div().text_color(muted).child(soon_text(section)))
+                            }))
+                            .children(claude_page.then(|| self.claude_page(section, &query, cx)))
+                            .children(advanced)
+                            .children(extensions.then(|| self.data.extensions.clone()).flatten()),
+                    ),
             )
     }
 }
@@ -754,6 +1073,7 @@ mod tests {
     use super::{RowStatus, Section, SelectEvent, SelectItem, SettingsData, SettingsView};
     use crate::workspace::tests::{click, fake_settings, open, question, wait_until};
     use crate::workspace::{Pane, Workspace};
+    use gpui_kit::{Modifiers, point, px};
 
     fn settings_ws(
         cx: &mut TestAppContext,
@@ -766,13 +1086,8 @@ mod tests {
 
     fn view(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Entity<SettingsView> {
         workspace
-            .read_with(cx, |w, _| {
-                w.panes.iter().find_map(|p| match p {
-                    Pane::Settings(v) => Some(v.clone()),
-                    _ => None,
-                })
-            })
-            .expect("settings pane")
+            .read_with(cx, |w, _| w.settings_view())
+            .expect("the settings modal")
     }
 
     fn data(error: Option<&str>) -> SettingsData {
@@ -780,8 +1095,11 @@ mod tests {
             settings: Settings::default(),
             error: error.map(Into::into),
             notice: None,
+            context: String::new(),
             agents: Vec::new(),
             project_default: None,
+            extensions: None,
+            home: Default::default(),
         }
     }
 
@@ -871,6 +1189,7 @@ mod tests {
             })
         });
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        assert!(workspace.read_with(cx, |w, _| w.settings_view().is_none()));
         assert!(cx.update(|window, cx| window.notifications(cx).is_empty()));
     }
 
@@ -959,6 +1278,7 @@ mod tests {
         cx.simulate_keystrokes("enter");
         assert!(question(&workspace, cx).is_some());
         click("approval-allow", cx);
+        assert!(workspace.read_with(cx, |w, _| w.settings_view().is_some()));
         let (settings, _) = Settings::load(dir.path(), None).unwrap();
         let typed = fake_settings("--reply other").agents["fake"]
             .command
@@ -966,24 +1286,150 @@ mod tests {
         assert_eq!(settings.agents["fake"].command, typed);
     }
 
+    #[test]
+    fn modal_size_follows_the_viewport() {
+        let vp = gpui_kit::size(gpui_kit::px(1400.), gpui_kit::px(900.));
+        assert_eq!(
+            super::modal_size(vp, false),
+            gpui_kit::size(gpui_kit::px(1232.), gpui_kit::px(774.))
+        );
+        assert_eq!(
+            super::modal_size(vp, true),
+            gpui_kit::size(gpui_kit::px(1376.), gpui_kit::px(876.))
+        );
+    }
+
     #[gpui_kit::test]
-    fn cmd_comma_opens_one_settings_pane(cx: &mut TestAppContext) {
+    fn cmd_comma_opens_one_settings_modal(cx: &mut TestAppContext) {
         let (workspace, cx, _dir) = settings_ws(cx);
         cx.simulate_keystrokes("secondary-,");
         cx.simulate_keystrokes("secondary-,");
         workspace.read_with(cx, |w, _| {
-            let n = w
-                .panes
-                .iter()
-                .filter(|p| matches!(p, Pane::Settings(_)))
-                .count();
-            assert_eq!(n, 1);
-            assert!(matches!(w.panes[w.focused_pane], Pane::Settings(_)));
+            assert!(w.settings_view().is_some());
+            assert_eq!(w.panes.len(), 1, "no pane for settings");
         });
-        cx.simulate_keystrokes("secondary-w");
-        workspace.read_with(cx, |w, _| {
-            assert!(!w.panes.iter().any(|p| matches!(p, Pane::Settings(_))));
+        assert!(cx.update(|window, cx| window.has_active_dialog(cx)));
+        cx.simulate_keystrokes("escape");
+        assert!(workspace.read_with(cx, |w, _| w.settings_view().is_none()));
+        assert!(!cx.update(|window, cx| window.has_active_dialog(cx)));
+    }
+
+    #[gpui_kit::test]
+    fn close_button_and_outside_click_close_the_modal(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = settings_ws(cx);
+        let open = |cx: &mut VisualTestContext| {
+            workspace.update_in(cx, |w, window, cx| {
+                w.open_settings(Section::Ai, None, window, cx)
+            });
+            cx.run_until_parked();
+        };
+        let closed = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, _| w.settings_view().is_none())
+        };
+        open(cx);
+        assert!(!closed(cx));
+        click("settings-close", cx);
+        assert!(closed(cx));
+        open(cx);
+        let viewport = cx.update(|window, _| window.viewport_size());
+        cx.simulate_click(point(px(8.), viewport.height - px(8.)), Modifiers::none());
+        cx.run_until_parked();
+        assert!(closed(cx));
+    }
+
+    #[gpui_kit::test]
+    fn maximize_grows_the_modal(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Ai, None, window, cx)
         });
+        cx.run_until_parked();
+        let before = cx.debug_bounds("settings-modal").unwrap().size.width;
+        click("settings-maximize", cx);
+        cx.update(|window, cx| window.render_frame(cx));
+        let view = view(&workspace, cx);
+        assert!(view.read_with(cx, |v, _| v.maximized()));
+        let after = cx.debug_bounds("settings-modal").unwrap().size.width;
+        assert!(after > before, "{after:?} > {before:?}");
+    }
+
+    #[gpui_kit::test]
+    fn title_names_the_agent_and_the_project(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = fake_ws(cx, "");
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Ai, None, window, cx)
+        });
+        let project = workspace.read_with(cx, |w, _| w.project.clone());
+        let name = crate::workspace::folder_name(&project);
+        let shown = view(&workspace, cx).read_with(cx, |v, _| v.context().to_string());
+        assert_eq!(shown, format!("(fake · {name})"));
+    }
+
+    #[gpui_kit::test]
+    fn title_without_an_agent_is_the_project(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Ai, None, window, cx)
+        });
+        let project = workspace.read_with(cx, |w, _| w.project.clone());
+        let name = crate::workspace::folder_name(&project);
+        let shown = view(&workspace, cx).read_with(cx, |v, _| v.context().to_string());
+        assert_eq!(shown, format!("({name})"));
+    }
+
+    #[test]
+    fn nav_groups_match_the_spec() {
+        use Section::*;
+        let want: &[(&str, &[Section])] = &[
+            (
+                "wai",
+                &[Ai, Appearance, Conversation, Terminal, Updates, Extensions],
+            ),
+            (
+                "Claude",
+                &[Plugins, Mcp, Skills, Instructions, Agents, Hooks],
+            ),
+            ("Other agents", &[Codex, Copilot, Antigravity]),
+        ];
+        assert_eq!(super::NAV, want);
+    }
+
+    #[gpui_kit::test]
+    fn other_agents_are_coming_soon(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Ai, None, window, cx)
+        });
+        click("settings-nav-codex", cx);
+        assert!(cx.debug_bounds("settings-soon-page").is_some());
+        let view = view(&workspace, cx);
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.nav_count(Section::Codex, cx)),
+            None
+        );
+        assert_eq!(
+            super::soon_text(Section::Codex),
+            "Today wai shows what Claude uses. Codex comes next; its own settings stay in its CLI meanwhile."
+        );
+    }
+
+    #[gpui_kit::test]
+    fn nav_switches_pages_and_clears_the_search(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Appearance, None, window, cx)
+        });
+        let view = view(&workspace, cx);
+        view.update_in(cx, |v, window, cx| {
+            v.search.update(cx, |s, cx| s.set_value("x", window, cx));
+        });
+        cx.run_until_parked();
+        click("settings-nav-terminal", cx);
+        view.read_with(cx, |v, cx| {
+            assert_eq!(v.section(), Section::Terminal);
+            assert_eq!(v.search.read(cx).value(), "");
+        });
+        assert!(cx.debug_bounds("settings-shell").is_some());
     }
 
     #[gpui_kit::test]
@@ -1024,29 +1470,21 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn search_filters_rows_across_sections(cx: &mut TestAppContext) {
+    fn search_filters_the_page(cx: &mut TestAppContext) {
         let (workspace, cx, _dir) = settings_ws(cx);
         workspace.update_in(cx, |w, window, cx| {
-            w.open_settings(Section::Appearance, None, window, cx)
+            w.open_settings(Section::Updates, None, window, cx)
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("settings-theme").is_some());
-        assert!(cx.debug_bounds("settings-shell").is_none());
+        assert!(cx.debug_bounds("settings-updates-check").is_some());
         let view = view(&workspace, cx);
         view.update_in(cx, |v, window, cx| {
-            v.search
-                .update(cx, |s, cx| s.set_value("SHELL", window, cx));
+            v.search.update(cx, |s, cx| s.set_value("repo", window, cx));
             cx.notify();
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("settings-shell").is_some());
-        for hidden in [
-            "settings-theme",
-            "settings-updates-check",
-            "settings-updates-repo",
-        ] {
-            assert!(cx.debug_bounds(hidden).is_none(), "{hidden}");
-        }
+        assert!(cx.debug_bounds("settings-updates-repo").is_some());
+        assert!(cx.debug_bounds("settings-updates-check").is_none());
     }
 
     #[gpui_kit::test]

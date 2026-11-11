@@ -538,6 +538,7 @@ pub(crate) mod tests {
             })
         });
         crate::extensions_view::tests::click(("ext-enabled", 0usize), cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.close_settings(window, cx)));
     }
 
     /// An extension's agent joins the registry as `<ext-id>/<name>`, its command resolved in the

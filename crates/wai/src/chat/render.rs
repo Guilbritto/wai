@@ -3,6 +3,7 @@
 use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::message_scroller::MessageScroller;
 use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::text::TextView;
@@ -17,6 +18,57 @@ use super::view::{ChatEvent, ChatSession, Mode};
 use super::{permission, question};
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::workspace::{Dragged, DraggedSession, folder_name};
+
+/// The balloon of a message you sent (`.msg.voce`).
+fn user_bubble(cx: &App) -> Div {
+    let theme = cx.theme();
+    let bubble = div()
+        .max_w(relative(0.88))
+        .px_3()
+        .py(px(9.))
+        .rounded(px(16.))
+        .rounded_br(px(6.))
+        .border_1();
+    match theme.is_dark() {
+        true => bubble
+            .bg(linear_gradient(
+                160.,
+                linear_color_stop(aurora::lilas().alpha(0.32), 0.),
+                linear_color_stop(aurora::lilas().alpha(0.18), 1.),
+            ))
+            .border_color(aurora::lilas().alpha(0.35))
+            .text_color(aurora::tinta()),
+        false => bubble.bg(theme.secondary).border_color(theme.border),
+    }
+}
+
+/// A message waiting in the pinned stack: a dimmed balloon under a muted `caption`, its text
+/// clamped to 3 lines, with `remove` to its left.
+pub(super) fn pinned_message(
+    id: ElementId,
+    caption: &'static str,
+    text: &str,
+    remove: Option<Button>,
+    cx: &App,
+) -> Stateful<Div> {
+    let caption = div()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(caption);
+    h_flex()
+        .id(id)
+        .w_full()
+        .justify_end()
+        .items_center()
+        .gap_2()
+        .children(remove)
+        .child(
+            user_bubble(cx)
+                .opacity(0.75)
+                .child(caption)
+                .child(div().line_clamp(3).text_ellipsis().child(text.to_string())),
+        )
+}
 
 /// `43k`, `1M`, `1.5M`.
 fn tokens(n: u64) -> String {
@@ -59,21 +111,94 @@ pub(super) fn glass(el: Div, cx: &App) -> Div {
 /// A tool call's status mark and its color.
 fn status_icon(status: ToolStatus, cx: &App) -> Icon {
     let theme = cx.theme();
+    let done = match theme.is_dark() {
+        true => aurora::boreal(),
+        false => theme.success,
+    };
     let (icon, color) = match status {
         ToolStatus::Pending => (IconName::Ellipsis, theme.muted_foreground),
         ToolStatus::InProgress => (IconName::Loader, theme.foreground),
-        ToolStatus::Completed => (IconName::CircleCheck, theme.success),
+        ToolStatus::Completed => (IconName::Check, done),
         ToolStatus::Failed => (IconName::CircleX, theme.danger),
     };
-    Icon::new(icon).small().text_color(color)
+    Icon::new(icon).xsmall().text_color(color)
 }
 
-fn chevron(open: bool) -> Icon {
+/// The muted color of a step line's chevron and kind icon.
+fn icon_color(cx: &App) -> Hsla {
+    match cx.theme().is_dark() {
+        true => aurora::nevoa_2(),
+        false => cx.theme().muted_foreground,
+    }
+}
+
+fn chevron(open: bool, cx: &App) -> Icon {
     let icon = match open {
         true => IconName::ChevronDown,
         false => IconName::ChevronRight,
     };
-    Icon::new(icon).small()
+    Icon::new(icon).xsmall().text_color(icon_color(cx))
+}
+
+/// The icon of a tool call's kind.
+fn kind_icon(kind: &str) -> IconName {
+    match kind {
+        "execute" => IconName::SquareTerminal,
+        "read" => IconName::FileText,
+        "edit" => IconName::Replace,
+        "search" => IconName::Search,
+        "fetch" => IconName::Globe,
+        "delete" => IconName::Delete,
+        "move" => IconName::ArrowRight,
+        "subagent" => IconName::Bot,
+        "think" => IconName::Asterisk,
+        _ => IconName::Dash,
+    }
+}
+
+/// A step's one compact line (`.t`): glass, 13 px regular text, muted.
+pub(super) fn step_line(cx: &App) -> Div {
+    let theme = cx.theme();
+    let line = h_flex()
+        .gap(px(6.))
+        .px(px(9.))
+        .py(px(5.))
+        .rounded(px(8.))
+        .border_1()
+        .text_size(px(13.))
+        .font_weight(FontWeight::NORMAL)
+        .cursor_pointer();
+    match theme.is_dark() {
+        true => line
+            .bg(aurora::vidro())
+            .border_color(aurora::borda())
+            .text_color(aurora::nevoa()),
+        false => line
+            .border_color(theme.border)
+            .text_color(theme.muted_foreground),
+    }
+}
+
+/// The box under a step line (`.out`) that holds its output.
+fn output_box(cx: &App) -> Div {
+    let theme = cx.theme();
+    let out = v_flex()
+        .px(px(8.))
+        .py(px(6.))
+        .rounded(px(6.))
+        .border_1()
+        .font_family(theme.mono_font_family.clone())
+        .text_size(px(11.));
+    match theme.is_dark() {
+        true => out
+            .bg(aurora::noite())
+            .border_color(aurora::borda())
+            .text_color(aurora::nevoa()),
+        false => out
+            .bg(theme.muted)
+            .border_color(theme.border)
+            .text_color(theme.muted_foreground),
+    }
 }
 
 impl ChatSession {
@@ -179,35 +304,30 @@ impl ChatSession {
 
     /// Row `ix` as the processing mode shows it; none for a step that is hidden or sits in a
     /// folded group. Grouped, a run of steps is headed by its first row.
-    fn render_item(
-        &mut self,
-        ix: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn render_item(&mut self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.model.items[ix].is_step() || self.processing == Processing::Steps {
-            return Some(self.render_row(ix, window, cx));
+            return Some(self.render_row(ix, cx));
         }
         if self.processing == Processing::Hidden {
             return None;
         }
         let run = self.model.run(ix, ChatItem::is_step);
         let open = self.open_groups.contains(&run.start);
-        let row = open.then(|| self.render_row(ix, window, cx));
+        let row = open.then(|| self.render_row(ix, cx));
         if ix != run.start {
             return row;
         }
         let head = self.render_group(run, open, cx);
         Some(
             v_flex()
-                .gap_4()
+                .gap_2()
                 .child(head)
                 .children(row)
                 .into_any_element(),
         )
     }
 
-    /// The head of a run of steps: `3 steps · <the latest>`, with the run's status. A click
+    /// The head of a run of steps: `3 steps · <each tool's title once>`, with the run's status. A click
     /// unfolds the run into its step lines.
     fn render_group(
         &self,
@@ -227,20 +347,14 @@ impl ChatSession {
         } else {
             ToolStatus::Completed
         };
-        glass(h_flex(), cx)
+        step_line(cx)
             .id(("group", head))
-            .gap_2()
-            .px_3()
-            .py_2()
-            .rounded(px(12.))
-            .cursor_pointer()
-            .child(chevron(open))
+            .child(chevron(open, cx))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .font_weight(FontWeight::MEDIUM)
                     .child(self.model.run_label(run)),
             )
             .child(status_icon(status, cx))
@@ -255,36 +369,16 @@ impl ChatSession {
             .test_support()
     }
 
-    fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (dark, muted) = (theme.is_dark(), theme.muted_foreground);
         match &self.model.items[ix] {
             // `.msg.voce`
-            ChatItem::User { text } | ChatItem::Steered { text } => {
-                let bubble = div()
-                    .max_w(relative(0.88))
-                    .px_3()
-                    .py(px(9.))
-                    .rounded(px(16.))
-                    .rounded_br(px(6.))
-                    .border_1();
-                let bubble = match dark {
-                    true => bubble
-                        .bg(linear_gradient(
-                            160.,
-                            linear_color_stop(aurora::lilas().alpha(0.32), 0.),
-                            linear_color_stop(aurora::lilas().alpha(0.18), 1.),
-                        ))
-                        .border_color(aurora::lilas().alpha(0.35))
-                        .text_color(aurora::tinta()),
-                    false => bubble.bg(theme.secondary).border_color(theme.border),
-                };
-                h_flex()
-                    .w_full()
-                    .justify_end()
-                    .child(bubble.child(text.clone()))
-                    .into_any_element()
-            }
+            ChatItem::User { text } | ChatItem::Steered { text } => h_flex()
+                .w_full()
+                .justify_end()
+                .child(user_bubble(cx).child(text.clone()))
+                .into_any_element(),
             // `.msg.claude`, its turn's first one headed "✦ agent" (`.msg-quem`).
             ChatItem::Agent { .. } => {
                 let header = starts_reply(&self.model.items, ix).then(|| {
@@ -299,69 +393,105 @@ impl ChatSession {
                         .child(div().text_color(star).child("✦"))
                         .child(div().text_color(name).child(self.agent.clone()))
                 });
-                glass(v_flex(), cx)
-                    .gap_1()
+                // Read at click time, so a frame copies no text.
+                let session = cx.weak_entity();
+                let copy = Clipboard::new(("copy-message", ix))
+                    .tooltip("Copy message")
+                    .accessibility_label("Copy message")
+                    .xsmall()
+                    .value_fn(move |_, cx| {
+                        let text =
+                            session.read_with(cx, |this, _| match this.model.items.get(ix) {
+                                Some(ChatItem::Agent { text }) => text.clone(),
+                                _ => String::new(),
+                            });
+                        text.unwrap_or_default().into()
+                    });
+                let text =
+                    self.texts.get(&ix).map(|md| {
+                        TextView::new(&md.state).code_block_actions(move |block, _, _| {
+                            h_flex()
+                                .gap_1()
+                                .children(block.lang().map(|lang| {
+                                    div().text_xs().text_color(muted).child(lang.clone())
+                                }))
+                                .child(
+                                    Clipboard::new("copy-code")
+                                        .value(block.code())
+                                        .tooltip("Copy code")
+                                        .accessibility_label("Copy code"),
+                                )
+                        })
+                    });
+                glass(h_flex(), cx)
+                    .items_start()
+                    .gap_2()
                     .p_3()
                     .rounded(px(16.))
                     .rounded_bl(px(6.))
-                    .children(header)
-                    .children(self.texts.get(&ix).map(|md| TextView::new(&md.state)))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .children(header)
+                            .children(text),
+                    )
+                    .child(copy)
                     .into_any_element()
             }
             ChatItem::Thought { .. } => {
                 let open = self.open_thoughts.contains(&ix);
                 v_flex()
                     .gap_1()
-                    .text_color(muted)
                     .child(
-                        h_flex()
+                        step_line(cx)
                             .id(("thought", ix))
-                            .gap_1()
-                            .cursor_pointer()
-                            .child(chevron(open))
-                            .child("Thinking…")
+                            .child(chevron(open, cx))
+                            .child(
+                                Icon::new(kind_icon("think"))
+                                    .xsmall()
+                                    .text_color(icon_color(cx)),
+                            )
+                            .child("Thought")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.open_thoughts.remove(&ix) {
                                     this.open_thoughts.insert(ix);
                                 }
+                                this.remeasure(ix..ix + 1, cx);
                                 cx.notify();
                             }))
                             // Registers the id so tests can find it.
                             .test_support(),
                     )
                     .when(open, |el| {
-                        el.children(self.texts.get(&ix).map(|md| TextView::new(&md.state)))
+                        el.children(
+                            self.texts
+                                .get(&ix)
+                                .map(|md| output_box(cx).child(TextView::new(&md.state))),
+                        )
                     })
                     .into_any_element()
             }
             ChatItem::Tool(tool) => self.render_tool(ix, tool, cx).into_any_element(),
-            ChatItem::Permission { request, answered } => {
-                let id = request.id;
-                let on_choose =
-                    Rc::new(cx.listener(move |this, choice: &PermissionChoice, _, cx| {
-                        this.answer(id, choice, cx)
-                    }));
-                let diffs = self.diffs.get(&ix).map_or(&[][..], Vec::as_slice);
-                let on_open = Self::on_open(cx);
-                permission::card(
-                    ix,
-                    request,
-                    answered.as_deref(),
-                    diffs,
-                    on_choose,
-                    &on_open,
-                    cx,
-                )
-                .into_any_element()
-            }
-            ChatItem::Question { request, answered } => question::card(
-                ix,
-                request,
-                answered.as_deref(),
-                &mut self.questions,
-                window,
+            ChatItem::Permission { request, answered } => permission::closed(
+                ("permission", ix).into(),
+                &request.title,
+                answered.as_deref().unwrap_or_default(),
                 cx,
-            ),
+            )
+            // Registers the id so tests can find it.
+            .test_support()
+            .into_any_element(),
+            ChatItem::Question { request, answered } => permission::closed(
+                ("question", ix).into(),
+                request.message.lines().next().unwrap_or_default(),
+                answered.as_deref().unwrap_or_default(),
+                cx,
+            )
+            // Registers the id so tests can find it.
+            .test_support()
+            .into_any_element(),
             ChatItem::Notice { text, kind } => {
                 let restart = *kind == NoticeKind::Error
                     && ix + 1 == self.model.items.len()
@@ -402,14 +532,13 @@ impl ChatSession {
     }
 
     /// One folded line: the call's title and status; a click unfolds its output and diffs. An
-    /// edit that reached the disk reads `✎ Edited <file>`, in every processing mode.
+    /// edit that reached the disk reads `Edited <file>`, in every processing mode.
     fn render_tool(
         &self,
         ix: usize,
         tool: &ToolItem,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
-        let theme = cx.theme();
         let open = self.open_steps.contains(&ix);
         let edit = self.model.items[ix].is_edit();
         let (id, title) = match edit {
@@ -422,25 +551,18 @@ impl ChatSession {
                         files.push(name);
                     }
                 }
-                ("edited", format!("✎ Edited {}", files.join(", ")))
+                ("edited", format!("Edited {}", files.join(", ")))
             }
             false => ("step", tool.title.clone()),
         };
         let (output, hidden) = tool.visible_text();
         let on_open = Self::on_open(cx);
-        let line = h_flex()
+        let kind = kind_icon(if edit { "edit" } else { &tool.kind });
+        let line = step_line(cx)
             .id((id, ix))
-            .gap_2()
-            .cursor_pointer()
-            .child(chevron(open))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(title),
-            )
+            .child(chevron(open, cx))
+            .child(Icon::new(kind).xsmall().text_color(icon_color(cx)))
+            .child(div().flex_1().min_w_0().truncate().child(title))
             .child(status_icon(tool.status, cx))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if !this.open_steps.remove(&ix) {
@@ -451,23 +573,14 @@ impl ChatSession {
             }))
             // Registers the id so tests can find and click it.
             .test_support();
-        let card = glass(v_flex(), cx)
-            .id(("tool", ix))
-            .gap_2()
-            .px_3()
-            .py_2()
-            .rounded(px(12.))
-            .child(line);
+        let card = v_flex().id(("tool", ix)).gap_1().child(line).test_support();
         if !open {
             return card;
         }
         card.when(!output.is_empty(), |el| {
             el.child(
-                div()
+                output_box(cx)
                     .id(("step-output", ix))
-                    .font_family(theme.mono_font_family.clone())
-                    .text_size(theme.mono_font_size)
-                    .text_color(theme.muted_foreground)
                     .child(output.to_string())
                     .test_support(),
             )
@@ -528,36 +641,173 @@ impl ChatSession {
     }
 }
 
+impl ChatSession {
+    /// The O1 stack: every waiting card, oldest first, as a glass panel laid over the list's
+    /// bottom. `None` when nothing waits.
+    fn render_waiting(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.model.waiting.is_empty() && self.queued.is_empty() && self.model.steering.is_empty()
+        {
+            return None;
+        }
+        let waiting = self.model.waiting.clone();
+        let on_open = Self::on_open(cx);
+        let cards = waiting.iter().enumerate().map(|(k, card)| match card {
+            ChatItem::Permission { request, .. } => {
+                let id = request.id;
+                let on_choose =
+                    Rc::new(cx.listener(move |this, choice: &PermissionChoice, _, cx| {
+                        this.answer(id, choice, cx)
+                    }));
+                let diffs = self.card_diffs.get(&id).map_or(&[][..], Vec::as_slice);
+                permission::card(request, diffs, on_choose, &on_open, k == 0, cx).into_any_element()
+            }
+            ChatItem::Question { request, .. } => {
+                question::card(request, &mut self.questions, window, cx)
+            }
+            _ => div().into_any_element(),
+        });
+        let cards: Vec<_> = cards.collect();
+        let queued: Vec<_> = (self.queued.iter().enumerate())
+            .map(|(ix, message)| {
+                let remove = Button::new(("queued-remove", ix))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .tooltip("Back to the prompt box")
+                    .accessibility_label("Back to the prompt box")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if ix >= this.queued.len() {
+                            return;
+                        }
+                        let message = this.queued.remove(ix);
+                        this.take_back(message);
+                        cx.notify();
+                    }));
+                // Registers the id so tests can find it.
+                pinned_message(
+                    ("queued", ix).into(),
+                    "Queued",
+                    &message.shown(),
+                    Some(remove),
+                    cx,
+                )
+                .test_support()
+            })
+            .collect();
+        let steering: Vec<_> = (self.model.steering.iter().enumerate())
+            .map(|(ix, steer)| {
+                pinned_message(("steering", ix).into(), "Sent", &steer.text, None, cx)
+                    .test_support()
+            })
+            .collect();
+        let view = cx.entity();
+        let height = canvas(
+            move |bounds, _, cx| {
+                view.update(cx, |this, cx| {
+                    this.set_waiting_height(bounds.size.height, cx)
+                })
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+        let theme = cx.theme();
+        let stack = v_flex()
+            .id("waiting")
+            .absolute()
+            .left_3()
+            .right_3()
+            .bottom_2()
+            .max_h(relative(0.6))
+            .overflow_y_scroll()
+            .occlude()
+            .gap_2()
+            .p_2();
+        let stack = match theme.is_dark() {
+            true => stack
+                .rounded(px(16.))
+                .border_1()
+                .border_color(aurora::borda_forte())
+                .bg(aurora::noite_2().alpha(0.72))
+                // CSS `0 12px 40px -12px`: GPUI's blur radius is half the CSS one.
+                .shadow(vec![
+                    BoxShadow::new(px(0.), px(12.), hsla(0., 0., 0., 0.8))
+                        .blur_radius(px(20.))
+                        .spread_radius(px(-12.)),
+                ]),
+            false => stack
+                .rounded(px(16.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background.opacity(0.92))
+                .shadow(vec![
+                    BoxShadow::new(px(0.), px(8.), hsla(0., 0., 0., 0.25))
+                        .blur_radius(px(12.))
+                        .spread_radius(px(-8.)),
+                ]),
+        };
+        Some(
+            stack
+                .child(height)
+                .children(cards)
+                .children(queued)
+                .children(steering)
+                .test_support()
+                .into_any_element(),
+        )
+    }
+}
+
 impl Render for ChatSession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_mode_select(window, cx);
         self.sync_pickers(window, cx);
         self.sync_unsent(window, cx);
         let empty = self.model.items.is_empty() && self.model.state == TurnState::Idle;
-        let messages = div().flex_1().min_h_0();
+        let messages = div()
+            .id("transcript")
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .test_support();
+        let waiting = self.render_waiting(window, cx);
+        if waiting.is_none() && self.waiting_height != px(0.) {
+            self.set_waiting_height(px(0.), cx);
+        }
+        let inset = self.waiting_height + px(16.);
         let messages = match empty {
             true => messages
                 .flex()
                 .items_center()
                 .justify_center()
                 .child(aurora::pill(cx).child("No messages yet.")),
-            // The Central's bubbles sit 16 px apart, not the scroller's 32: the scroller's gap
+            // Rows sit 8 px apart, not the scroller's 32: the scroller's gap
             // goes and each row but the last carries its own. The scroller remeasures the row
             // before an append, whose "last" flips.
-            false => messages.child(
-                MessageScroller::new(
+            false => messages.child({
+                let scroller = MessageScroller::new(
                     "messages",
                     self.scroller.clone(),
-                    cx.processor(|this, ix, window, cx| {
+                    cx.processor(|this, ix, _, cx| {
                         let last = ix + 1 == this.model.items.len();
-                        let row = this.render_item(ix, window, cx);
+                        let row = this.render_item(ix, cx);
                         div()
-                            .when(!last && row.is_some(), |el| el.pb_4())
+                            .when(!last && row.is_some(), |el| el.pb_2())
                             .children(row)
                     }),
                 )
-                .with_row_style(StyleRefinement::default().pb_0()),
-            ),
+                .with_row_style(StyleRefinement::default().pb_0());
+                match self.waiting_height > px(0.) {
+                    true => scroller
+                        .with_list_style(StyleRefinement::default().pb(inset))
+                        .with_jump_button_style(StyleRefinement::default().mb(inset)),
+                    false => scroller,
+                }
+            }),
         };
         v_flex()
             .key_context("ChatSession")
@@ -565,7 +815,7 @@ impl Render for ChatSession {
             .on_drop(cx.listener(Self::attach))
             .size_full()
             .child(self.render_header(cx))
-            .child(messages)
+            .child(messages.children(waiting))
             .child(self.render_prompt(window, cx))
     }
 }

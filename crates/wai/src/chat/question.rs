@@ -13,7 +13,6 @@ use gpui_kit::*;
 use serde_json::{Map, Value};
 use wai_agent::{Choice, FieldKind, QuestionAnswer, QuestionField, QuestionRequest};
 
-use super::model::ChatItem;
 use super::view::ChatSession;
 use crate::aurora;
 
@@ -124,9 +123,9 @@ fn field_id(field: &QuestionField) -> ElementId {
     ElementId::Name(format!("field-{}", field.key).into())
 }
 
-/// A control's listener that edits field `field` of row `ix`'s form.
+/// A control's listener that edits field `field` of request `id`'s form.
 fn edit<E: ?Sized + 'static>(
-    ix: usize,
+    id: u64,
     field: usize,
     cx: &Context<ChatSession>,
     f: impl Fn(&mut FieldState, &E) + 'static,
@@ -134,7 +133,7 @@ fn edit<E: ?Sized + 'static>(
     cx.listener(move |this: &mut ChatSession, event: &E, _, cx| {
         if let Some(state) = this
             .questions
-            .get_mut(&ix)
+            .get_mut(&id)
             .and_then(|f| f.fields.get_mut(field))
         {
             f(state, event);
@@ -143,25 +142,19 @@ fn edit<E: ?Sized + 'static>(
     })
 }
 
-/// The message and, while open, the form and its buttons; once closed, how it ended.
+/// A waiting question: the message, the form and its buttons.
 pub fn card(
-    ix: usize,
     request: &QuestionRequest,
-    answered: Option<&str>,
-    forms: &mut HashMap<usize, QuestionForm>,
+    forms: &mut HashMap<u64, QuestionForm>,
     window: &mut Window,
     cx: &mut Context<ChatSession>,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
+    let id = request.id;
     let card = super::permission::frame(aurora::lilas(), "QUESTION", request.message.clone(), cx)
-        .id(("question", ix));
-    if let Some(answered) = answered {
-        return card
-            .child(div().text_color(muted).child(answered.to_string()))
-            .into_any_element();
-    }
+        .id(("waiting-question", id));
     let form = forms
-        .entry(ix)
+        .entry(id)
         .or_insert_with(|| QuestionForm::new(&request.fields, window, cx));
     let can_submit = ready(&request.fields, &form.filled(&request.fields, cx));
     let fields = request
@@ -169,11 +162,11 @@ pub fn card(
         .iter()
         .zip(&form.fields)
         .enumerate()
-        .map(|(i, (field, state))| render_field(ix, i, field, state, muted, cx));
+        .map(|(i, (field, state))| render_field(id, i, field, state, muted, cx));
 
     let submit = cx.listener(move |this: &mut ChatSession, _, _, cx| {
-        let (Some(ChatItem::Question { request, .. }), Some(form)) =
-            (this.model.items.get(ix), this.questions.get(&ix))
+        let (Some(request), Some(form)) =
+            (this.model.waiting_question(id), this.questions.get(&id))
         else {
             return;
         };
@@ -187,11 +180,11 @@ pub fn card(
             shown => format!("Answered: {shown}"),
         };
         let content: Map<_, _> = filled.into_iter().map(|(k, v, _)| (k, v)).collect();
-        this.answer_question(ix, QuestionAnswer::Accept(content), summary, cx);
+        this.answer_question(id, QuestionAnswer::Accept(content), summary, cx);
     });
     let close = |answer: QuestionAnswer, summary: &'static str| {
         cx.listener(move |this: &mut ChatSession, _, _, cx| {
-            this.answer_question(ix, answer.clone(), summary.into(), cx)
+            this.answer_question(id, answer.clone(), summary.into(), cx)
         })
     };
     let buttons = h_flex()
@@ -228,7 +221,7 @@ fn option_description(choice: &Choice, muted: Hsla) -> Option<Div> {
 
 /// The field's title (`*` when required), description and control.
 fn render_field(
-    ix: usize,
+    id: u64,
     i: usize,
     field: &QuestionField,
     state: &FieldState,
@@ -248,7 +241,7 @@ fn render_field(
                         .children(option_description(c, muted))
                 }))
                 .selected_index(*selected)
-                .on_click(edit(ix, i, cx, |state, choice: &usize| {
+                .on_click(edit(id, i, cx, |state, choice: &usize| {
                     *state = FieldState::Choice(Some(*choice))
                 }))
                 .into_any_element()
@@ -261,7 +254,7 @@ fn render_field(
                     .label(c.label.clone())
                     .children(option_description(c, muted))
                     .checked(*on)
-                    .on_click(edit(ix, i, cx, move |state, on: &bool| {
+                    .on_click(edit(id, i, cx, move |state, on: &bool| {
                         if let FieldState::Choices(picked) = state {
                             picked[n] = *on;
                         }
@@ -270,7 +263,7 @@ fn render_field(
             .into_any_element(),
         (FieldState::Switch(on), _) => Switch::new(field_id(field))
             .checked(*on)
-            .on_click(edit(ix, i, cx, |state, on: &bool| {
+            .on_click(edit(id, i, cx, |state, on: &bool| {
                 *state = FieldState::Switch(*on)
             }))
             .into_any_element(),
@@ -292,26 +285,22 @@ fn render_field(
 }
 
 impl ChatSession {
-    /// Sends the answer to row `ix`'s question and closes its card with `summary`.
+    /// Sends the answer to question `id` and closes its card with `summary`.
     fn answer_question(
         &mut self,
-        ix: usize,
+        id: u64,
         answer: QuestionAnswer,
         summary: String,
         cx: &mut Context<Self>,
     ) {
-        let Some(ChatItem::Question { request, .. }) = self.model.items.get(ix) else {
-            return;
-        };
-        let id = request.id;
         let sent = self.handle.answer_question(id, answer);
         self.update_model(cx, |m| match sent {
             Ok(()) => m.on_question_answered(id, &summary),
             // Already resolved on the agent's side (cancelled or withdrawn).
             Err(_) => m.on_question_resolved(id),
         });
-        self.questions.remove(&ix);
-        self.sync_rows(Some(ix), cx);
+        self.questions.remove(&id);
+        self.sync_rows(None, cx);
         cx.notify();
     }
 }

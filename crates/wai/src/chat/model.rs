@@ -242,6 +242,28 @@ pub struct ChatModel {
     pub subagents: Vec<Subagent>,
     /// A turn is running: a card answered meanwhile leaves the session `Working`, not `Idle`.
     pub in_turn: bool,
+    /// Open permission and question cards, oldest first: they wait over the list, and join
+    /// `items` once closed.
+    pub waiting: Vec<ChatItem>,
+    /// Messages sent into the running turn, oldest first, pinned until the agent reads them.
+    pub steering: Vec<Steer>,
+}
+
+/// A message sent into the running turn; `injected` once the agent took it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Steer {
+    pub text: String,
+    pub injected: bool,
+}
+
+/// The first new output of the main agent: the sign that it read an injected steer.
+// ponytail: a proxy, since the adapter reports no consumption; replace it with an explicit event once it does
+fn reads_steer(ev: &SessionEvent) -> bool {
+    match ev {
+        SessionEvent::AgentText(_) | SessionEvent::AgentThought(_) => true,
+        SessionEvent::ToolCall(v) => v.subagent.is_none(),
+        _ => false,
+    }
 }
 
 impl Default for ChatModel {
@@ -260,6 +282,8 @@ impl Default for ChatModel {
             commands: Vec::new(),
             subagents: Vec::new(),
             in_turn: false,
+            waiting: Vec::new(),
+            steering: Vec::new(),
         }
     }
 }
@@ -340,7 +364,53 @@ impl ChatModel {
         })
     }
 
+    pub fn steer_sent(&mut self, text: &str) {
+        self.steering.push(Steer {
+            text: text.to_string(),
+            injected: false,
+        });
+    }
+
+    /// The turn took the steer; with no turn running any more it reads at once.
+    pub fn steer_injected(&mut self, text: &str) {
+        if let Some(steer) = self
+            .steering
+            .iter_mut()
+            .find(|s| s.text == text && !s.injected)
+        {
+            steer.injected = true;
+        }
+        if !self.in_turn {
+            self.read_steers();
+        }
+    }
+
+    /// The steer went as a prompt or failed: it is no longer pinned.
+    pub fn steer_dropped(&mut self, text: &str) {
+        if let Some(at) = self
+            .steering
+            .iter()
+            .position(|s| s.text == text && !s.injected)
+        {
+            self.steering.remove(at);
+        }
+    }
+
+    /// Injected steers join the list, in order; those still waiting for their reply stay.
+    fn read_steers(&mut self) {
+        let (read, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.steering)
+            .into_iter()
+            .partition(|s| s.injected);
+        self.steering = waiting;
+        for steer in read {
+            self.push_steered(&steer.text);
+        }
+    }
+
     pub fn apply(&mut self, ev: &SessionEvent) -> Option<usize> {
+        if self.waiting.is_empty() && reads_steer(ev) {
+            self.read_steers();
+        }
         match ev {
             SessionEvent::AgentText(t) => Some(match self.items.last_mut() {
                 Some(ChatItem::Agent { text }) => {
@@ -511,50 +581,49 @@ impl ChatModel {
         Some(idx)
     }
 
-    pub fn on_permission(&mut self, mut req: PermissionRequest) -> usize {
+    pub fn on_permission(&mut self, mut req: PermissionRequest) {
         if let Some(prefix) = self.subagent_prefix(req.subagent.as_deref()) {
             req.title.insert_str(0, &prefix);
         }
         self.state = TurnState::NeedsYou;
-        self.push(ChatItem::Permission {
+        self.waiting.push(ChatItem::Permission {
             request: req,
             answered: None,
+        });
+    }
+
+    /// Closes the waiting permission request (or question) `id` with `answer`: the card moves to
+    /// the end of `items`, where the conversation is now. Whether this model held it.
+    fn close(&mut self, question: bool, id: u64, answer: &str) -> bool {
+        let Some(at) = self.waiting.iter().position(|item| match item {
+            ChatItem::Permission { request, .. } => !question && request.id == id,
+            ChatItem::Question { request, .. } => question && request.id == id,
+            _ => false,
+        }) else {
+            return false;
+        };
+        let mut card = self.waiting.remove(at);
+        if let ChatItem::Permission { answered, .. } | ChatItem::Question { answered, .. } =
+            &mut card
+        {
+            *answered = Some(answer.to_string());
+        }
+        self.push(card);
+        true
+    }
+
+    pub fn waiting_question(&self, id: u64) -> Option<&QuestionRequest> {
+        self.waiting.iter().find_map(|item| match item {
+            ChatItem::Question { request, .. } if request.id == id => Some(request),
+            _ => None,
         })
     }
 
-    /// Whether this model holds the permission request (or the question) `id`.
-    fn set_answer(&mut self, question: bool, id: u64, answer: &str, overwrite: bool) -> bool {
-        let mut held = false;
-        for item in &mut self.items {
-            let answered = match item {
-                ChatItem::Permission { request, answered } if !question && request.id == id => {
-                    answered
-                }
-                ChatItem::Question { request, answered } if question && request.id == id => {
-                    answered
-                }
-                _ => continue,
-            };
-            held = true;
-            if overwrite || answered.is_none() {
-                *answered = Some(answer.to_string());
-            }
-        }
-        held
-    }
-
-    /// `NeedsYou` while any permission or question card is unanswered (parallel tool calls can
-    /// open several), else `Working` during a turn, else `Idle` (a background subagent's card
-    /// can be answered after the turn).
+    /// `NeedsYou` while any permission or question card waits (parallel tool calls can open
+    /// several), else `Working` during a turn, else `Idle` (a background subagent's card can be
+    /// answered after the turn).
     fn after_answer(&self) -> TurnState {
-        let open = self.items.iter().any(|item| {
-            matches!(
-                item,
-                ChatItem::Permission { answered: None, .. }
-                    | ChatItem::Question { answered: None, .. }
-            )
-        });
-        if open {
+        if !self.waiting.is_empty() {
             TurnState::NeedsYou
         } else if self.in_turn {
             TurnState::Working
@@ -564,37 +633,37 @@ impl ChatModel {
     }
 
     pub fn on_permission_answered(&mut self, id: u64, choice_name: &str) {
-        self.set_answer(false, id, choice_name, true);
+        self.close(false, id, choice_name);
         self.state = self.after_answer();
     }
 
     /// The broker dropped the request (e.g. the turn was cancelled).
     /// Resolutions are broadcast to every session: ids this model does not hold are ignored.
     pub fn on_permission_resolved(&mut self, id: u64) {
-        if self.set_answer(false, id, "Cancelled", false) && self.state == TurnState::NeedsYou {
+        if self.close(false, id, "Cancelled") && self.state == TurnState::NeedsYou {
             self.state = self.after_answer();
         }
     }
 
-    pub fn on_question(&mut self, mut req: QuestionRequest) -> usize {
+    pub fn on_question(&mut self, mut req: QuestionRequest) {
         if let Some(prefix) = self.subagent_prefix(req.subagent.as_deref()) {
             req.message.insert_str(0, &prefix);
         }
         self.state = TurnState::NeedsYou;
-        self.push(ChatItem::Question {
+        self.waiting.push(ChatItem::Question {
             request: req,
             answered: None,
-        })
+        });
     }
 
     pub fn on_question_answered(&mut self, id: u64, summary: &str) {
-        self.set_answer(true, id, summary, true);
+        self.close(true, id, summary);
         self.state = self.after_answer();
     }
 
     /// Cancelled with the turn or withdrawn by the agent; ids of other sessions are ignored.
     pub fn on_question_resolved(&mut self, id: u64) {
-        if self.set_answer(true, id, "Cancelled", false) && self.state == TurnState::NeedsYou {
+        if self.close(true, id, "Cancelled") && self.state == TurnState::NeedsYou {
             self.state = self.after_answer();
         }
     }
@@ -726,23 +795,32 @@ impl ChatModel {
         ix - before..ix + after
     }
 
-    /// A run of steps as the grouped mode heads it: `3 steps · <the latest step>`.
+    /// A run of steps as the grouped mode heads it: `3 steps · <each tool's title once>`.
     pub fn run_label(&self, run: Range<usize>) -> String {
         let steps = match run.len() {
             1 => "1 step".to_string(),
             n => format!("{n} steps"),
         };
-        let latest = match self.items.get(run.end.wrapping_sub(1)) {
-            Some(ChatItem::Tool(t)) => t.title.lines().next().unwrap_or_default(),
-            _ => "Thinking",
-        };
-        format!("{steps} · {latest}")
+        let mut titles: Vec<&str> = Vec::new();
+        for item in self.items.get(run).unwrap_or_default() {
+            if let ChatItem::Tool(t) = item {
+                let title = t.title.lines().next().unwrap_or_default().trim_matches('`');
+                if !titles.contains(&title) {
+                    titles.push(title);
+                }
+            }
+        }
+        match titles.is_empty() {
+            true => format!("{steps} · Thinking"),
+            false => format!("{steps} · {}", titles.join(", ")),
+        }
     }
 
     /// The session's own cards were resolved before this: one still open is a background
     /// subagent's, and keeps the session `NeedsYou`.
     pub fn on_turn_ended(&mut self, reason: &StopReason) {
         self.in_turn = false;
+        self.read_steers();
         self.push_edits();
         self.done = matches!(reason, StopReason::EndTurn);
         match reason {
@@ -777,6 +855,19 @@ impl ChatModel {
     /// A subagent last seen live is not: nothing says what became of it.
     pub fn on_exited(&mut self, error: Option<&str>) {
         self.in_turn = false;
+        self.read_steers();
+        let cards: Vec<(bool, u64)> = self
+            .waiting
+            .iter()
+            .filter_map(|card| match card {
+                ChatItem::Permission { request, .. } => Some((false, request.id)),
+                ChatItem::Question { request, .. } => Some((true, request.id)),
+                _ => None,
+            })
+            .collect();
+        for (question, id) in cards {
+            self.close(question, id, "Cancelled");
+        }
         let msg = error.unwrap_or("The agent exited");
         self.state = TurnState::Error(msg.to_string());
         let live: Vec<String> = self
@@ -952,7 +1043,7 @@ mod tests {
             subagent: Some("c".into()),
         });
         let titles: Vec<&str> = m
-            .items
+            .waiting
             .iter()
             .filter_map(|item| match item {
                 ChatItem::Permission { request, .. } => Some(request.title.as_str()),
@@ -1097,7 +1188,7 @@ mod tests {
         assert_eq!(steps, [false, true, true, true, true, false]);
         assert!(!m.items[3].is_edit(), "not written yet");
         assert_eq!(m.run(2, ChatItem::is_step), 1..5);
-        assert_eq!(m.run_label(1..5), "4 steps · t");
+        assert_eq!(m.run_label(1..5), "4 steps · t, Edit /p/a");
 
         m.apply(&SessionEvent::ToolCallUpdate(ToolCallPatch {
             id: "e".into(),
@@ -1109,8 +1200,24 @@ mod tests {
         assert!(m.items[3].is_edit() && !m.items[3].is_step());
         assert_eq!(m.run(2, ChatItem::is_step), 1..3);
         assert_eq!(m.run(4, ChatItem::is_step), 4..5);
+        assert_eq!(m.run_label(1..3), "2 steps · t");
         assert_eq!(m.run_label(4..5), "1 step · t");
         assert_eq!(m.run_label(1..2), "1 step · Thinking");
+    }
+
+    #[test]
+    fn run_label_names_each_tool_once() {
+        let mut m = ChatModel::default();
+        m.push_user("go");
+        m.apply(&call(
+            "1",
+            "`git status`\nmore",
+            ToolStatus::Completed,
+            None,
+        ));
+        m.apply(&call("2", "Read README.md", ToolStatus::Completed, None));
+        m.apply(&call("3", "`git status`", ToolStatus::Completed, None));
+        assert_eq!(m.run_label(1..4), "3 steps · git status, Read README.md");
     }
 
     #[test]
@@ -1336,6 +1443,62 @@ mod tests {
         assert_eq!(m.state, TurnState::Working);
     }
 
+    fn question(id: u64) -> QuestionRequest {
+        QuestionRequest {
+            id,
+            session: "s".into(),
+            message: "Pick".into(),
+            fields: vec![],
+            subagent: None,
+        }
+    }
+
+    /// A card waits outside the list; once closed it joins the list where the conversation is,
+    /// after what arrived while it waited, and only once.
+    #[test]
+    fn waiting_cards_join_the_list_once_closed() {
+        let mut m = ChatModel {
+            in_turn: true,
+            ..Default::default()
+        };
+        m.on_permission(perm()); // id 7
+        m.apply(&text("meanwhile"));
+        m.on_question(question(8));
+        assert_eq!(
+            m.items,
+            [ChatItem::Agent {
+                text: "meanwhile".into()
+            }]
+        );
+        assert_eq!(m.waiting.len(), 2);
+        m.on_permission_answered(7, "Yes");
+        assert!(
+            matches!(&m.items[..], [ChatItem::Agent { .. }, ChatItem::Permission { answered: Some(a), .. }] if a == "Yes")
+        );
+        assert!(matches!(&m.waiting[..], [ChatItem::Question { .. }]));
+        assert_eq!(m.state, TurnState::NeedsYou);
+        m.on_question_resolved(8);
+        m.on_question_resolved(8);
+        assert_eq!(m.items.len(), 3);
+        assert!(m.waiting.is_empty());
+        assert_eq!(m.state, TurnState::Working);
+    }
+
+    /// Review focus 5: an exit leaves no card pinned.
+    #[test]
+    fn exit_cancels_waiting_cards() {
+        let mut m = ChatModel::default();
+        m.push_user("go");
+        m.on_permission(perm());
+        m.on_exited(None);
+        assert!(m.waiting.is_empty());
+        let n = m.items.len();
+        assert!(
+            matches!(&m.items[n - 2], ChatItem::Permission { answered: Some(a), .. } if a == "Cancelled")
+        );
+        assert!(matches!(&m.items[n - 1], ChatItem::Notice { .. }));
+    }
+
     #[test]
     fn turn_end_cancelled_adds_notice() {
         let mut m = ChatModel::default();
@@ -1468,6 +1631,130 @@ mod tests {
         };
         let paths: Vec<_> = files.iter().map(|f| f.path.display().to_string()).collect();
         assert_eq!((*turn, paths), (0, vec!["/p/a".into(), "/p/b".into()]));
+    }
+
+    fn steered(text: &str) -> ChatItem {
+        ChatItem::Steered { text: text.into() }
+    }
+
+    /// Review focus 4: a steer joins just before the main agent's next new output; a call's
+    /// update or a subagent's call is not one.
+    #[test]
+    fn steered_message_joins_when_the_agent_reads_it() {
+        let mut m = ChatModel::default();
+        m.push_user("go");
+        m.apply(&tool("1", ToolStatus::InProgress));
+        m.steer_sent("x");
+        m.steer_dropped("x"); // the turn had ended: it went as a prompt
+        assert!(m.steering.is_empty());
+        m.steer_sent("b");
+        m.apply(&text("a")); // its reply has not come: not taken yet
+        m.steer_injected("b");
+        m.apply(&SessionEvent::ToolCallUpdate(ToolCallPatch {
+            id: "1".into(),
+            title: None,
+            status: Some(ToolStatus::Completed),
+            content: None,
+            locations: None,
+        }));
+        m.apply(&call("s", "Sub", ToolStatus::InProgress, Some("c")));
+        assert!(!m.items.contains(&steered("b")));
+        m.apply(&text("ok"));
+        let n = m.items.len();
+        assert_eq!(
+            m.items[n - 2..],
+            [steered("b"), ChatItem::Agent { text: "ok".into() }]
+        );
+        assert!(m.steering.is_empty());
+    }
+
+    /// With a card waiting the adapter holds the steer: it is read only after the answer.
+    #[test]
+    fn steer_waits_for_the_cards() {
+        let mut m = ChatModel::default();
+        m.push_user("go");
+        m.on_permission(perm());
+        m.steer_sent("b");
+        m.steer_injected("b");
+        m.apply(&text("x"));
+        assert!(!m.items.contains(&steered("b")));
+        m.on_permission_answered(7, "Yes");
+        m.apply(&text("y"));
+        let n = m.items.len();
+        assert!(
+            matches!(&m.items[n - 3], ChatItem::Permission { .. }),
+            "{:?}",
+            m.items
+        );
+        assert_eq!(
+            m.items[n - 2..],
+            [steered("b"), ChatItem::Agent { text: "y".into() }]
+        );
+    }
+
+    /// D2: an unread steer joins when the turn ends, before its closing rows; a late injection reads at once.
+    #[test]
+    fn unread_steers_join_when_the_turn_ends() {
+        for reason in [StopReason::EndTurn, StopReason::Cancelled] {
+            let mut m = ChatModel::default();
+            m.push_user("go");
+            m.apply(&edit("t", "/p/a", None, "a", ToolStatus::Completed));
+            m.steer_sent("b");
+            m.steer_injected("b");
+            m.on_turn_ended(&reason);
+            let at = m
+                .items
+                .iter()
+                .position(|i| *i == steered("b"))
+                .expect("joined");
+            let edits = m
+                .items
+                .iter()
+                .position(|i| matches!(i, ChatItem::Edits { .. }))
+                .unwrap();
+            assert!(at < edits, "{reason:?}");
+            m.steer_sent("c");
+            m.steer_injected("c");
+            assert_eq!(m.items.last(), Some(&steered("c")), "{reason:?}");
+            assert!(m.steering.is_empty());
+        }
+    }
+
+    /// Review focus 3: the same text twice joins once per read, in order.
+    #[test]
+    fn identical_steers_join_one_per_read() {
+        let mut m = ChatModel::default();
+        m.push_user("go");
+        m.steer_sent("ok");
+        m.steer_sent("ok");
+        m.steer_injected("ok");
+        m.apply(&text("a"));
+        assert_eq!(
+            m.steering,
+            [Steer {
+                text: "ok".into(),
+                injected: false
+            }]
+        );
+        m.steer_injected("ok");
+        m.apply(&text("b"));
+        assert_eq!(m.items.iter().filter(|i| **i == steered("ok")).count(), 2);
+        assert!(m.steering.is_empty());
+    }
+
+    /// Review focus 5: an exit leaves nothing pinned.
+    #[test]
+    fn exit_unpins_everything() {
+        let mut m = ChatModel::default();
+        m.push_user("go");
+        m.on_permission(perm());
+        m.steer_sent("b");
+        m.steer_injected("b");
+        m.on_exited(None);
+        assert!(m.waiting.is_empty() && m.steering.is_empty());
+        let n = m.items.len();
+        assert!(m.items[..n - 1].contains(&steered("b")));
+        assert!(matches!(&m.items[n - 1], ChatItem::Notice { .. }));
     }
 
     /// R34: a file counts as created by a call only if wai saw it missing before the call ran.
