@@ -9,18 +9,22 @@ use gpui_kit::component::attachment::{Attachment as Chip, AttachmentContent, Att
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::select::{Select, SelectDelegate, SelectState};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use wai_agent::{AgentCaps, PromptBlock};
+use wai_agent::{AgentCaps, ConfigCategory, PromptBlock};
 
+use super::composer;
 use super::model::{ChatItem, NoticeKind, TurnState, elapsed};
 use super::view::{ChatEvent, ChatSession};
 use crate::agents::AgentStatus;
 use crate::app::CancelTurn;
 use crate::aurora;
+use crate::workspace::folder_name;
 
 const IMAGE_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
@@ -479,27 +483,26 @@ impl ChatSession {
         let disabled = empty || !(self.model.in_turn || self.model.state == TurnState::Idle);
         let send = send_button(disabled, cx)
             .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)));
-        // R83: the textarea draws no ring of its own, so the pill shows the focus, and a press
+        // R83: the textarea draws no ring of its own, so the box shows the focus, and a press
         // anywhere on it, its padding included, puts the caret in the textarea.
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
-        let field = h_flex()
+        let field = v_flex()
+            .id("prompt-box")
             .gap_2()
-            .items_end()
-            .rounded(px(24.))
+            .p_3()
+            .rounded(px(20.))
             .border_1()
-            .pt(px(6.))
-            .pr(px(6.))
-            .pb(px(6.))
-            .pl(px(14.))
             .capture_key_down(cx.listener(|this, event, _, cx| this.answer_key(event, cx)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| this.focus(window, cx)),
             );
         let field = match (dark, focused) {
-            (true, true) => field.bg(aurora::vidro()).border_color(aurora::boreal()),
+            (true, true) => field
+                .bg(aurora::noite_2().alpha(0.78))
+                .border_color(aurora::boreal()),
             (true, false) => field
-                .bg(aurora::vidro())
+                .bg(aurora::noite_2().alpha(0.78))
                 .border_color(aurora::borda_forte()),
             (false, true) => field.bg(theme.background).border_color(theme.ring),
             (false, false) => field.bg(theme.background).border_color(theme.input),
@@ -558,26 +561,130 @@ impl ChatSession {
                     let paste = |s: &mut Self, cx: &mut Context<Self>| s.paste(item, window, cx);
                     this.update(cx, paste).unwrap_or(false)
                 });
-        let prompt = v_flex()
-            .gap_2()
-            .p_3()
-            .children(status)
-            .when(!self.attachments.is_empty(), |el| {
-                el.child(h_flex().gap_2().flex_wrap().children(chips))
-            })
-            .child(
+        let strip = self.render_strip(cx);
+        let bar = self.render_bar(attach, stop, send, window, cx);
+        let prompt = v_flex().gap_2().p_3().children(status).child(
+            v_flex().child(strip).child(
                 div()
                     .relative()
                     .child(
                         field
-                            .child(attach)
-                            .child(div().flex_1().child(textarea))
-                            .children(stop)
-                            .child(send),
+                            .when(!self.attachments.is_empty(), |el| {
+                                el.child(h_flex().gap_2().flex_wrap().children(chips))
+                            })
+                            .child(textarea)
+                            .child(bar)
+                            // Registers the id so tests can find it.
+                            .test_support(),
                     )
                     .children(self.render_menu(cx)),
-            );
+            ),
+        );
         self.menu_keys(prompt, cx)
+    }
+
+    /// The folder, branch and agent, as read-only chips on the box's top edge.
+    fn render_strip(&self, cx: &App) -> impl IntoElement + use<> {
+        let icon = |name| Some(Icon::new(name).xsmall().into_any_element());
+        let branch = self.head.as_ref().and_then(|head| {
+            let mark = match head.worktree {
+                true => icon(gpui_kit::assets::IconName::GitFork),
+                false => icon(gpui_kit::assets::IconName::GitBranch),
+            };
+            head.branch
+                .clone()
+                .map(|branch| composer::strip_label("pill-branch", mark, branch, cx))
+        });
+        // Claude's mark, as the mockup's agent chip shows it.
+        let star = (self.agent == "claude").then(|| {
+            div()
+                .text_color(aurora::brasa())
+                .child("✳")
+                .into_any_element()
+        });
+        let tab = composer::strip(cx)
+            .child(composer::strip_label(
+                "pill-folder",
+                icon(gpui_kit::assets::IconName::Folder),
+                folder_name(&self.cwd),
+                cx,
+            ))
+            .children(branch)
+            .child(composer::strip_label(
+                "pill-agent",
+                star,
+                wai_settings::agent_label(&self.agent),
+                cx,
+            ));
+        // Registers the id so tests can find it.
+        composer::strip_row(tab.test_support())
+    }
+
+    /// `.cbar`: attach, the mode, then the model and effort, Stop and Send.
+    fn render_bar(
+        &self,
+        attach: Button,
+        stop: Option<Button>,
+        send: Button,
+        window: &Window,
+        cx: &App,
+    ) -> impl IntoElement + use<> {
+        let max_h = window.viewport_size().height * 0.5;
+        fn select<D: SelectDelegate + 'static>(
+            state: &Entity<SelectState<D>>,
+            max_h: Pixels,
+        ) -> Select<D> {
+            Select::new(state)
+                .appearance(false)
+                .small()
+                .menu_width(px(230.))
+                .menu_max_h(max_h)
+        }
+        let is_mode = |id: &str| {
+            (self.model.config.iter()).any(|o| o.id == id && o.category == ConfigCategory::Mode)
+        };
+        let shield = || Icon::new(gpui_kit::assets::IconName::Shield).xsmall();
+        let bar_chip = |id: String, content: AnyElement| {
+            composer::bar_chip(SharedString::from(id), content, cx)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .test_support()
+        };
+        let mode = match self.pickers.iter().find(|(id, _)| is_mode(id)) {
+            Some((id, state)) => Some(bar_chip(
+                format!("bar-{id}"),
+                h_flex()
+                    .gap(px(4.))
+                    .pl(px(6.))
+                    .child(shield())
+                    .child(select(state, max_h))
+                    .into_any_element(),
+            )),
+            None => self.legacy_mode_picker().map(|state| {
+                bar_chip(
+                    "bar-mode".into(),
+                    h_flex()
+                        .gap(px(4.))
+                        .pl(px(6.))
+                        .child(shield())
+                        .child(select(state, max_h))
+                        .into_any_element(),
+                )
+            }),
+        };
+        let rest = (self.pickers.iter())
+            .filter(|(id, _)| !is_mode(id))
+            .map(|(id, state)| {
+                bar_chip(format!("bar-{id}"), select(state, max_h).into_any_element())
+            });
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(attach)
+            .children(mode)
+            .child(div().flex_1())
+            .children(rest)
+            .children(stop)
+            .child(send)
     }
 }
 
