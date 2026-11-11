@@ -5,9 +5,9 @@ use std::time::Duration;
 use async_channel::Receiver;
 use wai_agent::{
     AgentCaps, AgentError, AgentEvent, AgentHandle, AgentSpec, BrokerError, Choice, ChoiceKind,
-    ConfigCategory, ConfigOption, ConfigValue, FieldKind, McpServer, PermissionRequest,
-    PromptBlock, QuestionAnswer, QuestionRequest, SessionEvent, StopReason, SubagentPatch,
-    SubagentState, ToolContent, program, quote,
+    CommandInfo, ConfigCategory, ConfigOption, ConfigValue, FieldKind, McpServer,
+    PermissionRequest, PromptBlock, QuestionAnswer, QuestionRequest, SessionEvent, StopReason,
+    SubagentPatch, SubagentState, ToolContent, program, quote,
 };
 
 fn run(test: impl Future<Output = ()>) {
@@ -174,6 +174,52 @@ fn steering_joins_the_running_turn() {
         events.extend(until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await);
         assert_eq!(agent_text(&events), "a b c d e f Steered: more");
         assert_eq!(agent.steer(session.id.clone(), more).await, Ok(false));
+    });
+}
+
+/// The agent's commands come once the session started, each with its input hint if it has one.
+#[test]
+fn commands_come_with_their_hints() {
+    run(async {
+        let (agent, rx) = spawn(&[]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        let events = until(&rx, |e| {
+            matches!(
+                e,
+                AgentEvent::Update {
+                    event: SessionEvent::Commands(_),
+                    ..
+                }
+            )
+        })
+        .await;
+        let Some(AgentEvent::Update {
+            session: id,
+            event: SessionEvent::Commands(commands),
+        }) = events.last()
+        else {
+            unreachable!()
+        };
+        assert_eq!(*id, session.id);
+        let command = |name: &str, description: &str, hint: Option<&str>| CommandInfo {
+            name: name.into(),
+            description: description.into(),
+            hint: hint.map(str::to_string),
+        };
+        assert_eq!(
+            *commands,
+            [
+                command("init", "Initialize a CLAUDE.md file", None),
+                command("review", "Review a pull request", None),
+                command(
+                    "compact",
+                    "Clear the history but keep a summary",
+                    Some("custom instructions")
+                ),
+                command("pr-review", "Comment on the open pull request", None),
+            ]
+        );
     });
 }
 

@@ -70,6 +70,10 @@ pub(crate) fn session_event(update: acp::SessionUpdate) -> Option<SessionEvent> 
                 .map(|c| CommandInfo {
                     name: c.name,
                     description: c.description,
+                    hint: match c.input {
+                        Some(acp::AvailableCommandInput::Unstructured(i)) => Some(i.hint),
+                        _ => None,
+                    },
                 })
                 .collect(),
         ),

@@ -99,6 +99,10 @@ pub struct ChatSession {
     pub(super) queued: Vec<Message>,
     /// Queued text going back to the prompt box at the next frame (which has the window).
     pub(super) unsent: Option<String>,
+    /// The `/` menu's selected row, its scroll, and whether Esc closed it.
+    pub(super) menu_ix: usize,
+    pub(super) menu_scroll: ScrollHandle,
+    pub(super) menu_closed: bool,
     pub(super) registry: WeakEntity<AgentRegistry>,
     /// Per `Agent`/`Thought` row.
     pub(super) texts: HashMap<usize, Markdown>,
@@ -148,9 +152,15 @@ impl ChatSession {
         let subscriptions =
             vec![
                 cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
-                    // Shift+Enter inserted a newline already.
-                    if let InputEvent::PressEnter { shift: false, .. } = event {
-                        this.send(window, cx);
+                    match event {
+                        // Shift+Enter inserted a newline already.
+                        InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
+                        // The `/` menu opens again, at its top.
+                        InputEvent::Change => {
+                            (this.menu_ix, this.menu_closed) = (0, false);
+                            cx.notify();
+                        }
+                        _ => {}
                     }
                 }),
             ];
@@ -164,6 +174,9 @@ impl ChatSession {
             attachments: Vec::new(),
             queued: Vec::new(),
             unsent: None,
+            menu_ix: 0,
+            menu_scroll: ScrollHandle::new(),
+            menu_closed: false,
             registry,
             texts: HashMap::new(),
             diffs: HashMap::new(),
@@ -1647,6 +1660,136 @@ mod tests {
 
     fn typed(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> String {
         session.read_with(cx, |s, cx| s.input.read(cx).value().to_string())
+    }
+
+    /// ⌘N, then the session once its agent's commands arrived.
+    fn commands_session(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<ChatSession> {
+        let session = start_session(workspace, cx);
+        wait_until(cx, "the agent's commands", |cx| {
+            session.read_with(cx, |s, _| !s.model.commands.is_empty())
+        });
+        session
+    }
+
+    /// The `/` menu's rows as `/name`; `None` while it is closed.
+    fn menu(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> Option<Vec<String>> {
+        session.read_with(cx, |s, cx| {
+            let rows = s.menu(cx)?;
+            Some(rows.iter().map(|c| format!("/{}", c.name)).collect())
+        })
+    }
+
+    /// `/` first in the prompt box opens the agent's commands above it, filtered by what follows;
+    /// a space after the name closes it.
+    #[gpui_kit::test]
+    fn slash_opens_the_command_menu(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = commands_session(&workspace, cx);
+        assert!(!shows("commands", cx));
+
+        cx.simulate_input("/");
+        let all = ["/init", "/review", "/compact", "/pr-review"];
+        assert_eq!(menu(&session, cx).unwrap(), all);
+        assert!(shows("commands", cx) && shows(("command", 3usize), cx));
+        let (list, input) = cx.update(|window, _| {
+            let bounds = |id: &'static str| window.find(id).bounds();
+            (bounds("commands"), bounds("input-state"))
+        });
+        assert!(
+            list.bottom() < input.top(),
+            "{list:?} is not above {input:?}"
+        );
+        // The input hint shows on its command's row.
+        assert!(shows(("command-hint", 2usize), cx));
+        assert!(!shows(("command-hint", 0usize), cx));
+
+        cx.simulate_input("re");
+        assert_eq!(menu(&session, cx).unwrap(), ["/review", "/pr-review"]);
+        assert!(!shows(("command", 2usize), cx));
+        cx.simulate_input("view ");
+        assert_eq!(menu(&session, cx), None);
+        assert!(!shows("commands", cx));
+    }
+
+    /// ↓/↑ move the selection and Enter puts `/name ` in the box, caret at its end, sending
+    /// nothing; Tab completes too.
+    #[gpui_kit::test]
+    fn keys_complete_a_command(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = commands_session(&workspace, cx);
+
+        cx.simulate_input("/");
+        cx.simulate_keystrokes("down down up enter");
+        assert_eq!(typed(&session, cx), "/review ");
+        assert_eq!(menu(&session, cx), None);
+        cx.simulate_input("x");
+        assert_eq!(typed(&session, cx), "/review x");
+        assert!(
+            session.read_with(cx, |s, _| s.model.items.is_empty()),
+            "sent"
+        );
+
+        session.update_in(cx, |s, window, cx| s.prefill("", window, cx));
+        cx.simulate_input("/co");
+        cx.simulate_keystrokes("tab");
+        assert_eq!(typed(&session, cx), "/compact ");
+    }
+
+    /// A click on a row completes its command.
+    #[gpui_kit::test]
+    fn click_completes_a_command(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = commands_session(&workspace, cx);
+
+        cx.simulate_input("/");
+        click_edits(None, ("command", 2usize), cx);
+        assert_eq!(typed(&session, cx), "/compact ");
+        cx.simulate_input("x");
+        assert_eq!(typed(&session, cx), "/compact x");
+    }
+
+    /// Esc closes the menu and keeps the text; typing opens it again. With it closed, Enter
+    /// sends.
+    #[gpui_kit::test]
+    fn escape_closes_the_command_menu(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = commands_session(&workspace, cx);
+
+        cx.simulate_input("/in");
+        cx.simulate_keystrokes("escape");
+        assert_eq!(menu(&session, cx), None);
+        assert_eq!(typed(&session, cx), "/in");
+        cx.simulate_input("i");
+        assert_eq!(menu(&session, cx).unwrap(), ["/init"]);
+        cx.simulate_keystrokes("escape enter");
+        wait_until(cx, "the reply", |cx| {
+            state(&session, cx) == TurnState::Idle && last_agent_text(&session, cx).is_some()
+        });
+        assert_eq!(user_texts(&session, cx), ["/ini"]);
+    }
+
+    /// Before the agent sent its commands, the menu says so in a single row.
+    #[gpui_kit::test]
+    fn command_menu_without_commands_says_so(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = commands_session(&workspace, cx);
+        session.update(cx, |s, _| s.model.commands.clear());
+
+        cx.simulate_input("/");
+        assert_eq!(menu(&session, cx), Some(vec![]));
+        let label = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find("commands-empty").label().map(str::to_owned)
+        });
+        assert_eq!(label.as_deref(), Some("No commands from fake yet"));
     }
 
     /// A session that lands after ⌘N must not pull the caret out of the pane the user is in.

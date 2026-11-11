@@ -36,6 +36,11 @@ While the agent prepares the session, its pane shows `Preparing <agent>…`. **�
 - **Sending during a turn:** you can keep typing and sending while the agent works.
   - An agent that can be steered (Claude Code) gets the message inside the running turn and reads it at its next step; it shows in the transcript at once. If the turn ended meanwhile, it goes as a new prompt. If steering fails, the message is queued instead, and the transcript says so.
   - Any other agent (Codex, Copilot) gets it after the turn: it waits above the prompt box as `Queued · <first line>`, with a **×** that drops it. When the turn ends, the queued messages go out together as one prompt. If you stop the turn, or it ends any other way, they go back into the prompt box, before anything typed since, and their attachments back to chips, unsent.
+- **Commands and skills:** a `/` first in the prompt box lists the agent's slash commands just above it (for Claude Code: the built-ins it supports, your custom commands and your skills), each with its description and, when it takes input, a hint of what to type.
+  - What follows the `/` filters the list: names that start with it first, then names or descriptions that contain it. When nothing matches, the list hides.
+  - **↑**/**↓** move, **Enter**, **Tab** or a click puts `/name ` in the box, and **Esc** closes the list and keeps the text.
+  - The list closes once a space follows the name; **Enter** then sends, and the agent runs the command. During a turn, it goes into the turn or the queue like any message.
+  - Until the agent sends its commands, the list reads `No commands from <agent> yet`.
 - **The status line:** while a turn runs, a line just above the prompt box says what the agent is doing (`Reading README.md…`, `Running git log…`, `Thinking…` between tool calls, `Waiting for you…` while a card waits), for how long, and `Esc to stop`. It updates once a second and goes away when the turn ends.
 - **Attaching files:** drop them on the prompt box, pick them with the **+** at its left (files and folders, several at once), or paste them with **⌘V**: an image you copied, such as a screenshot, or files copied in Finder. Text pastes as text. Each attachment shows as a chip above the box until you send or remove it.
   - PNG, JPEG, GIF and WebP files up to 5 MB go as images; any other file, of any kind, goes as a reference to its path, which the agent reads with its own tools.
@@ -243,6 +248,7 @@ Clicking a card shows that session in the focused pane; dragging it onto a pane 
 | Show or hide the Agents panel, while it is on the right | ⌘⌥B | ctrl-alt-b | window |
 | Stop the turn | Esc | Esc | chat session |
 | Send the prompt / new line | Enter / Shift+Enter | Enter / Shift+Enter | prompt box |
+| In the `/` menu: move / complete / close | ↑ ↓ / Enter or Tab / Esc | ↑ ↓ / Enter or Tab / Esc | prompt box |
 | Copy the selection | ⌘C | ctrl-shift-c | terminal |
 | Paste | ⌘V | ctrl-shift-v | terminal |
 

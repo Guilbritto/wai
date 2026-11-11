@@ -66,6 +66,9 @@
 //!   (once the reply streamed; use `--chunk-delay-ms` to keep the turn running); with no turn
 //!   running it answers `promptRequired`.
 //!
+//! After `session/new` answers, an `available_commands_update` lists `init`, `review`, `compact`
+//! (with the input hint `custom instructions`) and `pr-review`.
+//!
 //! `session/load` replays `previous prompt` and `previous answer`; for an id starting with
 //! `missing` it fails with the ACP session-not-found error instead.
 
@@ -802,7 +805,7 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
         .on_receive_request(
             {
                 let fake = fake.clone();
-                async move |request: acp::NewSessionRequest, responder, _cx| {
+                async move |request: acp::NewSessionRequest, responder, cx: ConnectionTo<Client>| {
                     if fake.opts.require_auth {
                         return responder.respond_with_error(Error::auth_required());
                     }
@@ -810,9 +813,27 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                     fake.record_mcp(&id.clone().into(), &request.mcp_servers);
                     let options = fake.config_options(&id.clone().into());
                     responder.respond(
-                        acp::NewSessionResponse::new(id)
+                        acp::NewSessionResponse::new(id.clone())
                             .modes(modes())
                             .config_options(options),
+                    )?;
+                    // Like claude-agent-acp: the commands follow the answer.
+                    let hint = acp::UnstructuredCommandInput::new("custom instructions");
+                    let commands = vec![
+                        acp::AvailableCommand::new("init", "Initialize a CLAUDE.md file"),
+                        acp::AvailableCommand::new("review", "Review a pull request"),
+                        acp::AvailableCommand::new(
+                            "compact",
+                            "Clear the history but keep a summary",
+                        )
+                        .input(acp::AvailableCommandInput::Unstructured(hint)),
+                        acp::AvailableCommand::new("pr-review", "Comment on the open pull request"),
+                    ];
+                    let update = acp::AvailableCommandsUpdate::new(commands);
+                    send(
+                        &cx,
+                        &id.into(),
+                        acp::SessionUpdate::AvailableCommandsUpdate(update),
                     )
                 }
             },

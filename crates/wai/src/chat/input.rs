@@ -493,7 +493,7 @@ impl ChatSession {
                     let paste = |s: &mut Self, cx: &mut Context<Self>| s.paste(item, window, cx);
                     this.update(cx, paste).unwrap_or(false)
                 });
-        v_flex()
+        let prompt = v_flex()
             .gap_2()
             .p_3()
             .children(status)
@@ -502,12 +502,18 @@ impl ChatSession {
                 el.child(h_flex().gap_2().flex_wrap().children(chips))
             })
             .child(
-                field
-                    .child(attach)
-                    .child(div().flex_1().child(textarea))
-                    .children(stop)
-                    .child(send),
-            )
+                div()
+                    .relative()
+                    .child(
+                        field
+                            .child(attach)
+                            .child(div().flex_1().child(textarea))
+                            .children(stop)
+                            .child(send),
+                    )
+                    .children(self.render_menu(cx)),
+            );
+        self.menu_keys(prompt, cx)
     }
 }
 
