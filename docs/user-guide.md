@@ -85,8 +85,8 @@ Each open session has a coloured dot in the sidebar:
 
 ### Permissions and questions
 
-- **Permission cards.** When an agent asks before acting, the session shows a card with the diff of the edit (when there is one) and the agent's own choices, such as **Yes**, **Yes, always** and **No**. The session reads `Needs you` until you answer.
-- **Questions.** When Claude asks a multiple-choice question, wai shows it as a form with **Submit** and **Decline**. A form wai cannot display is declined, and the transcript says so.
+- **Permission cards.** When an agent asks before acting, the session shows a card with the diff of the edit (when there is one) and the agent's own choices, such as **Yes**, **Yes, always** and **No**. The session reads `Needs you` until you answer. The card waits on a glass panel just above the prompt box, not in the transcript, and the conversation scrolls on behind it. Several cards stack, the oldest on top. Once answered, a card joins the transcript as one line with your answer, where the conversation is then.
+- **Questions.** When Claude asks a multiple-choice question, wai shows it as a form with **Submit** and **Decline**. A form wai cannot display is declined, and the transcript says so. They wait above the prompt box the same way.
 - **A subagent's card** is titled `<subagent>: <request>` and shows in the session's chat.
   - **Stop** cancels only the session's own cards.
   - A background subagent's card stays open, even after the turn ends, until you answer it; the session reads `Needs you` meanwhile.

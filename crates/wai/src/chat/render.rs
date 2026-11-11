@@ -209,21 +209,16 @@ impl ChatSession {
 
     /// Row `ix` as the processing mode shows it; none for a step that is hidden or sits in a
     /// folded group. Grouped, a run of steps is headed by its first row.
-    fn render_item(
-        &mut self,
-        ix: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn render_item(&mut self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.model.items[ix].is_step() || self.processing == Processing::Steps {
-            return Some(self.render_row(ix, window, cx));
+            return Some(self.render_row(ix, cx));
         }
         if self.processing == Processing::Hidden {
             return None;
         }
         let run = self.model.run(ix, ChatItem::is_step);
         let open = self.open_groups.contains(&run.start);
-        let row = open.then(|| self.render_row(ix, window, cx));
+        let row = open.then(|| self.render_row(ix, cx));
         if ix != run.start {
             return row;
         }
@@ -279,7 +274,7 @@ impl ChatSession {
             .test_support()
     }
 
-    fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (dark, muted) = (theme.is_dark(), theme.muted_foreground);
         match &self.model.items[ix] {
@@ -404,33 +399,20 @@ impl ChatSession {
                     .into_any_element()
             }
             ChatItem::Tool(tool) => self.render_tool(ix, tool, cx).into_any_element(),
-            ChatItem::Permission { request, answered } => {
-                let id = request.id;
-                let on_choose =
-                    Rc::new(cx.listener(move |this, choice: &PermissionChoice, _, cx| {
-                        this.answer(id, choice, cx)
-                    }));
-                let diffs = self.diffs.get(&ix).map_or(&[][..], Vec::as_slice);
-                let on_open = Self::on_open(cx);
-                permission::card(
-                    ix,
-                    request,
-                    answered.as_deref(),
-                    diffs,
-                    on_choose,
-                    &on_open,
-                    cx,
-                )
-                .into_any_element()
-            }
-            ChatItem::Question { request, answered } => question::card(
-                ix,
-                request,
-                answered.as_deref(),
-                &mut self.questions,
-                window,
+            ChatItem::Permission { request, answered } => permission::closed(
+                ("permission", ix).into(),
+                &request.title,
+                answered.as_deref().unwrap_or_default(),
                 cx,
-            ),
+            )
+            .into_any_element(),
+            ChatItem::Question { request, answered } => permission::closed(
+                ("question", ix).into(),
+                &request.message,
+                answered.as_deref().unwrap_or_default(),
+                cx,
+            )
+            .into_any_element(),
             ChatItem::Notice { text, kind } => {
                 let restart = *kind == NoticeKind::Error
                     && ix + 1 == self.model.items.len()
@@ -580,13 +562,87 @@ impl ChatSession {
     }
 }
 
+impl ChatSession {
+    /// The O1 stack: every waiting card, oldest first, as a glass panel laid over the list's
+    /// bottom. `None` when nothing waits.
+    fn render_waiting(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.model.waiting.is_empty() {
+            return None;
+        }
+        let waiting = self.model.waiting.clone();
+        let on_open = Self::on_open(cx);
+        let cards = waiting.iter().map(|card| match card {
+            ChatItem::Permission { request, .. } => {
+                let id = request.id;
+                let on_choose =
+                    Rc::new(cx.listener(move |this, choice: &PermissionChoice, _, cx| {
+                        this.answer(id, choice, cx)
+                    }));
+                let diffs = self.card_diffs.get(&id).map_or(&[][..], Vec::as_slice);
+                permission::card(request, diffs, on_choose, &on_open, cx).into_any_element()
+            }
+            ChatItem::Question { request, .. } => {
+                question::card(request, &mut self.questions, window, cx)
+            }
+            _ => div().into_any_element(),
+        });
+        let cards: Vec<_> = cards.collect();
+        let theme = cx.theme();
+        let stack = v_flex()
+            .id("waiting")
+            .absolute()
+            .left_3()
+            .right_3()
+            .bottom_2()
+            .max_h(relative(0.6))
+            .overflow_y_scroll()
+            .occlude()
+            .gap_2()
+            .p_2();
+        let stack = match theme.is_dark() {
+            true => stack
+                .rounded(px(16.))
+                .border_1()
+                .border_color(aurora::borda_forte())
+                .bg(aurora::noite_2().alpha(0.72))
+                // CSS `0 12px 40px -12px`: GPUI's blur radius is half the CSS one.
+                .shadow(vec![
+                    BoxShadow::new(px(0.), px(12.), hsla(0., 0., 0., 0.8))
+                        .blur_radius(px(20.))
+                        .spread_radius(px(-12.)),
+                ]),
+            false => stack
+                .rounded(px(16.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background.opacity(0.92))
+                .shadow(vec![
+                    BoxShadow::new(px(0.), px(8.), hsla(0., 0., 0., 0.25))
+                        .blur_radius(px(12.))
+                        .spread_radius(px(-8.)),
+                ]),
+        };
+        Some(stack.children(cards).test_support().into_any_element())
+    }
+}
+
 impl Render for ChatSession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_mode_select(window, cx);
         self.sync_pickers(window, cx);
         self.sync_unsent(window, cx);
         let empty = self.model.items.is_empty() && self.model.state == TurnState::Idle;
-        let messages = div().flex_1().min_h_0();
+        let messages = div()
+            .id("transcript")
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .test_support();
+        let waiting = self.render_waiting(window, cx);
         let messages = match empty {
             true => messages
                 .flex()
@@ -600,9 +656,9 @@ impl Render for ChatSession {
                 MessageScroller::new(
                     "messages",
                     self.scroller.clone(),
-                    cx.processor(|this, ix, window, cx| {
+                    cx.processor(|this, ix, _, cx| {
                         let last = ix + 1 == this.model.items.len();
-                        let row = this.render_item(ix, window, cx);
+                        let row = this.render_item(ix, cx);
                         div()
                             .when(!last && row.is_some(), |el| el.pb_2())
                             .children(row)
@@ -617,7 +673,7 @@ impl Render for ChatSession {
             .on_drop(cx.listener(Self::attach))
             .size_full()
             .child(self.render_header(cx))
-            .child(messages)
+            .child(messages.children(waiting))
             .child(self.render_prompt(window, cx))
     }
 }

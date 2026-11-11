@@ -3854,7 +3854,7 @@ pub(crate) mod tests {
         }
         let request = |ix: usize, cx: &mut VisualTestContext| {
             sessions[ix].read_with(cx, |s, _| {
-                s.model.items.iter().find_map(|item| match item {
+                (s.model.waiting.iter().chain(&s.model.items)).find_map(|item| match item {
                     ChatItem::Permission { request, answered } => {
                         Some((request.id, answered.clone()))
                     }

@@ -10,6 +10,7 @@ use gpui_kit::*;
 use wai_agent::{ChoiceKind, FileDiff, PermissionChoice, PermissionRequest};
 
 use super::edits::{DiffLine, bounded_diff};
+use super::render::step_line;
 use crate::aurora::{self, DISPLAY_FONT};
 
 /// What a choice button calls.
@@ -114,7 +115,8 @@ fn button_id(kind: ChoiceKind) -> &'static str {
 }
 
 /// The frame the permission and question cards share (`.chat-escolha`): `accent` tints its
-/// border, fill and glow; then `eyebrow` and `title`. Light mode: a warning border.
+/// border and fill, translucent so the glass stack behind shows through; then `eyebrow` and
+/// `title`. Light mode: a warning border.
 pub(super) fn frame(
     accent: Hsla,
     eyebrow: &'static str,
@@ -124,21 +126,10 @@ pub(super) fn frame(
     let theme = cx.theme();
     let frame = v_flex().gap_3().p_4().rounded(px(18.)).border_1();
     let (frame, eyebrow_color) = match theme.is_dark() {
-        // An opaque base, as the Central's: the glow would show through a clear fill.
         true => (
             frame
                 .border_color(accent.alpha(0.55))
-                .bg(linear_gradient(
-                    180.,
-                    linear_color_stop(aurora::noite_2().blend(accent.alpha(0.08)), 0.),
-                    linear_color_stop(aurora::noite_2(), 1.),
-                ))
-                // `0 0 40 -12`: GPUI's blur radius is the Gaussian's sigma, half the CSS one.
-                .shadow(vec![
-                    BoxShadow::new(px(0.), px(0.), accent.alpha(0.5))
-                        .blur_radius(px(20.))
-                        .spread_radius(px(-12.)),
-                ]),
+                .bg(accent.alpha(0.08)),
             aurora::brasa(),
         ),
         // Warning (yellow-500) text reads ~1.9:1 on white.
@@ -223,46 +214,53 @@ fn choice(n: usize, choice: &PermissionChoice, highlighted: bool, cx: &App) -> B
         )
 }
 
-/// Title, diff preview and one row per choice; once answered, the answer instead.
+/// A waiting request: title, diff preview and one row per choice.
 pub fn card(
-    ix: usize,
     request: &PermissionRequest,
-    answered: Option<&str>,
     diffs: &[DiffView],
     on_choose: OnChoose,
     on_open: &OnOpen,
     cx: &App,
 ) -> impl IntoElement + use<> {
-    let theme = cx.theme();
-    let footer = match answered {
-        Some("Cancelled") => div().text_color(theme.muted_foreground).child("Cancelled"),
-        Some(answer) => div()
-            .text_color(theme.muted_foreground)
-            .child(format!("Answered: {answer}")),
-        None => {
-            let allow = (request.options.iter())
-                .position(|c| matches!(c.kind, ChoiceKind::AllowOnce | ChoiceKind::AllowAlways));
-            v_flex()
-                .gap_2()
-                .children(request.options.iter().enumerate().map(|(n, c)| {
-                    let (on_choose, c) = (on_choose.clone(), c.clone());
-                    choice(n, &c, allow == Some(n), cx)
-                        .on_click(move |_, window, cx| on_choose(&c, window, cx))
-                }))
-        }
-    };
+    let allow = (request.options.iter())
+        .position(|c| matches!(c.kind, ChoiceKind::AllowOnce | ChoiceKind::AllowAlways));
+    let choices = v_flex()
+        .gap_2()
+        .children(request.options.iter().enumerate().map(|(n, c)| {
+            let (on_choose, c) = (on_choose.clone(), c.clone());
+            choice(n, &c, allow == Some(n), cx)
+                .on_click(move |_, window, cx| on_choose(&c, window, cx))
+        }));
     frame(
         aurora::boreal(),
         "PERMISSION REQUESTED",
         request.title.clone(),
         cx,
     )
-    .id(("permission", ix))
+    .id(("waiting-permission", request.id))
     .children(
         diffs
             .iter()
             .enumerate()
             .map(|(k, diff)| diff.render(("diff", k).into(), on_open, cx)),
     )
-    .child(footer)
+    .child(choices)
+}
+
+/// A closed card in the list: its title, then the answer.
+pub fn closed(id: ElementId, title: &str, answer: &str, cx: &App) -> Stateful<Div> {
+    let theme = cx.theme();
+    let strong = match theme.is_dark() {
+        true => aurora::tinta(),
+        false => theme.foreground,
+    };
+    step_line(cx)
+        .id(id)
+        .child(div().flex_1().truncate().child(title.to_string()))
+        .child(
+            div()
+                .flex_none()
+                .text_color(strong)
+                .child(answer.to_string()),
+        )
 }

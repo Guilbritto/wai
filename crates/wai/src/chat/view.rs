@@ -106,8 +106,10 @@ pub struct ChatSession {
     pub(super) registry: WeakEntity<AgentRegistry>,
     /// Per `Agent`/`Thought` row.
     pub(super) texts: HashMap<usize, Markdown>,
-    /// Per `Tool`/`Permission` row.
+    /// Per `Tool` row.
     pub(super) diffs: HashMap<usize, Vec<DiffView>>,
+    /// Per waiting `Permission` card, by request id.
+    pub(super) card_diffs: HashMap<u64, Vec<DiffView>>,
     pub(super) open_thoughts: HashSet<usize>,
     /// How the steps show (`conversation.processing`).
     pub(super) processing: Processing,
@@ -117,8 +119,8 @@ pub struct ChatSession {
     pub(super) open_groups: HashSet<usize>,
     /// While a turn runs: when it started, and the status line's one-second tick.
     pub(super) turn: Option<(Instant, Task<()>)>,
-    /// Per open `Question` row, made when it first draws.
-    pub(super) questions: HashMap<usize, QuestionForm>,
+    /// Per waiting `Question` card, by request id, made when it first draws.
+    pub(super) questions: HashMap<u64, QuestionForm>,
     pub(super) scroller: Entity<MessageScrollerState>,
     pub(super) modes: Option<Entity<SelectState<Vec<Mode>>>>,
     /// The header's pickers of the model, effort and mode options, in that order.
@@ -180,6 +182,7 @@ impl ChatSession {
             registry,
             texts: HashMap::new(),
             diffs: HashMap::new(),
+            card_diffs: HashMap::new(),
             open_thoughts: HashSet::new(),
             processing: Processing::default(),
             open_steps: HashSet::new(),
@@ -399,21 +402,22 @@ impl ChatSession {
     }
 
     pub fn handle_permission(&mut self, req: PermissionRequest, cx: &mut Context<Self>) {
-        let ix = self.update_model(cx, |m| m.on_permission(req));
-        self.sync_row(ix, cx);
-        self.sync_rows(Some(ix), cx);
+        let diffs = self.permission_diffs(&req);
+        self.card_diffs.insert(req.id, diffs);
+        self.update_model(cx, |m| m.on_permission(req));
         cx.notify();
     }
 
     /// Resolutions reach every session of the agent; the model ignores ids it does not hold.
     pub fn handle_permission_resolved(&mut self, id: u64, cx: &mut Context<Self>) {
         self.update_model(cx, |m| m.on_permission_resolved(id));
+        self.card_diffs.remove(&id);
+        self.sync_rows(None, cx);
         cx.notify();
     }
 
     pub fn handle_question(&mut self, req: QuestionRequest, cx: &mut Context<Self>) {
-        let ix = self.update_model(cx, |m| m.on_question(req));
-        self.sync_rows(Some(ix), cx);
+        self.update_model(cx, |m| m.on_question(req));
         cx.notify();
     }
 
@@ -428,13 +432,8 @@ impl ChatSession {
     /// Like permissions, resolutions reach every session of the agent.
     pub fn handle_question_resolved(&mut self, id: u64, cx: &mut Context<Self>) {
         self.update_model(cx, |m| m.on_question_resolved(id));
-        let items = &self.model.items;
-        self.questions.retain(|ix, _| {
-            matches!(
-                items.get(*ix),
-                Some(ChatItem::Question { answered: None, .. })
-            )
-        });
+        self.questions.remove(&id);
+        self.sync_rows(None, cx);
         cx.notify();
     }
 
@@ -557,26 +556,27 @@ impl ChatSession {
                 let diffs = diff_views(&tool.diffs, &tool.locations, &self.cwd);
                 self.diffs.insert(ix, diffs);
             }
-            // R5: the request's own diff, else the diffs of its tool call.
-            ChatItem::Permission { request, .. } => {
-                let tool = self.model.items.iter().rev().find_map(|item| match item {
-                    ChatItem::Tool(t) if t.id == request.tool_call_id => Some(t),
-                    _ => None,
-                });
-                let locations = tool.map_or(&[][..], |t| &t.locations[..]);
-                let diffs = match &request.diff {
-                    Some(diff) => std::slice::from_ref(diff),
-                    None => tool.map_or(&[][..], |t| &t.diffs[..]),
-                };
-                let diffs = diff_views(diffs, locations, &self.cwd);
-                self.diffs.insert(ix, diffs);
-            }
+            ChatItem::Permission { .. } => {}
             ChatItem::User { .. }
             | ChatItem::Steered { .. }
             | ChatItem::Question { .. }
             | ChatItem::Notice { .. }
             | ChatItem::Edits { .. } => {}
         }
+    }
+
+    /// R5: the request's own diff, else the diffs of its tool call.
+    fn permission_diffs(&self, request: &PermissionRequest) -> Vec<DiffView> {
+        let tool = self.model.items.iter().rev().find_map(|item| match item {
+            ChatItem::Tool(t) if t.id == request.tool_call_id => Some(t),
+            _ => None,
+        });
+        let locations = tool.map_or(&[][..], |t| &t.locations[..]);
+        let diffs = match &request.diff {
+            Some(diff) => std::slice::from_ref(diff),
+            None => tool.map_or(&[][..], |t| &t.diffs[..]),
+        };
+        diff_views(diffs, locations, &self.cwd)
     }
 
     pub(super) fn answer(
@@ -593,6 +593,8 @@ impl ChatSession {
             // Already resolved on the agent's side (cancelled, say).
             Err(_) => m.on_permission_resolved(request),
         });
+        self.card_diffs.remove(&request);
+        self.sync_rows(None, cx);
         cx.notify();
     }
 
@@ -629,8 +631,10 @@ impl ChatSession {
         };
         self.handle = handle.clone();
         self.model.items.clear();
+        self.model.waiting.clear();
         self.texts.clear();
         self.diffs.clear();
+        self.card_diffs.clear();
         self.open_thoughts.clear();
         self.open_steps.clear();
         self.open_groups.clear();
@@ -1073,9 +1077,43 @@ mod tests {
         wait_until(cx, "the permission card", |cx| {
             state(&session, cx) == TurnState::NeedsYou
         });
+        assert!(session.read_with(cx, |s, _| {
+            !s.model
+                .items
+                .iter()
+                .any(|i| matches!(i, ChatItem::Permission { .. }))
+        }));
         cx.update(|window, cx| {
             window.render_frame(cx);
-            assert!(window.try_find("perm-allow_once").is_some(), "no card");
+            assert!(
+                window
+                    .within("waiting")
+                    .try_find("perm-allow_once")
+                    .is_some(),
+                "the card is pinned"
+            );
+            let bounds = |id: &'static str| window.find(id).bounds();
+            let (waiting, list, input) = (
+                bounds("waiting"),
+                bounds("transcript"),
+                bounds("input-state"),
+            );
+            // O1: the stack lies over the list's bottom, inside its area, not below it.
+            assert!(
+                list.top() < waiting.top() && waiting.bottom() <= list.bottom(),
+                "{waiting:?} is not over {list:?}"
+            );
+            assert!(
+                list.bottom() - waiting.bottom() <= px(9.),
+                "{waiting:?} does not sit at the list's bottom"
+            );
+            assert!(
+                waiting.bottom() <= input.top(),
+                "{waiting:?} is not above {input:?}"
+            );
+        });
+        cx.update(|window, cx| {
+            window.render_frame(cx);
             window.click("perm-allow_once", cx);
         });
 
@@ -1084,6 +1122,14 @@ mod tests {
         });
         let reply = last_agent_text(&session, cx).unwrap_or_default();
         assert!(reply.starts_with("chose:"), "{reply}");
+        let items = session.read_with(cx, |s, _| s.model.items.clone());
+        let card = items
+            .iter()
+            .position(|i| matches!(i, ChatItem::Permission { .. }))
+            .unwrap();
+        assert!(matches!(&items[card + 1], ChatItem::Agent { text } if text.starts_with("chose:")));
+        assert!(shows(("permission", card), cx), "the closed line");
+        assert!(!shows("waiting", cx));
         let answered = session.read_with(cx, |s, _| {
             s.model.items.iter().find_map(|item| match item {
                 ChatItem::Permission { answered, .. } => answered.clone(),
@@ -1129,6 +1175,10 @@ mod tests {
         wait_until(cx, "the question card", |cx| {
             state(&session, cx) == TurnState::NeedsYou
         });
+        assert!(cx.update(|w, cx| {
+            w.render_frame(cx);
+            w.within("waiting").try_find("question-submit").is_some()
+        }));
         cx.update(|window, cx| window.click("question-submit", cx));
         assert_eq!(
             state(&session, cx),
@@ -1641,7 +1691,7 @@ mod tests {
             state(&session, cx) == TurnState::NeedsYou
         });
         assert!(shows("perm-allow_once", cx), "the card shows");
-        // Rows: the prompt, the thought, the Read call, the edit, its card.
+        // Rows: the prompt, the thought, the Read call, the edit, the edit (its card waits above the prompt box).
         assert!(!shows(("edited", 3usize), cx), "not written yet");
         click_edits(None, "perm-allow_once", cx);
         wait_until(cx, "the Edits block", |cx| {

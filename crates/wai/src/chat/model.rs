@@ -242,6 +242,9 @@ pub struct ChatModel {
     pub subagents: Vec<Subagent>,
     /// A turn is running: a card answered meanwhile leaves the session `Working`, not `Idle`.
     pub in_turn: bool,
+    /// Open permission and question cards, oldest first: they wait over the list, and join
+    /// `items` once closed.
+    pub waiting: Vec<ChatItem>,
 }
 
 impl Default for ChatModel {
@@ -260,6 +263,7 @@ impl Default for ChatModel {
             commands: Vec::new(),
             subagents: Vec::new(),
             in_turn: false,
+            waiting: Vec::new(),
         }
     }
 }
@@ -478,50 +482,49 @@ impl ChatModel {
         Some(idx)
     }
 
-    pub fn on_permission(&mut self, mut req: PermissionRequest) -> usize {
+    pub fn on_permission(&mut self, mut req: PermissionRequest) {
         if let Some(prefix) = self.subagent_prefix(req.subagent.as_deref()) {
             req.title.insert_str(0, &prefix);
         }
         self.state = TurnState::NeedsYou;
-        self.push(ChatItem::Permission {
+        self.waiting.push(ChatItem::Permission {
             request: req,
             answered: None,
+        });
+    }
+
+    /// Closes the waiting permission request (or question) `id` with `answer`: the card moves to
+    /// the end of `items`, where the conversation is now. Whether this model held it.
+    fn close(&mut self, question: bool, id: u64, answer: &str) -> bool {
+        let Some(at) = self.waiting.iter().position(|item| match item {
+            ChatItem::Permission { request, .. } => !question && request.id == id,
+            ChatItem::Question { request, .. } => question && request.id == id,
+            _ => false,
+        }) else {
+            return false;
+        };
+        let mut card = self.waiting.remove(at);
+        if let ChatItem::Permission { answered, .. } | ChatItem::Question { answered, .. } =
+            &mut card
+        {
+            *answered = Some(answer.to_string());
+        }
+        self.push(card);
+        true
+    }
+
+    pub fn waiting_question(&self, id: u64) -> Option<&QuestionRequest> {
+        self.waiting.iter().find_map(|item| match item {
+            ChatItem::Question { request, .. } if request.id == id => Some(request),
+            _ => None,
         })
     }
 
-    /// Whether this model holds the permission request (or the question) `id`.
-    fn set_answer(&mut self, question: bool, id: u64, answer: &str, overwrite: bool) -> bool {
-        let mut held = false;
-        for item in &mut self.items {
-            let answered = match item {
-                ChatItem::Permission { request, answered } if !question && request.id == id => {
-                    answered
-                }
-                ChatItem::Question { request, answered } if question && request.id == id => {
-                    answered
-                }
-                _ => continue,
-            };
-            held = true;
-            if overwrite || answered.is_none() {
-                *answered = Some(answer.to_string());
-            }
-        }
-        held
-    }
-
-    /// `NeedsYou` while any permission or question card is unanswered (parallel tool calls can
-    /// open several), else `Working` during a turn, else `Idle` (a background subagent's card
-    /// can be answered after the turn).
+    /// `NeedsYou` while any permission or question card waits (parallel tool calls can open
+    /// several), else `Working` during a turn, else `Idle` (a background subagent's card can be
+    /// answered after the turn).
     fn after_answer(&self) -> TurnState {
-        let open = self.items.iter().any(|item| {
-            matches!(
-                item,
-                ChatItem::Permission { answered: None, .. }
-                    | ChatItem::Question { answered: None, .. }
-            )
-        });
-        if open {
+        if !self.waiting.is_empty() {
             TurnState::NeedsYou
         } else if self.in_turn {
             TurnState::Working
@@ -531,37 +534,37 @@ impl ChatModel {
     }
 
     pub fn on_permission_answered(&mut self, id: u64, choice_name: &str) {
-        self.set_answer(false, id, choice_name, true);
+        self.close(false, id, choice_name);
         self.state = self.after_answer();
     }
 
     /// The broker dropped the request (e.g. the turn was cancelled).
     /// Resolutions are broadcast to every session: ids this model does not hold are ignored.
     pub fn on_permission_resolved(&mut self, id: u64) {
-        if self.set_answer(false, id, "Cancelled", false) && self.state == TurnState::NeedsYou {
+        if self.close(false, id, "Cancelled") && self.state == TurnState::NeedsYou {
             self.state = self.after_answer();
         }
     }
 
-    pub fn on_question(&mut self, mut req: QuestionRequest) -> usize {
+    pub fn on_question(&mut self, mut req: QuestionRequest) {
         if let Some(prefix) = self.subagent_prefix(req.subagent.as_deref()) {
             req.message.insert_str(0, &prefix);
         }
         self.state = TurnState::NeedsYou;
-        self.push(ChatItem::Question {
+        self.waiting.push(ChatItem::Question {
             request: req,
             answered: None,
-        })
+        });
     }
 
     pub fn on_question_answered(&mut self, id: u64, summary: &str) {
-        self.set_answer(true, id, summary, true);
+        self.close(true, id, summary);
         self.state = self.after_answer();
     }
 
     /// Cancelled with the turn or withdrawn by the agent; ids of other sessions are ignored.
     pub fn on_question_resolved(&mut self, id: u64) {
-        if self.set_answer(true, id, "Cancelled", false) && self.state == TurnState::NeedsYou {
+        if self.close(true, id, "Cancelled") && self.state == TurnState::NeedsYou {
             self.state = self.after_answer();
         }
     }
@@ -752,6 +755,18 @@ impl ChatModel {
     /// A subagent last seen live is not: nothing says what became of it.
     pub fn on_exited(&mut self, error: Option<&str>) {
         self.in_turn = false;
+        let cards: Vec<(bool, u64)> = self
+            .waiting
+            .iter()
+            .filter_map(|card| match card {
+                ChatItem::Permission { request, .. } => Some((false, request.id)),
+                ChatItem::Question { request, .. } => Some((true, request.id)),
+                _ => None,
+            })
+            .collect();
+        for (question, id) in cards {
+            self.close(question, id, "Cancelled");
+        }
         let msg = error.unwrap_or("The agent exited");
         self.state = TurnState::Error(msg.to_string());
         let live: Vec<String> = self
@@ -927,7 +942,7 @@ mod tests {
             subagent: Some("c".into()),
         });
         let titles: Vec<&str> = m
-            .items
+            .waiting
             .iter()
             .filter_map(|item| match item {
                 ChatItem::Permission { request, .. } => Some(request.title.as_str()),
@@ -1325,6 +1340,62 @@ mod tests {
         assert_eq!(m.state, TurnState::NeedsYou);
         m.on_question_resolved(10);
         assert_eq!(m.state, TurnState::Working);
+    }
+
+    fn question(id: u64) -> QuestionRequest {
+        QuestionRequest {
+            id,
+            session: "s".into(),
+            message: "Pick".into(),
+            fields: vec![],
+            subagent: None,
+        }
+    }
+
+    /// A card waits outside the list; once closed it joins the list where the conversation is,
+    /// after what arrived while it waited, and only once.
+    #[test]
+    fn waiting_cards_join_the_list_once_closed() {
+        let mut m = ChatModel {
+            in_turn: true,
+            ..Default::default()
+        };
+        m.on_permission(perm()); // id 7
+        m.apply(&text("meanwhile"));
+        m.on_question(question(8));
+        assert_eq!(
+            m.items,
+            [ChatItem::Agent {
+                text: "meanwhile".into()
+            }]
+        );
+        assert_eq!(m.waiting.len(), 2);
+        m.on_permission_answered(7, "Yes");
+        assert!(
+            matches!(&m.items[..], [ChatItem::Agent { .. }, ChatItem::Permission { answered: Some(a), .. }] if a == "Yes")
+        );
+        assert!(matches!(&m.waiting[..], [ChatItem::Question { .. }]));
+        assert_eq!(m.state, TurnState::NeedsYou);
+        m.on_question_resolved(8);
+        m.on_question_resolved(8);
+        assert_eq!(m.items.len(), 3);
+        assert!(m.waiting.is_empty());
+        assert_eq!(m.state, TurnState::Working);
+    }
+
+    /// Review focus 5: an exit leaves no card pinned.
+    #[test]
+    fn exit_cancels_waiting_cards() {
+        let mut m = ChatModel::default();
+        m.push_user("go");
+        m.on_permission(perm());
+        m.on_exited(None);
+        assert!(m.waiting.is_empty());
+        let n = m.items.len();
+        assert!(
+            matches!(&m.items[n - 2], ChatItem::Permission { answered: Some(a), .. } if a == "Cancelled")
+        );
+        assert!(matches!(&m.items[n - 1], ChatItem::Notice { .. }));
     }
 
     #[test]
