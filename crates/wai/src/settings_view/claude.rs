@@ -352,6 +352,9 @@ impl SettingsView {
         let all = match section {
             Section::Mcp => mcp_groups(data, &self.mcp_check),
             Section::Skills => entry_groups(&data.skills, "skill", &self.data.home),
+            Section::Instructions => {
+                entry_groups(&data.instructions, "instruction", &self.data.home)
+            }
             _ => plugin_groups(data, &self.data.home),
         };
         let total: usize = all.iter().map(|g| g.rows.len()).sum();

@@ -182,6 +182,14 @@ mod tests {
             home.join(".claude/plugins/cache/m/alpha/1.2.0/.mcp.json"),
             r#"{"mcpServers":{"db":{"command":"db-mcp","env":{"KEY":"s3cr3t"}}}}"#,
         );
+        put(
+            home.join(".claude/CLAUDE.md"),
+            "# Global rules\n@instructions/a.md\n@~/extra.md\n@missing.md\n",
+        );
+        put(home.join(".claude/instructions/a.md"), "@b.md");
+        put(home.join(".claude/instructions/b.md"), "x");
+        put(home.join("extra.md"), "x");
+        put(project.join("CLAUDE.md"), "x");
         let key = wai_settings::claude::project_key_for(project);
         put(
             home.join(".claude.json"),
@@ -523,5 +531,61 @@ mod tests {
             !editor_tabs(&workspace, cx).is_empty()
         });
         assert!(editor_tabs(&workspace, cx)[0].1);
+    }
+
+    /// The rows the page shows: (group, [(name, path, summary)]).
+    fn page_groups(
+        workspace: &Entity<Workspace>,
+        pick: fn(&wai_settings::claude::ClaudeData) -> &[wai_settings::claude::Entry],
+        kind: &'static str,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(String, Vec<(String, String, String)>)> {
+        let home = workspace.read_with(cx, |w, _| w.claude_home.clone());
+        let view = workspace.read_with(cx, |w, _| w.settings_view()).unwrap();
+        view.read_with(cx, |v, _| {
+            let entries = pick(v.claude().unwrap());
+            crate::settings_view::claude::entry_groups(entries, kind, &home)
+                .into_iter()
+                .map(|g| {
+                    let rows = (g.rows.into_iter())
+                        .map(|r| {
+                            (
+                                r.name,
+                                r.path.unwrap_or_default(),
+                                r.summary.unwrap_or_default(),
+                            )
+                        })
+                        .collect();
+                    (g.title, rows)
+                })
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn instructions_page_lists_imports(cx: &mut TestAppContext) {
+        let (workspace, cx, tmp) = claude_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Instructions, None, window, cx)
+        });
+        cx.run_until_parked();
+        let view = workspace.read_with(cx, |w, _| w.settings_view()).unwrap();
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.nav_count(Section::Instructions, cx)),
+            Some(5)
+        );
+        let groups = page_groups(&workspace, |d| &d.instructions, "instruction", cx);
+        assert_eq!(groups[0].0, "User");
+        let names: Vec<_> = groups[0].1.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(names, ["CLAUDE.md", "a.md", "b.md", "extra.md"]);
+        assert_eq!(groups[1].0, "Project");
+        assert_eq!(groups[1].1[0].0, "CLAUDE.md");
+        assert_eq!(groups[1].1[0].2, "This project");
+        click(ElementId::NamedInteger("open-instruction".into(), 0), cx);
+        wait_until(cx, "an editor tab", |cx| {
+            !editor_tabs(&workspace, cx).is_empty()
+        });
+        let want = crate::sidebar::canonical(&tmp.path().join("home/.claude/CLAUDE.md"));
+        assert_eq!(editor_tabs(&workspace, cx), [(want, false)]);
     }
 }

@@ -35,6 +35,7 @@ pub enum Section {
     Plugins,
     Mcp,
     Skills,
+    Instructions,
 }
 
 impl Section {
@@ -49,6 +50,7 @@ impl Section {
             Section::Plugins => "Plugins",
             Section::Mcp => "MCP Servers",
             Section::Skills => "Skills",
+            Section::Instructions => "Instructions",
         }
     }
 
@@ -63,6 +65,7 @@ impl Section {
             Section::Plugins => "plugins",
             Section::Mcp => "mcp",
             Section::Skills => "skills",
+            Section::Instructions => "instructions",
         }
     }
 
@@ -76,6 +79,9 @@ impl Section {
             Section::Extensions => "Programs that add panels, commands and agents to wai.",
             Section::Plugins => "Plugins add skills, agents, hooks and MCP servers to Claude Code.",
             Section::Skills => "Reusable instructions Claude loads when a task calls for them.",
+            Section::Instructions => {
+                "Files Claude reads at the start of every session (CLAUDE.md and what it includes)."
+            }
             Section::Mcp => {
                 "Servers that give Claude more tools. Turning one off applies to this project, in new Claude sessions, and keeps its configuration."
             }
@@ -96,7 +102,15 @@ pub(crate) const NAV: &[(&str, &[Section])] = &[
             Section::Extensions,
         ],
     ),
-    ("Claude", &[Section::Plugins, Section::Mcp, Section::Skills]),
+    (
+        "Claude",
+        &[
+            Section::Plugins,
+            Section::Mcp,
+            Section::Skills,
+            Section::Instructions,
+        ],
+    ),
 ];
 
 /// 88% x 86% of the viewport; maximized, the viewport less 24 px on each axis.
@@ -429,6 +443,7 @@ impl SettingsView {
             Section::Plugins => self.claude.as_ref().map(|d| d.plugins.len()),
             Section::Mcp => self.claude.as_ref().map(|d| d.mcp.len()),
             Section::Skills => self.claude.as_ref().map(|d| d.skills.len()),
+            Section::Instructions => self.claude.as_ref().map(|d| d.instructions.len()),
             _ => None,
         }
     }
@@ -757,7 +772,10 @@ impl Render for SettingsView {
             .collect();
         let ai = section == Section::Ai;
         let extensions = section == Section::Extensions;
-        let claude_page = matches!(section, Section::Plugins | Section::Mcp | Section::Skills);
+        let claude_page = matches!(
+            section,
+            Section::Plugins | Section::Mcp | Section::Skills | Section::Instructions
+        );
         let agents: Vec<_> = if ai {
             (self.data.agents.iter())
                 .filter(|a| a.label.to_lowercase().contains(&query))
