@@ -59,33 +59,39 @@ impl Workspace {
     }
 
     /// Runs `claude mcp list` in the project and shows each server's status in the open modal.
+    /// The run belongs to the modal: closing it drops the task and kills `claude`.
     pub(crate) fn check_mcp(&mut self, cx: &mut Context<Self>) {
-        let set = |this: &mut Self, check: McpCheck, cx: &mut Context<Self>| {
-            if let Some(view) = this.settings_view() {
-                view.update(cx, |v, cx| v.set_mcp_check(check, cx));
-            }
-        };
-        let program = (self.claude_program.clone())
-            .or_else(|| wai_settings::find_program("claude".as_ref()))
-            .filter(|p| p.is_file());
-        let Some(program) = program else {
-            self.mcp_task = None;
-            set(self, McpCheck::Failed("Needs the claude CLI".into()), cx);
+        let Some(view) = self.settings_view() else {
             return;
         };
-        set(self, McpCheck::Running, cx);
+        let claude =
+            (self.claude_program.clone()).or_else(|| wai_settings::find_program("claude".as_ref()));
         let project = self.project.clone();
-        self.mcp_task = Some(cx.spawn(async move |this, cx| {
-            let out = run_mcp_list(program, project, Duration::from_secs(60)).await;
-            this.update(cx, |this, cx| {
-                let check = match out {
-                    Ok(out) => McpCheck::Done(parse_mcp_list(&out)),
-                    Err(e) => McpCheck::Failed(format!("Check failed: {e}")),
-                };
-                set(this, check, cx);
-            })
-            .ok();
-        }));
+        view.update(cx, |v, cx| {
+            v.set_mcp_check(McpCheck::Running, cx);
+            let me = cx.entity().downgrade();
+            v.mcp_task = Some(cx.spawn(async move |_, cx| {
+                let out = cx
+                    .background_spawn(async move {
+                        match claude.filter(|p| p.is_file()) {
+                            Some(program) => {
+                                run_mcp_list(program, project, Duration::from_secs(60)).await
+                            }
+                            None => Err(String::new()),
+                        }
+                    })
+                    .await;
+                me.update(cx, |v, cx| {
+                    let check = match out {
+                        Ok(out) => McpCheck::Done(parse_mcp_list(&out)),
+                        Err(e) if e.is_empty() => McpCheck::Failed("Needs the claude CLI".into()),
+                        Err(e) => McpCheck::Failed(format!("Check failed: {e}")),
+                    };
+                    v.set_mcp_check(check, cx);
+                })
+                .ok();
+            }));
+        });
     }
 
     /// Writes `enabledPlugins` unless the file changed since `seen`, then shows what is on disk.
@@ -546,13 +552,15 @@ mod tests {
         assert!(editor_tabs(&workspace, cx)[0].1);
     }
 
+    type PageRow = (String, String, String);
+
     /// The rows the page shows: (group, [(name, path, summary)]).
     fn page_groups(
         workspace: &Entity<Workspace>,
         pick: fn(&wai_settings::claude::ClaudeData) -> &[wai_settings::claude::Entry],
         kind: &'static str,
         cx: &mut VisualTestContext,
-    ) -> Vec<(String, Vec<(String, String, String)>)> {
+    ) -> Vec<(String, Vec<PageRow>)> {
         let home = workspace.read_with(cx, |w, _| w.claude_home.clone());
         let view = workspace.read_with(cx, |w, _| w.settings_view()).unwrap();
         view.read_with(cx, |v, _| {

@@ -86,14 +86,22 @@ impl Section {
 
     fn description(self) -> &'static str {
         match self {
-            Section::Ai => "Choose the agent that answers in new sessions.",
+            Section::Ai => "Which AI starts new sessions, and how wai runs each one.",
             Section::Appearance => "How wai looks.",
-            Section::Conversation => "How a conversation shows what the agent does.",
-            Section::Terminal => "The shell the terminal runs.",
-            Section::Updates => "Whether wai looks for new versions.",
-            Section::Extensions => "Programs that add panels, commands and agents to wai.",
-            Section::Plugins => "Plugins add skills, agents, hooks and MCP servers to Claude Code.",
-            Section::Skills => "Reusable instructions Claude loads when a task calls for them.",
+            Section::Conversation => {
+                "What a conversation shows while the agent works. Permission cards, questions and file edits always show."
+            }
+            Section::Terminal => "The terminal under the panes.",
+            Section::Updates => "wai checks GitHub releases once a day, only when you turn it on.",
+            Section::Extensions => {
+                "Extensions add panels, commands, agents and MCP servers to wai. They run with your permissions."
+            }
+            Section::Plugins => {
+                "What Claude loads from ~/.claude/plugins: commands, skills, agents, hooks and MCP servers. A change applies to new Claude sessions."
+            }
+            Section::Skills => {
+                "Instructions Claude loads on its own when a task fits. They come with plugins; turn the plugin off to drop its skills."
+            }
             Section::Instructions => {
                 "Files Claude reads at the start of every session (CLAUDE.md and what it includes)."
             }
@@ -371,6 +379,8 @@ pub struct SettingsView {
     /// A write is out: the switches wait for it.
     busy: bool,
     mcp_check: claude::McpCheck,
+    /// The running `claude mcp list`; dropping the view kills it.
+    pub(crate) mcp_task: Option<Task<()>>,
     /// Groups the user flipped from their default (open or closed), per page.
     toggled: HashSet<(Section, usize)>,
     _subscriptions: Vec<Subscription>,
@@ -451,6 +461,7 @@ impl SettingsView {
             claude: None,
             busy: false,
             mcp_check: Default::default(),
+            mcp_task: None,
             toggled: HashSet::new(),
             _subscriptions: subscriptions,
         };
@@ -1002,6 +1013,7 @@ impl Render for SettingsView {
                                     .child(
                                         v_flex()
                                             .flex_1()
+                                            .min_w_0()
                                             .gap_1()
                                             .child(
                                                 div()

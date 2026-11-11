@@ -378,6 +378,7 @@ impl ExtensionsView {
                     )
                     .child(
                         Switch::new(("ext-enabled", ix))
+                            .label("Enabled")
                             .checked(ext.enabled)
                             .on_click(cx.listener(move |this, on: &bool, window, cx| {
                                 this.set_enabled(&toggle, *on, window, cx)
@@ -864,7 +865,8 @@ pub(crate) mod tests {
         let (config, src) = (tmp.path().join("config"), sample(&tmp.path().join("src")));
         let mut store = wai_ext::ExtStore::open(&config);
         let staged = store.stage(&Source::Folder(src)).unwrap();
-        store.commit(staged, vec![Permission::Process]).unwrap();
+        let granted = staged.manifest().permissions.clone();
+        store.commit(staged, granted).unwrap();
         let (workspace, cx) = workspace(&config, cx);
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| {
@@ -878,7 +880,7 @@ pub(crate) mod tests {
         );
         cx.update(|window, cx| window.render_frame(cx));
         assert!(cx.update(|w, _| w.try_find(("ext-enabled", 0usize)).is_some()));
-        assert!(cx.debug_bounds("ext-install-folder").is_some());
+        assert!(cx.update(|w, _| w.try_find("ext-install-folder").is_some()));
     }
 
     /// The top bar's Extensions button opens the modal on the Extensions page.

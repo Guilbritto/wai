@@ -165,7 +165,6 @@ pub struct Workspace {
     pub(crate) claude_task: Option<Task<()>>,
     /// The `claude` that `mcp list` runs; none means the one on PATH.
     pub(crate) claude_program: Option<PathBuf>,
-    pub(crate) mcp_task: Option<Task<()>>,
     pub registry: Entity<AgentRegistry>,
     /// Every open session, shown in a pane or not, in the order they opened.
     pub sessions: Vec<Entity<ChatSession>>,
@@ -363,7 +362,6 @@ impl Workspace {
             claude_home: wai_settings::claude::claude_home(),
             claude_task: None,
             claude_program: None,
-            mcp_task: None,
             registry,
             agents,
             agents_right: false,
@@ -2080,7 +2078,12 @@ impl Workspace {
 
     /// Closes the Settings modal when it is open.
     pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_view().is_some() {
+        if self
+            .settings_view
+            .take()
+            .and_then(|v| v.upgrade())
+            .is_some()
+        {
             window.close_dialog(cx);
         }
     }

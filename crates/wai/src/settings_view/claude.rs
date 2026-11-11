@@ -9,6 +9,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::*;
+use wai_ext::panel::clamp;
 use wai_settings::claude::{ClaudeData, Entry, McpSource, McpStatus, short};
 
 use super::{Section, SettingsEvent, SettingsView};
@@ -228,7 +229,7 @@ pub(crate) fn filter(groups: Vec<Group>, query: &str) -> Vec<Group> {
     };
     (groups.into_iter())
         .map(|mut g| {
-            g.rows.retain(|r| keep(r));
+            g.rows.retain(&keep);
             g
         })
         .filter(|g| !g.rows.is_empty())
@@ -238,13 +239,6 @@ pub(crate) fn filter(groups: Vec<Group>, query: &str) -> Vec<Group> {
 /// Big pages open only their first group.
 pub(crate) fn default_open(total_rows: usize, ix: usize) -> bool {
     total_rows <= 20 || ix == 0
-}
-
-fn clamp(text: &str, max: usize) -> String {
-    match text.char_indices().nth(max) {
-        Some((end, _)) => format!("{}…", text[..end].trim_end()),
-        None => text.to_string(),
-    }
 }
 
 impl SettingsView {
@@ -295,7 +289,8 @@ impl SettingsView {
                 Button::new("soon-plugins-menu")
                     .ghost()
                     .small()
-                    .icon(IconName::Ellipsis),
+                    .icon(IconName::Ellipsis)
+                    .tooltip("Coming soon"),
             ]
             .into_iter()
             .collect::<Vec<_>>(),
@@ -311,12 +306,17 @@ impl SettingsView {
                     .disabled(running)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::CheckMcp)));
                 return Some(
-                    h_flex().gap_2().items_center().child(check).child(
-                        Button::new("soon-add-server")
-                            .small()
-                            .label("Add server…")
-                            .disabled(true),
-                    ),
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(check)
+                        .child(
+                            Button::new("soon-add-server")
+                                .small()
+                                .label("Add server…")
+                                .disabled(true),
+                        )
+                        .child(aurora::soon(cx)),
                 );
             }
             _ => return None,
@@ -341,14 +341,14 @@ impl SettingsView {
                 .id("plugins-learn-more")
                 .text_color(cx.theme().link)
                 .cursor_pointer()
-                .child("Learn more about plugins")
+                .child("Learn more about Claude Code plugins")
                 .on_click(|_, _, cx| cx.open_url("https://code.claude.com/docs/en/plugins"))
                 .test_support()
         });
         let problems = data
             .problems
             .iter()
-            .map(|p| div().px_3().py_2().text_color(danger).child(p.clone()));
+            .map(|p| div().px_3().py_2().text_color(danger).child(clamp(p, 160)));
         let all = match section {
             Section::Mcp => mcp_groups(data, &self.mcp_check),
             Section::Skills => entry_groups(&data.skills, "skill", &self.data.home),
@@ -404,7 +404,7 @@ impl SettingsView {
                     .child(
                         div()
                             .font_weight(FontWeight::BOLD)
-                            .child(group.title.clone()),
+                            .child(clamp(&group.title, 80)),
                     )
                     .child(
                         aurora::pill(cx)
@@ -519,7 +519,7 @@ impl SettingsView {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(clamp(&row.name, 80)),
                             )
-                            .children(row.badge.clone().map(|b| aurora::badge(b, cx))),
+                            .children(row.badge.clone().map(|b| aurora::badge(clamp(&b, 80), cx))),
                     )
                     .children(row.path.clone().map(|p| {
                         div()
