@@ -116,9 +116,18 @@ pub(crate) fn subagent_reply(m: acp::SessionMessage, session: &str) -> Option<Se
     if text.is_empty() {
         return None;
     }
+    let text = text.join("\n");
+    // Claude Code opens the summary with `<tools-used-before-summary>…</…>`: not the answer.
+    const END: &str = "</tools-used-before-summary>";
+    let text = match text.strip_prefix("<tools-used-before-summary>") {
+        Some(rest) => rest
+            .split_once(END)
+            .map_or(text.as_str(), |(_, a)| a.trim_start()),
+        None => text.as_str(),
+    };
     Some(SessionEvent::SubagentReply {
         id,
-        text: text.join("\n"),
+        text: text.to_string(),
     })
 }
 
@@ -435,6 +444,27 @@ pub(crate) fn content_block(block: PromptBlock) -> acp::ContentBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Claude Code opens a subagent's summary with the tools it used, in its own markup; the
+    /// card shows only the answer.
+    #[test]
+    fn subagent_reply_drops_the_tools_used_markup() {
+        let reply = |t: &str| {
+            let m = acp::SessionMessage::new("m")
+                .sender_session_id(acp::SessionId::new("c"))
+                .content(vec![acp::ContentBlock::Text(acp::TextContent::new(t))]);
+            match subagent_reply(m, "r") {
+                Some(SessionEvent::SubagentReply { text, .. }) => text,
+                other => panic!("{other:?}"),
+            }
+        };
+        let tagged = "<tools-used-before-summary>Read</tools-used-before-summary>\n\nwai";
+        assert_eq!(reply(tagged), "wai");
+        assert_eq!(reply("wai"), "wai");
+        // Only a leading block is markup; the same words later are the agent's text.
+        let quoted = "see <tools-used-before-summary>x</tools-used-before-summary>";
+        assert_eq!(reply(quoted), quoted);
+    }
 
     #[test]
     fn mcp_servers_are_stdio_with_args_and_env() {
