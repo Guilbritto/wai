@@ -40,6 +40,7 @@ use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved, recovery};
 use crate::ext_host::{ExtHost, SessionCall};
 use crate::extensions_view::{ExtensionsView, InstallPlugin};
 use crate::files::{FileTree, OpenFile};
+use crate::git;
 use crate::layout::{self, Slot, Zone};
 use crate::notify::{self, should_notify};
 use crate::search_view::{OpenMatch, SearchView};
@@ -1045,6 +1046,19 @@ impl Workspace {
             cx.notify();
         })
         .detach();
+        if session.read(cx).head.is_none() {
+            let cwd = session.read(cx).cwd.clone();
+            let head = cx.background_spawn(async move { git::head(&cwd) });
+            let target = session.clone();
+            cx.spawn(async move |_, cx| {
+                let head = head.await;
+                target.update(cx, |s, cx| {
+                    s.head = head;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         self.sessions.push(session);
         self.sync_agents(cx);
         self.sync_drafts(cx);

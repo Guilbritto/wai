@@ -20,6 +20,7 @@ use super::model::{ChatItem, ChatModel, NoticeKind, TurnState, UNSUPPORTED_QUEST
 use super::permission::DiffView;
 use super::question::QuestionForm;
 use crate::agents::AgentRegistry;
+use crate::git::Head;
 
 /// How often a streaming message takes its new text. Each push costs a parse and a window
 /// redraw (~4 ms); pushing every token cost 12–18% of a core at 40 tokens/s.
@@ -93,6 +94,8 @@ pub struct ChatSession {
     pub agent: String,
     pub id: String,
     pub cwd: PathBuf,
+    /// The branch `cwd` is on, read in the background once the session is open.
+    pub head: Option<Head>,
     pub model: ChatModel,
     pub(super) handle: AgentHandle,
     pub(super) input: Entity<TextareaState>,
@@ -173,6 +176,7 @@ impl ChatSession {
             agent,
             id: started.id,
             cwd,
+            head: None,
             handle,
             input,
             attachments: Vec::new(),
@@ -800,16 +804,18 @@ mod tests {
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{ElementId, Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
     use wai_agent::{StopReason, SubagentState, ToolStatus};
-    use wai_settings::{Change, Processing, Settings};
+    use wai_settings::{AppState, Change, OpenSession, Processing, Settings};
 
     use super::ChatSession;
     use crate::agents::RegistryEvent;
     use crate::chat::input::{Attachment, Message};
     use crate::chat::model::{ChatItem, EditedFile, NoticeKind, TurnState, UNSUPPORTED_QUESTION};
+    use crate::git::tests::repo_with;
     use crate::notify;
     use crate::sidebar::canonical;
     use crate::workspace::tests::{
-        click, fake_settings, history_settings, live, load_history, open, start_now, wait_until,
+        click, fake_settings, history_settings, launch, live, load_history, open, open_at,
+        start_now, wait_until,
     };
     use crate::workspace::{Pane, Workspace};
 
@@ -2289,5 +2295,86 @@ mod tests {
             s.pickers[0].1.read(cx).selected_value().cloned()
         });
         assert_eq!(picked.as_deref(), Some("fake-small"));
+    }
+
+    /// Stops the project's watcher before its folder goes.
+    fn leave(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.set_project("/nonexistent".into(), window, cx))
+        });
+    }
+
+    fn pill(id: &'static str, cx: &mut VisualTestContext) -> Option<String> {
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find(id).label().map(str::to_owned)
+        })
+    }
+
+    #[gpui_kit::test]
+    fn header_pills_show_folder_branch_and_agent_model(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let root = repo_with(&dir.path().join("r"), &["feature"]);
+        let (workspace, cx) = open(cx, fake_settings("--models"));
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.set_project(root.clone(), window, cx))
+        });
+        let session = start_session(&workspace, cx);
+        wait_until(cx, "the branch", |cx| {
+            session.read_with(cx, |s, _| s.head.is_some())
+        });
+        let name = root.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(pill("pill-folder", cx), Some(name));
+        assert_eq!(pill("pill-branch", cx).as_deref(), Some("feature"));
+        assert_eq!(pill("pill-agent", cx).as_deref(), Some("fake · Fake Small"));
+        leave(&workspace, cx);
+    }
+
+    #[gpui_kit::test]
+    fn restored_session_shows_its_pills(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let root = repo_with(&dir.path().join("r"), &[]);
+        let path = dir.path().join("state.json");
+        let state = AppState {
+            open_sessions: vec![OpenSession {
+                agent: "fake".into(),
+                session_id: "abc".into(),
+                cwd: root.clone(),
+                pane: 0,
+                name: None,
+            }],
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(path));
+        cx.deactivate_window();
+
+        launch(&workspace, cx);
+
+        wait_until(cx, "the branch", |cx| {
+            workspace.read_with(cx, |w, cx| {
+                w.sessions
+                    .first()
+                    .is_some_and(|s| s.read(cx).head.is_some())
+            })
+        });
+        assert_eq!(pill("pill-branch", cx).as_deref(), Some("main"));
+        leave(&workspace, cx);
+    }
+
+    #[gpui_kit::test]
+    fn no_branch_pill_outside_a_repository(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        // Let the (empty) read land before looking.
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+        assert!(session.read_with(cx, |s, _| s.head.is_none()));
+        assert!(pill("pill-folder", cx).is_some());
+        assert_eq!(pill("pill-branch", cx), None);
     }
 }
