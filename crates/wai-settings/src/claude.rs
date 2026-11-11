@@ -924,6 +924,169 @@ pub fn read_claude(home: &Path, project: &Path) -> ClaudeData {
     data
 }
 
+#[derive(Debug)]
+pub enum WriteError {
+    Changed,
+    Busy,
+    Invalid(String),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteError::Changed => f.write_str("it changed since it was shown"),
+            WriteError::Busy => f.write_str("Claude is writing it; try again"),
+            WriteError::Invalid(s) => f.write_str(s),
+            WriteError::Io(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for WriteError {}
+
+impl From<std::io::Error> for WriteError {
+    fn from(e: std::io::Error) -> Self {
+        WriteError::Io(e)
+    }
+}
+
+struct Lock(PathBuf);
+
+impl Lock {
+    fn take(target: &Path) -> Result<Lock, WriteError> {
+        let mut name = target.as_os_str().to_owned();
+        name.push(".lock");
+        let dir = PathBuf::from(name);
+        let fresh = |dir: &Path| {
+            std::fs::metadata(dir)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_none_or(|age| age < std::time::Duration::from_secs(10))
+        };
+        let mut tries = 0;
+        let mut cleared = false;
+        loop {
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return Ok(Lock(dir)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if !fresh(&dir) {
+                        if cleared {
+                            return Err(WriteError::Busy);
+                        }
+                        cleared = true;
+                        let _ = std::fs::remove_dir(&dir);
+                    } else if tries >= 10 {
+                        return Err(WriteError::Busy);
+                    } else {
+                        tries += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.0);
+    }
+}
+
+fn indent_of(text: &str) -> String {
+    text.lines()
+        .find(|l| l.starts_with([' ', '\t']) && !l.trim().is_empty())
+        .map(|l| l[..l.len() - l.trim_start().len()].to_string())
+        .unwrap_or_else(|| "  ".to_string())
+}
+
+fn replace_json(
+    path: &Path,
+    seen: Stamp,
+    edit: impl FnOnce(&mut Value) -> Result<(), String>,
+) -> Result<Stamp, WriteError> {
+    let target = if path.exists() {
+        crate::try_canonical(path)?
+    } else {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        path.to_path_buf()
+    };
+    let _lock = Lock::take(&target)?;
+    let read = |p: &Path| match std::fs::read(p) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(WriteError::Io(e)),
+    };
+    let bytes = read(&target)?;
+    if Stamp::of(bytes.as_deref()) != seen {
+        return Err(WriteError::Changed);
+    }
+    let (mut value, text) = match &bytes {
+        Some(b) => {
+            let text = String::from_utf8(b.clone())
+                .map_err(|_| WriteError::Invalid("the file is not valid UTF-8".into()))?;
+            let v = serde_json::from_str(&text)
+                .map_err(|e| WriteError::Invalid(format!("the file is not valid JSON: {e}")))?;
+            (v, text)
+        }
+        None => (Value::Object(Default::default()), String::new()),
+    };
+    edit(&mut value).map_err(WriteError::Invalid)?;
+    let indent = indent_of(&text);
+    let mut out = Vec::new();
+    let fmt = serde_json::ser::PrettyFormatter::with_indent(indent.as_bytes());
+    let mut ser = serde_json::Serializer::with_formatter(&mut out, fmt);
+    serde::Serialize::serialize(&value, &mut ser)
+        .map_err(|e| WriteError::Invalid(e.to_string()))?;
+    if text.ends_with('\n') {
+        out.push(b'\n');
+    }
+    let mut name = target.as_os_str().to_owned();
+    name.push(".wai.tmp");
+    let tmp = PathBuf::from(name);
+    std::fs::write(&tmp, &out)?;
+    let finish = || -> Result<(), WriteError> {
+        if bytes.is_some() {
+            std::fs::set_permissions(&tmp, std::fs::metadata(&target)?.permissions())?;
+        }
+        if Stamp::of(read(&target)?.as_deref()) != seen {
+            return Err(WriteError::Changed);
+        }
+        std::fs::rename(&tmp, &target)?;
+        Ok(())
+    };
+    if let Err(e) = finish() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(Stamp::of(Some(&out)))
+}
+
+pub fn set_plugin_enabled(
+    home: &Path,
+    id: &str,
+    on: bool,
+    seen: Stamp,
+) -> Result<Stamp, WriteError> {
+    replace_json(&home.join(".claude/settings.json"), seen, |root| {
+        let obj = root
+            .as_object_mut()
+            .ok_or("settings.json is not a JSON object")?;
+        let plugins = obj
+            .entry("enabledPlugins")
+            .or_insert_with(|| Value::Object(Default::default()))
+            .as_object_mut()
+            .ok_or("enabledPlugins is not an object")?;
+        plugins.insert(id.to_string(), Value::Bool(on));
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1425,5 +1588,161 @@ mod tests {
         assert_eq!(eps.summary, "No components");
         let odd = d.skills.iter().find(|e| e.name == "odd").unwrap();
         assert_eq!(odd.summary, "");
+    }
+
+    fn settings_path(home: &Path) -> PathBuf {
+        home.join(".claude/settings.json")
+    }
+
+    fn stamp_of(path: &Path) -> Stamp {
+        Stamp::of(fs::read(path).ok().as_deref())
+    }
+
+    #[test]
+    fn plugin_toggle_changes_only_its_key() {
+        let t = tempfile::tempdir().unwrap();
+        let p = settings_path(t.path());
+        put(
+            &p,
+            "{\n    \"model\": \"opus\",\n    \"enabledPlugins\": {\"a@m\": true},\n    \"hooks\": {\"Stop\": []},\n    \"zeta\": 1\n}\n",
+        );
+        let before = fs::read(&p).unwrap();
+        let st = set_plugin_enabled(t.path(), "a@m", false, Stamp::of(Some(&before))).unwrap();
+        let after = fs::read(&p).unwrap();
+        let text = String::from_utf8(after.clone()).unwrap();
+        let v: Value = serde_json::from_str(&text).unwrap();
+        let keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["model", "enabledPlugins", "hooks", "zeta"]);
+        assert_eq!(v["enabledPlugins"]["a@m"], json!(false));
+        assert!(text.ends_with('\n'));
+        assert!(text.lines().nth(1).unwrap().starts_with("    \""));
+        assert_eq!(st, Stamp::of(Some(&after)));
+    }
+
+    #[test]
+    fn plugin_toggle_creates_a_missing_file() {
+        let t = tempfile::tempdir().unwrap();
+        set_plugin_enabled(t.path(), "a@m", true, Stamp::default()).unwrap();
+        let text = fs::read_to_string(settings_path(t.path())).unwrap();
+        assert_eq!(
+            text,
+            "{\n  \"enabledPlugins\": {\n    \"a@m\": true\n  }\n}"
+        );
+    }
+
+    #[test]
+    fn changed_file_is_left_alone() {
+        let t = tempfile::tempdir().unwrap();
+        let p = settings_path(t.path());
+        put(&p, "{\"model\":\"opus\"}");
+        let seen = stamp_of(&p);
+        fs::write(&p, "{\"model\":\"other\"}").unwrap();
+        let r = set_plugin_enabled(t.path(), "a@m", false, seen);
+        assert!(matches!(r, Err(WriteError::Changed)));
+        assert_eq!(fs::read_to_string(&p).unwrap(), "{\"model\":\"other\"}");
+    }
+
+    #[test]
+    fn invalid_files_are_left_alone() {
+        let t = tempfile::tempdir().unwrap();
+        let p = settings_path(t.path());
+        for text in ["{oops", "{\"enabledPlugins\":[]}"] {
+            put(&p, text);
+            let r = set_plugin_enabled(t.path(), "a@m", false, stamp_of(&p));
+            assert!(matches!(r, Err(WriteError::Invalid(_))), "{text}");
+            assert_eq!(fs::read_to_string(&p).unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn toggling_off_and_on_restores_the_bytes() {
+        let t = tempfile::tempdir().unwrap();
+        let p = settings_path(t.path());
+        put(
+            &p,
+            "{\n  \"numStartups\": 3,\n  \"lastCost\": 0.123456,\n  \"enabledPlugins\": {\n    \"a@m\": true,\n    \"b@m\": false\n  },\n  \"hooks\": {\"Stop\": []}\n}\n",
+        );
+        let original = fs::read(&p).unwrap();
+        let orig_v: Value = serde_json::from_slice(&original).unwrap();
+        let st = set_plugin_enabled(t.path(), "a@m", false, stamp_of(&p)).unwrap();
+        let mut v: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+        assert_eq!(v["enabledPlugins"]["a@m"], json!(false));
+        v["enabledPlugins"]["a@m"] = json!(true);
+        assert_eq!(v, orig_v);
+        set_plugin_enabled(t.path(), "a@m", true, st).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_target_is_written() {
+        let t = tempfile::tempdir().unwrap();
+        let real = t.path().join("dotfiles/settings.json");
+        put(&real, "{\"model\":\"opus\"}");
+        let link = settings_path(t.path());
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        set_plugin_enabled(t.path(), "a@m", true, stamp_of(&link)).unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(fs::read_to_string(&real).unwrap().contains("a@m"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mode_is_kept() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let p = settings_path(t.path());
+        put(&p, "{\"model\":\"opus\"}");
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+        set_plugin_enabled(t.path(), "a@m", true, stamp_of(&p)).unwrap();
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn busy_lock_gives_up() {
+        let t = tempfile::tempdir().unwrap();
+        let p = settings_path(t.path());
+        put(&p, "{}");
+        let lock = t.path().join(".claude/settings.json.lock");
+        fs::create_dir(&lock).unwrap();
+        let start = std::time::Instant::now();
+        let r = set_plugin_enabled(t.path(), "a@m", true, stamp_of(&p));
+        assert!(matches!(r, Err(WriteError::Busy)));
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(fs::read_to_string(&p).unwrap(), "{}");
+        assert!(lock.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_lock_is_replaced() {
+        let t = tempfile::tempdir().unwrap();
+        let p = settings_path(t.path());
+        put(&p, "{}");
+        let lock = t.path().join(".claude/settings.json.lock");
+        fs::create_dir(&lock).unwrap();
+        fs::File::open(&lock)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+            .unwrap();
+        set_plugin_enabled(t.path(), "a@m", true, stamp_of(&p)).unwrap();
+        assert!(!lock.exists());
+    }
+
+    #[test]
+    fn lock_is_released() {
+        let t = tempfile::tempdir().unwrap();
+        let p = settings_path(t.path());
+        set_plugin_enabled(t.path(), "a@m", true, Stamp::default()).unwrap();
+        assert!(!p.with_extension("json.lock").exists());
     }
 }
