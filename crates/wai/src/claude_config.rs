@@ -199,6 +199,10 @@ mod tests {
             home.join(".claude/plugins/cache/m/alpha/1.2.0/agents/rev.md"),
             "x",
         );
+        put(
+            home.join(".claude/plugins/cache/m/alpha/1.2.0/hooks/hooks.json"),
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo s3cr3t"}]}]}}"#,
+        );
         let key = wai_settings::claude::project_key_for(project);
         put(
             home.join(".claude.json"),
@@ -212,7 +216,7 @@ mod tests {
         );
         put(
             home.join(".claude/settings.json"),
-            r#"{"model":"opus","enabledPlugins":{"beta@m":false}}"#,
+            r#"{"model":"opus","enabledPlugins":{"beta@m":false},"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo s3cr3t"}]}],"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"x"},{"type":"command","command":"y"}]}]}}"#,
         );
     }
 
@@ -614,6 +618,35 @@ mod tests {
             !editor_tabs(&workspace, cx).is_empty()
         });
         let want = crate::sidebar::canonical(&tmp.path().join("home/.claude/agents/helper.md"));
+        assert_eq!(editor_tabs(&workspace, cx), [(want, false)]);
+    }
+
+    #[gpui_kit::test]
+    fn hooks_page_shows_events_not_commands(cx: &mut TestAppContext) {
+        let (workspace, cx, tmp) = claude_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Hooks, None, window, cx)
+        });
+        cx.run_until_parked();
+        let groups = page_groups(&workspace, |d| &d.hooks, "hook", cx);
+        let titles: Vec<_> = groups.iter().map(|g| g.0.as_str()).collect();
+        assert_eq!(titles, ["User", "From plugins"]);
+        let user: Vec<_> = groups[0]
+            .1
+            .iter()
+            .map(|r| (r.0.as_str(), r.2.as_str()))
+            .collect();
+        assert_eq!(
+            user,
+            [("SessionStart", "1 hook"), ("PreToolUse", "2 hooks")]
+        );
+        assert_eq!(groups[1].1[0].1, "plugin: alpha");
+        assert!(!format!("{groups:?}").contains("s3cr3t"));
+        click(ElementId::NamedInteger("open-hook".into(), 0), cx);
+        wait_until(cx, "an editor tab", |cx| {
+            !editor_tabs(&workspace, cx).is_empty()
+        });
+        let want = crate::sidebar::canonical(&tmp.path().join("home/.claude/settings.json"));
         assert_eq!(editor_tabs(&workspace, cx), [(want, false)]);
     }
 }

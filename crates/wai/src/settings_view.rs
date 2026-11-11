@@ -37,6 +37,7 @@ pub enum Section {
     Skills,
     Instructions,
     Agents,
+    Hooks,
 }
 
 impl Section {
@@ -53,6 +54,7 @@ impl Section {
             Section::Skills => "Skills",
             Section::Instructions => "Instructions",
             Section::Agents => "Agents",
+            Section::Hooks => "Hooks",
         }
     }
 
@@ -69,6 +71,7 @@ impl Section {
             Section::Skills => "skills",
             Section::Instructions => "instructions",
             Section::Agents => "agents",
+            Section::Hooks => "hooks",
         }
     }
 
@@ -86,6 +89,9 @@ impl Section {
                 "Files Claude reads at the start of every session (CLAUDE.md and what it includes)."
             }
             Section::Agents => "Subagents Claude can hand work to.",
+            Section::Hooks => {
+                "Commands Claude Code runs on its own at set moments. They run with your permissions."
+            }
             Section::Mcp => {
                 "Servers that give Claude more tools. Turning one off applies to this project, in new Claude sessions, and keeps its configuration."
             }
@@ -114,6 +120,7 @@ pub(crate) const NAV: &[(&str, &[Section])] = &[
             Section::Skills,
             Section::Instructions,
             Section::Agents,
+            Section::Hooks,
         ],
     ),
 ];
@@ -450,6 +457,7 @@ impl SettingsView {
             Section::Skills => self.claude.as_ref().map(|d| d.skills.len()),
             Section::Instructions => self.claude.as_ref().map(|d| d.instructions.len()),
             Section::Agents => self.claude.as_ref().map(|d| d.agents.len()),
+            Section::Hooks => self.claude.as_ref().map(|d| d.hooks.len()),
             _ => None,
         }
     }
@@ -785,6 +793,7 @@ impl Render for SettingsView {
                 | Section::Skills
                 | Section::Instructions
                 | Section::Agents
+                | Section::Hooks
         );
         let agents: Vec<_> = if ai {
             (self.data.agents.iter())
