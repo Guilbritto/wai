@@ -129,7 +129,7 @@ pub struct ChatSession {
     /// The unfolded runs of steps of the grouped mode, by their first row.
     pub(super) open_groups: HashSet<usize>,
     /// While a turn runs: when it started, and the status line's one-second tick.
-    pub(super) turn: Option<(Instant, Task<()>)>,
+    pub(super) turn: Option<(Instant, Duration, Task<()>)>,
     /// Per waiting `Question` card, by request id, made when it first draws.
     pub(super) questions: HashMap<u64, QuestionForm>,
     pub(super) scroller: Entity<MessageScrollerState>,
@@ -626,21 +626,26 @@ impl ChatSession {
         result
     }
 
-    /// The status line's clock: one tick a second while a turn runs, no timer otherwise.
+    /// The status line's clock: ticks at `tick_period` while a turn runs, restarting only when
+    /// the period changes; no timer otherwise.
     fn sync_clock(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.model.state, TurnState::Working | TurnState::NeedsYou) {
+        let Some(period) = tick_period(&self.model.state) else {
             self.turn = None;
-        } else if self.turn.is_none() {
-            let tick = cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(Duration::from_secs(1)).await;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
-                        break;
-                    }
-                }
-            });
-            self.turn = Some((Instant::now(), tick));
+            return;
+        };
+        if matches!(&self.turn, Some((_, current, _)) if *current == period) {
+            return;
         }
+        let started = self.turn.as_ref().map_or_else(Instant::now, |(at, ..)| *at);
+        let tick = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(period).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        });
+        self.turn = Some((started, period, tick));
     }
 
     /// Appends new rows to the list and remeasures `changed`.
@@ -845,6 +850,16 @@ impl ChatSession {
 }
 
 /// A tool call's diffs, each opening at its line (`open_line`).
+/// How often the status line's clock ticks: fast enough to turn its ring while the agent works,
+/// once a second while a card waits for you, never when no turn runs.
+pub(super) fn tick_period(state: &TurnState) -> Option<Duration> {
+    match state {
+        TurnState::Working => Some(Duration::from_millis(125)),
+        TurnState::NeedsYou => Some(Duration::from_secs(1)),
+        _ => None,
+    }
+}
+
 fn diff_views(diffs: &[FileDiff], locations: &[Location], cwd: &Path) -> Vec<DiffView> {
     let view = |k| DiffView::new(&diffs[k], cwd, open_line(locations, diffs, k));
     (0..diffs.len()).map(view).collect()
@@ -856,7 +871,9 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::rc::Rc;
+    use std::time::Duration;
 
+    use super::tick_period;
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{ElementId, Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
@@ -1898,6 +1915,20 @@ mod tests {
     }
 
     /// A turn is one card: its segments touch, and only its first row carries the header.
+    #[test]
+    fn tick_period_follows_the_state() {
+        assert_eq!(
+            tick_period(&TurnState::Working),
+            Some(Duration::from_millis(125))
+        );
+        assert_eq!(
+            tick_period(&TurnState::NeedsYou),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(tick_period(&TurnState::Idle), None);
+        assert_eq!(tick_period(&TurnState::Error(String::new())), None);
+    }
+
     #[gpui_kit::test]
     fn turn_is_one_card(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process

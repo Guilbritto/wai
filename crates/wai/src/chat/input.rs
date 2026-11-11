@@ -2,6 +2,7 @@
 //! messages queued during a turn, Send and Stop.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use base64::Engine as _;
 use gpui_kit::component::attachment::{Attachment as Chip, AttachmentContent, AttachmentTitle};
@@ -507,25 +508,33 @@ impl ChatSession {
             true => aurora::nevoa_2(),
             false => theme.muted_foreground,
         };
-        // What the agent does, for how long, and how to stop it. Nothing animates: the mark
-        // turns with the clock's tick, so a quiet turn costs one frame a second.
+        // What the agent does, for how long, and how to stop it. The ring turns with the turn
+        // clock's tick (see `tick_period`): no animation runs of its own.
         let status = self.model.activity().map(|doing| {
-            let started = self.turn.as_ref().map(|(started, _)| started.elapsed());
+            let started = self.turn.as_ref().map(|(started, ..)| started.elapsed());
             let secs = started.map_or(0, |d| d.as_secs());
             let waiting = self.model.state == TurnState::NeedsYou;
-            let color = match (dark, waiting) {
-                (true, true) => aurora::ambar(),
-                (true, false) => aurora::boreal(),
-                (false, true) => warning,
-                (false, false) => success,
+            let (ring, text) = match (dark, waiting) {
+                (true, true) => (aurora::ambar(), aurora::ambar()),
+                (true, false) => (aurora::boreal(), aurora::nevoa()),
+                (false, true) => (warning, warning),
+                (false, false) => (success, theme.muted_foreground),
+            };
+            let mark = gpui_kit::component::Icon::new(gpui_kit::assets::IconName::LoaderCircle)
+                .size(px(12.))
+                .flex_none()
+                .text_color(ring);
+            let mark = match waiting {
+                true => mark,
+                false => mark.rotate(spin_angle(started.unwrap_or_default())),
             };
             h_flex()
                 .id("turn-status")
-                .gap_2()
+                .gap(px(10.))
                 .px_3()
                 .text_size(px(12.5))
-                .text_color(color)
-                .child(mark(secs))
+                .text_color(text)
+                .child(mark)
                 .child(div().min_w_0().truncate().child(doing))
                 .child(div().flex_1())
                 .child(
@@ -574,14 +583,17 @@ impl ChatSession {
     }
 }
 
-/// The status line's mark: one glyph a second, no animation.
-fn mark(secs: u64) -> &'static str {
-    ["✢", "✳", "✶", "✻", "✽"][secs as usize % 5]
+/// The status ring's angle: an eighth of a turn per 125 ms tick, a full turn a second.
+fn spin_angle(elapsed: Duration) -> Radians {
+    let tick = (elapsed.as_millis() / 125 % 8) as f32;
+    radians(tick * std::f32::consts::FRAC_PI_4)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Attachment, IMAGE_MAX_BYTES, mark, prompt_block};
+    use std::time::Duration;
+
+    use super::{Attachment, IMAGE_MAX_BYTES, prompt_block, spin_angle};
     use base64::Engine as _;
     use gpui_kit::{Image, ImageFormat};
     use wai_agent::PromptBlock;
@@ -597,8 +609,9 @@ mod tests {
     }
 
     #[test]
-    fn status_mark_turns_once_a_second() {
-        assert_eq!([0, 1, 4, 5].map(mark), ["✢", "✳", "✽", "✢"]);
+    fn ring_turns_an_eighth_per_tick() {
+        let deg = |ms| spin_angle(Duration::from_millis(ms)).0.to_degrees().round();
+        assert_eq!([0, 125, 250, 1000, 1125].map(deg), [0., 45., 90., 0., 45.]);
     }
 
     /// A pasted PNG goes inline as it is, under a name of its own.
