@@ -190,6 +190,15 @@ mod tests {
         put(home.join(".claude/instructions/b.md"), "x");
         put(home.join("extra.md"), "x");
         put(project.join("CLAUDE.md"), "x");
+        put(
+            home.join(".claude/agents/helper.md"),
+            "---\nname: helper\ndescription: Helps\n---\n",
+        );
+        put(project.join(".claude/agents/proj.md"), "x");
+        put(
+            home.join(".claude/plugins/cache/m/alpha/1.2.0/agents/rev.md"),
+            "x",
+        );
         let key = wai_settings::claude::project_key_for(project);
         put(
             home.join(".claude.json"),
@@ -586,6 +595,25 @@ mod tests {
             !editor_tabs(&workspace, cx).is_empty()
         });
         let want = crate::sidebar::canonical(&tmp.path().join("home/.claude/CLAUDE.md"));
+        assert_eq!(editor_tabs(&workspace, cx), [(want, false)]);
+    }
+
+    #[gpui_kit::test]
+    fn agents_page_lists_user_project_and_plugin_agents(cx: &mut TestAppContext) {
+        let (workspace, cx, tmp) = claude_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Agents, None, window, cx)
+        });
+        cx.run_until_parked();
+        let groups = page_groups(&workspace, |d| &d.agents, "agent", cx);
+        let titles: Vec<_> = groups.iter().map(|g| g.0.as_str()).collect();
+        assert_eq!(titles, ["User", "Project", "alpha"]);
+        assert!(groups[2].1.iter().all(|r| r.1 == "plugin: alpha"));
+        click(ElementId::NamedInteger("open-agent".into(), 0), cx);
+        wait_until(cx, "an editor tab", |cx| {
+            !editor_tabs(&workspace, cx).is_empty()
+        });
+        let want = crate::sidebar::canonical(&tmp.path().join("home/.claude/agents/helper.md"));
         assert_eq!(editor_tabs(&workspace, cx), [(want, false)]);
     }
 }

@@ -36,6 +36,7 @@ pub enum Section {
     Mcp,
     Skills,
     Instructions,
+    Agents,
 }
 
 impl Section {
@@ -51,6 +52,7 @@ impl Section {
             Section::Mcp => "MCP Servers",
             Section::Skills => "Skills",
             Section::Instructions => "Instructions",
+            Section::Agents => "Agents",
         }
     }
 
@@ -66,6 +68,7 @@ impl Section {
             Section::Mcp => "mcp",
             Section::Skills => "skills",
             Section::Instructions => "instructions",
+            Section::Agents => "agents",
         }
     }
 
@@ -82,6 +85,7 @@ impl Section {
             Section::Instructions => {
                 "Files Claude reads at the start of every session (CLAUDE.md and what it includes)."
             }
+            Section::Agents => "Subagents Claude can hand work to.",
             Section::Mcp => {
                 "Servers that give Claude more tools. Turning one off applies to this project, in new Claude sessions, and keeps its configuration."
             }
@@ -109,6 +113,7 @@ pub(crate) const NAV: &[(&str, &[Section])] = &[
             Section::Mcp,
             Section::Skills,
             Section::Instructions,
+            Section::Agents,
         ],
     ),
 ];
@@ -444,6 +449,7 @@ impl SettingsView {
             Section::Mcp => self.claude.as_ref().map(|d| d.mcp.len()),
             Section::Skills => self.claude.as_ref().map(|d| d.skills.len()),
             Section::Instructions => self.claude.as_ref().map(|d| d.instructions.len()),
+            Section::Agents => self.claude.as_ref().map(|d| d.agents.len()),
             _ => None,
         }
     }
@@ -774,7 +780,11 @@ impl Render for SettingsView {
         let extensions = section == Section::Extensions;
         let claude_page = matches!(
             section,
-            Section::Plugins | Section::Mcp | Section::Skills | Section::Instructions
+            Section::Plugins
+                | Section::Mcp
+                | Section::Skills
+                | Section::Instructions
+                | Section::Agents
         );
         let agents: Vec<_> = if ai {
             (self.data.agents.iter())

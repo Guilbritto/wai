@@ -355,6 +355,7 @@ impl SettingsView {
             Section::Instructions => {
                 entry_groups(&data.instructions, "instruction", &self.data.home)
             }
+            Section::Agents => entry_groups(&data.agents, "agent", &self.data.home),
             _ => plugin_groups(data, &self.data.home),
         };
         let total: usize = all.iter().map(|g| g.rows.len()).sum();
