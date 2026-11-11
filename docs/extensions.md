@@ -2,7 +2,7 @@
 
 An extension is a folder with a `wai-extension.toml` manifest. It can be manifest-only (templates, prompt commands, agents, MCP servers) or run a program of its own. That program can be in any language: it speaks line-delimited JSON-RPC 2.0 over stdio and can draw panels in wai's sidebar.
 
-This guide describes protocol version 1, as implemented by wai 0.6.0. The [first-party extensions](../extensions) are working references:
+This guide describes protocol version 1, as implemented by wai 0.6.1. The [first-party extensions](../extensions) are working references:
 - `wai-navegador` is manifest-only;
 - `wai-waycarbon` and `wai-rotinas` are written in Go.
 
@@ -132,7 +132,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 
 | Method | Kind | Params | Notes |
 |---|---|---|---|
-| `initialize` | request, id `0` | `{"protocol": 1, "wai_version": "0.6.0", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
+| `initialize` | request, id `0` | `{"protocol": 1, "wai_version": "0.6.1", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
 | `command/run` | request | `{"id": "<command id>"}` | The user ran one of your commands without `prompt` from the palette. wai ignores the answer |
 | `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item or button was clicked. `action_id` is the item's or button's `id`. `values` has every form field in the panel by id: inputs as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels` |
 | `event/session_state` | notification | `{"agent", "session", "state"}` | `state` is `idle`, `working`, `needs_you` or `error`. Needs `sessions:read` |
