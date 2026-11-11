@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 mod approve;
+pub mod claude;
 mod edit;
 pub use approve::{Approval, is_approved, seed_approved, unapproved};
 pub use edit::{Change, write_change};
