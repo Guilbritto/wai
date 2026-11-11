@@ -39,7 +39,6 @@ fn white(alpha: f32) -> Hsla {
 }
 
 /// Window background.
-#[cfg(test)]
 pub(crate) fn noite() -> Hsla {
     rgb(0x070a18).into()
 }

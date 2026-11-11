@@ -28,24 +28,17 @@ pub fn should_notify(
 /// message.
 pub fn message(kind: NotifyKind, model: &ChatModel) -> (String, String) {
     let title = model.shown_title().unwrap_or("New session");
-    let mut items = model.items.iter().rev();
     match kind {
         NotifyKind::NeedsYou => {
-            let body = items.find_map(|item| match item {
-                ChatItem::Permission {
-                    request,
-                    answered: None,
-                } => Some(request.title.clone()),
-                ChatItem::Question {
-                    request,
-                    answered: None,
-                } => Some(request.message.clone()),
+            let body = model.waiting.iter().rev().find_map(|item| match item {
+                ChatItem::Permission { request, .. } => Some(request.title.clone()),
+                ChatItem::Question { request, .. } => Some(request.message.clone()),
                 _ => None,
             });
             (format!("{title} needs you"), body.unwrap_or_default())
         }
         NotifyKind::Done => {
-            let body = items.find_map(|item| match item {
+            let body = model.items.iter().rev().find_map(|item| match item {
                 ChatItem::Agent { text } => Some(text.trim().chars().take(80).collect()),
                 _ => None,
             });
@@ -202,7 +195,7 @@ mod tests {
         model.items.push(ChatItem::Agent {
             text: format!("  {}", "a".repeat(100)),
         });
-        model.items.push(ChatItem::Permission {
+        model.waiting.push(ChatItem::Permission {
             request: PermissionRequest {
                 id: 1,
                 session: "s".into(),

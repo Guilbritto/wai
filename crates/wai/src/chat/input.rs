@@ -9,13 +9,13 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, IconName, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::{AgentCaps, PromptBlock};
 
-use super::model::{NoticeKind, TurnState, elapsed};
+use super::model::{ChatItem, NoticeKind, TurnState, elapsed};
 use super::view::ChatSession;
 use crate::agents::AgentStatus;
 use crate::app::CancelTurn;
@@ -87,7 +87,7 @@ pub(super) struct Message {
 
 impl Message {
     /// What the transcript shows of it: the text, then `Attached: <names>`.
-    fn shown(&self) -> String {
+    pub(super) fn shown(&self) -> String {
         if self.attachments.is_empty() {
             return self.text.clone();
         }
@@ -129,6 +129,30 @@ fn image(path: &Path) -> Option<PromptBlock> {
 }
 
 impl ChatSession {
+    /// With the box empty, `1`-`9` answer the top card's n-th choice when it is a
+    /// permission; any other key, or a question on top, goes through to the box.
+    fn answer_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let key = &event.keystroke;
+        let Some(n) = (key.key.parse::<usize>().ok()).filter(|n| (1..=9).contains(n)) else {
+            return;
+        };
+        if key.modifiers.modified()
+            || !self.input.read(cx).value().is_empty()
+            || !self.attachments.is_empty()
+        {
+            return;
+        }
+        let Some(ChatItem::Permission { request, .. }) = self.model.waiting.first() else {
+            return;
+        };
+        let Some(choice) = request.options.get(n - 1).cloned() else {
+            return;
+        };
+        let id = request.id;
+        cx.stop_propagation();
+        self.answer(id, &choice, cx);
+    }
+
     /// Sends the prompt and the attachments: from an idle session as a prompt; during a turn
     /// into it when the agent steers, else into the queue until it ends.
     pub(super) fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -171,16 +195,23 @@ impl ChatSession {
     pub(super) fn steer(&mut self, message: Message, cx: &mut Context<Self>) {
         let blocks = self.blocks(&message, cx);
         let (handle, id) = (self.handle.clone(), self.id.clone());
+        let shown = message.shown();
+        self.model.steer_sent(&shown);
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let steered = handle.steer(id, blocks).await;
             this.update(cx, |this, cx| {
                 match steered {
                     Ok(true) => {
-                        let ix = this.update_model(cx, |m| m.push_steered(&message.shown()));
-                        this.sync_rows(Some(ix), cx);
+                        this.update_model(cx, |m| m.steer_injected(&shown));
+                        this.sync_rows(None, cx);
                     }
-                    Ok(false) => this.send_message(message, cx),
+                    Ok(false) => {
+                        this.model.steer_dropped(&shown);
+                        this.send_message(message, cx)
+                    }
                     Err(e) => {
+                        this.model.steer_dropped(&shown);
                         let text = format!(
                             "Could not send the message into the turn ({e}); it is queued."
                         );
@@ -216,9 +247,21 @@ impl ChatSession {
         if send {
             return self.send_message(message, cx);
         }
-        self.attachments.splice(0..0, message.attachments);
-        self.unsent = Some(message.text);
+        self.take_back(message);
         cx.notify();
+    }
+
+    /// Puts a queued message back in the prompt box: its attachments first among the chips, its
+    /// text after any text already taken back, a blank line apart.
+    pub(super) fn take_back(&mut self, message: Message) {
+        self.attachments.splice(0..0, message.attachments);
+        self.unsent = Some(match self.unsent.take() {
+            Some(held) if !held.is_empty() && !message.text.is_empty() => {
+                format!("{held}\n\n{}", message.text)
+            }
+            Some(held) if message.text.is_empty() => held,
+            _ => message.text,
+        });
     }
 
     /// Puts the text taken back from the queue in the prompt box, before what was typed since.
@@ -351,6 +394,7 @@ impl ChatSession {
         });
         let theme = cx.theme();
         let dark = theme.is_dark();
+        let (success, warning) = (theme.success, theme.warning);
         // Round 36 px buttons (`.chat-enviar`); light mode keeps the theme's primary and danger.
         let stop = busy.then(|| {
             let stop = Button::new("stop")
@@ -408,6 +452,7 @@ impl ChatSession {
             .pr(px(6.))
             .pb(px(6.))
             .pl(px(14.))
+            .capture_key_down(cx.listener(|this, event, _, cx| this.answer_key(event, cx)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| this.focus(window, cx)),
@@ -429,50 +474,31 @@ impl ChatSession {
         let status = self.model.activity().map(|doing| {
             let started = self.turn.as_ref().map(|(started, _)| started.elapsed());
             let secs = started.map_or(0, |d| d.as_secs());
+            let waiting = self.model.state == TurnState::NeedsYou;
+            let color = match (dark, waiting) {
+                (true, true) => aurora::ambar(),
+                (true, false) => aurora::boreal(),
+                (false, true) => warning,
+                (false, false) => success,
+            };
             h_flex()
                 .id("turn-status")
                 .gap_2()
                 .px_3()
-                .text_size(px(12.))
-                .text_color(muted)
-                .child(["◐", "◓", "◑", "◒"][secs as usize % 4])
+                .text_size(px(12.5))
+                .text_color(color)
+                .child(mark(secs))
                 .child(div().min_w_0().truncate().child(doing))
+                .child(div().flex_1())
                 .child(
                     div()
+                        .id("turn-status-time")
                         .flex_none()
-                        .child(format!("{} · Esc to stop", elapsed(secs))),
-                )
-                // Registers the id so tests can find it.
-                .test_support()
-        });
-        // The messages waiting for the turn's end, oldest first.
-        let queued = self.queued.iter().enumerate().map(|(ix, message)| {
-            let shown = message.shown();
-            let first = shown.lines().next().unwrap_or_default();
-            h_flex()
-                .id(("queued", ix))
-                .gap_2()
-                .px_3()
-                .text_size(px(12.))
-                .text_color(muted)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .child(format!("Queued · {first}")),
-                )
-                .child(
-                    Button::new(("queued-remove", ix))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
-                        .tooltip("Don't send")
-                        .accessibility_label("Don't send")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.queued.remove(ix);
-                            cx.notify();
-                        })),
+                        .text_size(px(11.5))
+                        .text_color(muted)
+                        .child(format!("{} · Esc to stop", elapsed(secs)))
+                        // Registers the id so tests can find it.
+                        .test_support(),
                 )
                 // Registers the id so tests can find it.
                 .test_support()
@@ -497,7 +523,6 @@ impl ChatSession {
             .gap_2()
             .p_3()
             .children(status)
-            .children(queued)
             .when(!self.attachments.is_empty(), |el| {
                 el.child(h_flex().gap_2().flex_wrap().children(chips))
             })
@@ -517,9 +542,14 @@ impl ChatSession {
     }
 }
 
+/// The status line's mark: one glyph a second, no animation.
+fn mark(secs: u64) -> &'static str {
+    ["✢", "✳", "✶", "✻", "✽"][secs as usize % 5]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Attachment, IMAGE_MAX_BYTES, prompt_block};
+    use super::{Attachment, IMAGE_MAX_BYTES, mark, prompt_block};
     use base64::Engine as _;
     use gpui_kit::{Image, ImageFormat};
     use wai_agent::PromptBlock;
@@ -532,6 +562,11 @@ mod tests {
             .decode(base64)
             .unwrap();
         (mime.clone(), bytes)
+    }
+
+    #[test]
+    fn status_mark_turns_once_a_second() {
+        assert_eq!([0, 1, 4, 5].map(mark), ["✢", "✳", "✽", "✢"]);
     }
 
     /// A pasted PNG goes inline as it is, under a name of its own.
