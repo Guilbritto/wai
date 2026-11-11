@@ -1540,6 +1540,38 @@ mod tests {
         })
     }
 
+    /// A step is one compact line of its own, 8 px from the next; unfolded, its output sits in a
+    /// box under the line.
+    #[gpui_kit::test]
+    fn step_lines_are_compact_and_open_below(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--steps 2"));
+        let session = start_session(&workspace, cx);
+        turn(&session, cx);
+        let bounds = |id: (&'static str, usize), cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.find(id).bounds()
+            })
+        };
+        let (tool, line, next) = (
+            bounds(("tool", 2), cx),
+            bounds(("step", 2), cx),
+            bounds(("step", 3), cx),
+        );
+        assert_eq!(line.top(), tool.top(), "the line is the step's own box");
+        assert!(
+            (next.top() - line.bottom() - px(8.)).abs() < px(0.5),
+            "{line:?} {next:?}"
+        );
+        click_edits(None, ("step", 2usize), cx);
+        let (line, output) = (bounds(("step", 2), cx), bounds(("step-output", 2), cx));
+        assert!(
+            output.top() >= line.bottom(),
+            "{output:?} is not under {line:?}"
+        );
+    }
+
     /// `--steps 2` is a thought (row 1) and two Read calls (rows 2 and 3). Step by step, each is
     /// one folded line; a click unfolds a call's output.
     #[gpui_kit::test]

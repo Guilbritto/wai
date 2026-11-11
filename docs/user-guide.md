@@ -59,12 +59,12 @@ While the agent prepares the session, its pane shows `Preparing <agent>…`. **�
 
     | Processing | Steps |
     |---|---|
-    | **Step by step** (the default) | Each step is one folded line with its title and ✓ or ✗. A click unfolds a tool call's output, or the thinking |
+    | **Step by step** (the default) | Each step is one folded line with an icon of its kind, its title and ✓ or ✗. A click opens a tool call's output in a box under the line; thinking shows as a `Thought` line that opens the same way |
     | **Grouped** | The steps between two replies fold into one block, such as `3 steps · Read README.md`. A click lists the step lines, each still folded |
     | **Hidden** | No steps |
 
   - **Subagents.** Each subagent the agent runs (Claude Code's Agent tool) shows as a step card with its title, its status and, once it answers, its answer. Its tool calls stay in the transcript, as steps. Its own text and checklist are not shown.
-  - **Always shown,** whatever the setting: your prompts, the replies, permission cards and questions, notices, and file edits. An edit that was written reads `✎ Edited <file>` (a click shows its diff), and the turn still ends with its **Edits** block (see [Reviewing edits](#reviewing-edits)).
+  - **Always shown,** whatever the setting: your prompts, the replies, permission cards and questions, notices, and file edits. An edit that was written reads `Edited <file>` (a click shows its diff), and the turn still ends with its **Edits** block (see [Reviewing edits](#reviewing-edits)).
   - An unfolded tool call shows its output, up to 2,000 lines, with **Show all**.
   - A very large output offers **Open full output in editor**. That opens a read-only copy kept under `<config>/scratch/`, which is cleared at each launch.
 

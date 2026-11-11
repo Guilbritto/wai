@@ -60,21 +60,94 @@ pub(super) fn glass(el: Div, cx: &App) -> Div {
 /// A tool call's status mark and its color.
 fn status_icon(status: ToolStatus, cx: &App) -> Icon {
     let theme = cx.theme();
+    let done = match theme.is_dark() {
+        true => aurora::boreal(),
+        false => theme.success,
+    };
     let (icon, color) = match status {
         ToolStatus::Pending => (IconName::Ellipsis, theme.muted_foreground),
         ToolStatus::InProgress => (IconName::Loader, theme.foreground),
-        ToolStatus::Completed => (IconName::CircleCheck, theme.success),
+        ToolStatus::Completed => (IconName::Check, done),
         ToolStatus::Failed => (IconName::CircleX, theme.danger),
     };
-    Icon::new(icon).small().text_color(color)
+    Icon::new(icon).xsmall().text_color(color)
 }
 
-fn chevron(open: bool) -> Icon {
+/// The muted color of a step line's chevron and kind icon.
+fn icon_color(cx: &App) -> Hsla {
+    match cx.theme().is_dark() {
+        true => aurora::nevoa_2(),
+        false => cx.theme().muted_foreground,
+    }
+}
+
+fn chevron(open: bool, cx: &App) -> Icon {
     let icon = match open {
         true => IconName::ChevronDown,
         false => IconName::ChevronRight,
     };
-    Icon::new(icon).small()
+    Icon::new(icon).xsmall().text_color(icon_color(cx))
+}
+
+/// The icon of a tool call's kind.
+fn kind_icon(kind: &str) -> IconName {
+    match kind {
+        "execute" => IconName::SquareTerminal,
+        "read" => IconName::FileText,
+        "edit" => IconName::Replace,
+        "search" => IconName::Search,
+        "fetch" => IconName::Globe,
+        "delete" => IconName::Delete,
+        "move" => IconName::ArrowRight,
+        "subagent" => IconName::Bot,
+        "think" => IconName::Asterisk,
+        _ => IconName::Dash,
+    }
+}
+
+/// A step's one compact line (`.t`): glass, 13 px regular text, muted.
+pub(super) fn step_line(cx: &App) -> Div {
+    let theme = cx.theme();
+    let line = h_flex()
+        .gap(px(6.))
+        .px(px(9.))
+        .py(px(5.))
+        .rounded(px(8.))
+        .border_1()
+        .text_size(px(13.))
+        .font_weight(FontWeight::NORMAL)
+        .cursor_pointer();
+    match theme.is_dark() {
+        true => line
+            .bg(aurora::vidro())
+            .border_color(aurora::borda())
+            .text_color(aurora::nevoa()),
+        false => line
+            .border_color(theme.border)
+            .text_color(theme.muted_foreground),
+    }
+}
+
+/// The box under a step line (`.out`) that holds its output.
+fn output_box(cx: &App) -> Div {
+    let theme = cx.theme();
+    let out = v_flex()
+        .px(px(8.))
+        .py(px(6.))
+        .rounded(px(6.))
+        .border_1()
+        .font_family(theme.mono_font_family.clone())
+        .text_size(px(11.));
+    match theme.is_dark() {
+        true => out
+            .bg(aurora::noite())
+            .border_color(aurora::borda())
+            .text_color(aurora::nevoa()),
+        false => out
+            .bg(theme.muted)
+            .border_color(theme.border)
+            .text_color(theme.muted_foreground),
+    }
 }
 
 impl ChatSession {
@@ -157,7 +230,7 @@ impl ChatSession {
         let head = self.render_group(run, open, cx);
         Some(
             v_flex()
-                .gap_4()
+                .gap_2()
                 .child(head)
                 .children(row)
                 .into_any_element(),
@@ -191,7 +264,7 @@ impl ChatSession {
             .py_2()
             .rounded(px(12.))
             .cursor_pointer()
-            .child(chevron(open))
+            .child(chevron(open, cx))
             .child(
                 div()
                     .flex_1()
@@ -307,25 +380,32 @@ impl ChatSession {
                 let open = self.open_thoughts.contains(&ix);
                 v_flex()
                     .gap_1()
-                    .text_color(muted)
                     .child(
-                        h_flex()
+                        step_line(cx)
                             .id(("thought", ix))
-                            .gap_1()
-                            .cursor_pointer()
-                            .child(chevron(open))
-                            .child("Thinking…")
+                            .child(chevron(open, cx))
+                            .child(
+                                Icon::new(kind_icon("think"))
+                                    .xsmall()
+                                    .text_color(icon_color(cx)),
+                            )
+                            .child("Thought")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.open_thoughts.remove(&ix) {
                                     this.open_thoughts.insert(ix);
                                 }
+                                this.remeasure(ix..ix + 1, cx);
                                 cx.notify();
                             }))
                             // Registers the id so tests can find it.
                             .test_support(),
                     )
                     .when(open, |el| {
-                        el.children(self.texts.get(&ix).map(|md| TextView::new(&md.state)))
+                        el.children(
+                            self.texts
+                                .get(&ix)
+                                .map(|md| output_box(cx).child(TextView::new(&md.state))),
+                        )
                     })
                     .into_any_element()
             }
@@ -397,14 +477,13 @@ impl ChatSession {
     }
 
     /// One folded line: the call's title and status; a click unfolds its output and diffs. An
-    /// edit that reached the disk reads `✎ Edited <file>`, in every processing mode.
+    /// edit that reached the disk reads `Edited <file>`, in every processing mode.
     fn render_tool(
         &self,
         ix: usize,
         tool: &ToolItem,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
-        let theme = cx.theme();
         let open = self.open_steps.contains(&ix);
         let edit = self.model.items[ix].is_edit();
         let (id, title) = match edit {
@@ -417,25 +496,18 @@ impl ChatSession {
                         files.push(name);
                     }
                 }
-                ("edited", format!("✎ Edited {}", files.join(", ")))
+                ("edited", format!("Edited {}", files.join(", ")))
             }
             false => ("step", tool.title.clone()),
         };
         let (output, hidden) = tool.visible_text();
         let on_open = Self::on_open(cx);
-        let line = h_flex()
+        let kind = kind_icon(if edit { "edit" } else { &tool.kind });
+        let line = step_line(cx)
             .id((id, ix))
-            .gap_2()
-            .cursor_pointer()
-            .child(chevron(open))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(title),
-            )
+            .child(chevron(open, cx))
+            .child(Icon::new(kind).xsmall().text_color(icon_color(cx)))
+            .child(div().flex_1().min_w_0().truncate().child(title))
             .child(status_icon(tool.status, cx))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if !this.open_steps.remove(&ix) {
@@ -446,23 +518,14 @@ impl ChatSession {
             }))
             // Registers the id so tests can find and click it.
             .test_support();
-        let card = glass(v_flex(), cx)
-            .id(("tool", ix))
-            .gap_2()
-            .px_3()
-            .py_2()
-            .rounded(px(12.))
-            .child(line);
+        let card = v_flex().id(("tool", ix)).gap_1().child(line).test_support();
         if !open {
             return card;
         }
         card.when(!output.is_empty(), |el| {
             el.child(
-                div()
+                output_box(cx)
                     .id(("step-output", ix))
-                    .font_family(theme.mono_font_family.clone())
-                    .text_size(theme.mono_font_size)
-                    .text_color(theme.muted_foreground)
                     .child(output.to_string())
                     .test_support(),
             )
@@ -536,7 +599,7 @@ impl Render for ChatSession {
                 .items_center()
                 .justify_center()
                 .child(aurora::pill(cx).child("No messages yet.")),
-            // The Central's bubbles sit 16 px apart, not the scroller's 32: the scroller's gap
+            // Rows sit 8 px apart, not the scroller's 32: the scroller's gap
             // goes and each row but the last carries its own. The scroller remeasures the row
             // before an append, whose "last" flips.
             false => messages.child(
@@ -547,7 +610,7 @@ impl Render for ChatSession {
                         let last = ix + 1 == this.model.items.len();
                         let row = this.render_item(ix, window, cx);
                         div()
-                            .when(!last && row.is_some(), |el| el.pb_4())
+                            .when(!last && row.is_some(), |el| el.pb_2())
                             .children(row)
                     }),
                 )
