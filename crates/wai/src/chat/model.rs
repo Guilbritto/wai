@@ -245,6 +245,25 @@ pub struct ChatModel {
     /// Open permission and question cards, oldest first: they wait over the list, and join
     /// `items` once closed.
     pub waiting: Vec<ChatItem>,
+    /// Messages sent into the running turn, oldest first, pinned until the agent reads them.
+    pub steering: Vec<Steer>,
+}
+
+/// A message sent into the running turn; `injected` once the agent took it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Steer {
+    pub text: String,
+    pub injected: bool,
+}
+
+/// The first new output of the main agent: the sign that it read an injected steer.
+// ponytail: a proxy, since the adapter reports no consumption; replace it with an explicit event once it does
+fn reads_steer(ev: &SessionEvent) -> bool {
+    match ev {
+        SessionEvent::AgentText(_) | SessionEvent::AgentThought(_) => true,
+        SessionEvent::ToolCall(v) => v.subagent.is_none(),
+        _ => false,
+    }
 }
 
 impl Default for ChatModel {
@@ -264,6 +283,7 @@ impl Default for ChatModel {
             subagents: Vec::new(),
             in_turn: false,
             waiting: Vec::new(),
+            steering: Vec::new(),
         }
     }
 }
@@ -311,7 +331,53 @@ impl ChatModel {
         })
     }
 
+    pub fn steer_sent(&mut self, text: &str) {
+        self.steering.push(Steer {
+            text: text.to_string(),
+            injected: false,
+        });
+    }
+
+    /// The turn took the steer; with no turn running any more it reads at once.
+    pub fn steer_injected(&mut self, text: &str) {
+        if let Some(steer) = self
+            .steering
+            .iter_mut()
+            .find(|s| s.text == text && !s.injected)
+        {
+            steer.injected = true;
+        }
+        if !self.in_turn {
+            self.read_steers();
+        }
+    }
+
+    /// The steer went as a prompt or failed: it is no longer pinned.
+    pub fn steer_dropped(&mut self, text: &str) {
+        if let Some(at) = self
+            .steering
+            .iter()
+            .position(|s| s.text == text && !s.injected)
+        {
+            self.steering.remove(at);
+        }
+    }
+
+    /// Injected steers join the list, in order; those still waiting for their reply stay.
+    fn read_steers(&mut self) {
+        let (read, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.steering)
+            .into_iter()
+            .partition(|s| s.injected);
+        self.steering = waiting;
+        for steer in read {
+            self.push_steered(&steer.text);
+        }
+    }
+
     pub fn apply(&mut self, ev: &SessionEvent) -> Option<usize> {
+        if self.waiting.is_empty() && reads_steer(ev) {
+            self.read_steers();
+        }
         match ev {
             SessionEvent::AgentText(t) => Some(match self.items.last_mut() {
                 Some(ChatItem::Agent { text }) => {
@@ -721,6 +787,7 @@ impl ChatModel {
     /// subagent's, and keeps the session `NeedsYou`.
     pub fn on_turn_ended(&mut self, reason: &StopReason) {
         self.in_turn = false;
+        self.read_steers();
         self.push_edits();
         self.done = matches!(reason, StopReason::EndTurn);
         match reason {
@@ -755,6 +822,7 @@ impl ChatModel {
     /// A subagent last seen live is not: nothing says what became of it.
     pub fn on_exited(&mut self, error: Option<&str>) {
         self.in_turn = false;
+        self.read_steers();
         let cards: Vec<(bool, u64)> = self
             .waiting
             .iter()
@@ -1530,6 +1598,130 @@ mod tests {
         };
         let paths: Vec<_> = files.iter().map(|f| f.path.display().to_string()).collect();
         assert_eq!((*turn, paths), (0, vec!["/p/a".into(), "/p/b".into()]));
+    }
+
+    fn steered(text: &str) -> ChatItem {
+        ChatItem::Steered { text: text.into() }
+    }
+
+    /// Review focus 4: a steer joins just before the main agent's next new output; a call's
+    /// update or a subagent's call is not one.
+    #[test]
+    fn steered_message_joins_when_the_agent_reads_it() {
+        let mut m = ChatModel::default();
+        m.push_user("go");
+        m.apply(&tool("1", ToolStatus::InProgress));
+        m.steer_sent("x");
+        m.steer_dropped("x"); // the turn had ended: it went as a prompt
+        assert!(m.steering.is_empty());
+        m.steer_sent("b");
+        m.apply(&text("a")); // its reply has not come: not taken yet
+        m.steer_injected("b");
+        m.apply(&SessionEvent::ToolCallUpdate(ToolCallPatch {
+            id: "1".into(),
+            title: None,
+            status: Some(ToolStatus::Completed),
+            content: None,
+            locations: None,
+        }));
+        m.apply(&call("s", "Sub", ToolStatus::InProgress, Some("c")));
+        assert!(!m.items.contains(&steered("b")));
+        m.apply(&text("ok"));
+        let n = m.items.len();
+        assert_eq!(
+            m.items[n - 2..],
+            [steered("b"), ChatItem::Agent { text: "ok".into() }]
+        );
+        assert!(m.steering.is_empty());
+    }
+
+    /// With a card waiting the adapter holds the steer: it is read only after the answer.
+    #[test]
+    fn steer_waits_for_the_cards() {
+        let mut m = ChatModel::default();
+        m.push_user("go");
+        m.on_permission(perm());
+        m.steer_sent("b");
+        m.steer_injected("b");
+        m.apply(&text("x"));
+        assert!(!m.items.contains(&steered("b")));
+        m.on_permission_answered(7, "Yes");
+        m.apply(&text("y"));
+        let n = m.items.len();
+        assert!(
+            matches!(&m.items[n - 3], ChatItem::Permission { .. }),
+            "{:?}",
+            m.items
+        );
+        assert_eq!(
+            m.items[n - 2..],
+            [steered("b"), ChatItem::Agent { text: "y".into() }]
+        );
+    }
+
+    /// D2: an unread steer joins when the turn ends, before its closing rows; a late injection reads at once.
+    #[test]
+    fn unread_steers_join_when_the_turn_ends() {
+        for reason in [StopReason::EndTurn, StopReason::Cancelled] {
+            let mut m = ChatModel::default();
+            m.push_user("go");
+            m.apply(&edit("t", "/p/a", None, "a", ToolStatus::Completed));
+            m.steer_sent("b");
+            m.steer_injected("b");
+            m.on_turn_ended(&reason);
+            let at = m
+                .items
+                .iter()
+                .position(|i| *i == steered("b"))
+                .expect("joined");
+            let edits = m
+                .items
+                .iter()
+                .position(|i| matches!(i, ChatItem::Edits { .. }))
+                .unwrap();
+            assert!(at < edits, "{reason:?}");
+            m.steer_sent("c");
+            m.steer_injected("c");
+            assert_eq!(m.items.last(), Some(&steered("c")), "{reason:?}");
+            assert!(m.steering.is_empty());
+        }
+    }
+
+    /// Review focus 3: the same text twice joins once per read, in order.
+    #[test]
+    fn identical_steers_join_one_per_read() {
+        let mut m = ChatModel::default();
+        m.push_user("go");
+        m.steer_sent("ok");
+        m.steer_sent("ok");
+        m.steer_injected("ok");
+        m.apply(&text("a"));
+        assert_eq!(
+            m.steering,
+            [Steer {
+                text: "ok".into(),
+                injected: false
+            }]
+        );
+        m.steer_injected("ok");
+        m.apply(&text("b"));
+        assert_eq!(m.items.iter().filter(|i| **i == steered("ok")).count(), 2);
+        assert!(m.steering.is_empty());
+    }
+
+    /// Review focus 5: an exit leaves nothing pinned.
+    #[test]
+    fn exit_unpins_everything() {
+        let mut m = ChatModel::default();
+        m.push_user("go");
+        m.on_permission(perm());
+        m.steer_sent("b");
+        m.steer_injected("b");
+        m.on_exited(None);
+        assert!(m.waiting.is_empty() && m.steering.is_empty());
+        let n = m.items.len();
+        assert!(m.items[..n - 1].contains(&steered("b")));
+        assert!(matches!(&m.items[n - 1], ChatItem::Notice { .. }));
     }
 
     /// R34: a file counts as created by a call only if wai saw it missing before the call ran.

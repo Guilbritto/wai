@@ -195,16 +195,23 @@ impl ChatSession {
     pub(super) fn steer(&mut self, message: Message, cx: &mut Context<Self>) {
         let blocks = self.blocks(&message, cx);
         let (handle, id) = (self.handle.clone(), self.id.clone());
+        let shown = message.shown();
+        self.model.steer_sent(&shown);
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let steered = handle.steer(id, blocks).await;
             this.update(cx, |this, cx| {
                 match steered {
                     Ok(true) => {
-                        let ix = this.update_model(cx, |m| m.push_steered(&message.shown()));
-                        this.sync_rows(Some(ix), cx);
+                        this.update_model(cx, |m| m.steer_injected(&shown));
+                        this.sync_rows(None, cx);
                     }
-                    Ok(false) => this.send_message(message, cx),
+                    Ok(false) => {
+                        this.model.steer_dropped(&shown);
+                        this.send_message(message, cx)
+                    }
                     Err(e) => {
+                        this.model.steer_dropped(&shown);
                         let text = format!(
                             "Could not send the message into the turn ({e}); it is queued."
                         );

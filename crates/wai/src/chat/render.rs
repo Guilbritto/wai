@@ -601,7 +601,8 @@ impl ChatSession {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if self.model.waiting.is_empty() && self.queued.is_empty() {
+        if self.model.waiting.is_empty() && self.queued.is_empty() && self.model.steering.is_empty()
+        {
             return None;
         }
         let waiting = self.model.waiting.clone();
@@ -644,6 +645,12 @@ impl ChatSession {
                     cx,
                 )
                 .test_support()
+            })
+            .collect();
+        let steering: Vec<_> = (self.model.steering.iter().enumerate())
+            .map(|(ix, steer)| {
+                pinned_message(("steering", ix).into(), "Sent", &steer.text, None, cx)
+                    .test_support()
             })
             .collect();
         let view = cx.entity();
@@ -697,6 +704,7 @@ impl ChatSession {
                 .child(height)
                 .children(cards)
                 .children(queued)
+                .children(steering)
                 .test_support()
                 .into_any_element(),
         )

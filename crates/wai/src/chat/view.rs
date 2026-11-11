@@ -650,6 +650,7 @@ impl ChatSession {
         self.handle = handle.clone();
         self.model.items.clear();
         self.model.waiting.clear();
+        self.model.steering.clear();
         self.texts.clear();
         self.diffs.clear();
         self.card_diffs.clear();
@@ -806,7 +807,7 @@ mod tests {
     }
 
     /// With an agent that steers, a message sent during a turn joins it: it shows as the user's
-    /// at once, the turn's reply takes it in, and no second prompt goes out.
+    /// once the turn reads it, the turn's reply takes it in, and no second prompt goes out.
     #[gpui_kit::test]
     fn message_sent_during_a_turn_steers_it(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
@@ -833,6 +834,50 @@ mod tests {
         let words: Vec<String> = (0..20).map(|i| format!("w{i}")).collect();
         let reply = format!("{} Steered: also this", words.join(" "));
         assert_eq!(agent_texts(&session, cx), reply);
+    }
+
+    /// A message steered while a card waits stays pinned until the agent reads it, then joins
+    /// the chat after the answered card and before the reply to it.
+    #[gpui_kit::test]
+    fn steered_message_stays_pinned_until_read(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--steering --ask-permission"));
+        let session = start_session(&workspace, cx);
+        send("edit", cx);
+        wait_until(cx, "the permission card", |cx| {
+            state(&session, cx) == TurnState::NeedsYou
+        });
+        send("also", cx);
+        wait_until(cx, "the steer taken", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.steering.first().is_some_and(|s| s.injected)
+            })
+        });
+        let also = ChatItem::Steered {
+            text: "also".into(),
+        };
+        assert!(cx.update(|w, cx| {
+            w.render_frame(cx);
+            w.within("waiting").try_find(("steering", 0usize)).is_some()
+        }));
+        assert!(!session.read_with(cx, |s, _| s.model.items.contains(&also)));
+        click_edits(None, "perm-allow_once", cx);
+        wait_until(cx, "the turn's end", |cx| {
+            state(&session, cx) == TurnState::Idle
+        });
+        let items = session.read_with(cx, |s, _| s.model.items.clone());
+        let at = |f: &dyn Fn(&ChatItem) -> bool| items.iter().position(|i| f(i)).unwrap();
+        let card = at(&|i| matches!(i, ChatItem::Permission { .. }));
+        let steer = at(&|i| *i == also);
+        let reply = at(&|i| matches!(i, ChatItem::Agent { .. }));
+        assert!(card < steer && steer < reply, "{items:?}");
+        assert_eq!(
+            items[reply],
+            ChatItem::Agent {
+                text: "chose:allow-once Steered: also".into()
+            }
+        );
+        assert!(!shows(("steering", 0usize), cx));
     }
 
     /// A steer that finds no turn running (it ended meanwhile) goes out as a prompt.
