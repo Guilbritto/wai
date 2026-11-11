@@ -1,26 +1,32 @@
-//! The prompt box: a multi-line input, dropped-file chips, Send / Stop.
+//! The prompt box: a multi-line input, chips for the files dropped, pasted or picked, Send /
+//! Stop.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use gpui_kit::component::attachment::{Attachment as Chip, AttachmentContent, AttachmentTitle};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, h_flex, v_flex};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, IconName, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::PromptBlock;
 
 use super::model::{TurnState, elapsed};
 use super::view::ChatSession;
+use crate::agents::AgentStatus;
 use crate::app::CancelTurn;
 use crate::aurora;
 
 const IMAGE_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
-/// A dropped file, ready to go out with the next prompt.
+/// A file dropped, pasted or picked, ready to go out with the next prompt.
 pub struct Attachment {
-    name: String,
+    pub(super) name: String,
+    path: PathBuf,
     block: PromptBlock,
 }
 
@@ -34,7 +40,52 @@ impl Attachment {
         let block = image(path).unwrap_or_else(|| PromptBlock::Resource {
             path: path.to_path_buf(),
         });
-        Self { name, block }
+        let path = path.to_path_buf();
+        Self { name, path, block }
+    }
+
+    /// A pasted image, written to a file of its own so an agent without images can read it.
+    /// What agents take as an image is kept as it is; an SVG stays a file; any other format
+    /// becomes a PNG.
+    pub fn pasted(image: &gpui_kit::Image) -> anyhow::Result<Self> {
+        use gpui_kit::ImageFormat as F;
+        let kept = match image.format {
+            F::Png => Some("png"),
+            F::Jpeg => Some("jpg"),
+            F::Gif => Some("gif"),
+            F::Webp => Some("webp"),
+            F::Svg => Some("svg"),
+            F::Bmp | F::Tiff | F::Ico | F::Pnm => None,
+        };
+        let (ext, bytes) = match kept {
+            Some(ext) => (ext, image.bytes.clone()),
+            None => {
+                let mut png = std::io::Cursor::new(Vec::new());
+                image::load_from_memory(&image.bytes)?
+                    .write_to(&mut png, image::ImageFormat::Png)?;
+                ("png", png.into_inner())
+            }
+        };
+        // ponytail: never deleted; the system clears its temporary folder.
+        let dir = std::env::temp_dir().join("wai-pasted");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{:x}.{ext}", image.id));
+        std::fs::write(&path, bytes)?;
+        let attachment = Self::new(&path);
+        Ok(Self {
+            name: format!("Pasted image.{ext}"),
+            ..attachment
+        })
+    }
+}
+
+/// What `attachment` sends: an image goes as its file to an agent that takes no images.
+pub(super) fn prompt_block(attachment: &Attachment, images: bool) -> PromptBlock {
+    match &attachment.block {
+        PromptBlock::Image { .. } if !images => PromptBlock::Resource {
+            path: attachment.path.clone(),
+        },
+        block => block.clone(),
     }
 }
 
@@ -79,7 +130,8 @@ impl ChatSession {
                 .trim_start()
                 .to_string();
         }
-        blocks.extend(self.attachments.drain(..).map(|a| a.block));
+        let images = self.takes_images(cx);
+        blocks.extend(self.attachments.drain(..).map(|a| prompt_block(&a, images)));
         self.input
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.submit(blocks, &shown, cx);
@@ -124,9 +176,66 @@ impl ChatSession {
     }
 
     pub(super) fn attach(&mut self, paths: &ExternalPaths, _: &mut Window, cx: &mut Context<Self>) {
+        self.attach_paths(paths.paths(), cx);
+    }
+
+    fn attach_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         self.attachments
-            .extend(paths.paths().iter().map(|path| Attachment::new(path)));
+            .extend(paths.iter().map(|path| Attachment::new(path)));
         cx.notify();
+    }
+
+    /// ⌘V of files copied in Finder or of an image attaches them; `false` lets text paste.
+    fn paste(&mut self, item: &ClipboardItem, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        for entry in item.entries() {
+            match entry {
+                ClipboardEntry::ExternalPaths(paths) => {
+                    self.attach_paths(paths.paths(), cx);
+                    return true;
+                }
+                ClipboardEntry::Image(image) => {
+                    match Attachment::pasted(image) {
+                        Ok(attachment) => self.attachments.push(attachment),
+                        Err(e) => window.push_notification(
+                            Notification::warning(format!("Could not attach the image: {e}")),
+                            cx,
+                        ),
+                    }
+                    cx.notify();
+                    return true;
+                }
+                ClipboardEntry::String(_) => {}
+            }
+        }
+        false
+    }
+
+    /// The paperclip: the system's file picker, files and folders, several at once.
+    fn pick_files(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: true,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = picked.await {
+                this.update(cx, |this, cx| this.attach_paths(&paths, cx))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Whether this session's agent takes images in a prompt.
+    fn takes_images(&self, cx: &App) -> bool {
+        let Some(registry) = self.registry.upgrade() else {
+            return false;
+        };
+        matches!(
+            registry.read(cx).status(&self.agent),
+            Some(AgentStatus::Ready(caps)) if caps.images
+        )
     }
 
     pub(super) fn render_prompt(
@@ -239,6 +348,22 @@ impl ChatSession {
                 // Registers the id so tests can find it.
                 .test_support()
         });
+        let attach = Button::new("attach")
+            .ghost()
+            .icon(IconName::Plus)
+            .tooltip("Attach files (or paste, or drop them here)")
+            .accessibility_label("Attach files")
+            .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx)))
+            .size(px(36.))
+            .rounded(px(18.));
+        let this = cx.entity().downgrade();
+        let textarea =
+            Textarea::new(&self.input)
+                .appearance(false)
+                .on_paste(move |item, window, cx| {
+                    let paste = |s: &mut Self, cx: &mut Context<Self>| s.paste(item, window, cx);
+                    this.update(cx, paste).unwrap_or(false)
+                });
         v_flex()
             .gap_2()
             .p_3()
@@ -248,11 +373,8 @@ impl ChatSession {
             })
             .child(
                 field
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(Textarea::new(&self.input).appearance(false)),
-                    )
+                    .child(attach)
+                    .child(div().flex_1().child(textarea))
                     .child(button),
             )
     }
@@ -260,8 +382,58 @@ impl ChatSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{Attachment, IMAGE_MAX_BYTES};
+    use super::{Attachment, IMAGE_MAX_BYTES, prompt_block};
+    use base64::Engine as _;
+    use gpui_kit::{Image, ImageFormat};
     use wai_agent::PromptBlock;
+
+    fn decoded(block: &PromptBlock) -> (String, Vec<u8>) {
+        let PromptBlock::Image { mime, base64 } = block else {
+            panic!("not an image: {block:?}");
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(base64)
+            .unwrap();
+        (mime.clone(), bytes)
+    }
+
+    /// A pasted PNG goes inline as it is, under a name of its own.
+    #[test]
+    fn pasted_png_attaches_inline() {
+        let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
+        let a = Attachment::pasted(&Image::from_bytes(ImageFormat::Png, png.clone())).unwrap();
+        assert_eq!(a.name, "Pasted image.png");
+        assert_eq!(decoded(&a.block), ("image/png".into(), png));
+        assert!(a.path.exists(), "kept on disk for agents without images");
+    }
+
+    /// A TIFF (what Preview and Safari copy) is not an image agents take: it goes as a PNG.
+    #[test]
+    fn pasted_tiff_attaches_as_png() {
+        let mut tiff = std::io::Cursor::new(Vec::new());
+        image::RgbImage::new(2, 2)
+            .write_to(&mut tiff, image::ImageFormat::Tiff)
+            .unwrap();
+        let image = Image::from_bytes(ImageFormat::Tiff, tiff.into_inner());
+        let a = Attachment::pasted(&image).unwrap();
+        assert_eq!(a.name, "Pasted image.png");
+        let (mime, bytes) = decoded(&a.block);
+        assert_eq!(mime, "image/png");
+        assert_eq!(&bytes[..4], b"\x89PNG");
+    }
+
+    /// An agent that takes no images gets an image attachment as its file.
+    #[test]
+    fn without_image_support_images_go_as_files() {
+        let a = Attachment::pasted(&Image::from_bytes(ImageFormat::Png, vec![1])).unwrap();
+        assert!(matches!(prompt_block(&a, true), PromptBlock::Image { .. }));
+        assert_eq!(
+            prompt_block(&a, false),
+            PromptBlock::Resource {
+                path: a.path.clone()
+            }
+        );
+    }
 
     #[test]
     fn small_images_inline_and_the_rest_link() {

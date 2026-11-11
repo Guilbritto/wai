@@ -95,7 +95,7 @@ pub struct ChatSession {
     pub(super) handle: AgentHandle,
     pub(super) input: Entity<TextareaState>,
     pub(super) attachments: Vec<Attachment>,
-    registry: WeakEntity<AgentRegistry>,
+    pub(super) registry: WeakEntity<AgentRegistry>,
     /// Per `Agent`/`Thought` row.
     pub(super) texts: HashMap<usize, Markdown>,
     /// Per `Tool`/`Permission` row.
@@ -726,6 +726,72 @@ mod tests {
 
     fn state(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> TurnState {
         session.read_with(cx, |s, _| s.model.state.clone())
+    }
+
+    /// ⌘V of an image or of files copied in Finder attaches them; text pastes as text.
+    #[gpui_kit::test]
+    fn paste_attaches_images_and_files(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        let names = |cx: &mut VisualTestContext| {
+            session.read_with(cx, |s, _| {
+                s.attachments
+                    .iter()
+                    .map(|a| a.name.clone())
+                    .collect::<Vec<_>>()
+            })
+        };
+        let paste = |item: gpui_kit::ClipboardItem, cx: &mut VisualTestContext| {
+            cx.write_to_clipboard(item);
+            cx.simulate_keystrokes("secondary-v");
+            cx.run_until_parked();
+        };
+
+        let image = gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, vec![0x89, 1]);
+        paste(
+            gpui_kit::ClipboardItem {
+                entries: vec![gpui_kit::ClipboardEntry::Image(image)],
+            },
+            cx,
+        );
+        assert_eq!(names(cx), ["Pasted image.png"]);
+        assert_eq!(session.read_with(cx, |s, cx| s.draft(cx)), "");
+
+        paste(gpui_kit::ClipboardItem::new_string("some text".into()), cx);
+        assert_eq!(session.read_with(cx, |s, cx| s.draft(cx)), "some text");
+        assert_eq!(names(cx).len(), 1);
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.pdf");
+        fs::write(&file, "x").unwrap();
+        paste(
+            gpui_kit::ClipboardItem {
+                entries: vec![
+                    gpui_kit::ClipboardEntry::ExternalPaths(gpui_kit::ExternalPaths(
+                        vec![file.clone()].into(),
+                    )),
+                    gpui_kit::ClipboardEntry::String(gpui_kit::ClipboardString::new(
+                        file.display().to_string(),
+                    )),
+                ],
+            },
+            cx,
+        );
+        assert_eq!(names(cx), ["Pasted image.png", "notes.pdf"]);
+        assert_eq!(session.read_with(cx, |s, cx| s.draft(cx)), "some text");
+
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "the prompt", |cx| {
+            session.read_with(cx, |s, _| !s.model.items.is_empty())
+        });
+        let first = session.read_with(cx, |s, _| s.model.items[0].clone());
+        assert_eq!(
+            first,
+            ChatItem::User {
+                text: "some text\nAttached: Pasted image.png, notes.pdf".into()
+            }
+        );
     }
 
     #[gpui_kit::test]
