@@ -1025,6 +1025,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::single_range_in_vec_init)]
     fn code_ranges_split_titles() {
         assert_eq!(
             code_ranges("Read README.md"),
