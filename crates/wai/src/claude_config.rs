@@ -123,17 +123,17 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{Entity, TestAppContext, VisualTestContext};
+    use gpui_kit::{ElementId, Entity, TestAppContext, VisualTestContext};
     use wai_settings::Settings;
 
     use crate::settings_view::Section;
     use crate::settings_view::claude::McpCheck;
-    use crate::workspace::Workspace;
     use crate::workspace::tests::{click, open, wait_until};
+    use crate::workspace::{Pane, Workspace};
 
     fn put(path: impl AsRef<Path>, text: &str) {
         let path = path.as_ref();
@@ -166,6 +166,18 @@ mod tests {
                 &format!(r#"{{"name":"{name}","description":"{name} tools"}}"#),
             );
         }
+        put(
+            home.join(".claude/plugins/cache/m/alpha/1.2.0/skills/one/SKILL.md"),
+            "---\nname: one\ndescription: Plugin skill\n---\n",
+        );
+        put(
+            home.join(".claude/skills/mine/SKILL.md"),
+            "---\nname: mine\ndescription: My skill\n---\n",
+        );
+        put(
+            project.join(".claude/skills/local/SKILL.md"),
+            "---\nname: local\ndescription: Project skill\n---\n",
+        );
         put(
             home.join(".claude/plugins/cache/m/alpha/1.2.0/.mcp.json"),
             r#"{"mcpServers":{"db":{"command":"db-mcp","env":{"KEY":"s3cr3t"}}}}"#,
@@ -447,5 +459,69 @@ mod tests {
         let search = view.read_with(cx, |v, _| v.search.clone());
         cx.update(|window, cx| search.update(cx, |s, cx| s.set_value("alpha", window, cx)));
         assert!(shown(cx));
+    }
+
+    /// The editor tabs open now, as (path, read_only).
+    fn editor_tabs(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(PathBuf, bool)> {
+        workspace.read_with(cx, |w, cx| {
+            w.panes
+                .iter()
+                .filter_map(|p| match p {
+                    Pane::Editor(pane) => Some(pane.read(cx).tabs.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .map(|t| (t.read(cx).path.clone(), t.read(cx).read_only))
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn skills_page_opens_skill_md(cx: &mut TestAppContext) {
+        let (workspace, cx, tmp) = claude_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Skills, None, window, cx)
+        });
+        cx.run_until_parked();
+        let view = workspace.read_with(cx, |w, _| w.settings_view()).unwrap();
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.nav_count(Section::Skills, cx)),
+            Some(3)
+        );
+        click(ElementId::NamedInteger("open-skill".into(), 0), cx);
+        wait_until(cx, "an editor tab", |cx| {
+            !editor_tabs(&workspace, cx).is_empty()
+        });
+        let want = crate::sidebar::canonical(&tmp.path().join("home/.claude/skills/mine/SKILL.md"));
+        assert_eq!(editor_tabs(&workspace, cx), [(want, false)]);
+        assert!(workspace.read_with(cx, |w, _| w.settings_view().is_none()));
+    }
+
+    #[gpui_kit::test]
+    fn plugin_skill_opens_read_only(cx: &mut TestAppContext) {
+        let (workspace, cx, _tmp) = claude_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Skills, None, window, cx)
+        });
+        cx.run_until_parked();
+        let view = workspace.read_with(cx, |w, _| w.settings_view()).unwrap();
+        let ix = view.read_with(cx, |v, _| {
+            v.claude()
+                .unwrap()
+                .skills
+                .iter()
+                .position(|e| e.group == "alpha")
+        });
+        click(
+            ElementId::NamedInteger("open-skill".into(), ix.unwrap() as u64),
+            cx,
+        );
+        wait_until(cx, "an editor tab", |cx| {
+            !editor_tabs(&workspace, cx).is_empty()
+        });
+        assert!(editor_tabs(&workspace, cx)[0].1);
     }
 }

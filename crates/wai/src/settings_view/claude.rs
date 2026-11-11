@@ -1,7 +1,7 @@
 //! The Claude pages of the Settings modal: what Claude Code keeps on disk, in groups of rows.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::switch::Switch;
@@ -9,7 +9,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::*;
-use wai_settings::claude::{ClaudeData, McpSource, McpStatus, short};
+use wai_settings::claude::{ClaudeData, Entry, McpSource, McpStatus, short};
 
 use super::{Section, SettingsEvent, SettingsView};
 use crate::aurora;
@@ -79,8 +79,21 @@ pub(crate) fn status_line(check: &McpCheck, name: &str, enabled: bool) -> (Tone,
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum Control {
-    Plugin { ix: usize, on: bool, locked: bool },
-    Mcp { ix: usize, on: bool },
+    Plugin {
+        ix: usize,
+        on: bool,
+        locked: bool,
+    },
+    Mcp {
+        ix: usize,
+        on: bool,
+    },
+    Open {
+        kind: &'static str,
+        ix: usize,
+        path: PathBuf,
+        read_only: bool,
+    },
     Soon,
 }
 
@@ -159,6 +172,45 @@ pub(crate) fn mcp_groups(data: &ClaudeData, check: &McpCheck) -> Vec<Group> {
         })
         .chain([connectors])
         .collect()
+}
+
+/// Entries (skills, agents, ...) in groups, in the entries' order; each row opens its file.
+pub(crate) fn entry_groups(entries: &[Entry], kind: &'static str, home: &Path) -> Vec<Group> {
+    let mut groups: Vec<Group> = Vec::new();
+    for (ix, e) in entries.iter().enumerate() {
+        if groups.last().is_none_or(|g| g.title != e.group) {
+            groups.push(Group {
+                title: e.group.clone(),
+                rows: Vec::new(),
+                add_soon: matches!(e.group.as_str(), "User" | "Project"),
+            });
+        }
+        // Hooks from plugins share one group; the plugin is the row's name.
+        let plugin = if e.group == "From plugins" {
+            &e.name
+        } else {
+            &e.group
+        };
+        let path = if e.read_only {
+            format!("plugin: {plugin}")
+        } else {
+            short(&e.path, home)
+        };
+        groups.last_mut().expect("pushed above").rows.push(Row {
+            name: e.name.clone(),
+            badge: None,
+            path: Some(path),
+            summary: Some(e.summary.clone()).filter(|s| !s.is_empty()),
+            status: None,
+            control: Control::Open {
+                kind,
+                ix,
+                path: e.path.clone(),
+                read_only: e.read_only,
+            },
+        });
+    }
+    groups
 }
 
 /// Keeps the rows whose name, badge, path or summary hold `query`, and the groups left with any.
@@ -299,6 +351,7 @@ impl SettingsView {
             .map(|p| div().px_3().py_2().text_color(danger).child(p.clone()));
         let all = match section {
             Section::Mcp => mcp_groups(data, &self.mcp_check),
+            Section::Skills => entry_groups(&data.skills, "skill", &self.data.home),
             _ => plugin_groups(data, &self.data.home),
         };
         let total: usize = all.iter().map(|g| g.rows.len()).sum();
@@ -417,6 +470,30 @@ impl SettingsView {
                 .items_center()
                 .child(Switch::new(("mcp-toggle", *ix)).checked(*on).disabled(true))
                 .child(aurora::soon(cx)),
+            Control::Open {
+                kind,
+                ix,
+                path,
+                read_only,
+            } => {
+                let (path, read_only) = (path.clone(), *read_only);
+                h_flex().child(
+                    Button::new(ElementId::NamedInteger(
+                        format!("open-{kind}").into(),
+                        *ix as u64,
+                    ))
+                    .ghost()
+                    .small()
+                    .icon(IconName::ExternalLink)
+                    .label("Open")
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(SettingsEvent::Open {
+                            path: path.clone(),
+                            read_only,
+                        })
+                    })),
+                )
+            }
             Control::Soon => h_flex().child(aurora::soon(cx)),
         };
         h_flex()
@@ -678,6 +755,40 @@ mod tests {
             line(&done(McpStatus::Connected), "b", true),
             t(Tone::Muted, "Not listed by claude mcp list")
         );
+    }
+
+    #[test]
+    fn entry_rows_group_and_open() {
+        use wai_settings::claude::Entry;
+        let entry = |group: &str, name: &str, read_only| Entry {
+            group: group.into(),
+            name: name.into(),
+            path: PathBuf::from(format!("/h/.claude/skills/{name}/SKILL.md")),
+            summary: String::new(),
+            read_only,
+        };
+        let entries = [
+            entry("User", "mine", false),
+            entry("Project", "local", false),
+            entry("alpha", "one", true),
+        ];
+        let groups = super::entry_groups(&entries, "skill", Path::new("/h"));
+        let titles: Vec<_> = groups.iter().map(|g| g.title.as_str()).collect();
+        assert_eq!(titles, ["User", "Project", "alpha"]);
+        let soon: Vec<_> = groups.iter().map(|g| g.add_soon).collect();
+        assert_eq!(soon, [true, true, false]);
+        assert_eq!(groups[2].rows[0].path.as_deref(), Some("plugin: alpha"));
+        assert_eq!(
+            groups[0].rows[0].path.as_deref(),
+            Some("~/.claude/skills/mine/SKILL.md")
+        );
+        assert_eq!(groups[0].rows[0].summary, None);
+        for (ix, g) in groups.iter().enumerate() {
+            assert!(matches!(
+                g.rows[0].control,
+                Control::Open { kind: "skill", ix: i, .. } if i == ix
+            ));
+        }
     }
 
     #[test]

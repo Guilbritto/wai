@@ -1852,7 +1852,7 @@ impl Workspace {
     }
 
     /// `open_file`; a `scratch` file (a tool's output) is read-only whatever its size.
-    fn open(
+    pub(crate) fn open(
         &mut self,
         path: PathBuf,
         line: Option<u32>,
@@ -2123,6 +2123,10 @@ impl Workspace {
                 }
                 SettingsEvent::Test(id) => this.test_agent(id, window, cx),
                 SettingsEvent::CheckMcp => this.check_mcp(cx),
+                SettingsEvent::Open { path, read_only } => {
+                    this.close_settings(window, cx);
+                    this.open(path.clone(), None, *read_only, window, cx)
+                }
                 SettingsEvent::TogglePlugin { id, on, seen } => {
                     this.toggle_plugin(id.clone(), *on, *seen, window, cx)
                 }
