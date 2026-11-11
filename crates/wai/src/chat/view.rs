@@ -1266,6 +1266,37 @@ mod tests {
         cx.run_until_parked();
     }
 
+    /// Each agent message copies its Markdown; each code block, its code.
+    #[gpui_kit::test]
+    fn copy_buttons_copy_the_message_and_its_code(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let reply = dir.path().join("reply.md");
+        fs::write(&reply, "Run this:\n\n```sh\ncargo test\n```\n").unwrap();
+        let flags = format!("--reply-file {}", wai_agent::quote(&reply));
+        let (workspace, cx) = open(cx, fake_settings(&flags));
+        let session = start_session(&workspace, cx);
+        turn(&session, cx);
+        wait_until(cx, "the markdown", |cx| {
+            session.read_with(cx, |s, cx| {
+                s.texts.get(&1).is_some_and(|md| {
+                    md.state
+                        .read(cx)
+                        .rendered_text()
+                        .as_str()
+                        .contains("cargo test")
+                })
+            })
+        });
+        let message = last_agent_text(&session, cx).unwrap();
+        click_edits(None, ("copy-message", 1usize), cx);
+        let copied = cx.read_from_clipboard().and_then(|c| c.text());
+        assert_eq!(copied.unwrap(), message);
+        click_edits(None, "copy-code", cx);
+        let code = cx.read_from_clipboard().and_then(|c| c.text());
+        assert_eq!(code.unwrap().trim_end(), "cargo test");
+    }
+
     /// Sends `edit` and allows the fake agent's `n` edits, one permission card at a time (it
     /// writes each file only then), until the turn ends with its Edits block: its row and files.
     fn run_edits(

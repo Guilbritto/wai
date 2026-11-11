@@ -3,6 +3,7 @@
 use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::message_scroller::MessageScroller;
 use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::text::TextView;
@@ -255,13 +256,51 @@ impl ChatSession {
                         .child(div().text_color(star).child("✦"))
                         .child(div().text_color(name).child(self.agent.clone()))
                 });
-                glass(v_flex(), cx)
-                    .gap_1()
+                // Read at click time, so a frame copies no text.
+                let session = cx.weak_entity();
+                let copy = Clipboard::new(("copy-message", ix))
+                    .tooltip("Copy message")
+                    .accessibility_label("Copy message")
+                    .xsmall()
+                    .value_fn(move |_, cx| {
+                        let text =
+                            session.read_with(cx, |this, _| match this.model.items.get(ix) {
+                                Some(ChatItem::Agent { text }) => text.clone(),
+                                _ => String::new(),
+                            });
+                        text.unwrap_or_default().into()
+                    });
+                let text =
+                    self.texts.get(&ix).map(|md| {
+                        TextView::new(&md.state).code_block_actions(move |block, _, _| {
+                            h_flex()
+                                .gap_1()
+                                .children(block.lang().map(|lang| {
+                                    div().text_xs().text_color(muted).child(lang.clone())
+                                }))
+                                .child(
+                                    Clipboard::new("copy-code")
+                                        .value(block.code())
+                                        .tooltip("Copy code")
+                                        .accessibility_label("Copy code"),
+                                )
+                        })
+                    });
+                glass(h_flex(), cx)
+                    .items_start()
+                    .gap_2()
                     .p_3()
                     .rounded(px(16.))
                     .rounded_bl(px(6.))
-                    .children(header)
-                    .children(self.texts.get(&ix).map(|md| TextView::new(&md.state)))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .children(header)
+                            .children(text),
+                    )
+                    .child(copy)
                     .into_any_element()
             }
             ChatItem::Thought { .. } => {
