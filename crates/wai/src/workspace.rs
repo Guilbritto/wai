@@ -22,7 +22,7 @@ use wai_ext::{CommandSpec, ExtEvent, ExtId, HostEvent, Reply};
 use wai_project::{FsChange, ProjectWatcher};
 use wai_settings::SessionGroup;
 use wai_settings::{
-    AgentConfig, AppState, Approval, Change, OpenSession, SeenModel, Settings, Template,
+    AgentConfig, AppState, Approval, Change, OpenSession, SeenModel, SeenModes, Settings, Template,
     agent_label, config_dir, is_approved, load_templates, seed_approved, shown, unapproved,
     write_change,
 };
@@ -243,6 +243,12 @@ pub struct Workspace {
     state_path: Option<PathBuf>,
     /// Agent id -> the models its last Test saw; kept in `state.json`.
     pub models_seen: BTreeMap<String, Vec<SeenModel>>,
+    /// Agent id -> the modes its last session reported; kept in `state.json`.
+    pub modes_seen: BTreeMap<String, SeenModes>,
+    /// Agent id -> the model its last draft sent with; kept in `state.json`.
+    pub last_models: BTreeMap<String, String>,
+    /// Repository root -> the base its last worktree draft sent from; kept in `state.json`.
+    pub last_bases: BTreeMap<PathBuf, String>,
     /// The Open list's drafts, in the order opened; never saved.
     pub drafts: Vec<Entity<DraftView>>,
     /// The Open list's groups, each with its sessions' ids; kept in `state.json`.
@@ -286,6 +292,7 @@ impl Workspace {
             // A state from before approvals, or none kept (tests): today's values are approved.
             _ => seed_approved(&settings),
         };
+        let remembered = state.flatten();
         let configs = approved_configs(&Settings::default().agents, &settings, &approved);
         let registry = cx.new(|_| AgentRegistry::new(configs));
         let shell = settings
@@ -414,7 +421,19 @@ impl Workspace {
             starting: HashMap::new(),
             early: HashMap::new(),
             ext_sessions: HashMap::new(),
-            models_seen: state.flatten().map(|s| s.models_seen).unwrap_or_default(),
+            modes_seen: remembered
+                .as_ref()
+                .map(|s| s.modes_seen.clone())
+                .unwrap_or_default(),
+            last_models: remembered
+                .as_ref()
+                .map(|s| s.last_models.clone())
+                .unwrap_or_default(),
+            last_bases: remembered
+                .as_ref()
+                .map(|s| s.last_bases.clone())
+                .unwrap_or_default(),
+            models_seen: remembered.map(|s| s.models_seen).unwrap_or_default(),
             drafts: Vec::new(),
             groups: Vec::new(),
             renaming: None,
@@ -862,6 +881,9 @@ impl Workspace {
             approved: Some(self.approved.clone()),
             models_seen: self.models_seen.clone(),
             groups: self.groups.clone(),
+            last_models: self.last_models.clone(),
+            last_bases: self.last_bases.clone(),
+            modes_seen: self.modes_seen.clone(),
         };
         // ponytail: a few hundred bytes on the UI thread; move to the background executor if
         // it ever shows in a frame.
@@ -1080,6 +1102,9 @@ impl Workspace {
         if !seen.is_empty() {
             self.models_seen.insert(agent.clone(), seen);
             self.sync_settings_view(cx);
+        }
+        if let Some(seen) = seen_modes(session.read(cx)) {
+            self.modes_seen.insert(agent.clone(), seen);
         }
         if let Some(model) = model.or_else(|| self.settings.models.get(&agent).cloned()) {
             session.update(cx, |s, cx| s.apply_default_model(&model, cx));
@@ -2312,6 +2337,9 @@ impl Workspace {
                 match started {
                     Ok(started) => {
                         this.registry.update(cx, |r, cx| r.mark_ready(&id, cx));
+                        if let Some(seen) = started_modes(&started) {
+                            this.modes_seen.insert(id.clone(), seen);
+                        }
                         this.models_seen.insert(id, seen_models(&started.config));
                         this.sync_drafts(cx);
                         this.save_state(cx);
@@ -2866,6 +2894,48 @@ fn seen_models(config: &[wai_agent::ConfigOption]) -> Vec<SeenModel> {
             name: v.name.clone(),
         })
         .collect()
+}
+
+fn mode_values(
+    modes: &[wai_agent::ModeInfo],
+    config: &[wai_agent::ConfigOption],
+    current: Option<String>,
+) -> Option<SeenModes> {
+    if !modes.is_empty() {
+        let modes = modes.iter().map(|m| SeenModel {
+            id: m.id.clone(),
+            name: m.name.clone(),
+        });
+        return Some(SeenModes {
+            modes: modes.collect(),
+            current,
+        });
+    }
+    let option = (config.iter()).find(|o| o.category == wai_agent::ConfigCategory::Mode)?;
+    let modes = (option.values.iter())
+        .map(|v| SeenModel {
+            id: v.id.clone(),
+            name: v.name.clone(),
+        })
+        .collect::<Vec<_>>();
+    (!modes.is_empty()).then(|| SeenModes {
+        modes,
+        current: Some(option.current.clone()),
+    })
+}
+
+/// The modes a session offers, from `modes` or else the Mode config option.
+fn seen_modes(session: &ChatSession) -> Option<SeenModes> {
+    let m = &session.model;
+    mode_values(&m.modes, &m.config, m.current_mode.clone())
+}
+
+pub(crate) fn started_modes(started: &wai_agent::SessionStarted) -> Option<SeenModes> {
+    mode_values(
+        &started.modes,
+        &started.config,
+        started.current_mode.clone(),
+    )
 }
 
 fn fork_failure(error: &AgentError) -> String {

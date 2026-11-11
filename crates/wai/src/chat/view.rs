@@ -702,7 +702,7 @@ impl ChatSession {
         cx.notify();
     }
 
-    fn set_mode(&mut self, mode: String, cx: &mut Context<Self>) {
+    pub(crate) fn set_mode(&mut self, mode: String, cx: &mut Context<Self>) {
         let previous = self.model.current_mode.replace(mode.clone());
         let (handle, id) = (self.handle.clone(), self.id.clone());
         cx.spawn(async move |this, cx| {

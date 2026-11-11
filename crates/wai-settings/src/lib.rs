@@ -478,6 +478,12 @@ pub struct AppState {
     pub models_seen: BTreeMap<String, Vec<SeenModel>>,
     /// The Open list's groups, in their order.
     pub groups: Vec<SessionGroup>,
+    /// Agent id -> the model its last draft sent with.
+    pub last_models: BTreeMap<String, String>,
+    /// Repository root -> the base its last worktree draft sent from.
+    pub last_bases: BTreeMap<PathBuf, String>,
+    /// Agent id -> the modes its last session reported.
+    pub modes_seen: BTreeMap<String, SeenModes>,
 }
 
 /// A named group of open sessions.
@@ -494,6 +500,12 @@ pub struct SessionGroup {
 pub struct SeenModel {
     pub id: String,
     pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SeenModes {
+    pub modes: Vec<SeenModel>,
+    pub current: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -519,6 +531,9 @@ impl Default for AppState {
             approved: None,
             models_seen: BTreeMap::new(),
             groups: Vec::new(),
+            last_models: BTreeMap::new(),
+            last_bases: BTreeMap::new(),
+            modes_seen: BTreeMap::new(),
         }
     }
 }
@@ -797,6 +812,34 @@ mod tests {
     }
 
     #[test]
+    fn app_state_keeps_remembered_choices() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("state.json");
+        let state = AppState {
+            last_models: [("claude".to_string(), "opus".to_string())].into(),
+            last_bases: [(PathBuf::from("/tmp/proj"), "feature".to_string())].into(),
+            modes_seen: [(
+                "claude".to_string(),
+                SeenModes {
+                    modes: vec![SeenModel {
+                        id: "plan".into(),
+                        name: "Plan".into(),
+                    }],
+                    current: Some("plan".into()),
+                },
+            )]
+            .into(),
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        assert_eq!(AppState::load(&path), state);
+        std::fs::write(&path, r#"{"terminal_visible":true}"#).unwrap();
+        let old = AppState::load(&path);
+        assert!(old.last_models.is_empty() && old.last_bases.is_empty());
+        assert!(old.modes_seen.is_empty());
+    }
+
+    #[test]
     fn state_roundtrip_and_corrupt_falls_back() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("wai").join("state.json");
@@ -827,6 +870,19 @@ mod tests {
                 collapsed: true,
                 sessions: vec!["s1".into()],
             }],
+            last_models: [("claude".to_string(), "opus".to_string())].into(),
+            last_bases: [(PathBuf::from("/tmp/proj"), "feature".to_string())].into(),
+            modes_seen: [(
+                "claude".to_string(),
+                SeenModes {
+                    modes: vec![SeenModel {
+                        id: "plan".into(),
+                        name: "Plan".into(),
+                    }],
+                    current: Some("plan".into()),
+                },
+            )]
+            .into(),
         };
         state.save(&path).unwrap();
         assert_eq!(AppState::load(&path), state);

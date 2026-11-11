@@ -8,7 +8,7 @@ use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use wai_settings::{SeenModel, agent_label, builtin, canonical, shown};
+use wai_settings::{SeenModel, SeenModes, agent_label, builtin, canonical, shown};
 
 use super::input::{Attachment, attach_button, paste_into, pick_paths, send_button};
 use super::view::ChatSession;
@@ -34,6 +34,28 @@ pub struct DraftData {
     pub models: BTreeMap<String, Vec<SeenModel>>,
     /// Agent id -> the model Settings starts it with.
     pub default_models: BTreeMap<String, String>,
+    /// Agent id -> the modes its last session reported, and the one it was in.
+    pub modes: BTreeMap<String, SeenModes>,
+    /// Agent id -> the model its last draft sent with.
+    pub last_models: BTreeMap<String, String>,
+    /// Repository root -> the base its last worktree draft sent from.
+    pub last_bases: BTreeMap<PathBuf, String>,
+}
+
+impl DraftData {
+    fn start_model(&self, agent: &str) -> Option<String> {
+        let last = self.last_models.get(agent);
+        last.or_else(|| self.default_models.get(agent)).cloned()
+    }
+
+    fn start_mode(&self, agent: &str) -> Option<String> {
+        self.modes.get(agent)?.current.clone()
+    }
+
+    fn base(&self, repo: &Repo) -> String {
+        let last = self.last_bases.get(&repo.root);
+        last.unwrap_or(&repo.default).clone()
+    }
 }
 
 const OPEN_FOLDER: &str = "\0open-folder";
@@ -187,6 +209,7 @@ pub struct DraftView {
     pub agent: String,
     pub folder: PathBuf,
     pub model: Option<String>,
+    pub mode: Option<String>,
     /// The folder's repository; `None` while it is read, or when the folder is not one.
     pub(crate) repo: Option<Repo>,
     /// A `read_repo` is running.
@@ -207,6 +230,7 @@ pub struct DraftView {
     folders: Menu,
     agents: Menu,
     models: Menu,
+    modes: Menu,
     places: Menu,
     branches: Menu,
     _read: Option<Task<()>>,
@@ -248,6 +272,7 @@ impl DraftView {
             menu(false, window, cx),
         );
         let (places, branches) = (menu(false, window, cx), menu(true, window, cx));
+        let modes = menu(false, window, cx);
         let subscriptions = vec![
             cx.subscribe_in(&input, window, |_, _, event: &InputEvent, _, cx| {
                 match event {
@@ -289,9 +314,15 @@ impl DraftView {
                     this.set_model(Some(model.clone()), cx);
                 }
             }),
+            cx.subscribe(&modes, |this, _, event: &SelectEvent<Vec<Pick>>, cx| {
+                if let SelectEvent::Confirm(Some(mode)) = event {
+                    this.set_mode(Some(mode.clone()), cx);
+                }
+            }),
         ];
         let mut this = Self {
-            model: data.default_models.get(&agent).cloned(),
+            model: data.start_model(&agent),
+            mode: data.start_mode(&agent),
             agent,
             folder,
             repo: None,
@@ -308,6 +339,7 @@ impl DraftView {
             folders,
             agents,
             models,
+            modes,
             places,
             branches,
             _read: None,
@@ -323,6 +355,9 @@ impl DraftView {
     /// New menu data; the installed check runs again.
     pub fn set_data(&mut self, data: DraftData, cx: &mut Context<Self>) {
         self.data = data;
+        if self.mode.is_none() {
+            self.mode = self.data.start_mode(&self.agent);
+        }
         self.menus_stale = true;
         self.check_installed(cx);
         cx.notify();
@@ -360,7 +395,7 @@ impl DraftView {
                     this.worktree = false;
                 }
                 this.branch = match &repo {
-                    Some(repo) if this.worktree => Some(repo.default.clone()),
+                    Some(repo) if this.worktree => Some(this.data.base(repo)),
                     _ => None,
                 };
                 this.repo = repo;
@@ -383,7 +418,7 @@ impl DraftView {
             return;
         }
         self.worktree = on;
-        self.branch = self.repo.as_ref().filter(|_| on).map(|r| r.default.clone());
+        self.branch = (self.repo.as_ref().filter(|_| on)).map(|r| self.data.base(r));
         self.menus_stale = true;
         cx.emit(DraftEvent::Changed);
         cx.notify();
@@ -408,9 +443,10 @@ impl DraftView {
         cx.emit(DraftEvent::Changed);
     }
 
-    /// The model goes back to what Settings starts the agent with.
+    /// The model goes back to the last one used with the agent, else what Settings starts it with.
     pub fn set_agent(&mut self, agent: String, cx: &mut Context<Self>) {
-        self.model = self.data.default_models.get(&agent).cloned();
+        self.model = self.data.start_model(&agent);
+        self.mode = self.data.start_mode(&agent);
         self.agent = agent;
         self.show_install = false;
         self.menus_stale = true;
@@ -421,6 +457,13 @@ impl DraftView {
 
     pub fn set_model(&mut self, model: Option<String>, cx: &mut Context<Self>) {
         self.model = model;
+        self.menus_stale = true;
+        cx.emit(DraftEvent::Changed);
+        cx.notify();
+    }
+
+    pub fn set_mode(&mut self, mode: Option<String>, cx: &mut Context<Self>) {
+        self.mode = mode;
         self.menus_stale = true;
         cx.emit(DraftEvent::Changed);
         cx.notify();
@@ -516,6 +559,22 @@ impl DraftView {
             select.set_items(items, window, cx);
             match &current {
                 Some(model) => select.set_selected_value(model, window, cx),
+                None => select.set_selected_index(None, window, cx),
+            }
+        });
+
+        let seen = self.data.modes.get(&self.agent).into_iter();
+        let items: Vec<Pick> = (seen.flat_map(|s| &s.modes))
+            .map(|m| Pick {
+                lead: Lead::Icon(gpui_kit::assets::IconName::Shield),
+                ..Pick::new(m.id.clone(), m.name.clone())
+            })
+            .collect();
+        let current = self.mode.clone();
+        self.modes.update(cx, |select, cx| {
+            select.set_items(items, window, cx);
+            match &current {
+                Some(mode) => select.set_selected_value(mode, window, cx),
                 None => select.set_selected_index(None, window, cx),
             }
         });
@@ -820,6 +879,10 @@ impl Render for DraftView {
             chip("draft-model", &self.models, 170., None)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         });
+        let mode = self.data.modes.contains_key(&self.agent).then(|| {
+            chip("draft-mode", &self.modes, 150., None)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        });
         let this = cx.entity().downgrade();
         let textarea =
             Textarea::new(&self.input)
@@ -862,6 +925,7 @@ impl Render for DraftView {
                 .gap_2()
                 .items_center()
                 .child(attach)
+                .children(mode)
                 .child(div().flex_1())
                 .children(model)
                 .child(send),

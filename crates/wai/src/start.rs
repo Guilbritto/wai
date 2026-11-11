@@ -8,7 +8,7 @@ use crate::agents::AgentStatus;
 use crate::chat::{ChatEvent, ChatSession, DraftData, DraftEvent, DraftView, signed_out};
 use crate::git::{self, Repo};
 use crate::sidebar::canonical;
-use crate::workspace::{Pane, Workspace};
+use crate::workspace::{Pane, Workspace, started_modes};
 
 impl Workspace {
     /// The project, then the open sessions' folders (newest first), then History's.
@@ -38,6 +38,9 @@ impl Workspace {
             agents,
             models: self.models_seen.clone(),
             default_models: self.settings.models.clone(),
+            modes: self.modes_seen.clone(),
+            last_models: self.last_models.clone(),
+            last_bases: self.last_bases.clone(),
         }
     }
 
@@ -91,6 +94,7 @@ impl Workspace {
             return;
         }
         let (agent, folder, model) = (d.agent.clone(), d.folder.clone(), d.model.clone());
+        let mode = d.mode.clone();
         let (text, attachments) = d.message(cx);
         let (repo, worktree, branch) = (d.repo.clone(), d.worktree, d.branch.clone());
         if !folder.is_dir() {
@@ -172,6 +176,10 @@ impl Workspace {
             };
             chat.update(cx, |chat, cx| chat.step(title, cx))
         });
+        let remembered_base = match &job {
+            Some(GitJob::Worktree { repo, base, .. }) => Some((repo.root.clone(), base.clone())),
+            _ => None,
+        };
         let mut start_step = None;
         if job.is_none() {
             start_step =
@@ -282,11 +290,37 @@ impl Workspace {
                         return this.revert_draft(&draft, error, window, cx);
                     }
                 };
-                let title = started_title(&label, &folder, &started);
+                let title = started_title(
+                    &label,
+                    &folder,
+                    &started,
+                    mode.as_deref(),
+                    model.as_deref(),
+                );
                 chat.update(cx, |chat, cx| chat.end_step(step, title, false, cx));
                 this.registry.update(cx, |r, cx| r.mark_ready(&agent, cx));
                 chat.update(cx, |chat, cx| chat.started(started, window, cx));
+                if let Some(model) = &model {
+                    this.last_models.insert(agent.clone(), model.clone());
+                }
+                if let Some((root, base)) = &remembered_base {
+                    this.last_bases.insert(root.clone(), base.clone());
+                }
                 this.land(chat.clone(), early, model, window, cx);
+                if let Some(mode) = mode {
+                    chat.update(cx, |chat, cx| {
+                        let option = (chat.model.config.iter())
+                            .find(|o| o.category == ConfigCategory::Mode)
+                            .map(|o| o.id.clone());
+                        match option {
+                            Some(option) => chat.set_option(&option, mode, cx),
+                            None if chat.model.current_mode.as_ref() != Some(&mode) => {
+                                chat.set_mode(mode, cx)
+                            }
+                            None => {}
+                        }
+                    });
+                }
                 this.drafts.retain(|d| *d != draft);
                 let pane = this.panes.iter().position(|p| p.draft() == Some(&draft));
                 if let Some(ix) = pane {
@@ -365,13 +399,24 @@ enum GitJob {
 }
 
 /// `Started <Label> in <folder> · <mode> · <model>`, without the parts the agent did not name.
-fn started_title(label: &str, folder: &Path, started: &SessionStarted) -> String {
-    let mode = (started.modes.iter())
-        .find(|m| Some(&m.id) == started.current_mode.as_ref())
-        .map(|m| m.name.clone());
+fn started_title(
+    label: &str,
+    folder: &Path,
+    started: &SessionStarted,
+    mode: Option<&str>,
+    model: Option<&str>,
+) -> String {
+    let seen = started_modes(started);
+    let current = seen.as_ref().and_then(|s| s.current.clone());
+    let mode = mode.map(str::to_string).or(current);
+    let mode = seen.and_then(|s| s.modes.into_iter().find(|m| Some(&m.id) == mode.as_ref()));
+    let mode = mode.map(|m| m.name);
     let model = (started.config.iter())
         .find(|o| o.category == ConfigCategory::Model)
-        .and_then(|o| o.values.iter().find(|v| v.id == o.current))
+        .and_then(|o| {
+            let id = model.unwrap_or(&o.current);
+            o.values.iter().find(|v| v.id == id)
+        })
         .map(|v| v.name.clone());
     let head = format!("Started {label} in {}", shown(folder));
     let parts = std::iter::once(head).chain(mode).chain(model);
@@ -391,7 +436,7 @@ mod tests {
     use crate::git::{self, SUBMODULE_HINT};
     use crate::sidebar::canonical;
     use crate::workspace::Workspace;
-    use crate::workspace::tests::{fake_settings, gated, open, start_now, wait_until};
+    use crate::workspace::tests::{fake_settings, gated, live, open, start_now, wait_until};
     use wai_agent::ToolStatus;
 
     fn mkdir(dir: &Path, name: &str) -> PathBuf {
@@ -541,6 +586,110 @@ mod tests {
                 s.model.state == TurnState::Idle && reply.as_deref() == Some("model:fake-large")
             })
         });
+    }
+
+    fn send_and_wait(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+        sessions: usize,
+    ) -> Entity<ChatSession> {
+        type_and_send(cx, "hi");
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.sessions.len() == sessions)
+        });
+        workspace.read_with(cx, |w, _| w.sessions[sessions - 1].clone())
+    }
+
+    #[gpui_kit::test]
+    fn new_draft_takes_the_last_model_used_for_its_agent(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--models"));
+        start_now(&workspace, cx);
+        let draft = new_draft(&workspace, cx);
+        draft.update(cx, |d, cx| d.set_model(Some("fake-large".into()), cx));
+        send_and_wait(&workspace, cx, 2);
+        let next = new_draft(&workspace, cx);
+        next.read_with(cx, |d, _| {
+            assert_eq!(d.model.as_deref(), Some("fake-large"))
+        });
+        workspace.read_with(cx, |w, _| assert!(w.settings.models.is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn new_draft_never_preselects_a_picked_mode(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        start_now(&workspace, cx);
+        let draft = new_draft(&workspace, cx);
+        draft.update(cx, |d, cx| d.set_mode(Some("plan".into()), cx));
+        let session = send_and_wait(&workspace, cx, 2);
+        wait_until(cx, "the mode", |cx| {
+            session.read_with(cx, |s, _| s.model.current_mode.as_deref() == Some("plan"))
+        });
+        let next = new_draft(&workspace, cx);
+        next.read_with(cx, |d, _| assert_eq!(d.mode.as_deref(), Some("default")));
+    }
+
+    #[gpui_kit::test]
+    fn mode_chip_waits_for_the_agent_to_report_modes(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let shown = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.try_find("draft-mode").is_some()
+            })
+        };
+        new_draft(&workspace, cx);
+        assert!(!shown(cx));
+        start_now(&workspace, cx);
+        new_draft(&workspace, cx);
+        assert!(shown(cx));
+    }
+
+    #[gpui_kit::test]
+    fn worktree_base_is_remembered_per_repository(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let one = repo_with(&dir.path().join("one"), &["feature"]);
+        git(&one, &["checkout", "main"]);
+        let two = repo_with(&dir.path().join("two"), &["other"]);
+        git(&two, &["checkout", "main"]);
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let draft = repo_draft(&workspace, cx, &one);
+        draft.update(cx, |d, cx| {
+            d.set_worktree(true, cx);
+            d.set_branch(Some("feature".into()), cx);
+        });
+        send_and_wait(&workspace, cx, 1);
+        let again = repo_draft(&workspace, cx, &one);
+        again.update(cx, |d, cx| d.set_worktree(true, cx));
+        again.read_with(cx, |d, _| assert_eq!(d.branch.as_deref(), Some("feature")));
+        let other = repo_draft(&workspace, cx, &two);
+        other.update(cx, |d, cx| d.set_worktree(true, cx));
+        other.read_with(cx, |d, _| assert_eq!(d.branch.as_deref(), Some("main")));
+        leave(&workspace, cx);
+    }
+
+    #[gpui_kit::test]
+    fn picks_never_change_settings(cx: &mut TestAppContext) {
+        let fake = fake_settings("--models");
+        let file = format!(
+            "[agents.fake]\ncommand = \'\'\'{}\'\'\'\n",
+            fake.agents["fake"].command
+        );
+        let (workspace, cx, dir) = live(cx, fake, Some(&file));
+        let path = dir.path().join("settings.toml");
+        let before = std::fs::read(&path).unwrap();
+        start_now(&workspace, cx);
+        let draft = new_draft(&workspace, cx);
+        draft.update(cx, |d, cx| {
+            d.set_model(Some("fake-large".into()), cx);
+            d.set_mode(Some("plan".into()), cx);
+        });
+        send_and_wait(&workspace, cx, 2);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        workspace.read_with(cx, |w, _| assert!(w.settings.models.is_empty()));
     }
 
     #[gpui_kit::test]
