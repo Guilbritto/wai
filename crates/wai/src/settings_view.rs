@@ -18,6 +18,7 @@ use gpui_kit::*;
 use wai_settings::{Change, Processing, SeenModel, Settings, ThemeChoice, agent_label, builtin};
 
 use crate::aurora::{self, DISPLAY_FONT};
+use crate::extensions_view::ExtensionsView;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Section {
@@ -26,6 +27,7 @@ pub enum Section {
     Conversation,
     Terminal,
     Updates,
+    Extensions,
 }
 
 impl Section {
@@ -36,6 +38,7 @@ impl Section {
             Section::Conversation => "Conversation",
             Section::Terminal => "Terminal",
             Section::Updates => "Updates",
+            Section::Extensions => "Extensions",
         }
     }
 
@@ -46,6 +49,7 @@ impl Section {
             Section::Conversation => "conversation",
             Section::Terminal => "terminal",
             Section::Updates => "updates",
+            Section::Extensions => "extensions",
         }
     }
 
@@ -56,6 +60,7 @@ impl Section {
             Section::Conversation => "How a conversation shows what the agent does.",
             Section::Terminal => "The shell the terminal runs.",
             Section::Updates => "Whether wai looks for new versions.",
+            Section::Extensions => "Programs that add panels, commands and agents to wai.",
         }
     }
 }
@@ -69,6 +74,7 @@ pub(crate) const NAV: &[(&str, &[Section])] = &[(
         Section::Conversation,
         Section::Terminal,
         Section::Updates,
+        Section::Extensions,
     ],
 )];
 
@@ -161,6 +167,7 @@ pub struct SettingsData {
     pub notice: Option<SharedString>,
     /// The title's suffix: the default agent and the project.
     pub context: String,
+    pub extensions: Option<Entity<ExtensionsView>>,
 }
 
 pub enum SettingsEvent {
@@ -368,9 +375,12 @@ impl SettingsView {
     }
 
     /// The count the nav shows beside `section`.
-    pub(crate) fn nav_count(&self, section: Section, _cx: &App) -> Option<usize> {
+    pub(crate) fn nav_count(&self, section: Section, cx: &App) -> Option<usize> {
         match section {
             Section::Ai => Some(self.data.agents.len()),
+            Section::Extensions => {
+                (self.data.extensions.as_ref()).map(|ext| ext.read(cx).store().list().len())
+            }
             _ => None,
         }
     }
@@ -698,6 +708,7 @@ impl Render for SettingsView {
             .map(|(_, label)| *label)
             .collect();
         let ai = section == Section::Ai;
+        let extensions = section == Section::Extensions;
         let agents: Vec<_> = if ai {
             (self.data.agents.iter())
                 .filter(|a| a.label.to_lowercase().contains(&query))
@@ -865,12 +876,13 @@ impl Render for SettingsView {
                                     .child(div().text_color(muted).child(section.description())),
                             )
                             .children(banner)
-                            .child(Input::new(&self.search).small())
+                            .children((!extensions).then(|| Input::new(&self.search).small()))
                             .children(notice)
                             .children(project)
                             .children(agents.iter().map(|a| self.agent_row(a, cx)))
                             .children(rows.into_iter().map(|label| self.rows(label, cx)))
-                            .children(advanced),
+                            .children(advanced)
+                            .children(extensions.then(|| self.data.extensions.clone()).flatten()),
                     ),
             )
     }
@@ -911,6 +923,7 @@ mod tests {
             context: String::new(),
             agents: Vec::new(),
             project_default: None,
+            extensions: None,
         }
     }
 

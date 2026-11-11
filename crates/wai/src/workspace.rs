@@ -1977,6 +1977,7 @@ impl Workspace {
             error: self.settings_error.clone(),
             notice,
             context: self.settings_context(),
+            extensions: self.extensions.clone(),
             agents: self.agent_rows(cx),
             project_default: wai_settings::project_default_agent(&self.project)
                 .filter(|p| Some(p) == self.settings.default_agent.as_ref()),
@@ -2082,6 +2083,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let notice = notice.map(|n| SharedString::from(n.to_string()));
+        self.extensions(window, cx);
         let data = self.settings_data(notice, cx);
         if let Some(view) = self.settings_view() {
             view.update(cx, |v, cx| {
@@ -2216,6 +2218,7 @@ impl Workspace {
             &view,
             window,
             |this, _, InstallPlugin(command), window, cx| {
+                this.close_settings(window, cx);
                 this.type_in_terminal(command, window, cx)
             },
         )
@@ -2235,14 +2238,13 @@ impl Workspace {
         self.sync_contributions(cx);
     }
 
-    /// Shows the Extensions view in the sidebar.
+    /// Opens the settings modal on Extensions.
     pub(crate) fn show_extensions(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<ExtensionsView> {
-        self.sidebar_tab = SidebarTab::Extensions;
-        cx.notify();
+        self.open_settings(Section::Extensions, None, window, cx);
         self.extensions(window, cx)
     }
 

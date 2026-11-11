@@ -15,7 +15,6 @@ use crate::app::{NewSession, OpenPalette, ToggleAgents, ToggleTerminal};
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::chat::TurnState;
 use crate::settings_view::Section;
-use crate::sidebar::SidebarTab;
 use crate::workspace::{Workspace, folder_name};
 
 pub(crate) static BRAND: LazyLock<Arc<Image>> = LazyLock::new(|| {
@@ -127,7 +126,6 @@ impl Workspace {
             .icon(IconName::LayoutDashboard)
             .tooltip("Extensions")
             .accessibility_label("Extensions")
-            .selected(self.sidebar_tab == SidebarTab::Extensions)
             .on_click(cx.listener(|this, _, window, cx| {
                 this.show_extensions(window, cx);
             }));
