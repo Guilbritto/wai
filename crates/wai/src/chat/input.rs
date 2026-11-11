@@ -1,5 +1,5 @@
-//! The prompt box: a multi-line input, chips for the files dropped, pasted or picked, Send /
-//! Stop.
+//! The prompt box: a multi-line input, chips for the files dropped, pasted or picked, the
+//! messages queued during a turn, Send and Stop.
 
 use std::path::{Path, PathBuf};
 
@@ -9,13 +9,13 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use wai_agent::PromptBlock;
+use wai_agent::{AgentCaps, PromptBlock};
 
-use super::model::{TurnState, elapsed};
+use super::model::{NoticeKind, TurnState, elapsed};
 use super::view::ChatSession;
 use crate::agents::AgentStatus;
 use crate::app::CancelTurn;
@@ -79,6 +79,25 @@ impl Attachment {
     }
 }
 
+/// A prompt's text and attachments, before it goes out.
+pub(super) struct Message {
+    pub(super) text: String,
+    pub(super) attachments: Vec<Attachment>,
+}
+
+impl Message {
+    /// What the transcript shows of it: the text, then `Attached: <names>`.
+    fn shown(&self) -> String {
+        if self.attachments.is_empty() {
+            return self.text.clone();
+        }
+        let names: Vec<_> = self.attachments.iter().map(|a| a.name.as_str()).collect();
+        format!("{}\nAttached: {}", self.text, names.join(", "))
+            .trim_start()
+            .to_string()
+    }
+}
+
 /// What `attachment` sends: an image goes as its file to an agent that takes no images.
 pub(super) fn prompt_block(attachment: &Attachment, images: bool) -> PromptBlock {
     match &attachment.block {
@@ -110,31 +129,109 @@ fn image(path: &Path) -> Option<PromptBlock> {
 }
 
 impl ChatSession {
-    /// Sends the prompt and the attachments. Only an idle session sends.
+    /// Sends the prompt and the attachments: from an idle session as a prompt; during a turn
+    /// into it when the agent steers, else into the queue until it ends.
     pub(super) fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.model.state != TurnState::Idle {
+        if !self.model.in_turn && self.model.state != TurnState::Idle {
             return;
         }
         let text = self.input.read(cx).value().trim().to_string();
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
-        let mut shown = text.clone();
-        let mut blocks = Vec::new();
-        if !text.is_empty() {
-            blocks.push(PromptBlock::Text(text));
-        }
-        if !self.attachments.is_empty() {
-            let names: Vec<_> = self.attachments.iter().map(|a| a.name.as_str()).collect();
-            shown = format!("{shown}\nAttached: {}", names.join(", "))
-                .trim_start()
-                .to_string();
-        }
-        let images = self.takes_images(cx);
-        blocks.extend(self.attachments.drain(..).map(|a| prompt_block(&a, images)));
+        let attachments = std::mem::take(&mut self.attachments);
         self.input
             .update(cx, |input, cx| input.set_value("", window, cx));
-        self.submit(blocks, &shown, cx);
+        let message = Message { text, attachments };
+        match self.model.in_turn {
+            false => self.send_message(message, cx),
+            true if self.caps(cx).is_some_and(|c| c.steering) => self.steer(message, cx),
+            true => {
+                self.queued.push(message);
+                cx.notify();
+            }
+        }
+    }
+
+    fn send_message(&mut self, message: Message, cx: &mut Context<Self>) {
+        let blocks = self.blocks(&message, cx);
+        self.submit(blocks, &message.shown(), cx);
+    }
+
+    /// What `message` sends: its text, then each attachment.
+    fn blocks(&self, message: &Message, cx: &App) -> Vec<PromptBlock> {
+        let images = self.caps(cx).is_some_and(|c| c.images);
+        let text = (!message.text.is_empty()).then(|| PromptBlock::Text(message.text.clone()));
+        let files = message.attachments.iter().map(|a| prompt_block(a, images));
+        text.into_iter().chain(files).collect()
+    }
+
+    /// Sends `message` into the running turn; it shows as the user's once the turn took it. With
+    /// no turn running any more it goes as a prompt; if the agent fails it, it is queued.
+    pub(super) fn steer(&mut self, message: Message, cx: &mut Context<Self>) {
+        let blocks = self.blocks(&message, cx);
+        let (handle, id) = (self.handle.clone(), self.id.clone());
+        cx.spawn(async move |this, cx| {
+            let steered = handle.steer(id, blocks).await;
+            this.update(cx, |this, cx| {
+                match steered {
+                    Ok(true) => {
+                        let ix = this.update_model(cx, |m| m.push_steered(&message.shown()));
+                        this.sync_rows(Some(ix), cx);
+                    }
+                    Ok(false) => this.send_message(message, cx),
+                    Err(e) => {
+                        let text = format!(
+                            "Could not send the message into the turn ({e}); it is queued."
+                        );
+                        this.model.notice(text, NoticeKind::Error);
+                        this.sync_rows(None, cx);
+                        this.queued.push(message);
+                        // The turn ended meanwhile: nothing would send the queue.
+                        if !this.model.in_turn {
+                            this.release_queue(false, cx);
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The queue once a turn ends: after a normal end it goes out as one prompt, its texts a blank
+    /// line apart; else its text and attachments go back to the prompt box, unsent.
+    pub(super) fn release_queue(&mut self, send: bool, cx: &mut Context<Self>) {
+        if self.queued.is_empty() {
+            return;
+        }
+        let queued = std::mem::take(&mut self.queued);
+        let texts: Vec<&str> = (queued.iter().map(|m| m.text.as_str()))
+            .filter(|t| !t.is_empty())
+            .collect();
+        let text = texts.join("\n\n");
+        let attachments = queued.into_iter().flat_map(|m| m.attachments).collect();
+        let message = Message { text, attachments };
+        if send {
+            return self.send_message(message, cx);
+        }
+        self.attachments.splice(0..0, message.attachments);
+        self.unsent = Some(message.text);
+        cx.notify();
+    }
+
+    /// Puts the text taken back from the queue in the prompt box, before what was typed since.
+    pub(super) fn sync_unsent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self.unsent.take() else {
+            return;
+        };
+        let draft = self.input.read(cx).value().trim().to_string();
+        let parts: Vec<String> = [text, draft]
+            .into_iter()
+            .filter(|t| !t.is_empty())
+            .collect();
+        self.prefill(&parts.join("\n\n"), window, cx);
     }
 
     /// Sends `text` as a prompt, leaving the prompt box alone (an extension's `sessions/prompt`).
@@ -227,15 +324,12 @@ impl ChatSession {
         .detach();
     }
 
-    /// Whether this session's agent takes images in a prompt.
-    fn takes_images(&self, cx: &App) -> bool {
-        let Some(registry) = self.registry.upgrade() else {
-            return false;
-        };
-        matches!(
-            registry.read(cx).status(&self.agent),
-            Some(AgentStatus::Ready(caps)) if caps.images
-        )
+    /// What this session's agent can do, once it is ready.
+    fn caps(&self, cx: &App) -> Option<AgentCaps> {
+        match self.registry.upgrade()?.read(cx).status(&self.agent) {
+            Some(AgentStatus::Ready(caps)) => Some(*caps),
+            _ => None,
+        }
     }
 
     pub(super) fn render_prompt(
@@ -258,7 +352,7 @@ impl ChatSession {
         let theme = cx.theme();
         let dark = theme.is_dark();
         // Round 36 px buttons (`.chat-enviar`); light mode keeps the theme's primary and danger.
-        let button = if busy {
+        let stop = busy.then(|| {
             let stop = Button::new("stop")
                 .icon(IconName::Square)
                 .tooltip("Stop")
@@ -276,26 +370,29 @@ impl ChatSession {
                 .border_color(aurora::erro().alpha(0.5)),
                 false => stop.danger(),
             }
-        } else {
-            let disabled = self.model.state != TurnState::Idle;
-            let send = Button::new("send")
-                .icon(IconName::ArrowUp)
-                .tooltip("Send")
-                .accessibility_label("Send")
-                .disabled(disabled)
-                .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)));
-            match (dark, disabled) {
-                // A disabled button replays these over its own disabled colors.
-                (true, true) => send.bg(aurora::vidro()).text_color(aurora::nevoa()),
-                (true, false) => aurora::filled(
-                    send,
-                    aurora::boreal(),
-                    aurora::boreal().blend(hsla(0., 0., 1., 0.2)),
-                    rgb(0x0b1024).into(),
-                    cx,
-                ),
-                (false, _) => send.primary(),
-            }
+            .size(px(36.))
+            .rounded(px(18.))
+        });
+        // During a turn too: the message goes into the turn, or waits in the queue.
+        let empty = self.input.read(cx).value().trim().is_empty() && self.attachments.is_empty();
+        let disabled = empty || !(self.model.in_turn || self.model.state == TurnState::Idle);
+        let send = Button::new("send")
+            .icon(IconName::ArrowUp)
+            .tooltip("Send")
+            .accessibility_label("Send")
+            .disabled(disabled)
+            .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)));
+        let send = match (dark, disabled) {
+            // A disabled button replays these over its own disabled colors.
+            (true, true) => send.bg(aurora::vidro()).text_color(aurora::nevoa()),
+            (true, false) => aurora::filled(
+                send,
+                aurora::boreal(),
+                aurora::boreal().blend(hsla(0., 0., 1., 0.2)),
+                rgb(0x0b1024).into(),
+                cx,
+            ),
+            (false, _) => send.primary(),
         }
         .size(px(36.))
         .rounded(px(18.));
@@ -323,27 +420,59 @@ impl ChatSession {
             (false, true) => field.bg(theme.background).border_color(theme.ring),
             (false, false) => field.bg(theme.background).border_color(theme.input),
         };
+        let muted = match dark {
+            true => aurora::nevoa_2(),
+            false => theme.muted_foreground,
+        };
         // What the agent does, for how long, and how to stop it. Nothing animates: the mark
         // turns with the clock's tick, so a quiet turn costs one frame a second.
         let status = self.model.activity().map(|doing| {
             let started = self.turn.as_ref().map(|(started, _)| started.elapsed());
             let secs = started.map_or(0, |d| d.as_secs());
-            let color = match dark {
-                true => aurora::nevoa_2(),
-                false => theme.muted_foreground,
-            };
             h_flex()
                 .id("turn-status")
                 .gap_2()
                 .px_3()
                 .text_size(px(12.))
-                .text_color(color)
+                .text_color(muted)
                 .child(["◐", "◓", "◑", "◒"][secs as usize % 4])
                 .child(div().min_w_0().truncate().child(doing))
                 .child(
                     div()
                         .flex_none()
                         .child(format!("{} · Esc to stop", elapsed(secs))),
+                )
+                // Registers the id so tests can find it.
+                .test_support()
+        });
+        // The messages waiting for the turn's end, oldest first.
+        let queued = self.queued.iter().enumerate().map(|(ix, message)| {
+            let shown = message.shown();
+            let first = shown.lines().next().unwrap_or_default();
+            h_flex()
+                .id(("queued", ix))
+                .gap_2()
+                .px_3()
+                .text_size(px(12.))
+                .text_color(muted)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(format!("Queued · {first}")),
+                )
+                .child(
+                    Button::new(("queued-remove", ix))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .tooltip("Don't send")
+                        .accessibility_label("Don't send")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.queued.remove(ix);
+                            cx.notify();
+                        })),
                 )
                 // Registers the id so tests can find it.
                 .test_support()
@@ -368,6 +497,7 @@ impl ChatSession {
             .gap_2()
             .p_3()
             .children(status)
+            .children(queued)
             .when(!self.attachments.is_empty(), |el| {
                 el.child(h_flex().gap_2().flex_wrap().children(chips))
             })
@@ -375,7 +505,8 @@ impl ChatSession {
                 field
                     .child(attach)
                     .child(div().flex_1().child(textarea))
-                    .child(button),
+                    .children(stop)
+                    .child(send),
             )
     }
 }

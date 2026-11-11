@@ -10,7 +10,7 @@ use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::{ConnectionTo, Responder, schema as acp};
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, Agent, Client, Error, ErrorCode, JsonRpcRequest, RequestCancellation,
-    is_connection_terminated, is_incoming_transport_closed,
+    UntypedMessage, is_connection_terminated, is_incoming_transport_closed,
 };
 use async_channel::{Receiver, Sender};
 
@@ -57,6 +57,11 @@ enum Command {
     Prompt {
         session: SessionId,
         blocks: Vec<PromptBlock>,
+    },
+    Steer {
+        session: SessionId,
+        blocks: Vec<PromptBlock>,
+        reply: Reply<Result<bool, AgentError>>,
     },
     Cancel {
         session: SessionId,
@@ -188,6 +193,22 @@ impl AgentHandle {
     /// Starts a turn. Its completion is reported as `AgentEvent::TurnEnded`.
     pub fn prompt(&self, session: SessionId, blocks: Vec<PromptBlock>) {
         self.send(Command::Prompt { session, blocks });
+    }
+
+    /// Sends `blocks` into the session's running turn (`_session/steering`; the agent must
+    /// advertise `AgentCaps::steering`). `true`: the turn took them; `false`: no turn runs, so
+    /// they must go as a prompt.
+    pub async fn steer(
+        &self,
+        session: SessionId,
+        blocks: Vec<PromptBlock>,
+    ) -> Result<bool, AgentError> {
+        self.request(|reply| Command::Steer {
+            session,
+            blocks,
+            reply,
+        })
+        .await?
     }
 
     pub fn cancel(&self, session: SessionId) {
@@ -597,6 +618,11 @@ async fn actor_loop(
             list_sessions: caps.session_capabilities.list.is_some(),
             fork: caps.session_capabilities.fork.is_some(),
             images: caps.prompt_capabilities.image,
+            steering: init
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("steering")?.get("supported"))
+                == Some(&serde_json::Value::Bool(true)),
         },
     });
 
@@ -702,6 +728,21 @@ async fn actor_loop(
                         turn.end_turn(session, reason);
                         Ok(())
                     })?
+            }
+            Command::Steer {
+                session,
+                blocks,
+                reply,
+            } => {
+                let blocks: Vec<_> = blocks.into_iter().map(convert::content_block).collect();
+                // An idle session leaves the message to wai, which sends it as a prompt.
+                let params = serde_json::json!({
+                    "sessionId": session,
+                    "prompt": blocks,
+                    "_meta": {"steering": {"idleBehavior": "promptRequired"}},
+                });
+                let steer = UntypedMessage::new("_session/steering", params)?;
+                request(&cx, broker, steer, reply, convert::steered)?
             }
             Command::Cancel { session } => {
                 broker.cancel_pending(Some(&session));

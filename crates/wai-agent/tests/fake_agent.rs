@@ -106,7 +106,8 @@ fn streams_agent_text_and_ends_turn() {
                         load_session: true,
                         list_sessions: true,
                         fork: true,
-                        images: true
+                        images: true,
+                        steering: false,
                     }
                 );
             }
@@ -122,10 +123,57 @@ fn streams_agent_text_and_ends_turn() {
         assert_eq!(
             events.last(),
             Some(&AgentEvent::TurnEnded {
-                session: session.id,
+                session: session.id.clone(),
                 reason: StopReason::EndTurn
             })
         );
+        // An agent without steering does not know the request.
+        let steered = agent.steer(session.id, hello()).await;
+        assert!(
+            matches!(steered, Err(AgentError::Protocol(_))),
+            "{steered:?}"
+        );
+    });
+}
+
+/// `--steering`: a message steered during a turn joins it; with no turn running, the agent
+/// asks for a prompt instead.
+#[test]
+fn steering_joins_the_running_turn() {
+    run(async {
+        let flags = [
+            "--steering",
+            "--reply",
+            "a b c d e f",
+            "--chunk-delay-ms",
+            "50",
+        ];
+        let (agent, rx) = spawn(&flags);
+        match ready(&rx).await {
+            AgentEvent::Ready { caps, .. } => assert!(caps.steering),
+            other => unreachable!("{other:?}"),
+        }
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        agent.prompt(session.id.clone(), hello());
+        let text = |e: &AgentEvent| {
+            matches!(
+                e,
+                AgentEvent::Update {
+                    event: SessionEvent::AgentText(_),
+                    ..
+                }
+            )
+        };
+        let mut events = until(&rx, text).await;
+
+        let more = vec![PromptBlock::Text("more".into())];
+        assert_eq!(
+            agent.steer(session.id.clone(), more.clone()).await,
+            Ok(true)
+        );
+        events.extend(until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await);
+        assert_eq!(agent_text(&events), "a b c d e f Steered: more");
+        assert_eq!(agent.steer(session.id.clone(), more).await, Ok(false));
     });
 }
 

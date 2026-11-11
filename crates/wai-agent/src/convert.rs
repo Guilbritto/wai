@@ -329,6 +329,18 @@ pub(crate) fn stop_reason(reason: acp::StopReason) -> StopReason {
     }
 }
 
+/// A `_session/steering` result: `true` when the running turn took the message, `false` when
+/// no turn runs.
+pub(crate) fn steered(result: serde_json::Value) -> Result<bool, AgentError> {
+    match result["outcome"].as_str() {
+        Some("injected") => Ok(true),
+        Some("promptRequired") => Ok(false),
+        _ => Err(AgentError::Protocol(format!(
+            "unexpected steering result {result}"
+        ))),
+    }
+}
+
 /// ACP stdio servers: every agent must support that transport. A bare command is resolved on
 /// PATH first: the agent starts the server in the project, where Windows would look first. One
 /// that is not on PATH is left out.

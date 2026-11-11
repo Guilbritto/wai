@@ -88,6 +88,8 @@ pub struct AgentCaps {
     pub list_sessions: bool,
     pub fork: bool,
     pub images: bool,
+    /// Takes a message into a running turn (`AgentHandle::steer`).
+    pub steering: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
