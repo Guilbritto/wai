@@ -122,6 +122,8 @@ pub struct ChatSession {
     /// Per waiting `Question` card, by request id, made when it first draws.
     pub(super) questions: HashMap<u64, QuestionForm>,
     pub(super) scroller: Entity<MessageScrollerState>,
+    /// The pinned stack's height at the last paint; 0 while nothing waits.
+    pub(super) waiting_height: Pixels,
     pub(super) modes: Option<Entity<SelectState<Vec<Mode>>>>,
     /// The header's pickers of the model, effort and mode options, in that order.
     pub(super) pickers: Vec<(String, Entity<SelectState<Vec<Choice>>>)>,
@@ -190,6 +192,7 @@ impl ChatSession {
             turn: None,
             questions: HashMap::new(),
             scroller: cx.new(|cx| MessageScrollerState::new(0, cx)),
+            waiting_height: px(0.),
             modes: None,
             pickers: Vec::new(),
             pickers_stale: false,
@@ -354,6 +357,21 @@ impl ChatSession {
             let known = list.item_count();
             list.remeasure_items(rows.start.min(known)..rows.end.min(known), cx);
         });
+    }
+
+    /// Records the pinned stack's height: the list's bottom inset follows it.
+    pub(super) fn set_waiting_height(&mut self, height: Pixels, cx: &mut Context<Self>) {
+        if self.waiting_height == height {
+            return;
+        }
+        self.waiting_height = height;
+        let last = self.model.items.len();
+        let following = self.scroller.read(cx).is_following_tail();
+        self.remeasure(last.saturating_sub(1)..last, cx);
+        if following {
+            self.scroller.update(cx, |list, cx| list.scroll_to_end(cx));
+        }
+        cx.notify();
     }
 
     pub fn status(&self) -> &TurnState {
@@ -1141,6 +1159,69 @@ mod tests {
             window.render_frame(cx);
             assert!(window.try_find("perm-allow_once").is_none(), "buttons stay");
         });
+    }
+
+    /// O1: while a card waits, the list's last row scrolls clear of the stack (the list's bottom
+    /// inset follows the stack's height); once nothing waits, the inset goes.
+    #[gpui_kit::test]
+    fn list_scrolls_clear_of_the_pinned_stack(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let reply = dir.path().join("long.md");
+        let lines: Vec<String> = (1..=80).map(|i| format!("line {i}")).collect();
+        fs::write(&reply, lines.join("\n\n")).unwrap();
+        // With --ask-permission the reply streams before the tool call: the list overflows.
+        let flags = format!("--ask-permission --reply-file {}", wai_agent::quote(&reply));
+        let (workspace, cx) = open(cx, fake_settings(&flags));
+        let session = start_session(&workspace, cx);
+        send("edit", cx);
+        wait_until(cx, "the permission card", |cx| {
+            state(&session, cx) == TurnState::NeedsYou
+        });
+        // The canvas reports the height in prepaint: the inset lands on the next frame.
+        let frame = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.render_frame(cx);
+            });
+        };
+        frame(cx);
+        let last = session.read_with(cx, |s, _| s.model.items.len() - 1); // the edit's tool row
+        let clear = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| {
+                let (row, stack) = (
+                    window.find(("tool", last)).bounds(),
+                    window.find("waiting").bounds(),
+                );
+                (row.bottom() <= stack.top() + px(0.5), stack.size.height)
+            })
+        };
+        let height = session.read_with(cx, |s, _| s.waiting_height);
+        let (is_clear, stack) = clear(cx);
+        assert!(
+            (height - stack).abs() <= px(2.),
+            "inset {height:?} vs stack {stack:?}"
+        );
+        assert!(is_clear, "at the tail, the last row sits above the stack");
+        // Scrolled up and back: the last row is still reachable, clear of the stack.
+        cx.update(|window, cx| {
+            let delta = gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(600.)));
+            window.scroll("transcript", delta, cx);
+        });
+        session.update(cx, |s, cx| {
+            s.scroller.update(cx, |list, cx| list.scroll_to_end(cx))
+        });
+        frame(cx);
+        assert!(clear(cx).0, "the last row scrolls clear of the stack");
+        // Nothing waits: no inset.
+        click_edits(None, "perm-allow_once", cx);
+        wait_until(cx, "the turn's end", |cx| {
+            state(&session, cx) == TurnState::Idle
+        });
+        frame(cx);
+        assert!(!shows("waiting", cx));
+        assert_eq!(session.read_with(cx, |s, _| s.waiting_height), px(0.));
     }
 
     /// The choice rows and the icon-only Stop are named for assistive tech: the rows' text is a

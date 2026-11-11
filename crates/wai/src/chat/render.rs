@@ -591,6 +591,17 @@ impl ChatSession {
             _ => div().into_any_element(),
         });
         let cards: Vec<_> = cards.collect();
+        let view = cx.entity();
+        let height = canvas(
+            move |bounds, _, cx| {
+                view.update(cx, |this, cx| {
+                    this.set_waiting_height(bounds.size.height, cx)
+                })
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
         let theme = cx.theme();
         let stack = v_flex()
             .id("waiting")
@@ -626,7 +637,13 @@ impl ChatSession {
                         .spread_radius(px(-8.)),
                 ]),
         };
-        Some(stack.children(cards).test_support().into_any_element())
+        Some(
+            stack
+                .child(height)
+                .children(cards)
+                .test_support()
+                .into_any_element(),
+        )
     }
 }
 
@@ -643,6 +660,10 @@ impl Render for ChatSession {
             .min_h_0()
             .test_support();
         let waiting = self.render_waiting(window, cx);
+        if waiting.is_none() && self.waiting_height != px(0.) {
+            self.set_waiting_height(px(0.), cx);
+        }
+        let inset = self.waiting_height + px(16.);
         let messages = match empty {
             true => messages
                 .flex()
@@ -652,8 +673,8 @@ impl Render for ChatSession {
             // Rows sit 8 px apart, not the scroller's 32: the scroller's gap
             // goes and each row but the last carries its own. The scroller remeasures the row
             // before an append, whose "last" flips.
-            false => messages.child(
-                MessageScroller::new(
+            false => messages.child({
+                let scroller = MessageScroller::new(
                     "messages",
                     self.scroller.clone(),
                     cx.processor(|this, ix, _, cx| {
@@ -664,8 +685,14 @@ impl Render for ChatSession {
                             .children(row)
                     }),
                 )
-                .with_row_style(StyleRefinement::default().pb_0()),
-            ),
+                .with_row_style(StyleRefinement::default().pb_0());
+                match self.waiting_height > px(0.) {
+                    true => scroller
+                        .with_list_style(StyleRefinement::default().pb(inset))
+                        .with_jump_button_style(StyleRefinement::default().mb(inset)),
+                    false => scroller,
+                }
+            }),
         };
         v_flex()
             .key_context("ChatSession")
