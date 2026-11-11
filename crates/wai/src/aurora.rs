@@ -89,6 +89,10 @@ pub(crate) fn nevoa() -> Hsla {
 pub(crate) fn nevoa_2() -> Hsla {
     rgb(0x626c98).into()
 }
+/// A step that finished.
+pub(crate) fn ok() -> Hsla {
+    rgb(0x46e39a).into()
+}
 /// Hover, chips, inputs.
 pub(crate) fn vidro() -> Hsla {
     white(0.055)

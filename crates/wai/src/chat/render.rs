@@ -152,56 +152,86 @@ pub(super) fn glass(el: Div, cx: &App) -> Div {
     }
 }
 
-/// A tool call's status mark and its color.
+/// A step's status mark (`.step svg`): 14 px.
 fn status_icon(status: ToolStatus, cx: &App) -> Icon {
     let theme = cx.theme();
-    let done = match theme.is_dark() {
-        true => aurora::boreal(),
-        false => theme.success,
+    let dark = theme.is_dark();
+    let (icon, color) = match (status, dark) {
+        (ToolStatus::Pending, true) => (IconName::Ellipsis, aurora::nevoa_2()),
+        (ToolStatus::Pending, false) => (IconName::Ellipsis, theme.muted_foreground),
+        (ToolStatus::InProgress, true) => (IconName::Loader, aurora::nevoa()),
+        (ToolStatus::InProgress, false) => (IconName::Loader, theme.foreground),
+        (ToolStatus::Completed, true) => (IconName::Check, aurora::ok()),
+        (ToolStatus::Completed, false) => (IconName::Check, theme.success),
+        (ToolStatus::Failed, true) => (IconName::CircleX, aurora::erro()),
+        (ToolStatus::Failed, false) => (IconName::CircleX, theme.danger),
     };
-    let (icon, color) = match status {
-        ToolStatus::Pending => (IconName::Ellipsis, theme.muted_foreground),
-        ToolStatus::InProgress => (IconName::Loader, theme.foreground),
-        ToolStatus::Completed => (IconName::Check, done),
-        ToolStatus::Failed => (IconName::CircleX, theme.danger),
-    };
-    Icon::new(icon).xsmall().text_color(color)
+    Icon::new(icon).size(px(14.)).flex_none().text_color(color)
 }
 
-/// The muted color of a step line's chevron and kind icon.
-fn icon_color(cx: &App) -> Hsla {
-    match cx.theme().is_dark() {
-        true => aurora::nevoa_2(),
-        false => cx.theme().muted_foreground,
+/// `title` with its `` `code` `` spans unquoted: the text, then the byte ranges of the code in it.
+/// An unclosed backtick stays text.
+pub(crate) fn code_ranges(title: &str) -> (String, Vec<std::ops::Range<usize>>) {
+    let (mut text, mut ranges) = (String::new(), Vec::new());
+    let mut rest = title;
+    while let Some(open) = rest.find('`') {
+        let Some(len) = rest[open + 1..].find('`') else {
+            break;
+        };
+        text.push_str(&rest[..open]);
+        let start = text.len();
+        text.push_str(&rest[open + 1..open + 1 + len]);
+        ranges.push(start..text.len());
+        rest = &rest[open + len + 2..];
     }
+    text.push_str(rest);
+    (text, ranges)
 }
 
-fn chevron(open: bool, cx: &App) -> Icon {
-    let icon = match open {
-        true => IconName::ChevronDown,
-        false => IconName::ChevronRight,
+/// A step title as one line of text, its code spans highlighted (`.step code`).
+fn step_title(title: &str, cx: &App) -> impl IntoElement + use<> {
+    let theme = cx.theme();
+    let (text, ranges) = code_ranges(title);
+    let style = match theme.is_dark() {
+        true => HighlightStyle {
+            color: Some(aurora::tinta_2()),
+            background_color: Some(aurora::vidro()),
+            ..Default::default()
+        },
+        false => HighlightStyle {
+            color: Some(theme.foreground),
+            background_color: Some(theme.muted),
+            ..Default::default()
+        },
     };
-    Icon::new(icon).xsmall().text_color(icon_color(cx))
+    div()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .child(StyledText::new(text).with_highlights(ranges.into_iter().map(|r| (r, style))))
 }
 
-/// The icon of a tool call's kind.
-fn kind_icon(kind: &str) -> IconName {
-    match kind {
-        "execute" => IconName::SquareTerminal,
-        "read" => IconName::FileText,
-        "edit" => IconName::Replace,
-        "search" => IconName::Search,
-        "fetch" => IconName::Globe,
-        "delete" => IconName::Delete,
-        "move" => IconName::ArrowRight,
-        "subagent" => IconName::Bot,
-        "think" => IconName::Asterisk,
-        _ => IconName::Dash,
-    }
-}
-
-/// A step's one compact line (`.t`): glass, 13 px regular text, muted.
+/// A step's line (`.step`): no box, 13 px, muted and `tinta` on hover.
 pub(super) fn step_line(cx: &App) -> Div {
+    let theme = cx.theme();
+    let line = h_flex()
+        .gap(px(8.))
+        .py(px(3.))
+        .text_size(px(13.))
+        .font_weight(FontWeight::NORMAL)
+        .cursor_pointer();
+    match theme.is_dark() {
+        true => line
+            .text_color(aurora::nevoa())
+            .hover(|el| el.text_color(aurora::tinta())),
+        false => line
+            .text_color(theme.muted_foreground)
+            .hover(|el| el.text_color(theme.foreground)),
+    }
+}
+
+/// A closed card's compact line (`.t`): glass, 13 px regular text, muted.
+pub(super) fn boxed_line(cx: &App) -> Div {
     let theme = cx.theme();
     let line = h_flex()
         .gap(px(6.))
@@ -377,7 +407,7 @@ impl ChatSession {
         if ix != run.start {
             return row;
         }
-        let head = self.render_group(run, open, cx);
+        let head = self.render_group(run, cx);
         Some(v_flex().child(head).children(row).into_any_element())
     }
 
@@ -405,7 +435,6 @@ impl ChatSession {
     fn render_group(
         &self,
         run: std::ops::Range<usize>,
-        open: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
         let head = run.start;
@@ -422,7 +451,7 @@ impl ChatSession {
         };
         step_line(cx)
             .id(("group", head))
-            .child(chevron(open, cx))
+            .child(status_icon(status, cx))
             .child(
                 div()
                     .flex_1()
@@ -430,7 +459,6 @@ impl ChatSession {
                     .truncate()
                     .child(self.model.run_label(run)),
             )
-            .child(status_icon(status, cx))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if !this.open_groups.remove(&head) {
                     this.open_groups.insert(head);
@@ -503,12 +531,12 @@ impl ChatSession {
                     .child(
                         step_line(cx)
                             .id(("thought", ix))
-                            .child(chevron(open, cx))
-                            .child(
-                                Icon::new(kind_icon("think"))
-                                    .xsmall()
-                                    .text_color(icon_color(cx)),
-                            )
+                            .child(Icon::new(IconName::Asterisk).size(px(14.)).text_color(
+                                match dark {
+                                    true => aurora::nevoa_2(),
+                                    false => muted,
+                                },
+                            ))
                             .child("Thought")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.open_thoughts.remove(&ix) {
@@ -613,13 +641,10 @@ impl ChatSession {
         };
         let (output, hidden) = tool.visible_text();
         let on_open = Self::on_open(cx);
-        let kind = kind_icon(if edit { "edit" } else { &tool.kind });
         let line = step_line(cx)
             .id((id, ix))
-            .child(chevron(open, cx))
-            .child(Icon::new(kind).xsmall().text_color(icon_color(cx)))
-            .child(div().flex_1().min_w_0().truncate().child(title))
             .child(status_icon(tool.status, cx))
+            .child(step_title(&title, cx))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if !this.open_steps.remove(&ix) {
                     this.open_steps.insert(ix);
@@ -893,7 +918,7 @@ impl Render for ChatSession {
 mod tests {
     use wai_agent::ToolStatus;
 
-    use super::{CardEdges, card_edges, tokens};
+    use super::{CardEdges, card_edges, code_ranges, tokens};
     use crate::chat::model::{ChatItem, ToolItem};
 
     #[test]
@@ -997,5 +1022,27 @@ mod tests {
             Some(true),
             "an invisible card gives no header"
         );
+    }
+
+    #[test]
+    fn code_ranges_split_titles() {
+        assert_eq!(
+            code_ranges("Read README.md"),
+            ("Read README.md".into(), vec![])
+        );
+        assert_eq!(
+            code_ranges("`git status`"),
+            ("git status".into(), vec![0..10])
+        );
+        assert_eq!(
+            code_ranges("Run `cargo test` now"),
+            ("Run cargo test now".into(), vec![4..14])
+        );
+        assert_eq!(
+            code_ranges("a `b"),
+            ("a `b".into(), vec![]),
+            "an unclosed backtick stays text"
+        );
+        assert_eq!(code_ranges(""), (String::new(), vec![]));
     }
 }

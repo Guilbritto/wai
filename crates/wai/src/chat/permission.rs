@@ -10,7 +10,7 @@ use gpui_kit::*;
 use wai_agent::{ChoiceKind, FileDiff, PermissionChoice, PermissionRequest};
 
 use super::edits::{DiffLine, bounded_diff};
-use super::render::step_line;
+use super::render::boxed_line;
 use crate::aurora::{self, DISPLAY_FONT};
 
 /// What a choice button calls.
@@ -257,7 +257,7 @@ pub fn closed(id: ElementId, title: &str, answer: &str, cx: &App) -> Stateful<Di
         true => aurora::tinta(),
         false => theme.foreground,
     };
-    step_line(cx)
+    boxed_line(cx)
         .id(id)
         .cursor_default()
         .child(div().flex_1().min_w_0().truncate().child(title.to_string()))

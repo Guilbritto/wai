@@ -1943,7 +1943,7 @@ mod tests {
         })
     }
 
-    /// A step is one compact line of its own, 8 px from the next; unfolded, its output sits in a
+    /// A step is one compact line of its own, touching the next; unfolded, its output sits in a
     /// box under the line.
     #[gpui_kit::test]
     fn step_lines_are_compact_and_open_below(cx: &mut TestAppContext) {
@@ -1964,7 +1964,7 @@ mod tests {
         );
         assert_eq!(line.top(), tool.top(), "the line is the step's own box");
         assert!(
-            (next.top() - line.bottom() - px(8.)).abs() < px(0.5),
+            (next.top() - line.bottom()).abs() < px(0.5),
             "{line:?} {next:?}"
         );
         click_edits(None, ("step", 2usize), cx);

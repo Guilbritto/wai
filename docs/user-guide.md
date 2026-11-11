@@ -60,7 +60,7 @@ While the agent prepares the session, its pane shows `Preparing <agent>…`. **�
 
     | Processing | Steps |
     |---|---|
-    | **Step by step** (the default) | Each step is one folded line with an icon of its kind, its title and ✓ or ✗. A click opens a tool call's output in a box under the line; thinking shows as a `Thought` line that opens the same way |
+    | **Step by step** (the default) | Each step is one line in the reply's card: ✓ or ✗ (or a mark while it runs), then its title, commands in code style. A click opens a tool call's output in a box under the line; thinking shows as a `Thought` line that opens the same way |
     | **Grouped** | The steps between two replies fold into one block, such as `3 steps · Read README.md, Run git status`; the head names every step. A click lists the step lines, each still folded |
     | **Hidden** | No steps |
 
