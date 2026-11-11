@@ -15,7 +15,7 @@ use wai_agent::{
 use wai_settings::Processing;
 
 use super::edits::open_line;
-use super::input::Attachment;
+use super::input::{Attachment, Message};
 use super::model::{ChatItem, ChatModel, NoticeKind, TurnState, UNSUPPORTED_QUESTION};
 use super::permission::DiffView;
 use super::question::QuestionForm;
@@ -95,6 +95,14 @@ pub struct ChatSession {
     pub(super) handle: AgentHandle,
     pub(super) input: Entity<TextareaState>,
     pub(super) attachments: Vec<Attachment>,
+    /// Sent during a turn to an agent that cannot steer: they go out when it ends.
+    pub(super) queued: Vec<Message>,
+    /// Queued text going back to the prompt box at the next frame (which has the window).
+    pub(super) unsent: Option<String>,
+    /// The `/` menu's selected row, its scroll, and whether Esc closed it.
+    pub(super) menu_ix: usize,
+    pub(super) menu_scroll: ScrollHandle,
+    pub(super) menu_closed: bool,
     pub(super) registry: WeakEntity<AgentRegistry>,
     /// Per `Agent`/`Thought` row.
     pub(super) texts: HashMap<usize, Markdown>,
@@ -144,9 +152,15 @@ impl ChatSession {
         let subscriptions =
             vec![
                 cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
-                    // Shift+Enter inserted a newline already.
-                    if let InputEvent::PressEnter { shift: false, .. } = event {
-                        this.send(window, cx);
+                    match event {
+                        // Shift+Enter inserted a newline already.
+                        InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
+                        // The `/` menu opens again, at its top.
+                        InputEvent::Change => {
+                            (this.menu_ix, this.menu_closed) = (0, false);
+                            cx.notify();
+                        }
+                        _ => {}
                     }
                 }),
             ];
@@ -158,6 +172,11 @@ impl ChatSession {
             handle,
             input,
             attachments: Vec::new(),
+            queued: Vec::new(),
+            unsent: None,
+            menu_ix: 0,
+            menu_scroll: ScrollHandle::new(),
+            menu_closed: false,
             registry,
             texts: HashMap::new(),
             diffs: HashMap::new(),
@@ -429,6 +448,7 @@ impl ChatSession {
         });
         self.sync_rows(None, cx);
         cx.emit(ChatEvent::TurnEnded(reason.clone()));
+        self.release_queue(*reason == StopReason::EndTurn, cx);
         cx.notify();
     }
 
@@ -436,6 +456,7 @@ impl ChatSession {
     pub fn handle_agent_exited(&mut self, error: &str, cx: &mut Context<Self>) {
         self.update_model(cx, |m| m.on_exited(Some(error)));
         self.sync_rows(None, cx);
+        self.release_queue(false, cx);
         cx.notify();
     }
 
@@ -551,6 +572,7 @@ impl ChatSession {
                 self.diffs.insert(ix, diffs);
             }
             ChatItem::User { .. }
+            | ChatItem::Steered { .. }
             | ChatItem::Question { .. }
             | ChatItem::Notice { .. }
             | ChatItem::Edits { .. } => {}
@@ -687,6 +709,7 @@ mod tests {
 
     use super::ChatSession;
     use crate::agents::RegistryEvent;
+    use crate::chat::input::{Attachment, Message};
     use crate::chat::model::{ChatItem, EditedFile, NoticeKind, TurnState, UNSUPPORTED_QUESTION};
     use crate::notify;
     use crate::sidebar::canonical;
@@ -726,6 +749,187 @@ mod tests {
 
     fn state(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> TurnState {
         session.read_with(cx, |s, _| s.model.state.clone())
+    }
+
+    /// The fake agent's flags for a reply of `n` words, one every `delay` ms: the turn runs that
+    /// long.
+    fn slow_reply(n: usize, delay: u32) -> String {
+        let words: Vec<String> = (0..n).map(|i| format!("w{i}")).collect();
+        format!("--reply '{}' --chunk-delay-ms {delay}", words.join(" "))
+    }
+
+    fn user_texts(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> Vec<String> {
+        session.read_with(cx, |s, _| {
+            (s.model.items.iter())
+                .filter_map(|item| match item {
+                    ChatItem::User { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    /// All the agent's text, every message joined.
+    fn agent_texts(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> String {
+        session.read_with(cx, |s, _| {
+            (s.model.items.iter())
+                .filter_map(|item| match item {
+                    ChatItem::Agent { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    /// With an agent that steers, a message sent during a turn joins it: it shows as the user's
+    /// at once, the turn's reply takes it in, and no second prompt goes out.
+    #[gpui_kit::test]
+    fn message_sent_during_a_turn_steers_it(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let flags = format!("--steering {}", slow_reply(20, 50));
+        let (workspace, cx) = open(cx, fake_settings(&flags));
+        let session = start_session(&workspace, cx);
+
+        send("go", cx);
+        wait_until(cx, "the first chunk", |cx| {
+            last_agent_text(&session, cx).is_some()
+        });
+        send("also this", cx);
+        let steered = ChatItem::Steered {
+            text: "also this".into(),
+        };
+        wait_until(cx, "the steered message", |cx| {
+            session.read_with(cx, |s, _| s.model.items.contains(&steered))
+        });
+        assert_eq!(typed(&session, cx), "");
+        wait_until(cx, "the turn's end", |cx| {
+            state(&session, cx) == TurnState::Idle
+        });
+        assert_eq!(user_texts(&session, cx), ["go"], "a second prompt went out");
+        let words: Vec<String> = (0..20).map(|i| format!("w{i}")).collect();
+        let reply = format!("{} Steered: also this", words.join(" "));
+        assert_eq!(agent_texts(&session, cx), reply);
+    }
+
+    /// A steer that finds no turn running (it ended meanwhile) goes out as a prompt.
+    #[gpui_kit::test]
+    fn steer_without_a_turn_sends_a_prompt(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--steering"));
+        let session = start_session(&workspace, cx);
+
+        let late = Message {
+            text: "late".into(),
+            attachments: Vec::new(),
+        };
+        session.update(cx, |s, cx| s.steer(late, cx));
+        wait_until(cx, "the reply", |cx| {
+            state(&session, cx) == TurnState::Idle && last_agent_text(&session, cx).is_some()
+        });
+        let items = session.read_with(cx, |s, _| s.model.items.clone());
+        assert_eq!(
+            items,
+            [
+                ChatItem::User {
+                    text: "late".into()
+                },
+                ChatItem::Agent {
+                    text: "Hello from fake agent".into()
+                },
+            ]
+        );
+    }
+
+    /// An agent that cannot steer: messages sent during a turn wait above the prompt box, × drops
+    /// one, and at the turn's end the rest go out as one prompt.
+    #[gpui_kit::test]
+    fn messages_sent_during_a_turn_queue_until_it_ends(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(&slow_reply(40, 50)));
+        let session = start_session(&workspace, cx);
+
+        send("go", cx);
+        wait_until(cx, "the first chunk", |cx| {
+            last_agent_text(&session, cx).is_some()
+        });
+        for message in ["first", "second", "third"] {
+            send(message, cx);
+        }
+        assert_eq!(typed(&session, cx), "");
+        assert!(shows(("queued", 2usize), cx));
+        click_edits(None, ("queued-remove", 1usize), cx);
+        assert!(!shows(("queued", 2usize), cx));
+        assert!(shows(("queued", 1usize), cx));
+
+        wait_until(cx, "the queued prompt's reply", |cx| {
+            state(&session, cx) == TurnState::Idle && user_texts(&session, cx).len() == 2
+        });
+        assert_eq!(user_texts(&session, cx), ["go", "first\n\nthird"]);
+        assert!(!shows(("queued", 0usize), cx));
+    }
+
+    /// Stop with messages queued: nothing goes out; their text and attachments go back into the
+    /// prompt box, ahead of what was typed since.
+    #[gpui_kit::test]
+    fn stop_puts_queued_messages_back_in_the_prompt_box(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(&slow_reply(200, 20)));
+        let session = start_session(&workspace, cx);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.md");
+        fs::write(&file, "x").unwrap();
+
+        send("go", cx);
+        wait_until(cx, "the first chunk", |cx| {
+            last_agent_text(&session, cx).is_some()
+        });
+        session.update(cx, |s, _| s.attachments.push(Attachment::new(&file)));
+        send("held", cx);
+        assert!(session.read_with(cx, |s, _| s.attachments.is_empty()));
+        cx.simulate_input("draft");
+        cx.simulate_keystrokes("escape");
+
+        let cancelled = ChatItem::Notice {
+            text: "Cancelled".into(),
+            kind: NoticeKind::Info,
+        };
+        wait_until(cx, "Cancelled", |cx| {
+            session.read_with(cx, |s, _| s.model.items.last() == Some(&cancelled))
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        assert_eq!(typed(&session, cx), "held\n\ndraft");
+        let names = session.read_with(cx, |s, _| {
+            (s.attachments.iter())
+                .map(|a| a.name.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(names, ["notes.md"]);
+        assert!(!shows(("queued", 0usize), cx));
+        assert_eq!(user_texts(&session, cx), ["go"]);
+    }
+
+    /// While a turn runs, Send stands next to Stop, enabled once there is something to send.
+    #[gpui_kit::test]
+    fn send_stays_next_to_stop_during_a_turn(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(&slow_reply(200, 20)));
+        let session = start_session(&workspace, cx);
+        let send_disabled = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.find("send").disabled() == Some(true)
+            })
+        };
+
+        send("go", cx);
+        wait_until(cx, "the first chunk", |cx| {
+            last_agent_text(&session, cx).is_some()
+        });
+        assert!(shows("stop", cx));
+        assert!(send_disabled(cx), "nothing to send yet");
+        cx.simulate_input("more");
+        assert!(!send_disabled(cx));
+        assert!(shows("stop", cx));
     }
 
     /// ⌘V of an image or of files copied in Finder attaches them; text pastes as text.
@@ -1458,6 +1662,136 @@ mod tests {
         session.read_with(cx, |s, cx| s.input.read(cx).value().to_string())
     }
 
+    /// ⌘N, then the session once its agent's commands arrived.
+    fn commands_session(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<ChatSession> {
+        let session = start_session(workspace, cx);
+        wait_until(cx, "the agent's commands", |cx| {
+            session.read_with(cx, |s, _| !s.model.commands.is_empty())
+        });
+        session
+    }
+
+    /// The `/` menu's rows as `/name`; `None` while it is closed.
+    fn menu(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> Option<Vec<String>> {
+        session.read_with(cx, |s, cx| {
+            let rows = s.menu(cx)?;
+            Some(rows.iter().map(|c| format!("/{}", c.name)).collect())
+        })
+    }
+
+    /// `/` first in the prompt box opens the agent's commands above it, filtered by what follows;
+    /// a space after the name closes it.
+    #[gpui_kit::test]
+    fn slash_opens_the_command_menu(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = commands_session(&workspace, cx);
+        assert!(!shows("commands", cx));
+
+        cx.simulate_input("/");
+        let all = ["/init", "/review", "/compact", "/pr-review"];
+        assert_eq!(menu(&session, cx).unwrap(), all);
+        assert!(shows("commands", cx) && shows(("command", 3usize), cx));
+        let (list, input) = cx.update(|window, _| {
+            let bounds = |id: &'static str| window.find(id).bounds();
+            (bounds("commands"), bounds("input-state"))
+        });
+        assert!(
+            list.bottom() < input.top(),
+            "{list:?} is not above {input:?}"
+        );
+        // The input hint shows on its command's row.
+        assert!(shows(("command-hint", 2usize), cx));
+        assert!(!shows(("command-hint", 0usize), cx));
+
+        cx.simulate_input("re");
+        assert_eq!(menu(&session, cx).unwrap(), ["/review", "/pr-review"]);
+        assert!(!shows(("command", 2usize), cx));
+        cx.simulate_input("view ");
+        assert_eq!(menu(&session, cx), None);
+        assert!(!shows("commands", cx));
+    }
+
+    /// ↓/↑ move the selection and Enter puts `/name ` in the box, caret at its end, sending
+    /// nothing; Tab completes too.
+    #[gpui_kit::test]
+    fn keys_complete_a_command(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = commands_session(&workspace, cx);
+
+        cx.simulate_input("/");
+        cx.simulate_keystrokes("down down up enter");
+        assert_eq!(typed(&session, cx), "/review ");
+        assert_eq!(menu(&session, cx), None);
+        cx.simulate_input("x");
+        assert_eq!(typed(&session, cx), "/review x");
+        assert!(
+            session.read_with(cx, |s, _| s.model.items.is_empty()),
+            "sent"
+        );
+
+        session.update_in(cx, |s, window, cx| s.prefill("", window, cx));
+        cx.simulate_input("/co");
+        cx.simulate_keystrokes("tab");
+        assert_eq!(typed(&session, cx), "/compact ");
+    }
+
+    /// A click on a row completes its command.
+    #[gpui_kit::test]
+    fn click_completes_a_command(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = commands_session(&workspace, cx);
+
+        cx.simulate_input("/");
+        click_edits(None, ("command", 2usize), cx);
+        assert_eq!(typed(&session, cx), "/compact ");
+        cx.simulate_input("x");
+        assert_eq!(typed(&session, cx), "/compact x");
+    }
+
+    /// Esc closes the menu and keeps the text; typing opens it again. With it closed, Enter
+    /// sends.
+    #[gpui_kit::test]
+    fn escape_closes_the_command_menu(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = commands_session(&workspace, cx);
+
+        cx.simulate_input("/in");
+        cx.simulate_keystrokes("escape");
+        assert_eq!(menu(&session, cx), None);
+        assert_eq!(typed(&session, cx), "/in");
+        cx.simulate_input("i");
+        assert_eq!(menu(&session, cx).unwrap(), ["/init"]);
+        cx.simulate_keystrokes("escape enter");
+        wait_until(cx, "the reply", |cx| {
+            state(&session, cx) == TurnState::Idle && last_agent_text(&session, cx).is_some()
+        });
+        assert_eq!(user_texts(&session, cx), ["/ini"]);
+    }
+
+    /// Before the agent sent its commands, the menu says so in a single row.
+    #[gpui_kit::test]
+    fn command_menu_without_commands_says_so(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = commands_session(&workspace, cx);
+        session.update(cx, |s, _| s.model.commands.clear());
+
+        cx.simulate_input("/");
+        assert_eq!(menu(&session, cx), Some(vec![]));
+        let label = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find("commands-empty").label().map(str::to_owned)
+        });
+        assert_eq!(label.as_deref(), Some("No commands from fake yet"));
+    }
+
     /// A session that lands after ⌘N must not pull the caret out of the pane the user is in.
     #[gpui_kit::test]
     fn landing_session_keeps_focus_on_focused_pane(cx: &mut TestAppContext) {
@@ -1494,20 +1828,20 @@ mod tests {
         });
 
         cx.run_until_parked();
-        let (inputs, stop) = cx.update(|window, cx| {
+        let (inputs, send) = cx.update(|window, cx| {
             window.render_frame(cx);
             let inputs: Vec<_> = (window.find_all("input-state").iter())
                 .map(|input| input.bounds())
                 .collect();
-            (inputs, window.find("stop").bounds())
+            (inputs, window.find("send").bounds())
         });
         assert_eq!(inputs.len(), 2, "the note and the prompt");
         cx.simulate_click(inputs[0].center(), Modifiers::none());
         cx.simulate_input("n");
         assert_eq!(typed(&session, cx), "", "the note has the caret");
 
-        // The pill's right padding, past the stop button.
-        let padding = point(stop.right() + px(3.), stop.center().y);
+        // The pill's right padding, past the send button.
+        let padding = point(send.right() + px(3.), send.center().y);
         cx.simulate_click(padding, Modifiers::none());
         cx.simulate_input("typed");
 

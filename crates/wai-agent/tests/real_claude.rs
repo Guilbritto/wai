@@ -384,3 +384,82 @@ fn subagent_runs_as_a_child_session() {
         std::fs::remove_dir_all(&dir).ok();
     });
 }
+
+/// A message steered while a turn runs (`_session/steering`) joins that turn: Claude reads it at
+/// its next step, and the turn's reply follows it.
+#[test]
+#[ignore = "needs network, npx and a Claude Code login"]
+fn steer_a_running_turn() {
+    run(async {
+        let dir: PathBuf =
+            std::env::temp_dir().join(format!("wai-real-claude-steer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = wai_settings::canonical(&dir);
+
+        let (agent, rx) = spawn();
+        let caps = ready(&rx).await;
+        assert!(caps.steering, "steering not advertised");
+        let session = agent
+            .new_session(dir.clone(), vec![])
+            .await
+            .expect("new_session");
+
+        let prompt =
+            "Run the shell command `sleep 4` with your Bash tool, then reply with the word DONE.";
+        let t = Instant::now();
+        agent.prompt(session.id.clone(), vec![PromptBlock::Text(prompt.into())]);
+
+        let (mut text, mut steered, mut echoed) = (String::new(), None, Vec::new());
+        let reason = loop {
+            match rx.recv().await.expect("event channel closed") {
+                AgentEvent::Update { event, .. } => match event {
+                    SessionEvent::AgentText(s) => text.push_str(&s),
+                    SessionEvent::UserText(s) => echoed.push(s),
+                    SessionEvent::ToolCall(call) => {
+                        println!(
+                            "tool call after {:?}: {} ({})",
+                            t.elapsed(),
+                            call.title,
+                            call.kind
+                        );
+                        if call.kind == "execute" && steered.is_none() {
+                            let more = "Also end your reply with the word STEERED";
+                            let outcome = agent
+                                .steer(session.id.clone(), vec![PromptBlock::Text(more.into())])
+                                .await;
+                            println!("steer after {:?}: {outcome:?}", t.elapsed());
+                            steered = Some(outcome);
+                        }
+                    }
+                    _ => {}
+                },
+                AgentEvent::PermissionRequested(request) => {
+                    println!("permission requested: {:?}", request.title);
+                    let allow = request
+                        .options
+                        .iter()
+                        .find(|o| o.kind == ChoiceKind::AllowOnce)
+                        .map(|o| o.id.clone());
+                    agent.answer_permission(request.id, allow).unwrap();
+                }
+                AgentEvent::TurnEnded { reason, .. } => break reason,
+                AgentEvent::AuthRequired { .. } => panic!("not signed in to Claude Code"),
+                AgentEvent::Exited { error } => panic!("agent exited mid-turn: {error:?}"),
+                _ => {}
+            }
+        };
+        println!(
+            "turn: {:?}; steer: {steered:?}; user text echoed: {echoed:?}; reply: {text:?}",
+            t.elapsed()
+        );
+        assert_eq!(reason, StopReason::EndTurn);
+        assert_eq!(steered, Some(Ok(true)), "no Bash call to steer during");
+        assert!(
+            text.contains("STEERED"),
+            "reply {text:?} missed the steered message"
+        );
+
+        agent.shutdown().await;
+        std::fs::remove_dir_all(&dir).ok();
+    });
+}

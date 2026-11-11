@@ -41,6 +41,10 @@ pub enum ChatItem {
     User {
         text: String,
     },
+    /// A message the running turn took in (steering): drawn as `User`, but no turn of its own.
+    Steered {
+        text: String,
+    },
     Agent {
         text: String,
     },
@@ -292,6 +296,13 @@ impl ChatModel {
         self.in_turn = true;
         self.done = false;
         self.push(ChatItem::User {
+            text: text.to_string(),
+        })
+    }
+
+    /// A message sent into the running turn, which goes on.
+    pub fn push_steered(&mut self, text: &str) -> usize {
+        self.push(ChatItem::Steered {
             text: text.to_string(),
         })
     }
@@ -1406,6 +1417,24 @@ mod tests {
         m.push_user("third");
         m.on_turn_ended(&StopReason::EndTurn);
         assert!(matches!(m.items.last(), Some(ChatItem::User { .. })));
+    }
+
+    /// A message steered into a turn is no turn of its own: the turn's Edits block keeps the
+    /// edits made before it.
+    #[test]
+    fn steered_message_stays_in_its_turn() {
+        let mut m = ChatModel::default();
+        m.push_user("go");
+        m.apply(&edit("t1", "/p/a", Some("a0"), "a1", ToolStatus::Completed));
+        m.push_steered("and b");
+        assert_eq!(m.state, TurnState::Working);
+        m.apply(&edit("t2", "/p/b", None, "b", ToolStatus::Completed));
+        m.on_turn_ended(&StopReason::EndTurn);
+        let Some(ChatItem::Edits { turn, files }) = m.items.last() else {
+            panic!("{:?}", m.items)
+        };
+        let paths: Vec<_> = files.iter().map(|f| f.path.display().to_string()).collect();
+        assert_eq!((*turn, paths), (0, vec!["/p/a".into(), "/p/b".into()]));
     }
 
     /// R34: a file counts as created by a call only if wai saw it missing before the call ran.

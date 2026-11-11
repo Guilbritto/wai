@@ -61,6 +61,13 @@
 //!   value per session, and each turn answers `model:<current model id>`.
 //! - `--config-mode`: with `--models`, a `mode` option (`ask`, `code`) joins them.
 //! - `--reject-config`: `session/set_config_option` fails.
+//! - `--steering`: advertise `_meta.steering.supported` and take `_session/steering`: during a
+//!   turn it answers `injected`, and the turn's reply ends with ` Steered: <text>` for each one
+//!   (once the reply streamed; use `--chunk-delay-ms` to keep the turn running); with no turn
+//!   running it answers `promptRequired`.
+//!
+//! After `session/new` answers, an `available_commands_update` lists `init`, `review`, `compact`
+//! (with the input hint `custom instructions`) and `pr-review`.
 //!
 //! `session/load` replays `previous prompt` and `previous answer`; for an id starting with
 //! `missing` it fails with the ACP session-not-found error instead.
@@ -74,7 +81,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::v1::{ConnectionTo, schema as acp};
-use agent_client_protocol::{Agent, Client, Error, Stdio};
+use agent_client_protocol::{Agent, Client, Error, Stdio, UntypedMessage};
 
 const PAGE: usize = 10;
 
@@ -122,6 +129,7 @@ struct Opts {
     models: bool,
     config_mode: bool,
     reject_config: bool,
+    steering: bool,
 }
 
 fn parse_args() -> Opts {
@@ -153,6 +161,7 @@ fn parse_args() -> Opts {
         models: false,
         config_mode: false,
         reject_config: false,
+        steering: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -202,6 +211,7 @@ fn parse_args() -> Opts {
             "--models" => opts.models = true,
             "--config-mode" => opts.config_mode = true,
             "--reject-config" => opts.reject_config = true,
+            "--steering" => opts.steering = true,
             other => panic!("unknown flag {other}"),
         }
     }
@@ -220,6 +230,8 @@ struct Fake {
     mcp: Mutex<HashMap<String, String>>,
     /// `--models`: per session, the chosen value of each config option.
     config: Mutex<HashMap<String, HashMap<String, String>>>,
+    /// Per session with a turn running: the texts steered into it.
+    steered: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl Fake {
@@ -747,6 +759,7 @@ fn main() -> Result<(), Error> {
         subagents: AtomicBool::new(false),
         mcp: Mutex::default(),
         config: Mutex::default(),
+        steered: Mutex::default(),
     });
     smol::block_on(serve(fake))
 }
@@ -774,13 +787,16 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                                 .list(acp::SessionListCapabilities::new())
                                 .fork(acp::SessionForkCapabilities::new()),
                         );
+                    let meta = serde_json::json!({"steering": {"supported": true}});
+                    let meta = meta.as_object().filter(|_| fake.opts.steering).cloned();
                     responder.respond(
                         acp::InitializeResponse::new(request.protocol_version)
                             .agent_info(acp::Implementation::new(
                                 "wai-fake-agent",
                                 env!("CARGO_PKG_VERSION"),
                             ))
-                            .agent_capabilities(caps),
+                            .agent_capabilities(caps)
+                            .meta(meta),
                     )
                 }
             },
@@ -789,7 +805,7 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
         .on_receive_request(
             {
                 let fake = fake.clone();
-                async move |request: acp::NewSessionRequest, responder, _cx| {
+                async move |request: acp::NewSessionRequest, responder, cx: ConnectionTo<Client>| {
                     if fake.opts.require_auth {
                         return responder.respond_with_error(Error::auth_required());
                     }
@@ -797,9 +813,27 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                     fake.record_mcp(&id.clone().into(), &request.mcp_servers);
                     let options = fake.config_options(&id.clone().into());
                     responder.respond(
-                        acp::NewSessionResponse::new(id)
+                        acp::NewSessionResponse::new(id.clone())
                             .modes(modes())
                             .config_options(options),
+                    )?;
+                    // Like claude-agent-acp: the commands follow the answer.
+                    let hint = acp::UnstructuredCommandInput::new("custom instructions");
+                    let commands = vec![
+                        acp::AvailableCommand::new("init", "Initialize a CLAUDE.md file"),
+                        acp::AvailableCommand::new("review", "Review a pull request"),
+                        acp::AvailableCommand::new(
+                            "compact",
+                            "Clear the history but keep a summary",
+                        )
+                        .input(acp::AvailableCommandInput::Unstructured(hint)),
+                        acp::AvailableCommand::new("pr-review", "Comment on the open pull request"),
+                    ];
+                    let update = acp::AvailableCommandsUpdate::new(commands);
+                    send(
+                        &cx,
+                        &id.into(),
+                        acp::SessionUpdate::AvailableCommandsUpdate(update),
                     )
                 }
             },
@@ -923,13 +957,54 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                         .lock()
                         .expect("cancel set poisoned")
                         .remove(&*request.session_id.0);
+                    let session = request.session_id;
+                    (fake.steered.lock().expect("steered poisoned"))
+                        .insert(session.to_string(), Vec::new());
                     let fake = fake.clone();
                     let turn_cx = cx.clone();
                     // The turn runs outside the dispatch loop so cancels and permission answers get through.
                     cx.spawn(async move {
-                        let reason = fake.turn(&turn_cx, &request.session_id).await?;
+                        let reason = fake.turn(&turn_cx, &session).await?;
+                        let steered = (fake.steered.lock().expect("steered poisoned"))
+                            .remove(&*session.0)
+                            .unwrap_or_default();
+                        if reason == acp::StopReason::EndTurn {
+                            for text in steered {
+                                let more = chunk(format!(" Steered: {text}"));
+                                send(
+                                    &turn_cx,
+                                    &session,
+                                    acp::SessionUpdate::AgentMessageChunk(more),
+                                )?;
+                            }
+                        }
                         responder.respond(acp::PromptResponse::new(reason))
                     })
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        // Last: it takes every request the handlers above did not.
+        .on_receive_request(
+            {
+                let fake = fake.clone();
+                async move |request: UntypedMessage, responder, _cx| {
+                    if !fake.opts.steering || request.method != "_session/steering" {
+                        return responder.respond_with_error(Error::method_not_found());
+                    }
+                    let session = request.params["sessionId"].as_str().unwrap_or_default();
+                    let text = request.params["prompt"][0]["text"]
+                        .as_str()
+                        .unwrap_or_default();
+                    let mut steered = fake.steered.lock().expect("steered poisoned");
+                    let outcome = match steered.get_mut(session) {
+                        Some(texts) => {
+                            texts.push(text.to_string());
+                            "injected"
+                        }
+                        None => "promptRequired",
+                    };
+                    responder.respond(serde_json::json!({ "outcome": outcome }))
                 }
             },
             agent_client_protocol::on_receive_request!(),

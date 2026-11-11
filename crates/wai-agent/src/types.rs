@@ -88,6 +88,8 @@ pub struct AgentCaps {
     pub list_sessions: bool,
     pub fork: bool,
     pub images: bool,
+    /// Takes a message into a running turn (`AgentHandle::steer`).
+    pub steering: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -235,6 +237,8 @@ pub struct PlanEntry {
 pub struct CommandInfo {
     pub name: String,
     pub description: String,
+    /// What to type after the name, when the command takes input.
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

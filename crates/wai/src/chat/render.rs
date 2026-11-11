@@ -37,11 +37,12 @@ fn usage_label(usage: &UsageInfo) -> String {
     }
 }
 
-/// Whether row `ix` is the first agent message of its turn, which gets the "✦ agent" header.
+/// Whether row `ix` is the first agent message of its turn, or since a message steered into it:
+/// it gets the "✦ agent" header.
 pub(crate) fn starts_reply(items: &[ChatItem], ix: usize) -> bool {
     matches!(items.get(ix), Some(ChatItem::Agent { .. }))
         && !(items[..ix].iter().rev())
-            .take_while(|item| !matches!(item, ChatItem::User { .. }))
+            .take_while(|item| !matches!(item, ChatItem::User { .. } | ChatItem::Steered { .. }))
             .any(|item| matches!(item, ChatItem::Agent { .. }))
 }
 
@@ -215,7 +216,7 @@ impl ChatSession {
         let (dark, muted) = (theme.is_dark(), theme.muted_foreground);
         match &self.model.items[ix] {
             // `.msg.voce`
-            ChatItem::User { text } => {
+            ChatItem::User { text } | ChatItem::Steered { text } => {
                 let bubble = div()
                     .max_w(relative(0.88))
                     .px_3()
@@ -487,6 +488,7 @@ impl Render for ChatSession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_mode_select(window, cx);
         self.sync_pickers(window, cx);
+        self.sync_unsent(window, cx);
         let empty = self.model.items.is_empty() && self.model.state == TurnState::Idle;
         let messages = div().flex_1().min_h_0();
         let messages = match empty {
@@ -564,5 +566,7 @@ mod tests {
         assert!(starts_reply(&items, 2));
         assert!(!starts_reply(&items, 1));
         assert!(starts_reply(&[user(), agent(), user(), agent()], 3));
+        let steered = ChatItem::Steered { text: text() };
+        assert!(starts_reply(&[user(), agent(), steered, agent()], 3));
     }
 }

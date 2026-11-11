@@ -70,6 +70,10 @@ pub(crate) fn session_event(update: acp::SessionUpdate) -> Option<SessionEvent> 
                 .map(|c| CommandInfo {
                     name: c.name,
                     description: c.description,
+                    hint: match c.input {
+                        Some(acp::AvailableCommandInput::Unstructured(i)) => Some(i.hint),
+                        _ => None,
+                    },
                 })
                 .collect(),
         ),
@@ -326,6 +330,18 @@ pub(crate) fn stop_reason(reason: acp::StopReason) -> StopReason {
         acp::StopReason::MaxTokens => StopReason::MaxTokens,
         acp::StopReason::Refusal => StopReason::Refusal,
         other => StopReason::Other(wire_name(&other)),
+    }
+}
+
+/// A `_session/steering` result: `true` when the running turn took the message, `false` when
+/// no turn runs.
+pub(crate) fn steered(result: serde_json::Value) -> Result<bool, AgentError> {
+    match result["outcome"].as_str() {
+        Some("injected") => Ok(true),
+        Some("promptRequired") => Ok(false),
+        _ => Err(AgentError::Protocol(format!(
+            "unexpected steering result {result}"
+        ))),
     }
 }
 
