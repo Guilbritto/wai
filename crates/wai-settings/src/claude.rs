@@ -2,6 +2,7 @@
 //! versions, counts and transports are kept; env, headers, tokens, commands, urls and account
 //! data are never copied out of the files.
 
+use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
@@ -231,69 +232,118 @@ fn servers(v: &Value, key: &str, root: &Path, depth: u8, out: &mut Vec<(String, 
     }
 }
 
-fn hook_handlers(v: &Value, root: &Path, depth: u8) -> usize {
-    if depth > 2 {
-        return 0;
-    }
-    match v {
-        Value::String(s) => json_file(root, s).map_or(0, |x| hook_handlers(&x, root, depth + 1)),
-        Value::Array(a) => a.iter().map(|x| hook_handlers(x, root, depth + 1)).sum(),
-        Value::Object(o) => o
-            .get("hooks")
-            .and_then(Value::as_object)
-            .unwrap_or(o)
-            .values()
-            .filter_map(Value::as_array)
+fn add_events(map: &serde_json::Map<String, Value>, out: &mut Vec<(String, usize)>) {
+    for (event, list) in map {
+        let n: usize = list
+            .as_array()
+            .into_iter()
             .flatten()
             .filter_map(|m| m["hooks"].as_array())
             .map(Vec::len)
-            .sum(),
-        _ => 0,
+            .sum();
+        if n == 0 {
+            continue;
+        }
+        match out.iter_mut().find(|(e, _)| e == event) {
+            Some(x) => x.1 += n,
+            None => out.push((event.clone(), n)),
+        }
     }
 }
 
-fn md_files(dir: &Path, recursive: bool, depth: u8) -> usize {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    rd.flatten()
-        .map(|e| {
-            let p = e.path();
-            if p.is_dir() {
-                if recursive && depth < 8 {
-                    md_files(&p, true, depth + 1)
-                } else {
-                    0
-                }
-            } else {
-                usize::from(p.extension().is_some_and(|x| x == "md"))
+/// Events with their handler counts, from inline hooks, a path to a hooks file, or an array.
+fn hook_events(v: &Value, root: &Path, depth: u8, out: &mut Vec<(String, usize)>) {
+    if depth > 2 {
+        return;
+    }
+    match v {
+        Value::String(s) => {
+            if let Some(x) = json_file(root, s) {
+                hook_events(&x, root, depth + 1, out);
             }
-        })
-        .sum()
+        }
+        Value::Array(a) => a.iter().for_each(|x| hook_events(x, root, depth + 1, out)),
+        Value::Object(o) => add_events(o.get("hooks").and_then(Value::as_object).unwrap_or(o), out),
+        _ => {}
+    }
+}
+
+fn plugin_hook_events(root: &Path, m: &Value) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    if let Some(v) = json_file(root, "hooks/hooks.json") {
+        hook_events(&v, root, 0, &mut out);
+    }
+    hook_events(&m["hooks"], root, 0, &mut out);
+    out
+}
+
+fn md_paths(dir: &Path, recursive: bool, left: u8, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if recursive && left > 0 {
+                md_paths(&p, true, left - 1, out);
+            }
+        } else if p.extension().is_some_and(|x| x == "md") {
+            out.push(p);
+        }
+    }
 }
 
 /// A manifest `agents`/`commands` entry: a `.md` file, or a folder of them.
-fn md_entries(list: &[PathBuf], recursive: bool) -> usize {
-    list.iter()
-        .map(|p| {
-            if p.is_dir() {
-                md_files(p, recursive, 0)
-            } else {
-                usize::from(p.extension().is_some_and(|x| x == "md") && p.is_file())
-            }
-        })
-        .sum()
+fn md_list(list: &[PathBuf], recursive: bool, left: u8) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for p in list {
+        if p.is_dir() {
+            md_paths(p, recursive, left, &mut out);
+        } else if p.extension().is_some_and(|x| x == "md") && p.is_file() {
+            out.push(p.clone());
+        }
+    }
+    out
 }
 
-fn skills_in(dir: &Path) -> usize {
+/// `dir/SKILL.md`, or `dir/*/SKILL.md`.
+fn skill_files(dir: &Path) -> Vec<PathBuf> {
     if dir.join("SKILL.md").is_file() {
-        return 1;
+        return vec![dir.join("SKILL.md")];
     }
-    std::fs::read_dir(dir).map_or(0, |rd| {
-        rd.flatten()
-            .filter(|e| e.path().join("SKILL.md").is_file())
-            .count()
-    })
+    std::fs::read_dir(dir).map_or_else(
+        |_| Vec::new(),
+        |rd| {
+            rd.flatten()
+                .map(|e| e.path().join("SKILL.md"))
+                .filter(|p| p.is_file())
+                .collect()
+        },
+    )
+}
+
+fn plugin_skill_files(root: &Path, m: &Value) -> Vec<PathBuf> {
+    let dir = root.join("skills");
+    let mut out = if dir.is_dir() {
+        skill_files(&dir)
+    } else {
+        Vec::new()
+    };
+    for p in paths(&m["skills"], root) {
+        out.extend(skill_files(&p));
+    }
+    if !dir.is_dir() && m["skills"].is_null() && root.join("SKILL.md").is_file() {
+        out.push(root.join("SKILL.md"));
+    }
+    out
+}
+
+fn plugin_agent_files(root: &Path, m: &Value) -> Vec<PathBuf> {
+    if m["agents"].is_null() {
+        md_list(&[root.join("agents")], true, 8)
+    } else {
+        md_list(&paths(&m["agents"], root), true, 8)
+    }
 }
 
 struct Scan {
@@ -321,35 +371,16 @@ fn scan(root: &Path, home: &Path, marketplace: &str, name: &str) -> Scan {
     } else {
         None
     };
-    let has = |k: &str| !m[k].is_null();
-
-    let mut skills = 0;
-    let skills_dir = root.join("skills");
-    if skills_dir.is_dir() {
-        skills += skills_in(&skills_dir);
-    }
-    skills += paths(&m["skills"], root)
-        .iter()
-        .map(|p| skills_in(p))
-        .sum::<usize>();
-    if !skills_dir.is_dir() && !has("skills") && root.join("SKILL.md").is_file() {
-        skills += 1;
-    }
-
-    let agents = if has("agents") {
-        md_entries(&paths(&m["agents"], root), true)
-    } else {
-        md_files(&root.join("agents"), true, 0)
-    };
+    let skills = plugin_skill_files(root, m).len();
+    let agents = plugin_agent_files(root, m).len();
 
     let commands = match &m["commands"] {
         Value::Object(o) => o.len(),
-        Value::Null => md_files(&root.join("commands"), false, 0),
-        v => md_entries(&paths(v, root), false),
+        Value::Null => md_list(&[root.join("commands")], false, 0).len(),
+        v => md_list(&paths(v, root), false, 0).len(),
     };
 
-    let mut hooks = json_file(root, "hooks/hooks.json").map_or(0, |v| hook_handlers(&v, root, 0));
-    hooks += hook_handlers(&m["hooks"], root, 0);
+    let hooks: usize = plugin_hook_events(root, m).iter().map(|e| e.1).sum();
 
     let mut mcp = Vec::new();
     if let Some(v) = json_file(root, ".mcp.json") {
@@ -397,6 +428,325 @@ fn scan(root: &Path, home: &Path, marketplace: &str, name: &str) -> Scan {
         default_enabled: m["defaultEnabled"].as_bool().unwrap_or(true),
         servers: mcp,
     }
+}
+
+/// At most the first `cap` bytes of a regular file, lossy; empty when unreadable.
+fn head(path: &Path, cap: u64) -> String {
+    use std::io::Read as _;
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return String::new();
+    }
+    let mut bytes = Vec::new();
+    let _ = std::fs::File::open(path).and_then(|f| f.take(cap).read_to_end(&mut bytes));
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// `name` and `description` from the `---` block at the top of a file.
+fn frontmatter(text: &str) -> (Option<String>, Option<String>) {
+    let mut lines = text.lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return (None, None);
+    }
+    let (mut name, mut description) = (None, None);
+    let mut key: Option<(&str, String)> = None;
+    let mut done = |k: Option<(&str, String)>| {
+        if let Some((k, v)) = k {
+            let v = v.trim().trim_matches(['"', '\'']).trim().to_string();
+            match k {
+                "name" if !v.is_empty() => name = Some(v),
+                "description" if !v.is_empty() => description = Some(v),
+                _ => {}
+            }
+        }
+    };
+    for line in lines {
+        if line.trim_end() == "---" {
+            break;
+        }
+        if line.starts_with([' ', '\t']) {
+            if let Some((_, v)) = key.as_mut() {
+                v.push(' ');
+                v.push_str(line.trim());
+            }
+        } else {
+            done(key.take());
+            if let Some((k, v)) = line.split_once(':') {
+                let v = v.trim();
+                let v = if v.starts_with(['>', '|']) { "" } else { v };
+                key = Some((k.trim(), v.to_string()));
+            }
+        }
+    }
+    done(key);
+    (name, description)
+}
+
+/// The `@path` tokens of a markdown file, outside fenced blocks and inline code.
+fn imports(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut fenced = false;
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        let plain = line.split('`').step_by(2).collect::<Vec<_>>().join(" ");
+        out.extend(
+            plain
+                .replace("\\ ", "\0")
+                .split_whitespace()
+                .filter(|t| t.len() > 1)
+                .filter_map(|t| t.strip_prefix('@'))
+                .map(|t| t.replace('\0', " ")),
+        );
+    }
+    out
+}
+
+fn md_entry(group: &str, file: &Path, fallback: &str, read_only: bool) -> Entry {
+    let (name, description) = frontmatter(&head(file, 8 * 1024));
+    Entry {
+        group: group.to_string(),
+        name: name.unwrap_or_else(|| fallback.to_string()),
+        path: file.to_path_buf(),
+        summary: description
+            .and_then(|d| d.lines().next().map(|l| l.trim().to_string()))
+            .unwrap_or_default(),
+        read_only,
+    }
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn skill_group(group: &str, files: Vec<PathBuf>, read_only: bool) -> Vec<Entry> {
+    let mut v: Vec<_> = files
+        .iter()
+        .map(|f| {
+            md_entry(
+                group,
+                f,
+                &f.parent().map(file_name).unwrap_or_default(),
+                read_only,
+            )
+        })
+        .collect();
+    v.sort_by(|a, b| a.name.cmp(&b.name));
+    v
+}
+
+fn agent_group(group: &str, files: Vec<PathBuf>, read_only: bool) -> Vec<Entry> {
+    let mut v: Vec<_> = files
+        .iter()
+        .map(|f| {
+            let stem = f.file_stem().map(|n| n.to_string_lossy().into_owned());
+            md_entry(group, f, &stem.unwrap_or_default(), read_only)
+        })
+        .collect();
+    v.sort_by(|a, b| a.name.cmp(&b.name));
+    v
+}
+
+const MAX_INSTRUCTION_BYTES: u64 = 256 * 1024;
+const MAX_IMPORT_HOPS: u8 = 4;
+
+fn walk_imports(
+    file: &Path,
+    group: &str,
+    home: &Path,
+    hop: u8,
+    seen: &mut HashSet<PathBuf>,
+    out: &mut Vec<Entry>,
+) {
+    if hop >= MAX_IMPORT_HOPS {
+        return;
+    }
+    let by = file_name(file);
+    let dir = file.parent().unwrap_or(Path::new(""));
+    for token in imports(&head(file, MAX_INSTRUCTION_BYTES)) {
+        let target = match token.strip_prefix("~/") {
+            Some(rest) => home.join(rest),
+            None => dir.join(&token),
+        };
+        if !target.is_file() {
+            continue;
+        }
+        let target = canonical(&target);
+        if !seen.insert(target.clone()) {
+            continue;
+        }
+        out.push(Entry {
+            group: group.to_string(),
+            name: file_name(&target),
+            path: target.clone(),
+            summary: format!("Included by {by}"),
+            read_only: false,
+        });
+        walk_imports(&target, group, home, hop + 1, seen, out);
+    }
+}
+
+fn instruction(
+    file: &Path,
+    group: &str,
+    summary: Option<&str>,
+    home: &Path,
+    seen: &mut HashSet<PathBuf>,
+    out: &mut Vec<Entry>,
+) {
+    if !file.is_file() {
+        return;
+    }
+    let file = canonical(file);
+    if !seen.insert(file.clone()) {
+        return;
+    }
+    let summary = summary.map(String::from).unwrap_or_else(|| {
+        head(&file, MAX_INSTRUCTION_BYTES)
+            .lines()
+            .find_map(|l| l.strip_prefix("# "))
+            .map_or_else(|| "Every project".to_string(), |h| h.trim().to_string())
+    });
+    out.push(Entry {
+        group: group.to_string(),
+        name: file_name(&file),
+        path: file.clone(),
+        summary,
+        read_only: false,
+    });
+    walk_imports(&file, group, home, 0, seen, out);
+}
+
+fn hook_group(group: &str, settings: Option<&Value>, path: PathBuf, out: &mut Vec<Entry>) {
+    let Some(map) = settings.and_then(|v| v["hooks"].as_object()) else {
+        return;
+    };
+    let mut events = Vec::new();
+    add_events(map, &mut events);
+    for (name, n) in events {
+        out.push(Entry {
+            group: group.to_string(),
+            name,
+            path: path.clone(),
+            summary: if n == 1 {
+                "1 hook".to_string()
+            } else {
+                format!("{n} hooks")
+            },
+            read_only: false,
+        });
+    }
+}
+
+/// Skills, agents, instructions and hooks; the plugin ones only from enabled plugins.
+fn fill_entries(data: &mut ClaudeData, home: &Path, project: &Path, settings: [Option<&Value>; 3]) {
+    let [user, shared, local] = settings;
+    let (user_dir, project_dir) = (home.join(".claude"), project.join(".claude"));
+
+    data.skills = skill_group("User", skill_files(&user_dir.join("skills")), false);
+    data.skills.extend(skill_group(
+        "Project",
+        skill_files(&project_dir.join("skills")),
+        false,
+    ));
+    let mut user_agents = Vec::new();
+    md_paths(&user_dir.join("agents"), true, 3, &mut user_agents);
+    data.agents = agent_group("User", user_agents, false);
+    let mut project_agents = Vec::new();
+    md_paths(&project_dir.join("agents"), true, 3, &mut project_agents);
+    data.agents
+        .extend(agent_group("Project", project_agents, false));
+
+    let mut seen = HashSet::new();
+    instruction(
+        &user_dir.join("CLAUDE.md"),
+        "User",
+        None,
+        home,
+        &mut seen,
+        &mut data.instructions,
+    );
+    let ancestors: Vec<_> = project.ancestors().collect();
+    for dir in ancestors.into_iter().rev() {
+        let here = dir == project;
+        for (file, mine) in [
+            (dir.join("CLAUDE.md"), "This project"),
+            (dir.join(".claude/CLAUDE.md"), "This project"),
+            (dir.join("CLAUDE.local.md"), "This project, yours only"),
+        ] {
+            let summary = if here { mine } else { "Parent folder" };
+            instruction(
+                &file,
+                "Project",
+                Some(summary),
+                home,
+                &mut seen,
+                &mut data.instructions,
+            );
+        }
+    }
+
+    hook_group(
+        "User",
+        user,
+        user_dir.join("settings.json"),
+        &mut data.hooks,
+    );
+    hook_group(
+        "Project",
+        shared,
+        project_dir.join("settings.json"),
+        &mut data.hooks,
+    );
+    hook_group(
+        "Project",
+        local,
+        project_dir.join("settings.local.json"),
+        &mut data.hooks,
+    );
+
+    let mut plugin_hooks = Vec::new();
+    for plugin in data.plugins.iter().filter(|p| p.enabled) {
+        let root = &plugin.root;
+        let manifest = json_file(root, ".claude-plugin/plugin.json").unwrap_or(Value::Null);
+        let m = &manifest;
+        data.skills
+            .extend(skill_group(&plugin.name, plugin_skill_files(root, m), true));
+        data.agents
+            .extend(agent_group(&plugin.name, plugin_agent_files(root, m), true));
+        let events = plugin_hook_events(root, m);
+        if events.is_empty() {
+            continue;
+        }
+        let default = root.join("hooks/hooks.json");
+        let path = if default.is_file() {
+            default
+        } else {
+            paths(&m["hooks"], root)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| root.join(".claude-plugin/plugin.json"))
+        };
+        plugin_hooks.push(Entry {
+            group: "From plugins".to_string(),
+            name: plugin.name.clone(),
+            path,
+            summary: events
+                .iter()
+                .map(|e| e.0.as_str())
+                .collect::<Vec<_>>()
+                .join(" · "),
+            read_only: true,
+        });
+    }
+    data.hooks.extend(plugin_hooks);
 }
 
 pub fn read_claude(home: &Path, project: &Path) -> ClaudeData {
@@ -561,6 +911,16 @@ pub fn read_claude(home: &Path, project: &Path) -> ClaudeData {
             add(name.clone(), name, McpSource::Project, t);
         }
     }
+    fill_entries(
+        &mut data,
+        home,
+        project,
+        [
+            user_settings.value.as_ref(),
+            project_shared.value.as_ref(),
+            project_local.value.as_ref(),
+        ],
+    );
     data
 }
 
@@ -636,8 +996,37 @@ mod tests {
         );
         put_json(
             home.join(".claude/settings.json"),
-            json!({"model":"opus","enabledPlugins":{"delta@n":false}}),
+            json!({"model":"opus","enabledPlugins":{"delta@n":false},"hooks":{
+                "SessionStart":[{"hooks":[{"type":"command","command":"echo s3cr3t"}]}],
+                "PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"x"},{"type":"command","command":"y"}]}]}}),
         );
+        put(
+            home.join(".claude/skills/mine/SKILL.md"),
+            "---\nname: mine\ndescription: \"My skill\"\n---\nbody",
+        );
+        put(home.join(".claude/skills/synced/abc/SKILL.md"), "x");
+        put(
+            project.join(".claude/skills/local/SKILL.md"),
+            "no frontmatter",
+        );
+        put(
+            a.join("skills/one/SKILL.md"),
+            "---\nname: one\ndescription: >\n  Folded\n  text\n---\n",
+        );
+        put(
+            home.join(".claude/agents/helper.md"),
+            "---\nname: helper\ndescription: Helps\n---\n",
+        );
+        put(project.join(".claude/agents/proj.md"), "x");
+        put(
+            home.join(".claude/CLAUDE.md"),
+            "# Global rules\n- @instructions/a.md here\n`@instructions/no.md`\n```\n@instructions/no.md\n```\n@~/extra.md\n@missing.md\n",
+        );
+        put(home.join(".claude/instructions/a.md"), "@b.md");
+        put(home.join(".claude/instructions/b.md"), "@a.md");
+        put(home.join(".claude/instructions/no.md"), "x");
+        put(home.join("extra.md"), "x");
+        put(project.join("CLAUDE.md"), "x");
         put_json(
             home.join(".claude.json"),
             json!({"oauthAccount":{"emailAddress":"s3cr3t@x.test"},"mcpServers":{"u":{"command":"u-mcp"}},
@@ -844,5 +1233,197 @@ mod tests {
             read_claude(&home, &project).settings_stamp,
             Stamp::of(Some(&bytes))
         );
+    }
+
+    #[test]
+    fn frontmatter_reads_name_and_description() {
+        assert_eq!(
+            frontmatter("---\nname: a\ndescription: \"Quoted\"\n---\n"),
+            (Some("a".into()), Some("Quoted".into()))
+        );
+        assert_eq!(
+            frontmatter("---\ndescription: >\n  Folded\n  text\n---\n")
+                .1
+                .as_deref(),
+            Some("Folded text")
+        );
+        assert_eq!(frontmatter("no frontmatter"), (None, None));
+    }
+
+    #[test]
+    fn imports_skip_code() {
+        assert_eq!(
+            imports("a @x.md `@y.md`\n```\n@z.md\n```\n@my\\ file.md"),
+            ["x.md", "my file.md"]
+        );
+    }
+
+    fn group<'a>(list: &'a [Entry], g: &str) -> Vec<&'a Entry> {
+        list.iter().filter(|e| e.group == g).collect()
+    }
+
+    #[test]
+    fn skills_from_user_project_and_enabled_plugins() {
+        let (_t, home, project) = setup();
+        let d = read_claude(&home, &project);
+        let pairs: Vec<_> = d
+            .skills
+            .iter()
+            .map(|e| (e.group.as_str(), e.name.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("User", "mine"),
+                ("Project", "local"),
+                ("alpha", "one"),
+                ("alpha", "two")
+            ]
+        );
+        assert_eq!(d.skills[0].summary, "My skill");
+        assert_eq!(d.skills[2].summary, "Folded text");
+        let ro: Vec<_> = d.skills.iter().map(|e| e.read_only).collect();
+        assert_eq!(ro, [false, false, true, true]);
+        assert!(d.skills.iter().all(|e| e.name != "synced"));
+    }
+
+    #[test]
+    fn agents_from_user_project_and_plugins() {
+        let (_t, home, project) = setup();
+        let d = read_claude(&home, &project);
+        let pairs: Vec<_> = d
+            .agents
+            .iter()
+            .map(|e| (e.group.as_str(), e.name.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("User", "helper"),
+                ("Project", "proj"),
+                ("alpha", "deep"),
+                ("alpha", "rev")
+            ]
+        );
+        assert_eq!(d.agents[0].summary, "Helps");
+    }
+
+    #[test]
+    fn instructions_follow_imports() {
+        let (_t, home, project) = setup();
+        let d = read_claude(&home, &project);
+        let user = group(&d.instructions, "User");
+        let names: Vec<_> = user.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["CLAUDE.md", "a.md", "b.md", "extra.md"]);
+        let sums: Vec<_> = user.iter().map(|e| e.summary.as_str()).collect();
+        assert_eq!(
+            sums,
+            [
+                "Global rules",
+                "Included by CLAUDE.md",
+                "Included by a.md",
+                "Included by CLAUDE.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn imports_stop_after_four_hops() {
+        let (_t, home, project) = setup();
+        let dir = home.join(".claude");
+        put(dir.join("CLAUDE.md"), "@d1.md");
+        for i in 1..=5 {
+            put(dir.join(format!("d{i}.md")), &format!("@d{}.md", i + 1));
+        }
+        let d = read_claude(&home, &project);
+        let names: Vec<_> = group(&d.instructions, "User")
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
+        assert_eq!(names, ["CLAUDE.md", "d1.md", "d2.md", "d3.md", "d4.md"]);
+    }
+
+    #[test]
+    fn project_instructions_walk_up() {
+        let (t, home, _) = setup();
+        let project = canonical(t.path()).join("root/proj");
+        put(project.parent().unwrap().join("CLAUDE.md"), "x");
+        put(project.join("CLAUDE.md"), "x");
+        put(project.join(".claude/CLAUDE.md"), "x");
+        put(project.join("CLAUDE.local.md"), "x");
+        let d = read_claude(&home, &project);
+        let sums: Vec<_> = group(&d.instructions, "Project")
+            .iter()
+            .map(|e| e.summary.clone())
+            .collect();
+        assert_eq!(
+            sums,
+            [
+                "Parent folder",
+                "This project",
+                "This project",
+                "This project, yours only"
+            ]
+        );
+    }
+
+    #[test]
+    fn hooks_show_events_not_commands() {
+        let (_t, home, project) = setup();
+        let d = read_claude(&home, &project);
+        let user: Vec<_> = group(&d.hooks, "User")
+            .iter()
+            .map(|e| (e.name.as_str(), e.summary.as_str()))
+            .collect();
+        assert_eq!(
+            user,
+            [("SessionStart", "1 hook"), ("PreToolUse", "2 hooks")]
+        );
+        let plugins = group(&d.hooks, "From plugins");
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].name, "alpha");
+        assert_eq!(plugins[0].summary, "SessionStart · Stop");
+        assert!(plugins[0].path.ends_with("alpha/1.2.0/hooks/hooks.json"));
+        assert!(plugins[0].read_only);
+        assert!(!format!("{d:?}").contains("s3cr3t"));
+    }
+
+    #[test]
+    fn disabled_plugins_contribute_nothing() {
+        let (_t, home, project) = setup();
+        put_json(
+            home.join(".claude/settings.json"),
+            json!({"enabledPlugins":{"alpha@m":false}}),
+        );
+        let d = read_claude(&home, &project);
+        for list in [&d.skills, &d.agents, &d.hooks] {
+            assert!(list.iter().all(|e| e.group != "alpha" && e.name != "alpha"));
+        }
+    }
+
+    #[test]
+    fn odd_files_do_not_break_the_read() {
+        let (_t, home, project) = setup();
+        let cache = home.join(".claude/plugins/cache/m");
+        put(cache.join("beta/abc1234/.claude-plugin/plugin.json"), "[]");
+        put(
+            cache.join("beta/abc1234/hooks/hooks.json"),
+            r#"{"hooks":[]}"#,
+        );
+        let odd = home.join(".claude/skills/odd/SKILL.md");
+        fs::create_dir_all(odd.parent().unwrap()).unwrap();
+        fs::write(&odd, [0xff, 0xfe, b'x']).unwrap();
+        let path = home.join(".claude/plugins/installed_plugins.json");
+        let mut installed: Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        installed["plugins"]["eps@m"] =
+            json!([{"scope":"user","installPath":shown(&cache.join("gone")),"version":"1"}]);
+        put_json(&path, installed);
+        let d = read_claude(&home, &project);
+        assert!(d.plugins.iter().any(|p| p.name == "beta"));
+        let eps = d.plugins.iter().find(|p| p.name == "eps").unwrap();
+        assert_eq!(eps.summary, "No components");
+        let odd = d.skills.iter().find(|e| e.name == "odd").unwrap();
+        assert_eq!(odd.summary, "");
     }
 }
