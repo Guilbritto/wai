@@ -1,10 +1,14 @@
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
 use gpui_kit::component::attachment::{Attachment as Chip, AttachmentContent, AttachmentTitle};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
-use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use wai_settings::{SeenModel, agent_label, builtin, canonical, shown};
 
 use super::input::{Attachment, attach_button, paste_into, pick_paths, send_button};
 use crate::aurora::{self, DISPLAY_FONT};
@@ -13,6 +17,136 @@ use crate::workspace::{Dragged, DraggedSession, START_KEY};
 pub enum DraftEvent {
     Send,
     Changed,
+}
+
+/// What the workspace tells a draft for its menus; `Workspace::draft_data` builds it.
+#[derive(Clone, Default)]
+pub struct DraftData {
+    /// The project, the open sessions' folders and History's, without duplicates.
+    pub known: Vec<PathBuf>,
+    /// Agent ids in the menu's order.
+    pub agents: Vec<String>,
+    /// Agent id -> its command, for the installed check.
+    pub commands: BTreeMap<String, String>,
+    /// Agent id -> the models its last session offered.
+    pub models: BTreeMap<String, Vec<SeenModel>>,
+    /// Agent id -> the model Settings starts it with.
+    pub default_models: BTreeMap<String, String>,
+}
+
+const OPEN_FOLDER: &str = "\0open-folder";
+const FOOTER: &str = "\0footer";
+
+#[derive(Clone)]
+enum Lead {
+    None,
+    Folder,
+    Glyph(&'static str),
+}
+
+/// A row of any of the three menus.
+#[derive(Clone)]
+struct Pick {
+    value: String,
+    title: SharedString,
+    detail: Option<SharedString>,
+    lead: Lead,
+    tag: Option<&'static str>,
+    disabled: bool,
+}
+
+impl Pick {
+    fn new(value: impl Into<String>, title: impl Into<SharedString>) -> Self {
+        Self {
+            value: value.into(),
+            title: title.into(),
+            detail: None,
+            lead: Lead::None,
+            tag: None,
+            disabled: false,
+        }
+    }
+
+    fn footer(text: String) -> Self {
+        Self {
+            disabled: true,
+            ..Self::new(FOOTER, text)
+        }
+    }
+
+    fn folder(path: &Path) -> Self {
+        let name = path
+            .file_name()
+            .map_or_else(|| shown(path), |name| name.to_string_lossy().into_owned());
+        Self {
+            detail: path.parent().map(|parent| shown(parent).into()),
+            lead: Lead::Folder,
+            ..Self::new(path.to_string_lossy(), name)
+        }
+    }
+
+    fn row(&self, full: bool) -> Div {
+        let row = h_flex().gap_2().items_center().min_w_0();
+        let row = match self.lead {
+            Lead::Folder => row.child(Icon::new(IconName::Folder).xsmall()),
+            Lead::Glyph(glyph) => row.child(glyph),
+            Lead::None => row,
+        };
+        let row = row.child(div().truncate().child(self.title.clone()));
+        if !full {
+            return row;
+        }
+        row.when(self.disabled, |el| el.text_xs().text_color(aurora::nevoa()))
+            .when_some(self.detail.clone(), |el, detail| {
+                let text = div().truncate().text_xs().text_color(aurora::nevoa());
+                el.child(text.child(detail))
+            })
+            .when_some(self.tag, |el, tag| {
+                el.child(div().text_xs().text_color(aurora::nevoa()).child(tag))
+            })
+    }
+}
+
+impl SelectItem for Pick {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    fn display_title(&self) -> Option<AnyElement> {
+        Some(self.row(false).into_any_element())
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        self.row(true)
+    }
+
+    fn value(&self) -> &String {
+        &self.value
+    }
+
+    fn matches(&self, query: &str) -> bool {
+        let query = query.to_lowercase();
+        let detail = self.detail.as_deref().unwrap_or_default();
+        self.title.to_lowercase().contains(&query) || detail.to_lowercase().contains(&query)
+    }
+
+    fn disabled(&self) -> bool {
+        self.disabled
+    }
+}
+
+type Menu = Entity<SelectState<Vec<Pick>>>;
+
+fn glyph(agent: &str) -> Lead {
+    Lead::Glyph(match agent {
+        "claude" => "✳",
+        "codex" => "◎",
+        "copilot" => "◉",
+        "antigravity" => "▲",
+        _ => "◆",
+    })
 }
 
 /// A session that has not started: where, with whom, and what to ask. Nothing runs until Send.
@@ -25,6 +159,16 @@ pub struct DraftView {
     pub starting: bool,
     pub(super) input: Entity<TextareaState>,
     pub(crate) attachments: Vec<Attachment>,
+    pub(crate) data: DraftData,
+    /// Agent id -> its program is on PATH; empty until the check ends.
+    installed: HashMap<String, bool>,
+    show_install: bool,
+    folders: Menu,
+    agents: Menu,
+    models: Menu,
+    /// The menus' items and selections are rebuilt at the next frame (it has the window).
+    menus_stale: bool,
+    _check: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -34,7 +178,7 @@ impl DraftView {
     pub fn new(
         agent: String,
         folder: PathBuf,
-        model: Option<String>,
+        data: DraftData,
         prompt: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -49,27 +193,195 @@ impl DraftView {
             }
             input
         });
-        let subscriptions =
-            vec![
-                cx.subscribe_in(&input, window, |_, _, event: &InputEvent, _, cx| {
-                    match event {
-                        // Shift+Enter inserted a newline already.
-                        InputEvent::PressEnter { shift: false, .. } => cx.emit(DraftEvent::Send),
-                        InputEvent::Change => cx.emit(DraftEvent::Changed),
-                        _ => {}
-                    }
-                }),
-            ];
-        Self {
+        let menu = |searchable, window: &mut Window, cx: &mut Context<Self>| {
+            cx.new(|cx| {
+                SelectState::new(Vec::<Pick>::new(), None, window, cx).searchable(searchable)
+            })
+        };
+        let (folders, agents, models) = (
+            menu(true, window, cx),
+            menu(false, window, cx),
+            menu(false, window, cx),
+        );
+        let subscriptions = vec![
+            cx.subscribe_in(&input, window, |_, _, event: &InputEvent, _, cx| {
+                match event {
+                    // Shift+Enter inserted a newline already.
+                    InputEvent::PressEnter { shift: false, .. } => cx.emit(DraftEvent::Send),
+                    InputEvent::Change => cx.emit(DraftEvent::Changed),
+                    _ => {}
+                }
+            }),
+            cx.subscribe(&folders, |this, _, event: &SelectEvent<Vec<Pick>>, cx| {
+                let SelectEvent::Confirm(Some(value)) = event else {
+                    return;
+                };
+                match value.as_str() {
+                    OPEN_FOLDER => this.open_folder(cx),
+                    _ => this.set_folder(PathBuf::from(value), cx),
+                }
+            }),
+            cx.subscribe(&agents, |this, _, event: &SelectEvent<Vec<Pick>>, cx| {
+                if let SelectEvent::Confirm(Some(agent)) = event {
+                    this.set_agent(agent.clone(), cx);
+                }
+            }),
+            cx.subscribe(&models, |this, _, event: &SelectEvent<Vec<Pick>>, cx| {
+                if let SelectEvent::Confirm(Some(model)) = event {
+                    this.set_model(Some(model.clone()), cx);
+                }
+            }),
+        ];
+        let mut this = Self {
+            model: data.default_models.get(&agent).cloned(),
             agent,
             folder,
-            model,
             notice: None,
             starting: false,
             input,
             attachments: Vec::new(),
+            data,
+            installed: HashMap::new(),
+            show_install: false,
+            folders,
+            agents,
+            models,
+            menus_stale: true,
+            _check: None,
             _subscriptions: subscriptions,
+        };
+        this.check_installed(cx);
+        this
+    }
+
+    /// New menu data; the installed check runs again.
+    pub fn set_data(&mut self, data: DraftData, cx: &mut Context<Self>) {
+        self.data = data;
+        self.menus_stale = true;
+        self.check_installed(cx);
+        cx.notify();
+    }
+
+    /// Where the session will work. The workspace's project does not follow.
+    pub fn set_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
+        let folder = canonical(&folder);
+        self.menus_stale = true;
+        if folder != self.folder {
+            self.folder = folder;
+            cx.emit(DraftEvent::Changed);
         }
+        cx.notify();
+    }
+
+    /// The model goes back to what Settings starts the agent with.
+    pub fn set_agent(&mut self, agent: String, cx: &mut Context<Self>) {
+        self.model = self.data.default_models.get(&agent).cloned();
+        self.agent = agent;
+        self.show_install = false;
+        self.menus_stale = true;
+        self.check_installed(cx);
+        cx.emit(DraftEvent::Changed);
+        cx.notify();
+    }
+
+    pub fn set_model(&mut self, model: Option<String>, cx: &mut Context<Self>) {
+        self.model = model;
+        self.menus_stale = true;
+        cx.emit(DraftEvent::Changed);
+        cx.notify();
+    }
+
+    /// Whether the chosen agent's program is on PATH; `None` until the check ends.
+    pub fn installed(&self) -> Option<bool> {
+        self.installed.get(&self.agent).copied()
+    }
+
+    fn check_installed(&mut self, cx: &mut Context<Self>) {
+        let commands = self.data.commands.clone();
+        let found = cx.background_spawn(async move {
+            let found = commands.into_iter();
+            let found = found.map(|(id, command)| (id, wai_agent::program(&command).is_some()));
+            found.collect::<HashMap<_, _>>()
+        });
+        self._check = Some(cx.spawn(async move |this, cx| {
+            let found = found.await;
+            this.update(cx, |this, cx| {
+                this.installed = found;
+                this.menus_stale = true;
+                cx.emit(DraftEvent::Changed);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn open_folder(&mut self, cx: &mut Context<Self>) {
+        // The menu shows "Open folder…" as picked until it is rebuilt.
+        self.menus_stale = true;
+        cx.notify();
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            let paths = picked.await.ok().and_then(|picked| picked.ok()).flatten();
+            if let Some(folder) = paths.and_then(|paths| paths.into_iter().next()) {
+                this.update(cx, |this, cx| this.set_folder(folder, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    fn sync_menus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.menus_stale) {
+            return;
+        }
+        let mut known = self.data.known.clone();
+        if !known.contains(&self.folder) {
+            known.insert(0, self.folder.clone());
+        }
+        let mut items: Vec<Pick> = known.iter().map(|path| Pick::folder(path)).collect();
+        items.push(Pick::new(OPEN_FOLDER, "Open folder…"));
+        let current = self.folder.to_string_lossy().into_owned();
+        self.folders.update(cx, |select, cx| {
+            select.set_items(items, window, cx);
+            select.set_selected_value(&current, window, cx);
+        });
+
+        let mut items: Vec<Pick> = (self.data.agents.iter())
+            .map(|id| Pick {
+                lead: glyph(id),
+                tag: (self.installed.get(id) == Some(&false)).then_some("Not installed"),
+                ..Pick::new(id.clone(), agent_label(id))
+            })
+            .collect();
+        items.push(Pick::footer(
+            "Default agent comes from Settings → Agents.".into(),
+        ));
+        let current = self.agent.clone();
+        self.agents.update(cx, |select, cx| {
+            select.set_items(items, window, cx);
+            select.set_selected_value(&current, window, cx);
+        });
+
+        let seen = self.data.models.get(&self.agent).into_iter().flatten();
+        let mut items: Vec<Pick> = seen
+            .map(|m| Pick::new(m.id.clone(), m.name.clone()))
+            .collect();
+        items.push(Pick::footer(format!(
+            "Last used for {}. The list refreshes when the session starts.",
+            agent_label(&self.agent)
+        )));
+        let current = self.model.clone();
+        self.models.update(cx, |select, cx| {
+            select.set_items(items, window, cx);
+            match &current {
+                Some(model) => select.set_selected_value(model, window, cx),
+                None => select.set_selected_index(None, window, cx),
+            }
+        });
     }
 
     /// Puts the caret in the prompt box.
@@ -82,7 +394,7 @@ impl DraftView {
     }
 
     pub fn can_send(&self, cx: &App) -> bool {
-        !self.starting && !self.text(cx).is_empty()
+        !self.starting && self.installed() != Some(false) && !self.text(cx).is_empty()
     }
 
     /// What goes out: the draft keeps both, in case the start fails.
@@ -122,6 +434,7 @@ impl DraftView {
 
 impl Render for DraftView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_menus(window, cx);
         let theme = cx.theme();
         let dark = theme.is_dark();
         let muted = match dark {
@@ -168,19 +481,98 @@ impl Render for DraftView {
                     cx.notify();
                 }))
         });
-        let notice = self.notice.clone().map(|notice| {
-            div()
+        let missing = (self.installed() == Some(false)).then(|| {
+            let label = agent_label(&self.agent);
+            let command = self.data.commands.get(&self.agent);
+            let program = command.and_then(|command| wai_agent::program_name(command));
+            let program = program.map(|p| p.display().to_string()).unwrap_or_default();
+            let install = builtin(&self.agent).map(|agent| agent.install);
+            v_flex()
                 .id("draft-notice")
+                .gap_1()
                 .text_size(px(13.))
-                .text_color(theme.danger)
-                .child(notice)
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.danger)
+                        .child(format!("{label} is not installed")),
+                )
+                .child(div().text_color(muted).child(format!(
+                    "wai runs {label} through its CLI and could not find {program} on your PATH."
+                )))
+                .when_some(install, |el, text| {
+                    let button = Button::new("draft-install")
+                        .ghost()
+                        .small()
+                        .label("How to install")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if text.starts_with("https://") {
+                                cx.open_url(text);
+                            } else {
+                                this.show_install = true;
+                                cx.notify();
+                            }
+                        }));
+                    el.child(h_flex().child(button))
+                })
+                .when_some(install.filter(|_| self.show_install), |el, text| {
+                    el.child(div().text_color(muted).child(text))
+                })
                 // Registers the id so tests can find it.
                 .test_support()
+                .into_any_element()
+        });
+        let notice = missing.or_else(|| {
+            self.notice.clone().map(|notice| {
+                div()
+                    .id("draft-notice")
+                    .text_size(px(13.))
+                    .text_color(theme.danger)
+                    .child(notice)
+                    // Registers the id so tests can find it.
+                    .test_support()
+                    .into_any_element()
+            })
         });
         let send = send_button(!self.can_send(cx), cx)
             .on_click(cx.listener(|_, _, _, cx| cx.emit(DraftEvent::Send)));
         let attach = attach_button()
             .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx)));
+        let max_h = window.viewport_size().height * 0.5;
+        let chip = |id: &'static str, menu: &Menu, width: f32, search: Option<&'static str>| {
+            let select = Select::new(menu)
+                .appearance(false)
+                .small()
+                .menu_width(px(width + 80.))
+                .menu_max_h(max_h)
+                .when_some(search, |select, text| select.search_placeholder(text));
+            aurora::pill(cx)
+                .id(id)
+                .w(px(width))
+                .px(px(4.))
+                .child(select)
+                // Registers the id so tests can find it.
+                .test_support()
+        };
+        let strip = h_flex()
+            .gap_2()
+            .flex_wrap()
+            .child(chip(
+                "draft-folder",
+                &self.folders,
+                220.,
+                Some("Search projects"),
+            ))
+            .child(chip("draft-agent", &self.agents, 150., None));
+        let model = (!self
+            .data
+            .models
+            .get(&self.agent)
+            .is_none_or(|m| m.is_empty()))
+        .then(|| {
+            chip("draft-model", &self.models, 170., None)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        });
         let this = cx.entity().downgrade();
         let textarea =
             Textarea::new(&self.input)
@@ -224,6 +616,7 @@ impl Render for DraftView {
                 .items_center()
                 .child(attach)
                 .child(div().flex_1())
+                .children(model)
                 .child(send),
         );
         let hints = h_flex()
@@ -251,6 +644,7 @@ impl Render for DraftView {
                     .text_color(muted)
                     .child("Pick where and with whom. Nothing starts until you send."),
             )
+            .child(strip)
             .child(prompt)
             .child(hints);
         v_flex()

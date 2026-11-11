@@ -8,7 +8,7 @@ mod question;
 mod render;
 mod view;
 
-pub use draft::{DraftEvent, DraftView};
+pub use draft::{DraftData, DraftEvent, DraftView};
 #[cfg(test)]
 pub use input::Attachment;
 #[cfg(test)]

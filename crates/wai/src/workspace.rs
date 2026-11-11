@@ -572,6 +572,7 @@ impl Workspace {
             self.start_agent(cx);
             self.refresh_history(cx);
         }
+        self.sync_drafts(cx);
         self.sync_settings_view(cx);
         cx.notify();
     }
@@ -1046,6 +1047,7 @@ impl Workspace {
         .detach();
         self.sessions.push(session);
         self.sync_agents(cx);
+        self.sync_drafts(cx);
     }
 
     /// A started session joins the Open list: its early events replay, `model` (else the
@@ -1535,6 +1537,7 @@ impl Workspace {
         let (agents, mcp) = (host.agents(), host.mcp_servers());
         self.registry
             .update(cx, |r, _| r.set_extensions(agents, mcp));
+        self.sync_drafts(cx);
     }
 
     /// R51: an extension's session request, already checked against its permissions.
@@ -2288,6 +2291,7 @@ impl Workspace {
                     Ok(started) => {
                         this.registry.update(cx, |r, cx| r.mark_ready(&id, cx));
                         this.models_seen.insert(id, seen_models(&started.config));
+                        this.sync_drafts(cx);
                         this.save_state(cx);
                     }
                     Err(AgentError::AuthRequired) => this

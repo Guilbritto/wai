@@ -98,6 +98,7 @@ impl Workspace {
                 .await;
             this.update(cx, |this, cx| {
                 this.history = rows;
+                this.sync_drafts(cx);
                 // R14: the saved state keeps no titles, so an untitled open session takes its
                 // history title; a title the agent sends later still replaces it.
                 for session in &this.sessions {

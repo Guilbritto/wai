@@ -542,6 +542,17 @@ pub fn program(command: &str) -> Option<PathBuf> {
     find(&AcpAgent::from_str(command).ok()?.into_config())
 }
 
+/// The program `command` names, as written: what the "not installed" notice says is missing.
+pub fn program_name(command: &str) -> Option<PathBuf> {
+    Some(
+        AcpAgent::from_str(command)
+            .ok()?
+            .into_config()
+            .command()
+            .to_path_buf(),
+    )
+}
+
 /// Runs the connection; `Ok(true)` means wai asked it to stop.
 async fn connect(
     spec: &AgentSpec,

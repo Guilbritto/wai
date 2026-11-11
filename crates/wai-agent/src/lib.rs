@@ -5,7 +5,7 @@ mod convert;
 mod subagents;
 mod types;
 
-pub use actor::{AgentHandle, program};
+pub use actor::{AgentHandle, program, program_name};
 pub use types::*;
 
 /// Makes `dir` (created if missing) the process cwd. Agents inherit it, so wai calls this
