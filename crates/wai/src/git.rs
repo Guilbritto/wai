@@ -1,6 +1,3 @@
-// ponytail: the callers land in later tasks; drop this allow when they do.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -257,6 +254,25 @@ pub(crate) fn checkout(folder: &Path, branch: &str) -> Result<(), String> {
         .map_err(|e| format!("git checkout {branch} failed: {e}"))
 }
 
+/// Clones `url` into `parent`, in a folder named after the repository.
+pub(crate) fn clone(url: &str, parent: &Path) -> Result<PathBuf, String> {
+    let url = url.trim();
+    if url.is_empty() || url.starts_with('-') {
+        return Err("Enter a repository URL".into());
+    }
+    let name = url.trim_end_matches('/');
+    let name = name.rsplit(['/', ':']).next().unwrap_or_default();
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    if name.is_empty() || name == ".." {
+        return Err("Enter a repository URL".into());
+    }
+    let dest = parent.join(name);
+    if dest.exists() {
+        return Err(format!("{} already exists", dest.display()));
+    }
+    run(parent, &["clone", "--", url, &dest.to_string_lossy()]).map(|_| dest)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -328,6 +344,35 @@ pub(crate) mod tests {
             .lines()
             .filter(|l| l.trim() == ".worktrees/")
             .count()
+    }
+
+    #[test]
+    fn clone_makes_a_folder_named_after_the_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bare, _) = cloned(tmp.path());
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir(&parent).unwrap();
+        let dest = clone(bare.to_str().unwrap(), &parent).unwrap();
+        assert_eq!(dest, parent.join("origin"));
+        assert!(repo(&dest).is_some());
+    }
+
+    #[test]
+    fn clone_refuses_an_existing_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (bare, _) = cloned(tmp.path());
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(parent.join("origin")).unwrap();
+        let err = clone(bare.to_str().unwrap(), &parent).unwrap_err();
+        assert!(err.ends_with("already exists"), "{err}");
+    }
+
+    #[test]
+    fn clone_refuses_an_option_as_url() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(clone("-u x", tmp.path()).is_err());
+        assert!(clone("  ", tmp.path()).is_err());
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
     }
 
     #[test]

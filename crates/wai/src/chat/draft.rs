@@ -3,9 +3,12 @@ use std::path::{Path, PathBuf};
 
 use gpui_kit::component::attachment::{Attachment as Chip, AttachmentContent, AttachmentTitle};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::dialog::DialogFooter;
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_settings::{SeenModel, SeenModes, agent_label, builtin, canonical, shown};
@@ -59,6 +62,7 @@ impl DraftData {
 }
 
 const OPEN_FOLDER: &str = "\0open-folder";
+const CLONE: &str = "\0clone";
 const FOOTER: &str = "\0footer";
 const CURRENT: &str = "\0current";
 const LOCAL: &str = "local";
@@ -219,6 +223,8 @@ pub struct DraftView {
     /// Local: the branch to check out (`None` stays on the current one). Worktree: the base.
     pub(crate) branch: Option<String>,
     pub notice: Option<String>,
+    /// The URL being cloned.
+    pub(crate) cloning: Option<String>,
     /// The chat of a send in flight: the draft shows it until the session starts.
     pub starting: Option<Entity<ChatSession>>,
     pub(super) input: Entity<TextareaState>,
@@ -282,15 +288,20 @@ impl DraftView {
                     _ => {}
                 }
             }),
-            cx.subscribe(&folders, |this, _, event: &SelectEvent<Vec<Pick>>, cx| {
-                let SelectEvent::Confirm(Some(value)) = event else {
-                    return;
-                };
-                match value.as_str() {
-                    OPEN_FOLDER => this.open_folder(cx),
-                    _ => this.set_folder(PathBuf::from(value), cx),
-                }
-            }),
+            cx.subscribe_in(
+                &folders,
+                window,
+                |this, _, event: &SelectEvent<Vec<Pick>>, window, cx| {
+                    let SelectEvent::Confirm(Some(value)) = event else {
+                        return;
+                    };
+                    match value.as_str() {
+                        OPEN_FOLDER => this.open_folder(cx),
+                        CLONE => this.clone_dialog(window, cx),
+                        _ => this.set_folder(PathBuf::from(value), cx),
+                    }
+                },
+            ),
             cx.subscribe(&agents, |this, _, event: &SelectEvent<Vec<Pick>>, cx| {
                 if let SelectEvent::Confirm(Some(agent)) = event {
                     this.set_agent(agent.clone(), cx);
@@ -330,6 +341,7 @@ impl DraftView {
             worktree: false,
             branch: None,
             notice: None,
+            cloning: None,
             starting: None,
             input,
             attachments: Vec::new(),
@@ -497,17 +509,82 @@ impl DraftView {
         // The menu shows "Open folder…" as picked until it is rebuilt.
         self.menus_stale = true;
         cx.notify();
-        let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: None,
-        });
+        let picked = pick_folder(cx);
         cx.spawn(async move |this, cx| {
-            let paths = picked.await.ok().and_then(|picked| picked.ok()).flatten();
-            if let Some(folder) = paths.and_then(|paths| paths.into_iter().next()) {
+            if let Some(folder) = picked.await {
                 this.update(cx, |this, cx| this.set_folder(folder, cx)).ok();
             }
+        })
+        .detach();
+    }
+
+    /// Asks for the URL, then for the folder to clone into.
+    fn clone_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menus_stale = true;
+        cx.notify();
+        let url = cx
+            .new(|cx| InputState::new(window, cx).placeholder("https://github.com/owner/repo.git"));
+        let this = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (field, this) = (url.clone(), this.clone());
+            let choose = move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                let text = field.read(cx).value().trim().to_string();
+                if text.is_empty() {
+                    return;
+                }
+                window.close_dialog(cx);
+                let picked = pick_folder(cx);
+                let this = this.clone();
+                cx.spawn(async move |cx| {
+                    if let Some(parent) = picked.await {
+                        this.update(cx, |this, cx| this.clone_into(text, parent, cx))
+                            .ok();
+                    }
+                })
+                .detach();
+            };
+            dialog
+                .title("Clone repository")
+                .child(div().id("clone-url").child(Input::new(&url)).test_support())
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("clone-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("clone-choose")
+                                .primary()
+                                .label("Choose folder…")
+                                .on_click(choose),
+                        ),
+                )
+        });
+    }
+
+    /// Clones `url` into `parent` off the UI thread; the draft then works in the clone.
+    pub fn clone_into(&mut self, url: String, parent: PathBuf, cx: &mut Context<Self>) {
+        self.cloning = Some(url.clone());
+        self.notice = None;
+        cx.emit(DraftEvent::Changed);
+        cx.notify();
+        let job = {
+            let url = url.clone();
+            cx.background_spawn(async move { git::clone(&url, &parent) })
+        };
+        cx.spawn(async move |this, cx| {
+            let done = job.await;
+            this.update(cx, |this, cx| {
+                this.cloning = None;
+                match done {
+                    Ok(dest) => this.set_folder(dest, cx),
+                    Err(why) => this.notice = Some(format!("Could not clone {url}: {why}")),
+                }
+                cx.emit(DraftEvent::Changed);
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }
@@ -522,6 +599,7 @@ impl DraftView {
         }
         let mut items: Vec<Pick> = known.iter().map(|path| Pick::folder(path)).collect();
         items.push(Pick::new(OPEN_FOLDER, "Open folder…"));
+        items.push(Pick::new(CLONE, "Clone repository…"));
         let current = self.folder.to_string_lossy().into_owned();
         self.folders.update(cx, |select, cx| {
             select.set_items(items, window, cx);
@@ -673,7 +751,10 @@ impl DraftView {
     }
 
     pub fn can_send(&self, cx: &App) -> bool {
-        self.starting.is_none() && self.installed() != Some(false) && !self.text(cx).is_empty()
+        self.starting.is_none()
+            && self.cloning.is_none()
+            && self.installed() != Some(false)
+            && !self.text(cx).is_empty()
     }
 
     /// What goes out: the draft keeps both, in case the start fails.
@@ -723,6 +804,16 @@ impl DraftView {
         })
         .detach();
     }
+}
+
+fn pick_folder(cx: &mut App) -> impl Future<Output = Option<PathBuf>> + use<> {
+    let picked = cx.prompt_for_paths(PathPromptOptions {
+        files: false,
+        directories: true,
+        multiple: false,
+        prompt: None,
+    });
+    async move { picked.await.ok()?.ok()??.into_iter().next() }
 }
 
 impl Render for DraftView {
@@ -818,8 +909,9 @@ impl Render for DraftView {
                 .test_support()
                 .into_any_element()
         });
+        let cloning = self.cloning.as_ref().map(|url| format!("Cloning {url}…"));
         let notice = missing.or_else(|| {
-            self.notice.clone().map(|notice| {
+            cloning.or_else(|| self.notice.clone()).map(|notice| {
                 div()
                     .id("draft-notice")
                     .text_size(px(13.))

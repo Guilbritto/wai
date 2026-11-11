@@ -551,6 +551,28 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn cloned_folder_becomes_the_drafts_folder(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // git is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let (bare, _) = git::tests::cloned(dir.path());
+        let parent = mkdir(dir.path(), "parent");
+        let (workspace, cx) = open(cx, two_agents(""));
+        let draft = new_draft(&workspace, cx);
+        cx.simulate_input("hi");
+        draft.update(cx, |d, cx| {
+            d.clone_into(bare.to_string_lossy().into_owned(), parent.clone(), cx)
+        });
+        draft.read_with(cx, |d, cx| assert!(!d.can_send(cx)));
+        wait_until(cx, "the clone", |cx| {
+            draft.read_with(cx, |d, _| {
+                d.folder == canonical(&parent.join("origin")) && d.repo.is_some()
+            })
+        });
+        draft.read_with(cx, |d, _| assert!(d.cloning.is_none()));
+        leave(&workspace, cx);
+    }
+
+    #[gpui_kit::test]
     fn changing_the_agent_resets_the_model(cx: &mut TestAppContext) {
         let mut settings = two_agents("");
         settings.models = [("b".into(), "fake-large".into())].into();
