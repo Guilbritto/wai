@@ -3,6 +3,7 @@ mod agents_view;
 mod app;
 mod aurora;
 mod chat;
+mod claude_config;
 mod editor;
 mod ext_host;
 mod ext_panel;

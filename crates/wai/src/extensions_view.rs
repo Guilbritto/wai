@@ -19,6 +19,7 @@ use gpui_kit::*;
 use wai_ext::panel::clamp;
 use wai_ext::{ExtId, ExtStore, Installed, Permission, Source, Staged};
 
+use crate::aurora;
 use crate::ext_host::{ExtHost, ExtStatus};
 
 /// v1 has no sandbox, and the consent dialog says so in these words.
@@ -300,7 +301,7 @@ impl ExtensionsView {
         cx.notify();
     }
 
-    fn card(&self, ix: usize, ext: &Installed, cx: &Context<Self>) -> impl IntoElement + use<> {
+    fn row(&self, ix: usize, ext: &Installed, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let (toggle, remove) = (ext.manifest.id.clone(), ext.manifest.id.clone());
         let problem = match self.host.read(cx).status(&ext.manifest.id) {
@@ -337,45 +338,46 @@ impl ExtensionsView {
             });
         v_flex()
             .gap_1()
-            .p_2()
-            .border_1()
+            .py_2()
+            .border_b_1()
             .border_color(theme.border)
-            .rounded(theme.radius)
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap_3()
+                    .items_center()
                     .child(
-                        div()
+                        v_flex()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(clamp(&ext.manifest.name, NAME_CHARS)),
+                            .gap_1()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(clamp(&ext.manifest.name, NAME_CHARS)),
+                                    )
+                                    .child(aurora::badge(
+                                        clamp(&ext.manifest.version, NAME_CHARS),
+                                        cx,
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(permissions_text(&ext.granted).join(", ")),
+                            )
+                            .children(problem.map(|text| {
+                                let text = clamp(&text, DESCRIPTION_CHARS);
+                                div().text_xs().text_color(theme.danger).child(text)
+                            }))
+                            .children(plugins),
                     )
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(clamp(&ext.manifest.version, NAME_CHARS)),
-                    ),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(permissions_text(&ext.granted).join(", ")),
-            )
-            .children(problem.map(|text| {
-                let text = clamp(&text, DESCRIPTION_CHARS);
-                div().text_xs().text_color(theme.danger).child(text)
-            }))
-            .children(plugins)
-            .child(
-                h_flex()
-                    .justify_between()
-                    .child(
                         Switch::new(("ext-enabled", ix))
-                            .xsmall()
                             .label("Enabled")
                             .checked(ext.enabled)
                             .on_click(cx.listener(move |this, on: &bool, window, cx| {
@@ -385,7 +387,7 @@ impl ExtensionsView {
                     .child(
                         Button::new(("ext-uninstall", ix))
                             .ghost()
-                            .xsmall()
+                            .small()
                             .label("Uninstall")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.uninstall(&remove, window, cx)
@@ -407,26 +409,38 @@ impl Render for ExtensionsView {
         };
         v_flex()
             .id("extensions")
-            .size_full()
-            .p_2()
             .gap_2()
-            .overflow_y_scroll()
             .child(
-                Button::new("ext-install-folder")
-                    .small()
-                    .w_full()
-                    .label("Install from folder…")
-                    .on_click(cx.listener(|this, _, window, cx| this.pick_folder(window, cx))),
-            )
-            .child(Input::new(&self.url).small())
-            .child(
-                Button::new("ext-install-git")
-                    .small()
-                    .w_full()
-                    .label("Install from git URL…")
-                    .on_click(cx.listener(|this, _, window, cx| this.install_url(window, cx))),
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("ext-install-folder")
+                            .small()
+                            .label("Install from folder…")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.pick_folder(window, cx)),
+                            ),
+                    )
+                    .child(div().flex_1().child(Input::new(&self.url).small()))
+                    .child(
+                        Button::new("ext-install-git")
+                            .small()
+                            .label("Install from git URL…")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.install_url(window, cx)),
+                            ),
+                    ),
             )
             .when(self.staging.is_some(), |el| el.child(muted("Preparing…")))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .pt_2()
+                    .text_size(px(11.))
+                    .text_color(theme.muted_foreground)
+                    .child("INSTALLED")
+                    .child(installed.len().to_string()),
+            )
             .when(installed.is_empty(), |el| {
                 el.child(muted("No extensions installed"))
             })
@@ -434,7 +448,7 @@ impl Render for ExtensionsView {
                 installed
                     .iter()
                     .enumerate()
-                    .map(|(ix, ext)| self.card(ix, ext, cx)),
+                    .map(|(ix, ext)| self.row(ix, ext, cx)),
             )
     }
 }
@@ -457,6 +471,7 @@ pub(crate) mod tests {
     use super::{ExtensionsView, LIMITATION, plugin_install};
     #[cfg(unix)]
     use crate::ext_host::ExtStatus;
+    use crate::settings_view::Section;
     use crate::workspace::Workspace;
     use crate::workspace::tests::open;
     #[cfg(unix)]
@@ -503,8 +518,12 @@ pub(crate) mod tests {
         cx.run_until_parked();
     }
 
-    fn dialog(cx: &mut VisualTestContext) -> bool {
-        cx.update(|window, cx| window.has_active_dialog(cx))
+    /// The consent dialog; the settings modal is a dialog too.
+    fn consent(cx: &mut VisualTestContext) -> bool {
+        cx.update(|w, cx| {
+            w.render_frame(cx);
+            w.try_find("consent-install").is_some()
+        })
     }
 
     fn notices(cx: &mut VisualTestContext) -> usize {
@@ -538,7 +557,7 @@ pub(crate) mod tests {
         let view = view.expect("the Extensions view");
 
         review(&view, &src, cx);
-        assert!(dialog(cx), "no consent dialog");
+        assert!(consent(cx), "no consent dialog");
         cx.update(|window, cx| window.render_frame(cx));
         let from = format!("From {}", src.display());
         let lines = ["Sample", "1.2.0", LIMITATION, from.as_str()];
@@ -553,13 +572,13 @@ pub(crate) mod tests {
         assert!(cx.debug_bounds("consent-description").is_some());
         assert!(installed(&view, cx).is_empty(), "nothing before consent");
         click("consent-cancel", cx);
-        assert!(!dialog(cx));
+        assert!(!consent(cx));
         assert!(installed(&view, cx).is_empty());
         assert_eq!(staged(&config), 0, "Cancel drops the stage");
 
         review(&view, &src, cx);
         click("consent-install", cx);
-        assert!(!dialog(cx));
+        assert!(!consent(cx));
         let list = installed(&view, cx);
         assert_eq!(list.len(), 1);
         assert!(list[0].enabled);
@@ -608,7 +627,7 @@ pub(crate) mod tests {
             cx.update(|window, cx| workspace.update(cx, |w, cx| w.show_extensions(window, cx)));
 
         review(&view, &src, cx);
-        assert!(dialog(cx), "no consent dialog");
+        assert!(consent(cx), "no consent dialog");
         cx.update(|window, cx| window.render_frame(cx));
         let viewport = cx.update(|window, _| window.viewport_size());
         let description = cx
@@ -814,14 +833,14 @@ pub(crate) mod tests {
         });
         cx.run_until_parked();
         assert_eq!(notices(cx), 1, "one notice for the suggestion");
-        assert!(!dialog(cx));
+        assert!(!consent(cx));
         assert!(!config.join("extensions").exists() && !config.join("extensions.json").exists());
 
         // The notice slides in first (the test clock only moves when told).
         cx.executor().advance_clock(Duration::from_secs(1));
         cx.run_until_parked();
         click(("suggest-review", 0usize), cx);
-        assert!(dialog(cx), "Review asks for consent");
+        assert!(consent(cx), "Review asks for consent");
         click("consent-install", cx);
         let view = workspace
             .read_with(cx, |w, _| w.extensions.clone())
@@ -837,6 +856,41 @@ pub(crate) mod tests {
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| w.set_project("/nonexistent".into(), window, cx))
         });
+    }
+
+    /// The Extensions page lists what is installed and offers the installs.
+    #[gpui_kit::test]
+    fn extensions_page_shows_installed(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, src) = (tmp.path().join("config"), sample(&tmp.path().join("src")));
+        let mut store = wai_ext::ExtStore::open(&config);
+        let staged = store.stage(&Source::Folder(src)).unwrap();
+        let granted = staged.manifest().permissions.clone();
+        store.commit(staged, granted).unwrap();
+        let (workspace, cx) = workspace(&config, cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.open_settings(Section::Extensions, None, window, cx)
+            })
+        });
+        let view = workspace.read_with(cx, |w, _| w.settings_view()).unwrap();
+        assert_eq!(
+            view.read_with(cx, |v, cx| v.nav_count(Section::Extensions, cx)),
+            Some(1)
+        );
+        cx.update(|window, cx| window.render_frame(cx));
+        assert!(cx.update(|w, _| w.try_find(("ext-enabled", 0usize)).is_some()));
+        assert!(cx.update(|w, _| w.try_find("ext-install-folder").is_some()));
+    }
+
+    /// The top bar's Extensions button opens the modal on the Extensions page.
+    #[gpui_kit::test]
+    fn topbar_extensions_opens_the_page(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (workspace, cx) = workspace(&tmp.path().join("config"), cx);
+        click("sidebar-extensions", cx);
+        let view = workspace.read_with(cx, |w, _| w.settings_view()).unwrap();
+        assert_eq!(view.read_with(cx, |v, _| v.section()), Section::Extensions);
     }
 
     /// The typed command names a plugin and nothing else: no spaces, control characters, shell
@@ -919,6 +973,7 @@ pub(crate) mod tests {
         );
 
         click(ElementId::Name("ext-plugin:sample:0".into()), cx);
+        assert!(workspace.read_with(cx, |w, _| w.settings_view().is_none()));
         assert!(workspace.read_with(cx, |w, _| w.terminal_visible));
         let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().unwrap());
         let typed = "claude plugin install sample-plugin";

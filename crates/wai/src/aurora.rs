@@ -11,8 +11,8 @@ use gpui_kit::component::{ActiveTheme as _, Theme, ThemeRegistry, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Axis, Bounds, BoxShadow, Corners, Div, FontWeight, Hsla, InteractiveElement,
-    IntoElement, ParentElement, StyleRefinement, Styled, canvas, div, hsla, linear_color_stop,
-    linear_gradient, point, px, rgb, size,
+    IntoElement, ParentElement, SharedString, StyleRefinement, Styled, canvas, div, hsla,
+    linear_color_stop, linear_gradient, point, px, rgb, size,
 };
 
 /// Nunito Bold (OFL 1.1, `assets/fonts/OFL.txt`), for the brand and titles.
@@ -222,6 +222,46 @@ pub(crate) fn pill(cx: &App) -> Div {
         .text_xs()
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(text)
+}
+
+/// A small label such as a version: glass in dark mode, the theme's muted tokens in light.
+pub(crate) fn badge(text: impl Into<SharedString>, cx: &App) -> Div {
+    let theme = cx.theme();
+    let (fill, border, color) = if theme.is_dark() {
+        (vidro_forte(), borda(), tinta_2())
+    } else {
+        (theme.muted, theme.border, theme.muted_foreground)
+    };
+    div()
+        .px(px(6.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(border)
+        .bg(fill)
+        .text_size(px(11.))
+        .text_color(color)
+        .child(text.into())
+}
+
+/// "Coming soon": amber in dark mode, the theme's warning in light.
+pub(crate) fn soon(cx: &App) -> Div {
+    let theme = cx.theme();
+    let color = if theme.is_dark() {
+        ambar()
+    } else {
+        theme.warning
+    };
+    div()
+        .px(px(8.))
+        .py(px(2.))
+        .rounded_full()
+        .border_1()
+        .border_color(color.opacity(0.35))
+        .bg(color.opacity(0.10))
+        .text_size(px(10.5))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(color)
+        .child("Coming soon")
 }
 
 /// A selectable chip for tabs and rows (`.janela-aba`): the selected one is lilas-tinted. The

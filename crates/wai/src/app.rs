@@ -159,8 +159,6 @@ pub fn run(
                     w.templates = templates;
                     w.settings_error = settings_error;
                     w.show_load_notices(notices, window, cx);
-                    let pending = unapproved(&Settings::default(), &w.settings, &w.approved);
-                    w.ask_approval(pending, window, cx);
                     if w.settings_error.is_none() {
                         w.start_agent(cx);
                     }
@@ -175,6 +173,9 @@ pub fn run(
                     } else if w.default_agent().is_none() {
                         w.open_settings(Section::Ai, Some(CHOOSE_AI), window, cx);
                     }
+                    // After Settings opens, so the approval lands on top.
+                    let pending = unapproved(&Settings::default(), &w.settings, &w.approved);
+                    w.ask_approval(pending, window, cx);
                 });
                 for notice in template_notices {
                     window.push_notification(Notification::warning(notice).autohide(false), cx);
