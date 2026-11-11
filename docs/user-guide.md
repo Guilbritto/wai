@@ -1,10 +1,10 @@
 # wai user guide
 
-This guide describes wai 0.4.0. On Windows, read **ctrl** where it says **⌘**, except where the shortcut table says otherwise.
+This guide describes wai 0.4.1. On Windows, read **ctrl** where it says **⌘**, except where the shortcut table says otherwise.
 
 ## The window
 
-- **Top bar.** It shows wai's version and the commit it was built from (`0.4.0 · 01dd232`), the project's name and how many agents are working or need you, and holds the buttons **New from template** (shown when templates exist), **Extensions**, the command palette, **Settings** (⚙), the terminal, the Agents panel (only while it is on the right) and **New session**. On macOS it is the title bar: drag it to move the window, double-click it to zoom.
+- **Top bar.** It shows wai's version and the commit it was built from (`0.4.1 · 01dd232`), the project's name and how many agents are working or need you, and holds the buttons **New from template** (shown when templates exist), **Extensions**, the command palette, **Settings** (⚙), the terminal, the Agents panel (only while it is on the right) and **New session**. On macOS it is the title bar: drag it to move the window, double-click it to zoom.
 - **Sidebar.** The tabs **Sessions**, **History**, **Files**, **Search** and **Agents**, plus one tab per extension panel.
 - **Agents panel.** Agents can leave the sidebar for its own panel right of the panes, which collapses with **⌘⌥B** (see [The Agents tab](#the-agents-tab)).
 - **Panes.** Up to four sit side by side. Each holds a chat session, the editor (one editor pane at most) or Settings (one at most). **⌘⌥→** moves the focus to the next pane.
