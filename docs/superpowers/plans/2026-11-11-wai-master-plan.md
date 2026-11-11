@@ -12,6 +12,12 @@
 
 **Estado de partida:** roadmap Fases 0–4, Aurora, Settings+agentes, subagentes (0.4.0), clique direito (0.4.1), colar anexos (0.4.2), reordenar sessões (0.4.3), mensagem durante o turno + menu `/` (0.5.0) — executados. Os checkboxes dos planos antigos não foram marcados; o status vale pelo código.
 
+## Andamento (2026-11-11, fim da tarde)
+
+Mergeado na `development` (`6427cfc`), sem versão nova ainda: **0.1** (worktrees limpos), **0.4** e **0.5** (validados com o Claude real; teste `#[ignore]` `permission_requests_in_default_mode`), **0.8** (testes instáveis; ainda falta a prova de 20 rodadas sob carga), **1.1**, **1.2**, **1.3**, **1.5**, **1.6**, **1.7**, **1.8**, **1.9**. Planos detalhados: `2026-11-11-wai-onda-1-{chat,sessions,settings}.md`; spec nova `2026-11-11-wai-settings-modal-design.md`. Suíte completa verde na frente sessões após o merge (595 passaram, 0 falharam). Decisões tomadas sem o dono e verificações no app rodando: `.superpowers/sdd/master-onda-1/` (`rulings.md`, `track-*-report.md`).
+
+Ainda abertos na Onda 0/1: 0.2, 0.3 e 0.9 (dono), 0.6 e 0.7 (precisam do app na tela/parado), 1.4 (semana de uso), toggle de servidor MCP (gravar `~/.claude.json`, aguarda o dono) e a pergunta 4 (submodules; hoje "New worktree" fica desligado com dica).
+
 ## Restrições globais
 
 - CPU parado < 0,5% (medido 0,12–0,20%). Nada animado ou com polling no núcleo.
