@@ -204,11 +204,13 @@ fn step_title(title: &str, cx: &App) -> impl IntoElement + use<> {
             ..Default::default()
         },
     };
-    div()
-        .flex_1()
-        .min_w_0()
-        .truncate()
-        .child(StyledText::new(text).with_highlights(ranges.into_iter().map(|r| (r, style))))
+    let mono = theme.mono_font_family.clone();
+    let overrides: Vec<_> = ranges.iter().map(|r| (r.clone(), mono.clone())).collect();
+    div().flex_1().min_w_0().truncate().child(
+        StyledText::new(text)
+            .with_highlights(ranges.into_iter().map(|r| (r, style)))
+            .with_font_family_overrides(overrides),
+    )
 }
 
 /// A step's line (`.step`): no box, 13 px, muted and `tinta` on hover.
@@ -294,7 +296,7 @@ impl ChatSession {
             .child(
                 div()
                     .id("session-title")
-                    .flex_1()
+                    .flex_shrink(1.)
                     .min_w_0()
                     .truncate()
                     .cursor_grab()
@@ -309,7 +311,7 @@ impl ChatSession {
             )
             .child(self.pill(
                 "pill-folder",
-                Some(Icon::new(IconName::Folder)),
+                Some(Icon::new(IconName::Folder).xsmall().into_any_element()),
                 folder_name(&self.cwd),
                 cx,
             ))
@@ -319,9 +321,23 @@ impl ChatSession {
                 } else {
                     Icon::new(gpui_kit::assets::IconName::GitBranch)
                 };
-                (head.branch.clone()).map(|branch| self.pill("pill-branch", Some(icon), branch, cx))
+                let icon = Some(icon.xsmall().into_any_element());
+                (head.branch.clone()).map(|branch| self.pill("pill-branch", icon, branch, cx))
             }))
-            .child(self.pill("pill-agent", None, self.agent_model(), cx))
+            .child(self.pill(
+                "pill-agent",
+                // Claude's mark, as the mockup's agent pill shows it.
+                (self.agent == "claude").then(|| {
+                    div()
+                        .text_color(aurora::brasa())
+                        .child("✳")
+                        .into_any_element()
+                }),
+                self.agent_model(),
+                cx,
+            ))
+            // The pills sit by the title; the rest goes to the right.
+            .child(div().flex_1())
             .children(
                 self.pickers
                     .iter()
@@ -350,7 +366,7 @@ impl ChatSession {
     fn pill(
         &self,
         id: &'static str,
-        icon: Option<Icon>,
+        mark: Option<AnyElement>,
         text: String,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -359,7 +375,7 @@ impl ChatSession {
             .min_w_0()
             .truncate()
             .aria_label(text.clone())
-            .when_some(icon, |el, icon| el.child(icon.xsmall()))
+            .children(mark)
             .child(text)
             .test_support()
     }
@@ -407,7 +423,7 @@ impl ChatSession {
         if ix != run.start {
             return row;
         }
-        let head = self.render_group(run, cx);
+        let head = self.render_group(run, open, cx);
         Some(v_flex().child(head).children(row).into_any_element())
     }
 
@@ -425,7 +441,11 @@ impl ChatSession {
             .text_size(px(12.5))
             .font_weight(FontWeight::SEMIBOLD)
             .child(div().text_color(star).child("✦"))
-            .child(div().text_color(name).child(self.agent.clone()))
+            .child(
+                div()
+                    .text_color(name)
+                    .child(wai_settings::agent_label(&self.agent)),
+            )
             // Registers the id so tests can find it.
             .test_support()
     }
@@ -435,6 +455,7 @@ impl ChatSession {
     fn render_group(
         &self,
         run: std::ops::Range<usize>,
+        open: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
         let head = run.start;
@@ -459,6 +480,18 @@ impl ChatSession {
                     .truncate()
                     .child(self.model.run_label(run)),
             )
+            .child(
+                Icon::new(match open {
+                    true => IconName::ChevronDown,
+                    false => IconName::ChevronRight,
+                })
+                .size(px(12.))
+                .flex_none()
+                .text_color(match cx.theme().is_dark() {
+                    true => aurora::nevoa_2(),
+                    false => cx.theme().muted_foreground,
+                }),
+            )
             .on_click(cx.listener(move |this, _, _, cx| {
                 if !this.open_groups.remove(&head) {
                     this.open_groups.insert(head);
@@ -474,7 +507,7 @@ impl ChatSession {
         let theme = cx.theme();
         let (dark, muted) = (theme.is_dark(), theme.muted_foreground);
         match &self.model.items[ix] {
-            // `.msg.voce`
+            // `.me`
             ChatItem::User { text } | ChatItem::Steered { text } => h_flex()
                 .w_full()
                 .justify_end()
@@ -644,6 +677,17 @@ impl ChatSession {
         let line = step_line(cx)
             .id((id, ix))
             .child(status_icon(tool.status, cx))
+            .children(
+                (tool.kind == "subagent" || tool.subagent.is_some()).then(|| {
+                    Icon::new(IconName::Bot)
+                        .size(px(12.))
+                        .flex_none()
+                        .text_color(match cx.theme().is_dark() {
+                            true => aurora::nevoa_2(),
+                            false => cx.theme().muted_foreground,
+                        })
+                }),
+            )
             .child(step_title(&title, cx))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if !this.open_steps.remove(&ix) {
@@ -866,9 +910,9 @@ impl Render for ChatSession {
                 .items_center()
                 .justify_center()
                 .child(aurora::pill(cx).child("No messages yet.")),
-            // Rows sit 12 px apart, not the scroller's 32: the scroller's gap
-            // goes and each row but the last carries its own. The scroller remeasures the row
-            // before an append, whose "last" flips.
+            // Rows sit 12 px apart, not the scroller's 32: the scroller's gap goes and each
+            // row but the last carries its own, except rows inside a card (only the card's last
+            // does). The scroller remeasures the row before an append, whose "last" flips.
             false => messages.child({
                 let scroller = MessageScroller::new(
                     "messages",
@@ -988,6 +1032,7 @@ mod tests {
             e(true, true, false),
             "one header per turn"
         );
+        assert_eq!(card_edges(&[a()], 0, all), e(true, true, true));
         assert_eq!(
             card_edges(&[u(), a(), u(), a()], 3, all),
             e(true, true, true)

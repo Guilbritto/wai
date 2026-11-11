@@ -54,7 +54,7 @@ While the agent prepares the session, its pane shows `Preparing <agent>…`. **�
 - **Model pickers:** a change applies to that session only, from then on, and wai does not keep it across relaunches. A new session starts with the **Default model** from Settings, if you set one; if the agent no longer offers it, the session says `<agent> no longer offers the model <model>; using <current>.` and keeps the agent's own choice. Resumed, forked and restored sessions keep what the agent restores. An agent that offers no such option shows no picker.
 - **The transcript:**
   - Replies stream in as Markdown.
-  - Each turn of the agent is one card headed `✦ <agent>`, holding its steps and its replies in order; your prompts are violet balloons on the right; a closed permission card or a notice between them splits the card.
+  - Each turn of the agent is one card headed `✦ <agent>`, holding its steps and its replies in order; your prompts are balloons on the right; a closed permission card or a notice between them splits the card.
   - Each reply has a copy button that copies its Markdown, and each code block one that copies its code.
   - The agent's steps (its tool calls and its thinking) show as the **Processing** setting says:
 

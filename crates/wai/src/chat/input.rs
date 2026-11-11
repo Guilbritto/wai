@@ -504,10 +504,6 @@ impl ChatSession {
             (false, true) => field.bg(theme.background).border_color(theme.ring),
             (false, false) => field.bg(theme.background).border_color(theme.input),
         };
-        let muted = match dark {
-            true => aurora::nevoa_2(),
-            false => theme.muted_foreground,
-        };
         // What the agent does, for how long, and how to stop it. The ring turns with the turn
         // clock's tick (see `tick_period`): no animation runs of its own.
         let status = self.model.activity().map(|doing| {
@@ -541,8 +537,10 @@ impl ChatSession {
                     div()
                         .id("turn-status-time")
                         .flex_none()
-                        .text_size(px(11.5))
-                        .text_color(muted)
+                        .text_color(match dark {
+                            true => aurora::nevoa(),
+                            false => theme.muted_foreground,
+                        })
                         .child(format!("{} · Esc to stop", elapsed(secs)))
                         // Registers the id so tests can find it.
                         .test_support(),

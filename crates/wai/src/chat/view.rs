@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::IndexPath;
@@ -128,7 +129,7 @@ pub struct ChatSession {
     pub(super) open_steps: HashSet<usize>,
     /// The unfolded runs of steps of the grouped mode, by their first row.
     pub(super) open_groups: HashSet<usize>,
-    /// While a turn runs: when it started, and the status line's one-second tick.
+    /// While a turn runs: when it started, the status line's tick period and its timer.
     pub(super) turn: Option<(Instant, Duration, Task<()>)>,
     /// Per waiting `Question` card, by request id, made when it first draws.
     pub(super) questions: HashMap<u64, QuestionForm>,
@@ -639,7 +640,8 @@ impl ChatSession {
         let started = self.turn.as_ref().map_or_else(Instant::now, |(at, ..)| *at);
         let tick = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(period).await;
+                let wait = until_next_tick(period, EPOCH.elapsed());
+                cx.background_executor().timer(wait).await;
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }
@@ -663,12 +665,20 @@ impl ChatSession {
                 }
             }
             if let Some(ix) = changed.filter(|ix| *ix < known) {
-                // A changed row can change its card's edges (a step that starts to show).
-                let run = match model.items[ix].in_card() {
-                    true => model.run(ix, ChatItem::in_card),
-                    false => ix..ix + 1,
+                // A changed row can change its card's edges, and the header moves with them:
+                // remeasure from its card to the end of its turn.
+                let (start, end) = match model.items[ix].in_card() {
+                    true => {
+                        let turn = (model.items[ix..].iter())
+                            .position(|i| {
+                                matches!(i, ChatItem::User { .. } | ChatItem::Steered { .. })
+                            })
+                            .map_or(rows, |n| ix + n);
+                        (model.run(ix, ChatItem::in_card).start, turn)
+                    }
+                    false => (ix, ix + 1),
                 };
-                list.remeasure_items(run.start..run.end.min(known), cx);
+                list.remeasure_items(start..end.min(known), cx);
             }
         });
     }
@@ -849,7 +859,15 @@ impl ChatSession {
     }
 }
 
-/// A tool call's diffs, each opening at its line (`open_line`).
+/// The clock every session's ticks align to, so they all land in the same frame.
+static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// The wait to the next multiple of `period` on the `EPOCH` clock, `since` being its reading.
+fn until_next_tick(period: Duration, since: Duration) -> Duration {
+    let period = period.as_nanos().max(1);
+    Duration::from_nanos((period - since.as_nanos() % period) as u64)
+}
+
 /// How often the status line's clock ticks: fast enough to turn its ring while the agent works,
 /// once a second while a card waits for you, never when no turn runs.
 pub(super) fn tick_period(state: &TurnState) -> Option<Duration> {
@@ -860,6 +878,7 @@ pub(super) fn tick_period(state: &TurnState) -> Option<Duration> {
     }
 }
 
+/// A tool call's diffs, each opening at its line (`open_line`).
 fn diff_views(diffs: &[FileDiff], locations: &[Location], cwd: &Path) -> Vec<DiffView> {
     let view = |k| DiffView::new(&diffs[k], cwd, open_line(locations, diffs, k));
     (0..diffs.len()).map(view).collect()
@@ -873,7 +892,7 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    use super::tick_period;
+    use super::{tick_period, until_next_tick};
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{ElementId, Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
@@ -1914,7 +1933,6 @@ mod tests {
         }
     }
 
-    /// A turn is one card: its segments touch, and only its first row carries the header.
     #[test]
     fn tick_period_follows_the_state() {
         assert_eq!(
@@ -1927,6 +1945,38 @@ mod tests {
         );
         assert_eq!(tick_period(&TurnState::Idle), None);
         assert_eq!(tick_period(&TurnState::Error(String::new())), None);
+    }
+
+    /// A turn is one card: its segments touch, and only its first row carries the header.
+    /// The clock switches period with the state and keeps the turn's start.
+    #[gpui_kit::test]
+    fn clock_follows_the_state_and_keeps_its_start(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        let step = |state: TurnState, cx: &mut VisualTestContext| {
+            session.update(cx, |s, cx| {
+                s.model.state = state;
+                s.sync_clock(cx);
+                s.turn.as_ref().map(|(at, period, _)| (*at, *period))
+            })
+        };
+        let (at, period) = step(TurnState::Working, cx).unwrap();
+        assert_eq!(period, Duration::from_millis(125));
+        let (waiting_at, period) = step(TurnState::NeedsYou, cx).unwrap();
+        assert_eq!((waiting_at, period), (at, Duration::from_secs(1)));
+        let (again_at, period) = step(TurnState::Working, cx).unwrap();
+        assert_eq!((again_at, period), (at, Duration::from_millis(125)));
+        assert!(step(TurnState::Idle, cx).is_none());
+    }
+
+    #[test]
+    fn ticks_align_to_the_period() {
+        let p = Duration::from_millis(125);
+        let wait = |ms| until_next_tick(p, Duration::from_millis(ms));
+        assert_eq!(wait(0), p);
+        assert_eq!(wait(100), Duration::from_millis(25));
+        assert_eq!(wait(125), p);
     }
 
     #[gpui_kit::test]
@@ -1962,7 +2012,15 @@ mod tests {
         let (workspace, cx) = open(cx, settings);
         let session = start_session(&workspace, cx);
         turn(&session, cx);
+        let last = session.read_with(cx, |s, _| s.model.items.len() - 1);
         assert!(shows(("reply-head", 1usize), cx));
+        assert!(!shows(("reply-head", last), cx));
+        assert!(!shows(("card", 2usize), cx), "folded: only the head");
+        let (head, text) = (card_bounds(1, cx), card_bounds(last, cx));
+        assert!(
+            (text.top() - head.bottom()).abs() < px(0.5),
+            "{head:?} {text:?}"
+        );
         click_edits(None, ("group", 1usize), cx);
         assert_touching(&session, cx);
     }
