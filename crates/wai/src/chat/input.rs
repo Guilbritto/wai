@@ -351,6 +351,7 @@ impl ChatSession {
         });
         let theme = cx.theme();
         let dark = theme.is_dark();
+        let (success, warning) = (theme.success, theme.warning);
         // Round 36 px buttons (`.chat-enviar`); light mode keeps the theme's primary and danger.
         let stop = busy.then(|| {
             let stop = Button::new("stop")
@@ -429,18 +430,31 @@ impl ChatSession {
         let status = self.model.activity().map(|doing| {
             let started = self.turn.as_ref().map(|(started, _)| started.elapsed());
             let secs = started.map_or(0, |d| d.as_secs());
+            let waiting = self.model.state == TurnState::NeedsYou;
+            let color = match (dark, waiting) {
+                (true, true) => aurora::ambar(),
+                (true, false) => aurora::boreal(),
+                (false, true) => warning,
+                (false, false) => success,
+            };
             h_flex()
                 .id("turn-status")
                 .gap_2()
                 .px_3()
-                .text_size(px(12.))
-                .text_color(muted)
-                .child(["◐", "◓", "◑", "◒"][secs as usize % 4])
+                .text_size(px(12.5))
+                .text_color(color)
+                .child(mark(secs))
                 .child(div().min_w_0().truncate().child(doing))
+                .child(div().flex_1())
                 .child(
                     div()
+                        .id("turn-status-time")
                         .flex_none()
-                        .child(format!("{} · Esc to stop", elapsed(secs))),
+                        .text_size(px(11.5))
+                        .text_color(muted)
+                        .child(format!("{} · Esc to stop", elapsed(secs)))
+                        // Registers the id so tests can find it.
+                        .test_support(),
                 )
                 // Registers the id so tests can find it.
                 .test_support()
@@ -517,9 +531,14 @@ impl ChatSession {
     }
 }
 
+/// The status line's mark: one glyph a second, no animation.
+fn mark(secs: u64) -> &'static str {
+    ["✢", "✳", "✶", "✻", "✽"][secs as usize % 5]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Attachment, IMAGE_MAX_BYTES, prompt_block};
+    use super::{Attachment, IMAGE_MAX_BYTES, mark, prompt_block};
     use base64::Engine as _;
     use gpui_kit::{Image, ImageFormat};
     use wai_agent::PromptBlock;
@@ -532,6 +551,11 @@ mod tests {
             .decode(base64)
             .unwrap();
         (mime.clone(), bytes)
+    }
+
+    #[test]
+    fn status_mark_turns_once_a_second() {
+        assert_eq!([0, 1, 4, 5].map(mark), ["✢", "✳", "✽", "✢"]);
     }
 
     /// A pasted PNG goes inline as it is, under a name of its own.

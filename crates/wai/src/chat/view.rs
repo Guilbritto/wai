@@ -1679,6 +1679,16 @@ mod tests {
             })
         });
         assert!(shows("turn-status", cx));
+        let (line, time) = cx.update(|window, _| {
+            (
+                window.find("turn-status").bounds(),
+                window.find("turn-status-time").bounds(),
+            )
+        });
+        assert!(
+            line.right() - time.right() <= px(13.),
+            "the time sits at the line's end"
+        );
         assert!(session.read_with(cx, |s, _| s.turn.is_some()));
         wait_until(cx, "the reply's first chunk", |cx| {
             last_agent_text(&session, cx).is_some()
