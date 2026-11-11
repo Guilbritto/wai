@@ -72,7 +72,7 @@ const WORKTREE: &str = "worktree";
 enum Lead {
     None,
     Folder,
-    Glyph(&'static str),
+    Glyph(&'static str, Hsla),
     Icon(gpui_kit::assets::IconName),
 }
 
@@ -134,7 +134,7 @@ impl Pick {
         let row = h_flex().gap_2().items_center().min_w_0();
         let row = match self.lead {
             Lead::Folder => row.child(Icon::new(IconName::Folder).xsmall()),
-            Lead::Glyph(glyph) => row.child(glyph),
+            Lead::Glyph(glyph, color) => row.child(div().text_color(color).child(glyph)),
             Lead::Icon(icon) => row.child(Icon::new(icon).xsmall()),
             Lead::None => row,
         };
@@ -148,9 +148,9 @@ impl Pick {
                 let pill = div()
                     .px(px(6.))
                     .rounded_full()
-                    .text_xs()
+                    .text_size(px(11.5))
                     .text_color(aurora::ambar())
-                    .bg(aurora::ambar().opacity(0.16))
+                    .bg(aurora::ambar().opacity(0.12))
                     .child(count.to_string());
                 el.child(pill)
             });
@@ -198,14 +198,15 @@ impl SelectItem for Pick {
 
 type Menu = Entity<SelectState<Vec<Pick>>>;
 
+/// The agent's mark, as the mockup draws it; an agent without one shows none.
 fn glyph(agent: &str) -> Lead {
-    Lead::Glyph(match agent {
-        "claude" => "✳",
-        "codex" => "◎",
-        "copilot" => "◉",
-        "antigravity" => "▲",
-        _ => "◆",
-    })
+    match agent {
+        "claude" => Lead::Glyph("✳", aurora::brasa()),
+        "codex" => Lead::Glyph("◎", aurora::tinta_2()),
+        "copilot" => Lead::Glyph("◉", rgb(0x5bb8ff).into()),
+        "antigravity" => Lead::Glyph("▲", aurora::magenta()),
+        _ => Lead::None,
+    }
 }
 
 /// A session that has not started: where, with whom, and what to ask. Nothing runs until Send.
@@ -839,7 +840,7 @@ impl Render for DraftView {
             .child(
                 div()
                     .id("draft-title")
-                    .flex_1()
+                    .flex_shrink(1.)
                     .min_w_0()
                     .truncate()
                     .font_family(DISPLAY_FONT)
@@ -855,6 +856,10 @@ impl Render for DraftView {
                 aurora::pill(cx)
                     .flex_none()
                     .border_dashed()
+                    .text_color(match dark {
+                        true => aurora::nevoa(),
+                        false => theme.muted_foreground,
+                    })
                     .child("Draft · starts when you send"),
             );
         let chips = self.attachments.iter().enumerate().map(|(ix, attachment)| {
@@ -927,52 +932,86 @@ impl Render for DraftView {
         let attach = attach_button()
             .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx)));
         let max_h = window.viewport_size().height * 0.5;
-        let chip = |id: &'static str, menu: &Menu, width: f32, search: Option<&'static str>| {
-            let select = Select::new(menu)
-                .appearance(false)
-                .small()
-                .menu_width(px(width + 80.))
-                .menu_max_h(max_h)
-                .when_some(search, |select, text| select.search_placeholder(text));
-            aurora::pill(cx)
-                .id(id)
-                .w(px(width))
-                .px(px(4.))
-                .child(select)
-                // Registers the id so tests can find it.
-                .test_support()
-        };
+        // `.chip`: no box at rest, a vidro fill on hover. `bar`: the composer bar's smaller,
+        // fainter chips (`.cbar .chip`).
+        let chip =
+            |id: &'static str, menu: &Menu, width: f32, search: Option<&'static str>, bar: bool| {
+                let select = Select::new(menu)
+                    .appearance(false)
+                    .small()
+                    .menu_width(px(width + 80.))
+                    .menu_max_h(max_h)
+                    .when_some(search, |select, text| select.search_placeholder(text));
+                let (text, hover) = match (dark, bar) {
+                    (true, true) => (aurora::nevoa(), aurora::nevoa()),
+                    (true, false) => (aurora::tinta_2(), aurora::tinta()),
+                    (false, _) => (theme.muted_foreground, theme.foreground),
+                };
+                h_flex()
+                    .id(id)
+                    .flex_none()
+                    .h(px(if bar { 28. } else { 30. }))
+                    .px(px(4.))
+                    .rounded_full()
+                    .text_size(px(if bar { 13. } else { 13.5 }))
+                    .text_color(text)
+                    .hover(move |el| {
+                        let fill = match dark {
+                            true => aurora::vidro(),
+                            false => theme.muted,
+                        };
+                        el.bg(fill).text_color(hover)
+                    })
+                    .child(select)
+                    // Registers the id so tests can find it.
+                    .test_support()
+            };
+        // `.strip`: one tab sitting on the composer's top edge, 18 px in from its left.
         let strip = h_flex()
-            .gap_2()
-            .flex_wrap()
+            .self_start()
+            .ml(px(18.))
+            .gap(px(2.))
+            .px(px(6.))
+            .py(px(5.))
+            .rounded_t(px(14.))
+            .border_1()
+            .border_b_0()
             .child(chip(
                 "draft-folder",
                 &self.folders,
                 220.,
                 Some("Search projects"),
+                false,
             ))
-            .child(chip("draft-agent", &self.agents, 150., None))
             .when(self.repo.is_some(), |el| {
-                let places = chip("draft-workspace", &self.places, 170., None);
+                let places = chip("draft-workspace", &self.places, 150., None, false);
                 let branches = chip(
                     "draft-branch",
                     &self.branches,
-                    200.,
+                    260.,
                     Some("Filter branches"),
+                    false,
                 );
                 el.child(places).child(branches)
-            });
+            })
+            .child(chip("draft-agent", &self.agents, 130., None, false));
+        let strip = match dark {
+            true => strip
+                .bg(hsla(0., 0., 1., 0.035))
+                .border_color(aurora::borda()),
+            false => strip.border_color(theme.border),
+        };
         let model = (!self
             .data
             .models
             .get(&self.agent)
             .is_none_or(|m| m.is_empty()))
         .then(|| {
-            chip("draft-model", &self.models, 170., None)
+            chip("draft-model", &self.models, 150., None, true)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         });
         let mode = self.data.modes.contains_key(&self.agent).then(|| {
-            chip("draft-mode", &self.modes, 150., None)
+            chip("draft-mode", &self.modes, 150., None, true)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         });
         let this = cx.entity().downgrade();
@@ -1058,11 +1097,10 @@ impl Render for DraftView {
         let body = v_flex()
             .w_full()
             .max_w(px(820.))
-            .gap_3()
             .child(
                 v_flex()
                     .items_center()
-                    .mb(px(22.))
+                    .mb(px(34.))
                     .child(
                         div()
                             .font_family(DISPLAY_FONT)
@@ -1078,8 +1116,7 @@ impl Render for DraftView {
                             .child("Pick where and with whom. Nothing starts until you send."),
                     ),
             )
-            .child(strip)
-            .child(prompt)
+            .child(v_flex().child(strip).child(prompt))
             .child(hints);
         v_flex()
             .key_context("DraftView")

@@ -454,7 +454,7 @@ fn screenshot(
                     terminal.update(cx, |t, cx| t.show_history(20, 3, cx));
                 }
             });
-        } else {
+        } else if std::env::var("WAI_SHOT_DRAFT").is_err() {
             run_in_terminal(window, "echo wai", cx).await;
         }
         // `WAI_SHOT_DRAFT=1`: the new-session draft, nothing sent.
