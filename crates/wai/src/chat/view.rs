@@ -1947,7 +1947,6 @@ mod tests {
         assert_eq!(tick_period(&TurnState::Error(String::new())), None);
     }
 
-    /// A turn is one card: its segments touch, and only its first row carries the header.
     /// The clock switches period with the state and keeps the turn's start.
     #[gpui_kit::test]
     fn clock_follows_the_state_and_keeps_its_start(cx: &mut TestAppContext) {
@@ -1979,6 +1978,7 @@ mod tests {
         assert_eq!(wait(125), p);
     }
 
+    /// A turn is one card: its segments touch, and only its first row carries the header.
     #[gpui_kit::test]
     fn turn_is_one_card(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process

@@ -934,42 +934,50 @@ impl Render for DraftView {
         let max_h = window.viewport_size().height * 0.5;
         // `.chip`: no box at rest, a vidro fill on hover. `bar`: the composer bar's smaller,
         // fainter chips (`.cbar .chip`).
-        let chip =
-            |id: &'static str, menu: &Menu, width: f32, search: Option<&'static str>, bar: bool| {
-                let select = Select::new(menu)
-                    .appearance(false)
-                    .small()
-                    .menu_width(px(width + 80.))
-                    .menu_max_h(max_h)
-                    .when_some(search, |select, text| select.search_placeholder(text));
-                let (text, hover) = match (dark, bar) {
-                    (true, true) => (aurora::nevoa(), aurora::nevoa()),
-                    (true, false) => (aurora::tinta_2(), aurora::tinta()),
-                    (false, _) => (theme.muted_foreground, theme.foreground),
-                };
-                h_flex()
-                    .id(id)
-                    .flex_none()
-                    .h(px(if bar { 28. } else { 30. }))
-                    .px(px(4.))
-                    .rounded_full()
-                    .text_size(px(if bar { 13. } else { 13.5 }))
-                    .text_color(text)
-                    .hover(move |el| {
-                        let fill = match dark {
-                            true => aurora::vidro(),
-                            false => theme.muted,
-                        };
-                        el.bg(fill).text_color(hover)
-                    })
-                    .child(select)
-                    // Registers the id so tests can find it.
-                    .test_support()
+        let chip = |id: &'static str,
+                    menu: &Menu,
+                    width: f32,
+                    search: Option<&'static str>,
+                    bar: bool,
+                    shrink: f32| {
+            let select = Select::new(menu)
+                .appearance(false)
+                .small()
+                .menu_width(px(width + 80.))
+                .menu_max_h(max_h)
+                .when_some(search, |select, text| select.search_placeholder(text));
+            let (text, hover) = match (dark, bar) {
+                (true, true) => (aurora::nevoa(), aurora::nevoa()),
+                (true, false) => (aurora::tinta_2(), aurora::tinta()),
+                (false, _) => (theme.muted_foreground, theme.foreground),
             };
+            h_flex()
+                .id(id)
+                .when(shrink == 0., |el| el.flex_none())
+                // A chip that may shrink gives up its width (and truncates) before the
+                // strip leaves the composer.
+                .when(shrink > 0., |el| {
+                    el.flex_shrink(shrink).min_w(px(48.)).overflow_hidden()
+                })
+                .h(px(if bar { 28. } else { 30. }))
+                .px(px(4.))
+                .rounded_full()
+                .text_size(px(if bar { 13. } else { 13.5 }))
+                .text_color(text)
+                .hover(move |el| {
+                    let fill = match dark {
+                        true => aurora::vidro(),
+                        false => theme.muted,
+                    };
+                    el.bg(fill).text_color(hover)
+                })
+                .child(select)
+                // Registers the id so tests can find it.
+                .test_support()
+        };
         // `.strip`: one tab sitting on the composer's top edge, 18 px in from its left.
         let strip = h_flex()
-            .self_start()
-            .ml(px(18.))
+            .min_w_0()
             .gap(px(2.))
             .px(px(6.))
             .py(px(5.))
@@ -982,36 +990,40 @@ impl Render for DraftView {
                 220.,
                 Some("Search projects"),
                 false,
+                2.,
             ))
             .when(self.repo.is_some(), |el| {
-                let places = chip("draft-workspace", &self.places, 150., None, false);
+                let places = chip("draft-workspace", &self.places, 150., None, false, 0.);
                 let branches = chip(
                     "draft-branch",
                     &self.branches,
                     260.,
                     Some("Filter branches"),
                     false,
+                    4.,
                 );
                 el.child(places).child(branches)
             })
-            .child(chip("draft-agent", &self.agents, 130., None, false));
+            .child(chip("draft-agent", &self.agents, 130., None, false, 0.));
         let strip = match dark {
             true => strip
                 .bg(hsla(0., 0., 1., 0.035))
                 .border_color(aurora::borda()),
             false => strip.border_color(theme.border),
         };
+        // The tab starts 18 px in from the composer's edge and never runs past the other one.
+        let strip = h_flex().w_full().pl(px(18.)).child(strip);
         let model = (!self
             .data
             .models
             .get(&self.agent)
             .is_none_or(|m| m.is_empty()))
         .then(|| {
-            chip("draft-model", &self.models, 150., None, true)
+            chip("draft-model", &self.models, 150., None, true, 0.)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         });
         let mode = self.data.modes.contains_key(&self.agent).then(|| {
-            chip("draft-mode", &self.modes, 150., None, true)
+            chip("draft-mode", &self.modes, 150., None, true, 0.)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         });
         let this = cx.entity().downgrade();
@@ -1030,6 +1042,7 @@ impl Render for DraftView {
                 });
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let prompt = v_flex()
+            .id("draft-composer")
             .gap_2()
             .p_3()
             .rounded(px(20.))
@@ -1062,7 +1075,9 @@ impl Render for DraftView {
                 .child(div().flex_1())
                 .children(model)
                 .child(send),
-        );
+        )
+        // Registers the id so tests can find it.
+        .test_support();
         // `.hint`: the keys as small chips, the draft shortcut at the right.
         let key = |keys: &str, what: String| {
             h_flex()
@@ -1136,5 +1151,64 @@ impl Render for DraftView {
                     .child(body),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{TestAppContext, VisualTestContext, px, size};
+
+    use crate::app::NewSession;
+    use crate::git::Repo;
+    use crate::workspace::tests::{fake_settings, open};
+
+    /// In a narrow pane a long branch name shrinks its chip: no chip leaves the composer.
+    #[gpui_kit::test]
+    fn chips_stay_inside_the_composer_in_a_narrow_pane(cx: &mut TestAppContext) {
+        narrow_pane(cx);
+    }
+
+    fn narrow_pane(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        cx.simulate_resize(size(px(860.), px(700.)));
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.new_session(&NewSession, window, cx))
+        });
+        let draft = workspace.read_with(cx, |w, _| w.panes[0].draft().cloned());
+        let draft = draft.expect("the draft");
+        draft.update(cx, |d, cx| {
+            d.repo = Some(Repo {
+                root: d.folder.clone(),
+                current: Some("chore/ec-9688-energy-dashboard-with-a-very-long-name".into()),
+                default: "main".into(),
+                branches: vec!["main".into()],
+                dirty: 3,
+                submodules: false,
+                origin: false,
+            });
+            d.menus_stale = true;
+            cx.notify();
+        });
+        let right = |id: &'static str, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.find(id).bounds().right()
+            })
+        };
+        let composer = right("draft-composer", cx);
+        for id in [
+            "draft-folder",
+            "draft-workspace",
+            "draft-branch",
+            "draft-agent",
+        ] {
+            let edge = right(id, cx);
+            assert!(
+                edge <= composer + px(0.5),
+                "{id} ends at {edge:?} > {composer:?}"
+            );
+        }
     }
 }
