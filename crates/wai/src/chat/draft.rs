@@ -8,7 +8,7 @@ use gpui_kit::*;
 
 use super::input::{Attachment, attach_button, paste_into, pick_paths, send_button};
 use crate::aurora::{self, DISPLAY_FONT};
-use crate::workspace::START_KEY;
+use crate::workspace::{Dragged, DraggedSession, START_KEY};
 
 pub enum DraftEvent {
     Send,
@@ -128,19 +128,28 @@ impl Render for DraftView {
             true => aurora::nevoa_2(),
             false => theme.muted_foreground,
         };
+        let dragged = DraggedSession {
+            title: "New session".into(),
+            source: Dragged::Draft(cx.entity()),
+        };
         let header = aurora::card_bar(cx)
             .gap_3()
             .px_3()
             .py_2()
             .child(
                 div()
+                    .id("draft-title")
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .font_family(DISPLAY_FONT)
                     .text_size(px(14.))
                     .font_weight(FontWeight::BOLD)
-                    .child("New session"),
+                    .cursor_grab()
+                    .child("New session")
+                    .on_drag(dragged, DraggedSession::preview)
+                    // Registers the id so tests can find and drag it.
+                    .test_support(),
             )
             .child(
                 aurora::pill(cx)

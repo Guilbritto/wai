@@ -18,7 +18,7 @@ pub use wai_settings::canonical;
 use crate::agents::AgentStatus;
 use crate::app::NewSession;
 use crate::aurora;
-use crate::chat::{ChatSession, TurnState};
+use crate::chat::{ChatSession, DraftView, TurnState};
 use crate::workspace::{Dragged, DraggedSession, MAX_PANES, Renamed, Workspace};
 
 pub(crate) const ROW_HEIGHT: f32 = 28.;
@@ -224,6 +224,8 @@ impl Workspace {
                 .filter(move |(_, session)| self.group_of(&session.read(cx).id) == group)
                 .map(|(ix, session)| self.open_row(ix, session, cx).into_any_element())
         };
+        let drafts = (self.drafts.iter().enumerate())
+            .map(|(ix, draft)| self.draft_row(ix, draft, cx).into_any_element());
         let groups = self.groups.iter().enumerate().flat_map(|(ix, group)| {
             let header = self.group_header(ix, group, rows(Some(ix)).count(), cx);
             let rows = rows(Some(ix)).filter(|_| !group.collapsed);
@@ -259,6 +261,7 @@ impl Workspace {
                                     })),
                             ),
                     )
+                    .children(drafts)
                     .children(rows(None))
                     .test_support(),
             )
@@ -650,6 +653,66 @@ impl Workspace {
             })
     }
 
+    /// A draft's row: a hollow dot, "New session" and the Draft tag; × discards it.
+    fn draft_row(
+        &self,
+        ix: usize,
+        draft: &Entity<DraftView>,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        let active = self.panes[self.focused_pane].draft() == Some(draft);
+        let (open, end) = (draft.clone(), draft.clone());
+        let dragged = DraggedSession {
+            title: "New session".into(),
+            source: Dragged::Draft(draft.clone()),
+        };
+        row(active, cx)
+            .id(("draft-row", ix))
+            .child(
+                h_flex()
+                    .id(("draft", ix))
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(8.))
+                            .rounded_full()
+                            .border_1()
+                            .border_dashed()
+                            .border_color(aurora::nevoa()),
+                    )
+                    .aria_label("New session")
+                    .child(div().flex_1().min_w_0().truncate().child("New session"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Draft"),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.show_draft(open.clone(), false, window, cx)
+                    }))
+                    .on_drag(dragged, DraggedSession::preview)
+                    // Registers the id so tests can find and drag it.
+                    .test_support(),
+            )
+            .child(
+                Button::new(("draft-close", ix))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .tooltip("Discard draft")
+                    .accessibility_label("Discard draft")
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.close_draft(&end, window, cx)),
+                    ),
+            )
+    }
+
     /// An open session's menu: rename, fork, and moving it between groups.
     fn session_menu(
         &self,
@@ -830,7 +893,8 @@ fn side_button(id: impl Into<ElementId>) -> Button {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::component::WindowExt as _;
+    use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
     use gpui_kit::{
         ElementId, Entity, Modifiers, MouseButton, Pixels, Point, TestAppContext,
         VisualTestContext, point, px,
@@ -844,8 +908,8 @@ mod tests {
     use crate::agents::RegistryEvent;
     use crate::workspace::Workspace;
     use crate::workspace::tests::{
-        click, fake_settings, history_settings, launch, load_history, menu_item, open, open_at,
-        question, start_now,
+        click, drag_to_pane, fake_settings, history_settings, launch, load_history, menu_item,
+        open, open_at, question, start_now,
     };
     use crate::{app, aurora};
 
@@ -913,6 +977,64 @@ mod tests {
             assert_eq!(w.drafts.len(), 1);
             assert!(w.sessions.is_empty());
         });
+    }
+
+    #[gpui_kit::test]
+    fn draft_row_shows_and_discards(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let dialog =
+            |cx: &mut VisualTestContext| cx.update(|window, cx| window.has_active_dialog(cx));
+        cx.simulate_keystrokes("secondary-n");
+        assert_eq!(label(("draft", 0usize), cx).as_deref(), Some("New session"));
+
+        start_now(&workspace, cx);
+        workspace.read_with(cx, |w, _| assert!(w.panes[0].draft().is_none()));
+        press(("draft", 0usize), cx);
+        workspace.read_with(cx, |w, _| assert!(w.panes[0].draft().is_some()));
+
+        press(("draft-close", 0usize), cx);
+        workspace.read_with(cx, |w, _| assert!(w.drafts.is_empty()));
+        assert!(!dialog(cx));
+
+        cx.simulate_keystrokes("secondary-n");
+        cx.simulate_input("x");
+        press(("draft-close", 0usize), cx);
+        cx.update(|window, _| window.find_by_label("Discard this draft?"));
+        press("cancel", cx);
+        workspace.read_with(cx, |w, _| assert_eq!(w.drafts.len(), 1));
+
+        press(("draft-close", 0usize), cx);
+        press("confirm", cx);
+        workspace.read_with(cx, |w, _| {
+            assert!(w.drafts.is_empty());
+            assert!(w.panes[0].draft().is_none());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn draft_drags_to_the_right_edge(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
+        cx.simulate_keystrokes("secondary-n secondary-n");
+        let from = center_of(("draft", 0usize), cx);
+        drag_to_pane(from, 0, 0.9, cx);
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 2);
+            assert_eq!(w.panes[1].draft(), Some(&w.drafts[0]));
+            assert_eq!(w.focused_pane, 1);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn session_rows_keep_their_indexes_next_to_drafts(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_now(&workspace, cx);
+        cx.simulate_keystrokes("secondary-n");
+        let title = session.read_with(cx, |s, _| s.model.shown_title().map(str::to_string));
+        assert_eq!(
+            label(("open", 0usize), cx),
+            Some(title.unwrap_or("New session".into()))
+        );
+        assert!(label(("draft", 0usize), cx).is_some());
     }
 
     /// A workspace with `n` sessions open, resumed from the history: "Session 0", "Session 1"…

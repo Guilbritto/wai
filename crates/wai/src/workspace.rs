@@ -108,6 +108,8 @@ pub(crate) struct DraggedSession {
 #[derive(Clone)]
 pub(crate) enum Dragged {
     Open(Entity<ChatSession>),
+    /// A draft in the Open list, moved as an open session is.
+    Draft(Entity<DraftView>),
     /// Resumed where it drops, as a click on its row resumes it.
     History(SessionSummary),
     /// The Settings pane, moved as an open session is.
@@ -1132,6 +1134,68 @@ impl Workspace {
         self.save_state(cx);
     }
 
+    /// Shows `draft` as `show` shows a session: a pane that already shows it takes the focus.
+    pub(crate) fn show_draft(
+        &mut self,
+        draft: Entity<DraftView>,
+        side: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ix = match self.panes.iter().position(|p| p.draft() == Some(&draft)) {
+            Some(ix) => ix,
+            None => {
+                let empty = matches!(self.panes[self.focused_pane], Pane::Empty(_));
+                let ix = if side && !empty && self.panes.len() < MAX_PANES {
+                    self.panes.push(Pane::Empty(None));
+                    self.panes.len() - 1
+                } else {
+                    self.session_pane()
+                };
+                self.panes[ix] = Pane::Draft(draft);
+                ix
+            }
+        };
+        self.focus_pane(ix, window, cx);
+        self.follow_session(window, cx);
+        self.save_state(cx);
+    }
+
+    /// A draft row's ×: discards `draft`, after asking when it holds text or attachments.
+    pub(crate) fn close_draft(
+        &mut self,
+        draft: &Entity<DraftView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let d = draft.read(cx);
+        if d.text(cx).is_empty() && d.attachments.is_empty() {
+            return self.discard_draft(draft, window, cx);
+        }
+        let draft = draft.clone();
+        self.confirm(
+            "Discard this draft?".into(),
+            "What you typed is lost.",
+            "Discard",
+            move |this, window, cx| this.discard_draft(&draft, window, cx),
+            window,
+            cx,
+        );
+    }
+
+    pub(crate) fn discard_draft(
+        &mut self,
+        draft: &Entity<DraftView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.drafts.retain(|d| d != draft);
+        match self.panes.iter().position(|p| p.draft() == Some(draft)) {
+            Some(ix) => self.drop_pane(ix, window, cx),
+            None => cx.notify(),
+        }
+    }
+
     /// The pane a session takes: the focused one, unless it is the editor pane (its unsaved edits
     /// would go with it); then a new pane to the right, or at `MAX_PANES` the next pane.
     pub(crate) fn session_pane(&mut self) -> usize {
@@ -1224,25 +1288,26 @@ impl Workspace {
         if ix >= self.panes.len() {
             return;
         }
-        let (session, fresh) = match &dragged.source {
-            Dragged::Open(session) if self.sessions.contains(session) => {
-                (Some(session.clone()), false)
-            }
-            Dragged::Open(_) => return,
+        let (mut session, mut draft, mut fresh) = (None, None, false);
+        match &dragged.source {
+            Dragged::Open(open) if self.sessions.contains(open) => session = Some(open.clone()),
+            Dragged::Draft(d) if self.drafts.contains(d) => draft = Some(d.clone()),
+            Dragged::Open(_) | Dragged::Draft(_) => return,
             Dragged::History(row) => match self.resumed(row, window, cx) {
-                Some((resumed, fresh)) => (Some(resumed), fresh),
+                Some((resumed, new)) => (session, fresh) = (Some(resumed), new),
                 None => return,
             },
-            Dragged::Settings => (None, false),
+            Dragged::Settings => {}
         };
-        let from = match &session {
-            Some(session) => self.panes.iter().position(|p| p.session() == Some(session)),
-            None => self
+        let from = match (&session, &draft) {
+            (Some(session), _) => self.panes.iter().position(|p| p.session() == Some(session)),
+            (_, Some(draft)) => self.panes.iter().position(|p| p.draft() == Some(draft)),
+            _ => self
                 .panes
                 .iter()
                 .position(|p| matches!(p, Pane::Settings(_))),
         };
-        if session.is_none() && from.is_none() {
+        if session.is_none() && draft.is_none() && from.is_none() {
             return;
         }
         let empty = matches!(self.panes[ix], Pane::Empty(_));
@@ -1252,16 +1317,19 @@ impl Workspace {
             self.panes = (slots.into_iter())
                 .map(|slot| match slot {
                     Slot::Old(ix) => old[ix].take().expect("each pane lands once"),
-                    Slot::Dropped => {
-                        Pane::Session(session.clone().expect("a dropped session is a session"))
-                    }
+                    Slot::Dropped => match (&session, &draft) {
+                        (Some(session), _) => Pane::Session(session.clone()),
+                        (_, Some(draft)) => Pane::Draft(draft.clone()),
+                        _ => unreachable!("a dropped pane is a session or a draft"),
+                    },
                 })
                 .collect();
             self.save_state(cx);
         }
-        let shown = self.panes.iter().position(|p| match &session {
-            Some(session) => p.session() == Some(session),
-            None => matches!(p, Pane::Settings(_)),
+        let shown = self.panes.iter().position(|p| match (&session, &draft) {
+            (Some(session), _) => p.session() == Some(session),
+            (_, Some(draft)) => p.draft() == Some(draft),
+            _ => matches!(p, Pane::Settings(_)),
         });
         if let Some(ix) = shown {
             self.focus_pane(ix, window, cx);
@@ -1281,10 +1349,11 @@ impl Workspace {
             Dragged::History(row) => self
                 .default_agent()
                 .and_then(|agent| self.session(&agent, &row.id, cx)),
-            Dragged::Settings => None,
+            Dragged::Draft(_) | Dragged::Settings => None,
         };
         let from = match &dragged.source {
             Dragged::Settings => (self.panes.iter()).position(|p| matches!(p, Pane::Settings(_))),
+            Dragged::Draft(draft) => (self.panes.iter()).position(|p| p.draft() == Some(draft)),
             _ => session.and_then(|s| self.panes.iter().position(|p| p.session() == Some(&s))),
         };
         let empty = matches!(self.panes.get(ix)?, Pane::Empty(_));
@@ -3475,7 +3544,7 @@ pub(crate) mod tests {
     /// Drags from `from` to `x` of the way across pane `ix`, at its middle. Each event has its
     /// own update, as on a real window (`window.drag` sends them all in one): a pane's
     /// mouse-down focus, deferred, lands before the drop.
-    fn drag_to_pane(from: Point<Pixels>, ix: usize, x: f32, cx: &mut VisualTestContext) {
+    pub(crate) fn drag_to_pane(from: Point<Pixels>, ix: usize, x: f32, cx: &mut VisualTestContext) {
         let pane = cx
             .debug_bounds(format!("pane-{ix}").leak())
             .expect("pane drawn");
