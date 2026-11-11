@@ -993,16 +993,18 @@ impl Render for DraftView {
         let prompt = v_flex()
             .gap_2()
             .p_3()
-            .rounded(px(16.))
+            .rounded(px(20.))
             .border_1()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| this.focus(window, cx)),
             );
         let prompt = match (dark, focused) {
-            (true, true) => prompt.bg(aurora::vidro()).border_color(aurora::boreal()),
+            (true, true) => prompt
+                .bg(aurora::noite_2().alpha(0.78))
+                .border_color(aurora::boreal()),
             (true, false) => prompt
-                .bg(aurora::vidro())
+                .bg(aurora::noite_2().alpha(0.78))
                 .border_color(aurora::borda_forte()),
             (false, true) => prompt.bg(theme.background).border_color(theme.ring),
             (false, false) => prompt.bg(theme.background).border_color(theme.input),
@@ -1022,30 +1024,59 @@ impl Render for DraftView {
                 .children(model)
                 .child(send),
         );
+        // `.hint`: the keys as small chips, the draft shortcut at the right.
+        let key = |keys: &str, what: String| {
+            h_flex()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .px(px(5.))
+                        .rounded(px(5.))
+                        .border_1()
+                        .text_size(px(11.))
+                        .font_family(theme.mono_font_family.clone())
+                        .bg(aurora::vidro())
+                        .border_color(aurora::borda())
+                        .text_color(aurora::nevoa())
+                        .child(keys.to_string()),
+                )
+                .child(what)
+        };
         let hints = h_flex()
-            .gap_4()
-            .justify_center()
+            .justify_between()
+            .px(px(6.))
+            .pt(px(8.))
             .text_size(px(12.))
             .text_color(muted)
-            .child("⏎ start session")
-            .child("⇧⏎ new line")
-            .child(format!("{START_KEY} another draft"));
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(key("⏎", "start session".into()))
+                    .child(key("⇧⏎", "new line".into())),
+            )
+            .child(key(START_KEY, "another draft".into()));
         let body = v_flex()
             .w_full()
-            .max_w(px(640.))
+            .max_w(px(820.))
             .gap_3()
             .child(
-                div()
-                    .font_family(DISPLAY_FONT)
-                    .text_size(px(26.))
-                    .font_weight(FontWeight::BOLD)
-                    .child("What are we building?"),
-            )
-            .child(
-                div()
-                    .text_size(px(14.))
-                    .text_color(muted)
-                    .child("Pick where and with whom. Nothing starts until you send."),
+                v_flex()
+                    .items_center()
+                    .mb(px(22.))
+                    .child(
+                        div()
+                            .font_family(DISPLAY_FONT)
+                            .text_size(px(42.))
+                            .font_weight(FontWeight::EXTRA_BOLD)
+                            .mb(px(6.))
+                            .child("What are we building?"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .text_color(muted)
+                            .child("Pick where and with whom. Nothing starts until you send."),
+                    ),
             )
             .child(strip)
             .child(prompt)
@@ -1060,9 +1091,11 @@ impl Render for DraftView {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .items_center()
+                    .items_start()
                     .justify_center()
-                    .p_4()
+                    .px_4()
+                    .pb_4()
+                    .pt(window.viewport_size().height * 0.09)
                     .child(body),
             )
             .into_any_element()
