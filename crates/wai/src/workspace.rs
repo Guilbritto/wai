@@ -1018,7 +1018,7 @@ impl Workspace {
     }
 
     /// The Agents tab follows the open sessions.
-    fn sync_agents(&self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_agents(&self, cx: &mut Context<Self>) {
         self.agents.update(cx, |a, cx| a.set(&self.sessions, cx));
     }
 

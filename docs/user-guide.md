@@ -21,7 +21,7 @@ This guide describes wai 0.4.2. On Windows, read **ctrl** where it says **⌘**,
 ### Starting
 
 There are four ways to start a session:
-- **⌘N** or the **+** button starts one with the default agent (`default_agent`, which you choose in [Settings](#the-settings-screen); until you do, these open Settings instead).
+- **⌘N**, the **+** button or a double click on the **Sessions** tab starts one with the default agent (`default_agent`, which you choose in [Settings](#the-settings-screen); until you do, these open Settings instead).
 - **New from template** (the file icon in the top bar) starts one from a template.
 - The palette's **New session with &lt;agent&gt;** picks the agent.
 - A row in the **History** tab reopens a past session.
@@ -101,6 +101,7 @@ Revert refuses in these cases:
 - **Right-click menus:** an **Open** row's menu has **Rename**, **Fork**, **Move to** each other group, **New group with this session** and, for a session in a group, **Remove from group**. A group header's menu has **Rename group** and **Delete group**, and a **History** row's has **Fork**. The rows themselves keep only **Open to the side** and, on **Open** rows, the **×** that ends the session.
 - **Renaming a session:** **Rename** in its **Open** row's menu, or a double click on the row, turns its title into a text box. **Enter**, or clicking elsewhere, keeps the name; **Esc** does not. The name shows wherever the session's title does, is kept on relaunch and is never sent to the agent, whose own titles no longer replace it. An empty name gives the agent's title back. Ending the session drops the name.
 - **Groups:** the **+** beside **Open** adds a group, ready for its name. Put a session in a group from its row's menu, or by dragging its **Open** row onto the group's header; take it out with **Remove from group**, or by dragging it onto the sessions above the groups (or the **Open** heading). A session is in one group at most. A group's header has a chevron that folds it, its name and how many sessions it holds; a double click on the name renames it. **Delete group** deletes the group only: its sessions stay open, in no group. A session that ends leaves its group, and an empty group stays until you delete it. Groups are kept on relaunch.
+- **Reordering:** drag an **Open** row onto another to take its place: dragged down, it lands after that row; dragged up, before it. A row dropped on a row of another group joins that group. The **Agents** cards follow the order, which is kept on relaunch.
 - **Opening a row:** a click shows the session in the focused pane. **Open to the side** adds a pane, while there are fewer than four.
 - **Following a session:** moving to a session from another folder (opening its row, clicking its pane, **⌘⌥→**, closing the pane beside it) opens that folder, as **⌘O** does: the editor pane closes, after asking about unsaved edits, and Files, Search, History and templates follow. Relaunching and sessions opened by extensions never move you; a session whose folder is gone just shows.
 - **Fork:** for agents that can load and fork sessions, **Fork** in an open or past session's menu opens a copy with the same history beside it.
