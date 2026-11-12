@@ -930,22 +930,20 @@ fn cancelling_a_subagent_stops_only_it() {
         agent.prompt(session.id.clone(), hello());
         let request = permission(&rx).await;
         agent.cancel(request.subagent.clone().expect("a subagent's request"));
-        let (mut resolved, mut stopped) = (false, false);
+        // The background turn may end before or after the card closes and the subagent stops.
+        let end = AgentEvent::TurnEnded {
+            session: session.id,
+            reason: StopReason::EndTurn,
+        };
+        let (mut resolved, mut stopped, mut ended) = (false, false, false);
         let events = until(&rx, |e| {
             resolved |= *e == AgentEvent::PermissionResolved { id: request.id };
             stopped |= subagent_state(e, SubagentState::Stopped);
-            resolved && stopped
+            ended |= *e == end;
+            resolved && stopped && ended
         })
         .await;
-        let mut rest = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
-        assert_eq!(
-            rest.pop(),
-            Some(AgentEvent::TurnEnded {
-                session: session.id,
-                reason: StopReason::EndTurn
-            }),
-            "{events:?}"
-        );
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::TurnEnded { reason, .. } if *reason != StopReason::EndTurn)), "{events:?}");
     });
 }
 
