@@ -1061,7 +1061,6 @@ impl ChatSession {
         self.open_steps.clear();
         self.open_groups.clear();
         self.questions.clear();
-        self.model.subagents.clear();
         self.drawer = None;
         self.agent_cursor = None;
         self.scroller.update(cx, |list, cx| list.reset(0, cx));
@@ -1806,11 +1805,20 @@ mod tests {
                 s.model.state == TurnState::Idle && !s.model.subagents.is_empty()
             })
         });
+        let sub = session.read_with(cx, |s, _| s.model.subagents[0].id.clone());
+        session.update(cx, |s, cx| {
+            s.open_drawer(Some(sub), cx);
+            super::sync_markdown(&mut s.sub_texts, ("stale".to_string(), 0), "x", cx);
+        });
         cx.update(|window, cx| session.update(cx, |s, cx| s.load(false, window, cx)));
         wait_until(cx, "the restart", |cx| {
             session.read_with(cx, |s, _| {
                 s.model.state == TurnState::Idle && s.model.subagents.is_empty()
             })
+        });
+        session.read_with(cx, |s, _| {
+            assert!(s.drawer.is_none());
+            assert!(s.sub_texts.is_empty());
         });
     }
 

@@ -1767,7 +1767,10 @@ mod tests {
 
         cx.update(|window, cx| window.double_click(("history", 0usize), cx));
         cx.run_until_parked();
-        workspace.read_with(cx, |w, _| assert_eq!(w.drafts.len(), 1));
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.sessions.len(), 1, "the row resumed");
+            assert_eq!(w.drafts.len(), 1, "and opened no draft");
+        });
     }
 
     #[gpui_kit::test]
