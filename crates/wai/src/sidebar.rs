@@ -1565,7 +1565,7 @@ fn side_button(id: impl Into<ElementId>) -> Button {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
     use gpui_kit::{
@@ -1837,7 +1837,7 @@ mod tests {
     }
 
     /// A workspace with `n` sessions open, resumed from the history: "Session 0", "Session 1"…
-    fn with_sessions(
+    pub(crate) fn with_sessions(
         n: usize,
         cx: &mut TestAppContext,
     ) -> (Entity<Workspace>, &mut VisualTestContext) {

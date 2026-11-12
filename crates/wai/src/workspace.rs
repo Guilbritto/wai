@@ -871,7 +871,10 @@ impl Workspace {
         self.agents_collapsed = state.agents_collapsed;
         self.open_folded = state.open_folded;
         self.history_folded = state.history_folded;
-        self.focus_pane(0, window, cx);
+        if let Some(ix) = state.shown_area.filter(|&ix| ix < self.work_areas.len()) {
+            self.focused_pane = self.lay_out_area(ix, None, cx);
+        }
+        self.focus_pane(self.focused_pane, window, cx);
         self.save_state(cx);
         let (files, active) = match state.project.as_deref() == Some(self.project.as_path()) {
             true => (state.open_files, state.active_file),
@@ -1308,7 +1311,10 @@ impl Workspace {
     /// A session in no pane closes its subagent drawer.
     fn close_hidden_drawers(&self, cx: &mut Context<Self>) {
         for session in &self.sessions {
-            if !self.panes.iter().any(|p| p.session() == Some(session)) {
+            let id = &session.read(cx).id;
+            if self.area_of(id).is_none()
+                && !self.panes.iter().any(|p| p.session() == Some(session))
+            {
                 session.update(cx, |s, cx| s.open_drawer(None, cx));
             }
         }
@@ -1316,7 +1322,9 @@ impl Workspace {
 
     /// Shows `session` in the focused pane (beside the editor pane, see `session_pane`), or with
     /// `side` in a new pane while there are fewer than `MAX_PANES` (an empty focused pane is used
-    /// instead). A session already in a pane is focused there: one session is drawn once.
+    /// instead). A session already in a pane is focused there: one session is drawn once. A
+    /// session of an area shows that area (`show_area`) unless it is the shown one with the
+    /// session on screen; a session of no area, not `side`, goes alone (`show_alone`).
     pub fn show(
         &mut self,
         session: Entity<ChatSession>,
@@ -1324,6 +1332,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let on_screen = self.panes.iter().any(|p| p.session() == Some(&session));
+        match self.area_of(&session.read(cx).id) {
+            Some(area) if !(self.shown_area == Some(area) && on_screen) => {
+                return self.show_area(area, Some(&session), window, cx);
+            }
+            None if !side && !on_screen => return self.show_alone(session, window, cx),
+            _ => {}
+        }
         let ix = match self
             .panes
             .iter()
