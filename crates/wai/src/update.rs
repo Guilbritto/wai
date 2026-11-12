@@ -11,6 +11,8 @@
 #![allow(dead_code)]
 
 mod download;
+#[cfg(windows)]
+pub mod windows;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -274,6 +276,17 @@ pub fn verify(staged: &Staged) -> anyhow::Result<()> {
         "the downloaded update changed on disk; check for updates again"
     );
     Ok(())
+}
+
+/// The PowerShell one-liner that waits for wai (`pid`) to exit, then runs the NSIS installer
+/// silently (`/S`) and relaunches wai (`/R`). Waiting lets wai quit cleanly (state saved, agents
+/// stopped) instead of being killed by the installer. Pure so it is tested on every OS.
+pub(crate) fn installer_script(setup: &Path, pid: u32) -> String {
+    let setup = setup.display().to_string().replace('\'', "''");
+    format!(
+        "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; \
+         Start-Process -FilePath '{setup}' -ArgumentList '/S','/R'"
+    )
 }
 
 /// GitHub's `owner/repo`: one slash, letters, digits, `-`, `_` and `.`, no `.`/`..` part.
@@ -913,5 +926,14 @@ mod tests {
     fn fetch_is_https_only() {
         let refused = format!("{:#}", fetch("http://127.0.0.1:9/").unwrap_err());
         assert!(refused.ends_with("unsupported scheme http"), "{refused}");
+    }
+
+    #[test]
+    fn installer_script_quotes_the_path() {
+        let setup = Path::new(r"C:\Users\o'neil\AppData\Local\wai-updates\wai_1_x64-setup.exe");
+        assert_eq!(
+            installer_script(setup, 42),
+            r"Wait-Process -Id 42 -ErrorAction SilentlyContinue; Start-Process -FilePath 'C:\Users\o''neil\AppData\Local\wai-updates\wai_1_x64-setup.exe' -ArgumentList '/S','/R'"
+        );
     }
 }
