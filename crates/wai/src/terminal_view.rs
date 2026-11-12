@@ -9,6 +9,9 @@ use wai_terminal::{
 
 use crate::app::{CopySelection, Paste};
 
+/// Emitted when the shell's title changes.
+pub struct TerminalChanged;
+
 const EXITED: &str = "[process exited] Click to restart.";
 
 /// The bottom panel: a shell in the project folder, painted from the model's grid snapshots.
@@ -25,6 +28,8 @@ pub struct TerminalView {
     model: Option<TerminalModel>,
     pub snapshot: GridSnapshot,
     size: GridSize,
+    /// The last title the shell set; `None` after it exits or restarts.
+    title: Option<String>,
     /// Why no shell runs: it exited or could not start.
     notice: Option<String>,
     focus: FocusHandle,
@@ -44,6 +49,7 @@ impl TerminalView {
             model: None,
             snapshot: GridSnapshot::default(),
             size: GridSize { cols: 80, rows: 24 },
+            title: None,
             notice: None,
             focus: cx.focus_handle(),
             grid: Bounds::default(),
@@ -66,7 +72,17 @@ impl TerminalView {
         self.model = None;
     }
 
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// A job other than the shell runs in the terminal.
+    pub fn busy(&self) -> bool {
+        self.model.as_ref().is_some_and(TerminalModel::busy)
+    }
+
     fn start(&mut self, cx: &mut Context<Self>) {
+        self.set_title(None, cx);
         let spawned = TerminalModel::spawn(self.shell.as_deref(), &self.cwd, self.size);
         let (model, events) = match spawned {
             Ok(spawned) => spawned,
@@ -80,12 +96,17 @@ impl TerminalView {
         // Drained for as long as it is open: the reader thread blocks on a full channel.
         self._events = Some(cx.spawn(async move |this, cx| {
             while let Ok(event) = events.recv().await {
-                // One snapshot and one redraw per burst. Titles are not shown.
-                let mut exited = event == TerminalEvent::Exited;
-                while let Ok(event) = events.try_recv() {
-                    exited |= event == TerminalEvent::Exited;
+                // One snapshot and one redraw per burst; the last title of the burst wins.
+                let mut exited = false;
+                let mut title = None;
+                for event in std::iter::once(event).chain(std::iter::from_fn(|| events.try_recv().ok())) {
+                    match event {
+                        TerminalEvent::Exited => exited = true,
+                        TerminalEvent::Title(t) => title = Some(t),
+                        _ => {}
+                    }
                 }
-                if this.update(cx, |t, cx| t.refresh(exited, cx)).is_err() {
+                if this.update(cx, |t, cx| t.refresh(exited, title, cx)).is_err() {
                     break;
                 }
             }
@@ -93,15 +114,26 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn refresh(&mut self, exited: bool, cx: &mut Context<Self>) {
+    fn refresh(&mut self, exited: bool, title: Option<String>, cx: &mut Context<Self>) {
         if let Some(model) = &self.model {
             self.snapshot = model.snapshot();
         }
         if exited {
             self.model = None;
             self.notice = Some(EXITED.into());
+            self.set_title(None, cx);
+        } else if let Some(title) = title {
+            // An empty title (a reset) is none.
+            self.set_title(Some(title).filter(|t| !t.is_empty()), cx);
         }
         cx.notify();
+    }
+
+    fn set_title(&mut self, title: Option<String>, cx: &mut Context<Self>) {
+        if self.title != title {
+            self.title = title;
+            cx.emit(TerminalChanged);
+        }
     }
 
     /// Fits the grid to the panel. Runs on every layout, so it only works on a real change.
@@ -161,7 +193,7 @@ impl TerminalView {
         // Not by the snapshot's offset: output since it was taken moved the view further up.
         if self.snapshot.display_offset > 0 {
             model.scroll_to_bottom();
-            self.refresh(false, cx);
+            self.refresh(false, None, cx);
         }
     }
 
@@ -175,7 +207,7 @@ impl TerminalView {
         if lines != 0. {
             self.wheel -= self.cell.height * lines;
             model.scroll(lines as i32);
-            self.refresh(false, cx);
+            self.refresh(false, None, cx);
         }
     }
 
@@ -194,7 +226,7 @@ impl TerminalView {
         } else {
             model.select_to(col, row, right);
         }
-        self.refresh(false, cx);
+        self.refresh(false, None, cx);
     }
 
     /// Scrolls `lines` up into the history and selects visible row `row` (screenshots).
@@ -205,7 +237,7 @@ impl TerminalView {
             model.select(0, row, false);
             model.select_to(self.size.cols - 1, row, true);
         }
-        self.refresh(false, cx);
+        self.refresh(false, None, cx);
     }
 
     /// ⌘C (ctrl-shift-c elsewhere): the selection to the clipboard.
@@ -219,6 +251,8 @@ impl TerminalView {
 pub(crate) fn color(Rgb(r, g, b): Rgb) -> Hsla {
     rgb(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)).into()
 }
+
+impl EventEmitter<TerminalChanged> for TerminalView {}
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -354,7 +388,9 @@ mod tests {
     };
     use wai_settings::Settings;
 
-    use super::{EXITED, TerminalView};
+    use std::{cell::Cell, rc::Rc};
+
+    use super::{EXITED, TerminalChanged, TerminalView};
     use crate::workspace::tests::{open, wait_until};
 
     /// The visible row holding `text`, and where in it.
@@ -513,6 +549,28 @@ mod tests {
                 })
             })
         });
+    }
+
+    #[gpui_kit::test]
+    fn title_is_kept_and_announced(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the shell is a real process
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        let changes = Rc::new(Cell::new(0));
+        let seen = changes.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&terminal, move |_, _: &TerminalChanged, _| {
+                seen.set(seen.get() + 1)
+            })
+            .detach()
+        });
+        cx.simulate_input(r"printf '\033]0;hello\007'");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "the title", |cx| {
+            terminal.read_with(cx, |t, _| t.title() == Some("hello"))
+        });
+        assert_eq!(changes.get(), 1);
     }
 
     /// A shell that exits starts again on the next show, in the project open by then.

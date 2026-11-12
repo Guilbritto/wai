@@ -241,6 +241,19 @@ impl TerminalModel {
         }
     }
 
+    /// A job other than the shell owns the pty's foreground. Always `false` off unix.
+    pub fn busy(&self) -> bool {
+        #[cfg(unix)]
+        {
+            let leader = self.master.lock().ok().and_then(|m| m.process_group_leader());
+            let shell = self.child.lock().ok().and_then(|c| c.process_id());
+            if let (Some(leader), Some(shell)) = (leader, shell) {
+                return u32::try_from(leader).is_ok_and(|leader| leader != shell);
+            }
+        }
+        false
+    }
+
     /// Moves the view `lines` up into the history (down when negative), as far as it goes.
     pub fn scroll(&self, lines: i32) {
         self.term.lock().scroll_display(Scroll::Delta(lines));
@@ -419,6 +432,23 @@ mod tests {
             assert!(Instant::now() < deadline, "timed out; grid: {snap:?}");
             let _ = rx.recv_blocking_timeout(deadline);
         }
+    }
+
+    #[test]
+    fn busy_follows_the_foreground_job() {
+        let (m, _rx, _dir) = spawn();
+        assert!(!m.busy());
+        m.write(b"sleep 5\r");
+        let poll = |want: bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while m.busy() != want {
+                assert!(Instant::now() < deadline, "busy never became {want}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        poll(true);
+        m.write(b"\x03");
+        poll(false);
     }
 
     trait RecvDeadline {
