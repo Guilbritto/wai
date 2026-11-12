@@ -262,7 +262,7 @@ pub(super) fn boxed_line(cx: &App) -> Div {
 }
 
 /// The box under a step line (`.out`) that holds its output.
-fn output_box(cx: &App) -> Div {
+pub(super) fn output_box(cx: &App) -> Div {
     let theme = cx.theme();
     let out = v_flex()
         .px(px(8.))

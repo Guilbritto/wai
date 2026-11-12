@@ -4,14 +4,15 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Enter, MoveDown, MoveUp};
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::SubagentState;
 
-use super::model::{ChatItem, Subagent, elapsed};
-use super::render::tokens;
-use super::view::ChatSession;
+use super::model::{elapsed, ChatItem, Said, Subagent};
+use super::render::{output_box, tokens};
+use super::view::{sync_markdown, ChatSession};
+use crate::agents_view::{plan_row, MAX_PLAN_ROWS};
 use crate::aurora;
 
 /// A row's height and the gap between rows: the list shows `ROWS` rows and scrolls past them.
@@ -285,10 +286,17 @@ impl ChatSession {
     /// `.drawer`: the open subagent's calls and answer, as a glass panel laid over the
     /// transcript's bottom (like `render_waiting`, which is drawn after it, on top).
     pub(super) fn render_drawer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let sub = self.drawer.as_deref().and_then(|id| {
-            let found = self.model.subagents.iter().find(|s| s.id == id);
-            found.cloned()
-        })?;
+        let si = self
+            .drawer
+            .as_deref()
+            .and_then(|id| (self.model.subagents.iter()).position(|s| s.id == id))?;
+        for (k, said) in self.model.subagents[si].said.iter().enumerate() {
+            if let Said::Text(t) | Said::Thought(t) = said {
+                let key = (self.model.subagents[si].id.clone(), k);
+                sync_markdown(&mut self.sub_texts, key, t, cx);
+            }
+        }
+        let sub = &self.model.subagents[si];
         let theme = cx.theme();
         let dark = theme.is_dark();
         let (fg, fg2, muted, faint) = match dark {
@@ -305,23 +313,56 @@ impl ChatSession {
                 theme.muted_foreground,
             ),
         };
-        let (mark, color, _) = state_look(&sub, cx);
+        let (mark, color, _) = state_look(sub, cx);
         let (name, task) = match &sub.kind {
             Some(kind) => (kind.as_str(), sub.title.as_str()),
             None => (sub.title.as_str(), ""),
         };
-        let stat = sub_stat(&sub);
-        let calls: Vec<AnyElement> = (self.model.items.iter().enumerate())
-            .filter_map(|(ix, item)| match item {
-                ChatItem::Tool(t) if t.subagent.as_deref() == Some(&sub.id) => Some((ix, t)),
-                _ => None,
-            })
-            .map(|(ix, t)| self.render_tool(ix, t, cx).into_any_element())
-            .collect();
+        let stat = sub_stat(sub);
+        let mut body_rows: Vec<AnyElement> = Vec::new();
+        for (k, said) in sub.said.iter().enumerate() {
+            match said {
+                Said::Call(ix) => {
+                    if let Some(ChatItem::Tool(t)) = self.model.items.get(*ix) {
+                        body_rows.push(self.render_tool(*ix, t, cx).into_any_element());
+                    }
+                }
+                Said::Text(_) => {
+                    if let Some(md) = self.sub_texts.get(&(sub.id.clone(), k)) {
+                        body_rows.push(
+                            div()
+                                .id(("subagent-text", k))
+                                .child(TextView::new(&md.state))
+                                // Registers the id so tests can find it.
+                                .test_support()
+                                .into_any_element(),
+                        );
+                    }
+                }
+                Said::Thought(_) => {
+                    if let Some(md) = self.sub_texts.get(&(sub.id.clone(), k)) {
+                        body_rows.push(
+                            output_box(cx)
+                                .id(("subagent-thought", k))
+                                .text_color(muted)
+                                .child(TextView::new(&md.state))
+                                .test_support()
+                                .into_any_element(),
+                        );
+                    }
+                }
+            }
+        }
         // The card is the `Tool` whose id is the subagent's; its row owns the answer's markdown.
-        let answer = (self.model.items.iter().enumerate())
-            .find(|(_, item)| matches!(item, ChatItem::Tool(t) if t.id == sub.id))
-            .and_then(|(ix, _)| self.texts.get(&ix))
+        // A subagent that spoke shows its text instead: Claude sends the answer as both.
+        let spoke = sub.said.iter().any(|s| matches!(s, Said::Text(_)));
+        let answer = (!spoke)
+            .then(|| {
+                (self.model.items.iter().enumerate())
+                    .find(|(_, item)| matches!(item, ChatItem::Tool(t) if t.id == sub.id))
+                    .and_then(|(ix, _)| self.texts.get(&ix))
+            })
+            .flatten()
             .map(|md| {
                 div()
                     .id("subagent-answer")
@@ -329,6 +370,28 @@ impl ChatSession {
                     // Registers the id so tests can find it.
                     .test_support()
             });
+        let plan = (!sub.plan.is_empty()).then(|| {
+            v_flex()
+                .id("subagent-plan")
+                .flex_none()
+                .gap_1()
+                .px(px(12.))
+                .py(px(6.))
+                .border_b_1()
+                .border_color(if dark {
+                    aurora::borda()
+                } else {
+                    cx.theme().border
+                })
+                .children(sub.plan.iter().take(MAX_PLAN_ROWS).map(|e| plan_row(e, cx)))
+                .children((sub.plan.len() > MAX_PLAN_ROWS).then(|| {
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(format!("+{} more", sub.plan.len() - MAX_PLAN_ROWS))
+                }))
+                .test_support()
+        });
         let theme = cx.theme();
         let close = Button::new("subagent-drawer-close")
             .ghost()
@@ -387,7 +450,7 @@ impl ChatSession {
             .font_family(theme.mono_font_family.clone())
             .text_size(px(11.5))
             .text_color(fg2)
-            .children(calls)
+            .children(body_rows)
             .children(answer);
         let panel = v_flex()
             .id("subagent-drawer")
@@ -397,19 +460,23 @@ impl ChatSession {
             .rounded(px(14.))
             .border_1()
             .child(head)
+            .children(plan)
             .child(body);
         let panel = match dark {
             true => panel
                 .border_color(theme.list_active_border)
                 .bg(aurora::noite_2().alpha(0.95))
-                .shadow(vec![
-                    BoxShadow::new(px(0.), px(-10.), hsla(0., 0., 0., 0.5)).blur_radius(px(20.)),
-                ]),
+                .shadow(vec![BoxShadow::new(
+                    px(0.),
+                    px(-10.),
+                    hsla(0., 0., 0., 0.5),
+                )
+                .blur_radius(px(20.))]),
             false => panel
                 .border_color(theme.list_active_border)
                 .bg(theme.background.opacity(0.95))
                 .shadow(vec![
-                    BoxShadow::new(px(0.), px(-6.), hsla(0., 0., 0., 0.2)).blur_radius(px(12.)),
+                    BoxShadow::new(px(0.), px(-6.), hsla(0., 0., 0., 0.2)).blur_radius(px(12.))
                 ]),
         };
         // 46 % of the transcript above the waiting cards, shrunk to the room left there when a
