@@ -1073,16 +1073,23 @@ fn indent_of(text: &str) -> String {
 
 fn replace_json(
     path: &Path,
-    seen: Stamp,
-    edit: impl FnOnce(&mut Value) -> Result<(), String>,
+    seen: Option<Stamp>,
+    edit: impl FnOnce(&mut Value) -> Result<bool, String>,
 ) -> Result<Stamp, WriteError> {
     let target = if path.exists() {
         crate::try_canonical(path)?
     } else {
-        if let Some(dir) = path.parent() {
+        let mut t = path.to_path_buf();
+        for _ in 0..8 {
+            match std::fs::read_link(&t) {
+                Ok(l) => t = t.parent().unwrap_or(Path::new("")).join(l),
+                Err(_) => break,
+            }
+        }
+        if let Some(dir) = t.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        path.to_path_buf()
+        t
     };
     let _lock = Lock::take(&target)?;
     let read = |p: &Path| match std::fs::read(p) {
@@ -1091,7 +1098,8 @@ fn replace_json(
         Err(e) => Err(WriteError::Io(e)),
     };
     let bytes = read(&target)?;
-    if Stamp::of(bytes.as_deref()) != seen {
+    let base = Stamp::of(bytes.as_deref());
+    if seen.is_some_and(|s| s != base) {
         return Err(WriteError::Changed);
     }
     let (mut value, text) = match &bytes {
@@ -1104,7 +1112,9 @@ fn replace_json(
         }
         None => (Value::Object(Default::default()), String::new()),
     };
-    edit(&mut value).map_err(WriteError::Invalid)?;
+    if !edit(&mut value).map_err(WriteError::Invalid)? {
+        return Ok(base);
+    }
     let indent = indent_of(&text);
     let mut out = Vec::new();
     let fmt = serde_json::ser::PrettyFormatter::with_indent(indent.as_bytes());
@@ -1117,12 +1127,25 @@ fn replace_json(
     let mut name = target.as_os_str().to_owned();
     name.push(".wai.tmp");
     let tmp = PathBuf::from(name);
-    std::fs::write(&tmp, &out)?;
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, &out));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     let finish = || -> Result<(), WriteError> {
         if bytes.is_some() {
             std::fs::set_permissions(&tmp, std::fs::metadata(&target)?.permissions())?;
         }
-        if Stamp::of(read(&target)?.as_deref()) != seen {
+        if Stamp::of(read(&target)?.as_deref()) != base {
             return Err(WriteError::Changed);
         }
         std::fs::rename(&tmp, &target)?;
@@ -1141,7 +1164,7 @@ pub fn set_plugin_enabled(
     on: bool,
     seen: Stamp,
 ) -> Result<Stamp, WriteError> {
-    replace_json(&home.join(".claude/settings.json"), seen, |root| {
+    replace_json(&home.join(".claude/settings.json"), Some(seen), |root| {
         let obj = root
             .as_object_mut()
             .ok_or("settings.json is not a JSON object")?;
@@ -1151,8 +1174,60 @@ pub fn set_plugin_enabled(
             .as_object_mut()
             .ok_or("enabledPlugins is not an object")?;
         plugins.insert(id.to_string(), Value::Bool(on));
-        Ok(())
+        Ok(true)
     })
+}
+
+/// Turns one MCP server on or off for a project by editing `disabledMcpServers` in
+/// `~/.claude.json`, nothing else.
+pub fn set_mcp_enabled(
+    home: &Path,
+    project_key: &str,
+    server: &str,
+    on: bool,
+) -> Result<(), WriteError> {
+    replace_json(&home.join(".claude.json"), None, |root| {
+        let obj = root
+            .as_object_mut()
+            .ok_or("~/.claude.json is not a JSON object")?;
+        if !on && !obj.contains_key("projects") {
+            obj.insert("projects".into(), Value::Object(Default::default()));
+        }
+        let Some(projects) = obj.get_mut("projects") else {
+            return Ok(false);
+        };
+        let projects = projects
+            .as_object_mut()
+            .ok_or("projects is not an object")?;
+        if !on && !projects.contains_key(project_key) {
+            projects.insert(project_key.into(), Value::Object(Default::default()));
+        }
+        let Some(entry) = projects.get_mut(project_key) else {
+            return Ok(false);
+        };
+        let entry = entry
+            .as_object_mut()
+            .ok_or("the project entry is not an object")?;
+        if !on && !entry.contains_key("disabledMcpServers") {
+            entry.insert("disabledMcpServers".into(), Value::Array(Vec::new()));
+        }
+        let Some(list) = entry.get_mut("disabledMcpServers") else {
+            return Ok(false);
+        };
+        let list = list
+            .as_array_mut()
+            .ok_or("disabledMcpServers is not a list")?;
+        let at = list.iter().position(|v| v.as_str() == Some(server));
+        match (on, at) {
+            (false, None) => list.push(Value::String(server.into())),
+            (true, Some(i)) => {
+                list.remove(i);
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    })
+    .map(|_| ())
 }
 
 #[cfg(test)]
@@ -1862,5 +1937,176 @@ l: https://l.test (SSE) - ⊘ Disabled for this project (re-enable via /mcp)\n";
         let p = settings_path(t.path());
         set_plugin_enabled(t.path(), "a@m", true, Stamp::default()).unwrap();
         assert!(!p.with_extension("json.lock").exists());
+    }
+
+    fn claude_json(home: &Path) -> PathBuf {
+        home.join(".claude.json")
+    }
+
+    const MCP_FIXTURE: &str = "{\n    \"zeta\": 1,\n    \"oauthAccount\": {\"name\": \"Zoë\", \"id\": 7},\n    \"nums\": [0.1, 1e21, 12345678901234567890, [1, [2, {\"b\": 1, \"a\": 2}]]],\n    \"projects\": {\n        \"/z/proj\": {\"allowedTools\": [], \"disabledMcpServers\": [\"old\"], \"b\": 1, \"a\": 2},\n        \"/a/proj\": {\"x\": null}\n    }\n}\n";
+
+    #[test]
+    fn mcp_write_keeps_everything_else() {
+        let t = tempfile::tempdir().unwrap();
+        let p = claude_json(t.path());
+        put(&p, MCP_FIXTURE);
+        let orig: Value = serde_json::from_str(MCP_FIXTURE).unwrap();
+        set_mcp_enabled(t.path(), "/z/proj", "db", false).unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        let mut v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            v["projects"]["/z/proj"]["disabledMcpServers"],
+            json!(["old", "db"])
+        );
+        v["projects"]["/z/proj"]["disabledMcpServers"] = json!(["old"]);
+        assert_eq!(v, orig);
+        assert_eq!(v.to_string(), orig.to_string());
+        assert!(text.ends_with("}\n"));
+        assert!(text.lines().nth(1).unwrap().starts_with("    \""));
+        set_mcp_enabled(t.path(), "/z/proj", "db", true).unwrap();
+        set_mcp_enabled(t.path(), "/z/proj", "old", true).unwrap();
+        let v: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+        assert_eq!(v["projects"]["/z/proj"]["disabledMcpServers"], json!([]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_write_keeps_mode_and_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        for mode in [0o600, 0o640] {
+            let t = tempfile::tempdir().unwrap();
+            let p = claude_json(t.path());
+            put(&p, MCP_FIXTURE);
+            fs::set_permissions(&p, fs::Permissions::from_mode(mode)).unwrap();
+            set_mcp_enabled(t.path(), "/a/proj", "db", false).unwrap();
+            assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, mode);
+        }
+        let t = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let real = other.path().join("real.json");
+        put(&real, MCP_FIXTURE);
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o640)).unwrap();
+        let link = claude_json(t.path());
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        set_mcp_enabled(t.path(), "/a/proj", "db", false).unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(fs::read_to_string(&real).unwrap().contains("\"db\""));
+        assert_eq!(
+            fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        for dir in [t.path(), other.path()] {
+            for e in fs::read_dir(dir).unwrap() {
+                let n = e.unwrap().file_name().to_string_lossy().into_owned();
+                assert!(!n.ends_with(".wai.tmp") && !n.ends_with(".lock"), "{n}");
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_write_creates_missing_entry_only_when_turning_off() {
+        let t = tempfile::tempdir().unwrap();
+        let p = claude_json(t.path());
+        put(&p, "{\"a\":1}");
+        set_mcp_enabled(t.path(), "/p", "db", false).unwrap();
+        let v: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+        assert_eq!(v["projects"]["/p"]["disabledMcpServers"], json!(["db"]));
+        assert_eq!(v["a"], json!(1));
+        set_mcp_enabled(t.path(), "/p", "db", false).unwrap();
+        let v: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+        assert_eq!(v["projects"]["/p"]["disabledMcpServers"], json!(["db"]));
+    }
+
+    #[test]
+    fn mcp_on_without_entry_writes_nothing() {
+        let t = tempfile::tempdir().unwrap();
+        let p = claude_json(t.path());
+        put(&p, "{\"projects\":{}}");
+        fs::File::open(&p)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600))
+            .unwrap();
+        let m = fs::metadata(&p).unwrap().modified().unwrap();
+        for text in ["{\"projects\":{}}", "{}", "{\"projects\":{\"/p\":{}}}"] {
+            fs::write(&p, text).unwrap();
+            fs::File::open(&p).unwrap().set_modified(m).unwrap();
+            set_mcp_enabled(t.path(), "/p", "db", true).unwrap();
+            assert_eq!(fs::read_to_string(&p).unwrap(), text);
+            assert_eq!(fs::metadata(&p).unwrap().modified().unwrap(), m);
+        }
+    }
+
+    #[test]
+    fn mcp_write_rejects_wrong_shapes() {
+        let t = tempfile::tempdir().unwrap();
+        let p = claude_json(t.path());
+        for text in [
+            "{\"projects\":[]}",
+            "{\"projects\":{\"/p\":[]}}",
+            "{\"projects\":{\"/p\":{\"disabledMcpServers\":\"x\"}}}",
+        ] {
+            for on in [false, true] {
+                put(&p, text);
+                let r = set_mcp_enabled(t.path(), "/p", "db", on);
+                assert!(matches!(r, Err(WriteError::Invalid(_))), "{text}");
+                assert_eq!(fs::read_to_string(&p).unwrap(), text);
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_write_aborts_if_the_file_changes_underneath() {
+        let t = tempfile::tempdir().unwrap();
+        let p = claude_json(t.path());
+        put(&p, "{\"a\":1}");
+        let other = {
+            replace_json(&p, None, |_| {
+                fs::write(&p, "{\"a\":2}").unwrap();
+                Ok(true)
+            })
+        };
+        assert!(matches!(other, Err(WriteError::Changed)));
+        assert_eq!(fs::read_to_string(&p).unwrap(), "{\"a\":2}");
+        assert!(!t.path().join(".claude.json.wai.tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planted_tmp_symlink_is_not_followed() {
+        let t = tempfile::tempdir().unwrap();
+        let p = claude_json(t.path());
+        put(&p, "{}");
+        let victim = t.path().join("victim");
+        put(&victim, "keep");
+        std::os::unix::fs::symlink(&victim, t.path().join(".claude.json.wai.tmp")).unwrap();
+        set_mcp_enabled(t.path(), "/p", "db", false).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(fs::read_to_string(&p).unwrap().contains("\"db\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_is_kept() {
+        let t = tempfile::tempdir().unwrap();
+        let link = claude_json(t.path());
+        std::os::unix::fs::symlink("dot/real.json", &link).unwrap();
+        set_mcp_enabled(t.path(), "/p", "db", false).unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_link(&link).unwrap(), Path::new("dot/real.json"));
+        assert!(
+            fs::read_to_string(t.path().join("dot/real.json"))
+                .unwrap()
+                .contains("\"db\"")
+        );
     }
 }
