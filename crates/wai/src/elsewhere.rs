@@ -273,7 +273,6 @@ mod tests {
         let home = tmp.path().join("home");
         workspace.update(cx, |w, _| w.claude_home = home);
         load_history(&workspace, n, cx);
-        click("tab-history", cx);
         (workspace, cx, tmp)
     }
 
@@ -325,11 +324,9 @@ mod tests {
         let (workspace, cx, tmp) = setup(cx, 2);
         click(("history", 1usize), cx);
         wait_until(cx, "the session", |cx| ids(&workspace, cx) == ["session-1"]);
-        click("tab-sessions", cx);
         click(("open-close", 0usize), cx);
         wait_until(cx, "it closed", |cx| ids(&workspace, cx).is_empty());
         fresh(&tmp.path().join("home"), "session-1");
-        click("tab-history", cx);
         click(("history", 1usize), cx);
         wait_until(cx, "the session", |cx| {
             assert!(!asking(cx), "it asked");
