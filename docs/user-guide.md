@@ -33,7 +33,7 @@ While the agent prepares the session, its pane shows `Preparing <agent>…`. **�
 
 ### Chatting
 
-- **Sending:** **Enter** sends the prompt and **Shift+Enter** adds a new line. While the agent works, **Stop** stands beside **Send**, and **Esc** in a session also stops the turn (with a subagent's drawer open, the first **Esc** only closes the drawer).
+- **Sending:** **Enter** sends the prompt and **Shift+Enter** adds a new line. While the agent works, **Stop** stands beside **Send**, and **Esc** in a session also stops the turn (with the agent list or a subagent's drawer open, the first **Esc** only closes it, and the next one stops the turn). **Stop** always stops the turn.
 - **Sending during a turn:** you can keep typing and sending while the agent works.
   - An agent that can be steered (Claude Code) gets the message inside the running turn. It waits above the prompt box as a `Sent` balloon until the agent reads it, then joins the transcript there. wai takes the agent's next reply, thought or tool call as the sign that it read the message; while a card waits, the one after you answer it. A message still unread when the turn ends joins the transcript then. If the turn ended meanwhile, it goes as a new prompt. If steering fails, the message is queued instead, and the transcript says so.
   - Any other agent (Codex, Copilot) gets it after the turn: it waits above the prompt box as a `Queued` balloon, with a **×** that puts it back in the prompt box. When the turn ends, the queued messages go out together as one prompt. If you stop the turn, or it ends any other way, they go back into the prompt box, before anything typed since, and their attachments back to chips, unsent.
@@ -63,7 +63,7 @@ While the agent prepares the session, its pane shows `Preparing <agent>…`. **�
     | **Grouped** | The steps between two replies fold into one block, such as `3 steps · Read README.md, Run git status`; the head names every step. A click lists the step lines, each still folded |
     | **Hidden** | No steps |
 
-  - **Subagents.** Each subagent the agent runs (Claude Code's Agent tool) shows as one card with a state mark, its kind, its task and a `Running`, `Done` or `Failed` pill. Its tool calls are not in the transcript: they show in its drawer (see below), which a click on the card opens. Its own text and checklist are not shown.
+  - **Subagents.** Each subagent the agent runs (Claude Code's Agent tool) shows as one card with a state mark, its kind, its task and a `Running`, `Done` or `Failed` pill. The card follows the **Processing** setting like any step (**Step by step** shows it, **Grouped** folds it into the step group, **Hidden** does not show it); the agent list under the prompt opens a subagent's drawer in every mode. Its tool calls are not in the transcript: they show in its drawer (see below), which a click on the card opens. Its own text and checklist are not shown.
   - **Always shown,** whatever the setting: your prompts, the replies, permission cards and questions, notices, and file edits. An edit that was written reads `Edited <file>` (a click shows its diff), and the turn still ends with its **Edits** block (see [Reviewing edits](#reviewing-edits)).
   - **The agent list.** While a session has subagents (the current turn's, plus background ones still running), a list sits under its prompt box, in the mono font. The first row is `main`: the running turn's time and the context used (`↓ 82k tokens`, when the agent reports it). Each subagent has a row: a mark (`○` cyan while running, amber while it needs you, `✓` done, `✗` stopped or failed), its kind, its task, then its time (`9s`, `done · 32s`) and its tokens when the agent reports them. Finished subagents of earlier turns leave the list when a new turn starts. Without subagents the list is not drawn.
     - **Mouse:** click a subagent to open its drawer; click `main`, or the same subagent again, to close it.
@@ -268,7 +268,7 @@ Clicking a card shows that session in the focused pane; dragging it onto a pane 
 | Focus next pane | ⌘⌥→ | ctrl-alt-→ | window |
 | Show or hide the terminal | ctrl-` | ctrl-` | window |
 | Show or hide the Agents panel, while it is on the right | ⌘⌥B | ctrl-alt-b | window |
-| Filter the Sessions panel | ⌘K | ctrl-k | window |
+| Filter the Sessions panel | ⌘K | ctrl-k (ctrl-shift-k in the terminal) | window |
 | Move from an empty prompt into the agent list | ↓ | ↓ | prompt box |
 | In the agent list: move / open / back to the prompt | ↑ ↓ / Enter / Esc | ↑ ↓ / Enter / Esc | agent list |
 | Close the subagent drawer | Esc | Esc | chat session, drawer open |
@@ -330,7 +330,7 @@ Only your own settings file can change these; a project's `.wai/settings.toml` c
 
 Settings is a modal over the window, not a pane.
 
-- **Opening:** **⌘,** (ctrl-, on Windows and Linux), the ⚙ button in the top bar, or **Settings** in the command palette. It opens on the page you asked for. Opening it while it is open shows that page and refreshes its data.
+- **Opening:** **⌘,** (ctrl-, on Windows and Linux), the ⚙ button at the foot of the activity bar, or **Settings** in the command palette. It opens on the page you asked for. Opening it while it is open shows that page and refreshes its data.
 - **Closing:** **Esc**, a click outside it or its **×**. Closing drops the screen; it is not restored on relaunch.
 - **Size:** 88% of the window each way, centered. The maximize button in the header grows it to the window and back; the size is not kept.
 - **Header:** `Settings`, then the context in muted text: `(<default agent> · <project>)`, or `(<project>)` with no default agent.
