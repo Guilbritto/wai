@@ -501,6 +501,10 @@ pub struct AppState {
     pub open_files: Vec<PathBuf>,
     /// The editor tab that was showing.
     pub active_file: Option<PathBuf>,
+    /// The work areas, in their order.
+    pub work_areas: Vec<WorkArea>,
+    /// The one on screen.
+    pub shown_area: Option<usize>,
     /// The Sessions panel's Open and History sections are folded.
     pub open_folded: bool,
     pub history_folded: bool,
@@ -517,6 +521,19 @@ pub struct SessionGroup {
     /// Its swatch: an index into the sidebar's cycle of accents.
     #[serde(default)]
     pub color: u8,
+}
+
+/// A named set of open sessions with their screen arrangement.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkArea {
+    pub name: String,
+    pub collapsed: bool,
+    /// Its sessions' ids, one per pane, left to right; four at most.
+    // ponytail: by session id alone, as SessionGroup.
+    pub panes: Vec<String>,
+    /// The index in `panes` of the session that had the focus.
+    pub focused: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -559,6 +576,8 @@ impl Default for AppState {
             modes_seen: BTreeMap::new(),
             open_files: Vec::new(),
             active_file: None,
+            work_areas: Vec::new(),
+            shown_area: None,
             open_folded: false,
             history_folded: false,
         }
@@ -963,6 +982,13 @@ mod tests {
             .into(),
             open_files: vec!["/tmp/proj/a.rs".into()],
             active_file: Some("/tmp/proj/a.rs".into()),
+            work_areas: vec![WorkArea {
+                name: "Evolução BB".into(),
+                collapsed: true,
+                panes: vec!["s1".into(), "s2".into()],
+                focused: 1,
+            }],
+            shown_area: Some(0),
         };
         state.save(&path).unwrap();
         assert_eq!(AppState::load(&path), state);
@@ -981,7 +1007,15 @@ mod tests {
         let state = AppState::load(&path);
         assert_eq!(state.open_sessions[0].name, None);
         assert_eq!(state.groups, []);
+        assert_eq!(state.work_areas, []);
+        assert_eq!(state.shown_area, None);
         assert!(!state.open_folded && !state.history_folded);
+        std::fs::write(&path, r#"{"work_areas":[{"name":"A"}]}"#).unwrap();
+        let area = WorkArea {
+            name: "A".into(),
+            ..Default::default()
+        };
+        assert_eq!(AppState::load(&path).work_areas, [area]);
         // A state from before group colours.
         let old = r#"{"groups":[{"name":"g","collapsed":false,"sessions":[]}]}"#;
         std::fs::write(&path, old).unwrap();
