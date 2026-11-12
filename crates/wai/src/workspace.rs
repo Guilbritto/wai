@@ -1115,7 +1115,7 @@ impl Workspace {
             cx.spawn(async move |_, cx| {
                 let head = head.await;
                 target.update(cx, |s, cx| {
-                    s.head = head;
+                    s.set_home(head, cx);
                     cx.notify();
                 });
             })

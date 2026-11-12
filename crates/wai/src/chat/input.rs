@@ -592,7 +592,11 @@ impl ChatSession {
     /// The folder, branch and agent, as read-only chips on the box's top edge.
     fn render_strip(&self, cx: &App) -> impl IntoElement + use<> {
         let icon = |name| Some(Icon::new(name).xsmall().into_any_element());
-        let branch = self.head.as_ref().and_then(|head| {
+        let (folder, head) = match &self.place {
+            Some(p) => (folder_name(&p.folder), Some(p)),
+            None => (folder_name(&self.cwd), self.head.as_ref()),
+        };
+        let branch = head.and_then(|head| {
             let mark = match head.worktree {
                 true => icon(gpui_kit::assets::IconName::GitFork),
                 false => icon(gpui_kit::assets::IconName::GitBranch),
@@ -612,7 +616,7 @@ impl ChatSession {
             .child(composer::strip_label(
                 "pill-folder",
                 icon(gpui_kit::assets::IconName::Folder),
-                folder_name(&self.cwd),
+                folder,
                 cx,
             ))
             .children(branch)

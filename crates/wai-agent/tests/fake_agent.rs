@@ -1040,3 +1040,32 @@ fn new_session_waits_for_its_gate() {
         assert!(agent.new_session(cwd(), vec![]).await.is_ok());
     });
 }
+
+#[test]
+fn read_flag_reports_its_location() {
+    run(async {
+        let path = PathBuf::from("/tmp/wai-read/a.txt");
+        let (agent, rx) = spawn(&["--read", "/tmp/wai-read/a.txt"]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        agent.prompt(session.id, hello());
+        let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+        let located = |events: &[AgentEvent]| {
+            events.iter().any(|e| match e {
+                AgentEvent::Update {
+                    event: SessionEvent::ToolCall(call),
+                    ..
+                } => call.id == "read-0" && call.locations[0].path == path,
+                _ => false,
+            })
+        };
+        assert!(located(&events));
+
+        agent
+            .load_session("abc".into(), cwd(), vec![])
+            .await
+            .unwrap();
+        let replay: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(located(&replay));
+    });
+}
