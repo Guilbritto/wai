@@ -897,7 +897,8 @@ mod tests {
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{ElementId, Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
     use wai_agent::{
-        ChoiceKind, PermissionChoice, PermissionRequest, StopReason, SubagentState, ToolStatus,
+        ChoiceKind, PermissionChoice, PermissionRequest, SessionEvent, StopReason, SubagentState,
+        ToolStatus,
     };
     use wai_settings::{AppState, Change, OpenSession, Processing, Settings};
 
@@ -2848,6 +2849,25 @@ mod tests {
                 .try_find(id)
                 .and_then(|e| e.label().map(str::to_owned))
         })
+    }
+
+    /// 2.4: the header shows what the conversation cost, as the agent reports it.
+    #[gpui_kit::test]
+    fn header_shows_the_conversation_cost(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        let usage = |cost_usd| SessionEvent::Usage {
+            used: 43_000,
+            size: 1_000_000,
+            cost_usd,
+            rate_limit: None,
+        };
+        assert_eq!(pill("session-cost", cx), None, "no cost reported yet");
+        session.update(cx, |s, cx| s.handle_event(&usage(Some(0.4237)), cx));
+        assert_eq!(pill("session-cost", cx).as_deref(), Some("$0.42"));
+        session.update(cx, |s, cx| s.handle_event(&usage(None), cx));
+        assert_eq!(pill("session-cost", cx).as_deref(), Some("$0.42"));
     }
 
     #[gpui_kit::test]

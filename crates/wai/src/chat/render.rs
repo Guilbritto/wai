@@ -84,6 +84,11 @@ fn usage_label(usage: &UsageInfo) -> String {
     }
 }
 
+/// `$0.42`: what the conversation has cost.
+fn cost_label(usd: f64) -> String {
+    format!("${usd:.2}")
+}
+
 /// Where a row sits in its turn's card: which segment edges it draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CardEdges {
@@ -314,6 +319,20 @@ impl ChatSession {
             .children(
                 (self.model.usage.as_ref())
                     .map(|usage| aurora::pill(cx).flex_none().child(usage_label(usage))),
+            )
+            .children(
+                (self.model.usage.as_ref())
+                    .and_then(|usage| usage.cost_usd)
+                    .map(cost_label)
+                    .map(|label| {
+                        aurora::pill(cx)
+                            .id("session-cost")
+                            .flex_none()
+                            .aria_label(label.clone())
+                            .child(label)
+                            // Registers the id so tests can find it.
+                            .test_support()
+                    }),
             )
             .child(
                 Button::new("session-close")
@@ -896,7 +915,7 @@ impl Render for ChatSession {
 mod tests {
     use wai_agent::ToolStatus;
 
-    use super::{CardEdges, card_edges, code_ranges, tokens};
+    use super::{CardEdges, card_edges, code_ranges, cost_label, tokens};
     use crate::chat::model::{ChatItem, ToolItem};
 
     #[test]
@@ -904,6 +923,14 @@ mod tests {
         assert_eq!(
             [999, 43_000, 1_000_000, 1_500_000].map(tokens),
             ["999", "43k", "1M", "1.5M"]
+        );
+    }
+
+    #[test]
+    fn cost_reads_in_dollars() {
+        assert_eq!(
+            [0.0, 0.4237, 12.3].map(cost_label),
+            ["$0.00", "$0.42", "$12.30"]
         );
     }
 
