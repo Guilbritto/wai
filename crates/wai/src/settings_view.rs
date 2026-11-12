@@ -201,12 +201,13 @@ pub(crate) fn open_modal(view: Entity<SettingsView>, window: &mut Window, cx: &m
 }
 
 /// Every row with its section and label: what the search matches.
-const ROWS: [(Section, &str); 6] = [
+const ROWS: [(Section, &str); 7] = [
     (Section::Appearance, "Theme"),
     (Section::Conversation, "Processing"),
     (Section::Terminal, "Shell"),
     (Section::Updates, "Automatic updates"),
     (Section::Updates, "Version"),
+    (Section::Updates, "Diagnostics"),
     (Section::Updates, "Repository"),
 ];
 
@@ -282,6 +283,7 @@ pub enum SettingsEvent {
     OpenFile,
     CheckUpdates,
     RestartToUpdate,
+    CopyDiagnostics,
     Test(String),
     CheckMcp,
     Open {
@@ -909,6 +911,18 @@ impl SettingsView {
                 cx,
             ),
             "Version" => self.version_row(cx),
+            "Diagnostics" => self.row(
+                "Diagnostics",
+                "settings-diagnostics",
+                h_flex().justify_end().child(
+                    Button::new("settings-diagnostics-copy")
+                        .label("Copy diagnostics")
+                        .on_click(
+                            cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::CopyDiagnostics)),
+                        ),
+                ),
+                cx,
+            ),
             _ => self.row(
                 "Repository",
                 "settings-updates-repo",
@@ -1292,6 +1306,18 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
         assert!(workspace.read_with(cx, |w, _| w.settings_view().is_none()));
         assert!(cx.update(|window, cx| window.notifications(cx).is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn settings_button_copies_diagnostics(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Updates, None, window, cx)
+        });
+        click("settings-diagnostics-copy", cx);
+        wait_until(cx, "the clipboard", |cx| cx.read_from_clipboard().is_some());
+        let text = cx.read_from_clipboard().and_then(|c| c.text()).unwrap();
+        assert!(text.contains("\nAgents\n"));
     }
 
     #[gpui_kit::test]

@@ -2755,6 +2755,7 @@ impl Workspace {
                 SettingsEvent::CheckMcp => this.check_mcp(cx),
                 SettingsEvent::CheckUpdates => this.check_updates(false, window, cx),
                 SettingsEvent::RestartToUpdate => this.leave(Leave::Update, window, cx),
+                SettingsEvent::CopyDiagnostics => this.copy_diagnostics(window, cx),
                 SettingsEvent::Open { path, read_only } => {
                     this.close_settings(window, cx);
                     this.open(path.clone(), None, *read_only, window, cx)

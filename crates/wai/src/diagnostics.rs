@@ -1,12 +1,15 @@
 //! A plain-text report the user can paste into an issue: no environment, no extension values,
 //! no custom commands, and token-looking words masked.
 
-#![allow(dead_code)] // consumed by the "copy diagnostics" action, which lands later
-
+use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::notification::Notification;
+use gpui_kit::{AppContext as _, ClipboardItem, Context, Window};
 use std::fmt::Write as _;
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use wai_settings::{Settings, builtin};
+
+use crate::workspace::Workspace;
 
 pub const LOG_BYTES: u64 = 32 * 1024;
 pub const LOG_LINES: usize = 200;
@@ -214,6 +217,57 @@ pub fn tail(path: &Path, max_bytes: u64, max_lines: usize) -> String {
     lines[lines.len().saturating_sub(max_lines)..].join("\n")
 }
 
+impl Workspace {
+    /// Copies the report to the clipboard; the log and the OS version are read off the main thread.
+    pub(crate) fn copy_diagnostics(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let agents = (self.agent_rows(cx).into_iter())
+            .map(|row| AgentLine {
+                id: row.id,
+                status: format!("{:?}", row.status),
+                adapter: row.adapter,
+                command: row.command,
+            })
+            .collect();
+        let list = match &self.extensions {
+            Some(view) => view.read(cx).store().list(),
+            None => wai_ext::ExtStore::open(&self.user_dir).list(),
+        };
+        let extensions = (list.into_iter())
+            .map(|e| {
+                (
+                    e.manifest.id.as_str().to_string(),
+                    e.manifest.version,
+                    e.enabled,
+                )
+            })
+            .collect();
+        let mut inputs = Inputs {
+            wai: env!("CARGO_PKG_VERSION"),
+            os: String::new(),
+            settings: self.settings.clone(),
+            home: dirs::home_dir(),
+            agents,
+            extensions,
+            log_tail: String::new(),
+        };
+        let read = cx.background_spawn(async move {
+            let tail = crate::log::path().map(|p| tail(p, LOG_BYTES, LOG_LINES));
+            (os_line(), tail.unwrap_or_else(|| "(no log)".into()))
+        });
+        cx.spawn_in(window, async move |_, cx| {
+            let (os, log_tail) = read.await;
+            (inputs.os, inputs.log_tail) = (os, log_tail);
+            let text = report(&inputs);
+            cx.update(|window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                window.push_notification(Notification::success("Diagnostics copied"), cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +375,19 @@ mod tests {
         assert!(r.contains("claude: ready (adapter claude-agent-acp 0.103.0)"));
         assert!(r.contains("codex: stopped (adapter -)"));
         assert!(r.contains("Log (last 200 lines)"));
+    }
+
+    #[gpui_kit::test]
+    fn copy_diagnostics_fills_the_clipboard(cx: &mut gpui_kit::TestAppContext) {
+        use crate::workspace::tests::{fake_settings, open, wait_until};
+        let (workspace, cx) = open(cx, fake_settings(""));
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.copy_diagnostics(window, cx)));
+        wait_until(cx, "the clipboard", |cx| cx.read_from_clipboard().is_some());
+        let text = cx.read_from_clipboard().and_then(|c| c.text()).unwrap();
+        assert!(text.starts_with(&format!("wai\n  version: {}", env!("CARGO_PKG_VERSION"))));
+        assert!(text.contains("\nAgents\n"));
+        if let Some(home) = dirs::home_dir().and_then(|h| h.to_str().map(String::from)) {
+            assert!(home.len() < 2 || !text.contains(&home), "home leaked");
+        }
     }
 }

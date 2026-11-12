@@ -8,7 +8,6 @@ const MAX_BYTES: u64 = 1024 * 1024;
 static PATH: OnceLock<PathBuf> = OnceLock::new();
 
 /// Where stderr goes, once `init` redirected it.
-#[allow(dead_code)] // read by the later task that shows the log location
 pub fn path() -> Option<&'static Path> {
     PATH.get().map(PathBuf::as_path)
 }
