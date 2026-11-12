@@ -273,7 +273,21 @@ fn plugin_hook_events(root: &Path, m: &Value) -> Vec<(String, usize)> {
     if let Some(v) = json_file(root, "hooks/hooks.json") {
         hook_events(&v, root, 0, &mut out);
     }
-    hook_events(&m["hooks"], root, 0, &mut out);
+    // A manifest entry naming the default file would count its hooks twice.
+    let default = canonical(&root.join("hooks/hooks.json"));
+    let same = |x: &Value| {
+        x.as_str()
+            .and_then(|s| inside(root, s))
+            .is_some_and(|p| canonical(&p) == default)
+    };
+    match &m["hooks"] {
+        x if same(x) => {}
+        Value::Array(a) => a
+            .iter()
+            .filter(|x| !same(x))
+            .for_each(|x| hook_events(x, root, 1, &mut out)),
+        x => hook_events(x, root, 0, &mut out),
+    }
     out
 }
 
@@ -335,6 +349,8 @@ fn plugin_skill_files(root: &Path, m: &Value) -> Vec<PathBuf> {
     if !dir.is_dir() && m["skills"].is_null() && root.join("SKILL.md").is_file() {
         out.push(root.join("SKILL.md"));
     }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|p| seen.insert(canonical(p)));
     out
 }
 
@@ -731,6 +747,9 @@ fn fill_entries(
     let mut plugin_hooks = Vec::new();
     for plugin in data.plugins.iter().filter(|p| p.enabled) {
         let root = &plugin.root;
+        if root.as_os_str().is_empty() {
+            continue;
+        }
         let manifest = json_file(root, ".claude-plugin/plugin.json").unwrap_or(Value::Null);
         let m = &manifest;
         data.skills
@@ -845,7 +864,10 @@ pub fn read_claude(home: &Path, project: &Path) -> ClaudeData {
     };
     // Lookup order; the two project files also lock the toggle.
     let layers = [
-        (&root_local, None),
+        (
+            &root_local,
+            Some("Set in the repository's .claude/settings.local.json"),
+        ),
         (
             &project_local.value,
             Some("Set in this project's .claude/settings.local.json"),
@@ -891,7 +913,15 @@ pub fn read_claude(home: &Path, project: &Path) -> ClaudeData {
         };
         let (name, marketplace) = id.split_once('@').unwrap_or((id, ""));
         let plugin_root = PathBuf::from(install["installPath"].as_str().unwrap_or_default());
-        let scanned = scan(&plugin_root, home, marketplace, name);
+        let scanned = if plugin_root.as_os_str().is_empty() {
+            Scan {
+                summary: "No components".to_string(),
+                default_enabled: true,
+                servers: Vec::new(),
+            }
+        } else {
+            scan(&plugin_root, home, marketplace, name)
+        };
 
         let found = layers
             .iter()
@@ -1463,6 +1493,74 @@ l: https://l.test (SSE) - ⊘ Disabled for this project (re-enable via /mcp)\n";
         assert_eq!((mine("User"), mine("Project")), (1, 0));
         let hooks = d.hooks.iter().filter(|e| e.name == "SessionStart").count();
         assert_eq!(hooks, 1);
+    }
+
+    #[test]
+    fn empty_install_path_is_skipped() {
+        let (_t, home, project) = setup();
+        let cwd = home.join("elsewhere");
+        put(cwd.join("skills/x/SKILL.md"), "x");
+        put_json(
+            home.join(".claude/plugins/installed_plugins.json"),
+            json!({"plugins":{
+                "a@m":[{"scope":"user","installPath":"","version":"1"}],
+                "b@m":[{"scope":"user","version":"1"}]}}),
+        );
+        let old = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&cwd).unwrap();
+        let d = read_claude(&home, &project);
+        std::env::set_current_dir(old).unwrap();
+        assert_eq!(d.plugins.len(), 2);
+        assert!(d.plugins.iter().all(|p| p.summary == "No components"));
+        assert!(d.skills.iter().all(|e| e.group != "a" && e.group != "b"));
+        assert!(d.skills.iter().all(|e| !e.path.starts_with(&cwd)));
+    }
+
+    #[test]
+    fn git_root_local_settings_lock_the_toggle() {
+        let (_t, home, _) = setup();
+        let root = home.parent().unwrap().join("repo");
+        let project = root.join("sub");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        put_json(
+            root.join(".claude/settings.local.json"),
+            json!({"enabledPlugins":{"alpha@m":false}}),
+        );
+        let alpha = read_claude(&home, &project).plugins.remove(0);
+        assert!(!alpha.enabled);
+        assert_eq!(
+            alpha.locked.as_deref(),
+            Some("Set in the repository's .claude/settings.local.json")
+        );
+        fs::create_dir_all(home.join(".git")).unwrap();
+        put_json(
+            home.join(".claude/settings.local.json"),
+            json!({"enabledPlugins":{"alpha@m":false}}),
+        );
+        let alpha = read_claude(&home, &home).plugins.remove(0);
+        assert_eq!(alpha.locked, None);
+    }
+
+    #[test]
+    fn default_manifest_paths_are_not_counted_twice() {
+        let (_t, home, project) = setup();
+        let before = read_claude(&home, &project);
+        put_json(
+            alpha_manifest(&home),
+            json!({"name":"alpha","skills":"./skills/","hooks":"./hooks/hooks.json"}),
+        );
+        let a = home.join(".claude/plugins/cache/m/alpha/1.2.0");
+        put(a.join("skills/one/SKILL.md"), "x");
+        let d = read_claude(&home, &project);
+        let n = d.skills.iter().filter(|e| e.group == "alpha").count();
+        assert_eq!(n, 1);
+        assert!(d.plugins[0].summary.starts_with("1 skill · "));
+        assert!(d.plugins[0].summary.contains("3 hooks"));
+        assert_eq!(
+            d.hooks.iter().filter(|e| e.name == "alpha").count(),
+            before.hooks.iter().filter(|e| e.name == "alpha").count()
+        );
     }
 
     #[test]

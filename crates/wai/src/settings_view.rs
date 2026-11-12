@@ -395,7 +395,7 @@ pub struct SettingsView {
     /// The running `claude mcp list`; dropping the view kills it.
     pub(crate) mcp_task: Option<Task<()>>,
     /// Groups the user flipped from their default (open or closed), per page.
-    toggled: HashSet<(Section, usize)>,
+    toggled: HashSet<(Section, String)>,
     _subscriptions: Vec<Subscription>,
 }
 

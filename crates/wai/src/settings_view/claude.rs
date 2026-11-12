@@ -246,6 +246,18 @@ pub(crate) fn default_open(total_rows: usize, ix: usize) -> bool {
     total_rows <= 20 || ix == 0
 }
 
+/// Open state of a group; a click flips it, keyed by the group's title, not its place on screen.
+pub(crate) fn group_open(
+    toggled: &std::collections::HashSet<(Section, String)>,
+    section: Section,
+    order: &[String],
+    title: &str,
+    total: usize,
+) -> bool {
+    let ix = order.iter().position(|t| t == title).unwrap_or(0);
+    default_open(total, ix) != toggled.contains(&(section, title.to_string()))
+}
+
 impl SettingsView {
     pub fn set_claude(&mut self, data: ClaudeData, cx: &mut Context<Self>) {
         self.claude = Some(data);
@@ -392,6 +404,7 @@ impl SettingsView {
         };
         let total: usize = all.iter().map(|g| g.rows.len()).sum();
         let searching = !query.is_empty();
+        let order: Vec<String> = all.iter().map(|g| g.title.clone()).collect();
         let groups = filter(all, query);
         v_flex()
             .gap_3()
@@ -399,7 +412,7 @@ impl SettingsView {
             .children(problems)
             .children(groups.into_iter().enumerate().map(|(ix, group)| {
                 let open =
-                    searching || default_open(total, ix) != self.toggled.contains(&(section, ix));
+                    searching || group_open(&self.toggled, section, &order, &group.title, total);
                 self.group(section, ix, group, open, cx)
             }))
     }
@@ -413,6 +426,7 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Div {
         let (muted, faint) = (cx.theme().muted_foreground, aurora::nevoa_2());
+        let title = group.title.clone();
         let header = h_flex()
             .gap_2()
             .items_center()
@@ -443,8 +457,9 @@ impl SettingsView {
                             .child(group.rows.len().to_string()),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.toggled.remove(&(section, ix)) {
-                            this.toggled.insert((section, ix));
+                        let key = (section, title.clone());
+                        if !this.toggled.remove(&key) {
+                            this.toggled.insert(key);
                         }
                         cx.notify();
                     }))
@@ -585,7 +600,8 @@ mod tests {
     use wai_settings::claude::{ClaudeData, McpServer, McpSource, Plugin};
 
     use super::{
-        Control, McpCheck, Tone, default_open, filter, mcp_groups, plugin_groups, status_line,
+        Control, McpCheck, Tone, default_open, filter, group_open, mcp_groups, plugin_groups,
+        status_line,
     };
     use wai_settings::claude::McpStatus;
 
@@ -843,5 +859,19 @@ mod tests {
         assert!(default_open(10, 1));
         assert!(default_open(21, 0));
         assert!(!default_open(21, 1));
+    }
+
+    #[test]
+    fn collapsed_state_follows_the_group_not_its_position() {
+        use crate::settings_view::Section;
+        let order: Vec<String> = ["a", "b", "c"].map(String::from).into();
+        let mut toggled = std::collections::HashSet::new();
+        // 25 rows: only "a" is open; the user opens "b".
+        toggled.insert((Section::Skills, "b".to_string()));
+        assert!(group_open(&toggled, Section::Skills, &order, "b", 25));
+        assert!(!group_open(&toggled, Section::Skills, &order, "c", 25));
+        // A filter drops "a"; "b" keeps its state, "c" stays closed.
+        assert!(group_open(&toggled, Section::Skills, &order, "b", 25));
+        assert!(!group_open(&toggled, Section::Plugins, &order, "b", 25));
     }
 }
