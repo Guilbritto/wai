@@ -391,11 +391,8 @@ impl ChatSession {
             .children(answer);
         let panel = v_flex()
             .id("subagent-drawer")
-            .absolute()
-            .left(px(10.))
-            .right(px(10.))
-            .bottom(self.waiting_height + px(16.))
             .h(relative(0.46))
+            .min_h_0()
             .occlude()
             .rounded(px(14.))
             .border_1()
@@ -415,8 +412,22 @@ impl ChatSession {
                     BoxShadow::new(px(0.), px(-6.), hsla(0., 0., 0., 0.2)).blur_radius(px(12.)),
                 ]),
         };
-        // Registers the id so tests can find it.
-        Some(panel.test_support().into_any_element())
+        // 46 % of the transcript above the waiting cards, shrunk to the room left there when a
+        // tall card leaves less. The wrapper has no listeners, so clicks pass through it.
+        Some(
+            v_flex()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(10.))
+                .right(px(10.))
+                .justify_end()
+                .child(div().flex_none().h(px(8.)))
+                // Registers the id so tests can find it.
+                .child(panel.test_support())
+                .child(div().flex_none().h(self.waiting_height + px(16.)))
+                .into_any_element(),
+        )
     }
 }
 

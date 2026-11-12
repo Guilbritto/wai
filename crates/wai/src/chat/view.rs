@@ -1118,7 +1118,7 @@ mod tests {
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
         ElementId, Entity, InputEvent, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
-        TestAppContext, VisualTestContext, point, px,
+        TestAppContext, VisualTestContext, point, px, size,
     };
     use wai_agent::{
         ChoiceKind, Location, PermissionChoice, PermissionRequest, SessionEvent, StopReason,
@@ -1748,6 +1748,39 @@ mod tests {
         });
         wait_until(cx, "the answer", |cx| {
             state(&session, cx) != TurnState::NeedsYou
+        });
+    }
+
+    /// In a short pane a tall waiting card leaves the drawer only the room above it: the drawer
+    /// never rises over the pane's header.
+    #[gpui_kit::test]
+    fn drawer_fits_above_a_tall_waiting_card(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--subagent --ask-permission"));
+        let session = start_session(&workspace, cx);
+        cx.simulate_resize(size(px(900.), px(500.)));
+        send("edit", cx);
+        wait_until(cx, "the permission card", |cx| {
+            state(&session, cx) == TurnState::NeedsYou
+                && session.read_with(cx, |s, _| !s.model.subagents.is_empty())
+        });
+        click_edits(None, ("agent-row", 0usize), cx);
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            let (transcript, waiting, drawer) = (
+                window.find("transcript").bounds(),
+                window.find("waiting").bounds(),
+                window.find("subagent-drawer").bounds(),
+            );
+            assert!(
+                drawer.top() >= transcript.top(),
+                "{drawer:?} {transcript:?} {waiting:?}"
+            );
+            assert!(drawer.bottom() <= waiting.top() + px(1.));
+            assert!(
+                drawer.size.height > px(0.),
+                "the drawer still shows: {drawer:?}"
+            );
         });
     }
 
