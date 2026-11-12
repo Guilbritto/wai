@@ -1,7 +1,8 @@
 name: release
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -9,26 +10,88 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+# Serialised, never cancelled: a cancelled run can leave a tag published with no assets attached.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 # Signing follows cargo-packager 0.11.8 (pinned below): it signs only when the config names a
 # signing identity (macOS) or certificate thumbprint (Windows), so without secrets nothing is added
 # and the packages come out unsigned. When a command fails, the packager logs its full command line
 # at error level whatever the verbosity, including `security import -P <certificate password>` and
 # `notarytool --password <app password>`. GitHub masks only the exact stored value and the line is
 # Rust Debug-escaped, so a password containing `"` or `\` is printed unmasked (docs/building.md).
-# No rust-cache: a tag run restores nothing useful, evicts CI's caches, and would restore a cached
-# cargo-packager into the step that holds the secrets.
+# No rust-cache: a release run restores nothing useful, evicts CI's caches, and would restore a
+# cached cargo-packager into the step that holds the secrets.
 jobs:
+  # The same checks as development, so a push to main that skipped them cannot be released.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  # The version is computed before building so the binaries can carry it, and from one commit:
+  # every later job checks out this sha, so version, binaries and tag describe the same commit.
+  version:
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      sha: ${{ steps.compute.outputs.sha }}
+    steps:
+      # The branch tip, not the event SHA. semantic-release refuses to compute a version when the
+      # checked-out branch is behind its remote, and the event SHA is behind the moment any other
+      # commit lands on main while this runs. The concurrency group serialises runs, so the last
+      # one sees the newest tip.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - id: compute
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm install -g semantic-release@24 conventional-changelog-conventionalcommits@8
+          set +e
+          OUT=$(npx semantic-release --dry-run 2>&1); echo "$OUT"
+          V=$(printf '%s\n' "$OUT" | grep -oiE 'next release version is [0-9]+\.[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          if [ -z "$V" ]; then
+            # "Nothing to release" and "semantic-release broke" are different outcomes. The first
+            # is routine: a docs: or ci: commit asks for no release, and the jobs below skip on an
+            # empty version. Only the second may fail the run, because that is the case where a
+            # build could go out without a version.
+            if printf '%s\n' "$OUT" | grep -qiE 'there are no relevant changes|no new version is released'; then
+              echo "No releasable change; the build and release jobs will skip."
+              echo "version=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::semantic-release could not compute the next version; aborting rather than shipping an unversioned build"
+            exit 1
+          fi
+          echo "Computed version: $V"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   macos:
+    needs: version
+    if: needs.version.outputs.version != ''
     runs-on: macos-latest
     # `notarytool --wait` has no timeout of its own.
     timeout-minutes: 60
     env:
       SIGN: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+      V: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      # `release` needs this job, so a mismatched tag stops the whole run.
-      - name: Check the tag matches the version
-        run: grep -qxF "version = \"${GITHUB_REF_NAME#v}\"" Cargo.toml
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+      # The repository keeps a placeholder version; the release version exists only in the build.
+      - name: Stamp version
+        shell: bash
+        run: perl -0pi -e 's/^version = "[^"]*"/version = "'"$V"'"/m' Cargo.toml && grep -qxF "version = \"$V\"" Cargo.toml
       # The toolchain, its components and targets come from rust-toolchain.toml.
       - run: rustup toolchain install
       - run: cargo install cargo-packager --version 0.11.8 --locked
@@ -58,20 +121,34 @@ jobs:
       - name: Remove signing keychain
         if: always() && env.SIGN == 'true'
         run: security delete-keychain cargo-packager.keychain || true
+      # The in-app updater downloads this zip, not the DMG. ditto, not zip: the bundle holds
+      # symlinks and a signature that zip does not preserve.
+      - name: Zip the app for the updater
+        run: ditto -c -k --sequesterRsrc --keepParent target/release/wai.app "target/release/wai_${V}_aarch64.app.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: target/release/*.dmg
+          path: |
+            target/release/*.dmg
+            target/release/*.app.zip
           if-no-files-found: error
 
   windows:
+    needs: version
+    if: needs.version.outputs.version != ''
     runs-on: windows-latest
     # Cold release build of ~900 crates (no cache) on the slowest runner.
     timeout-minutes: 90
     env:
       SIGN: ${{ secrets.WINDOWS_CERTIFICATE != '' && secrets.WINDOWS_CERTIFICATE_PASSWORD != '' }}
+      V: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+      - name: Stamp version
+        shell: bash
+        run: perl -0pi -e 's/^version = "[^"]*"/version = "'"$V"'"/m' Cargo.toml && grep -qxF "version = \"$V\"" Cargo.toml
       - run: rustup toolchain install
       - run: cargo install cargo-packager --version 0.11.8 --locked
       # Built before the certificate is in the store; the packager's own build is then a no-op.
@@ -101,21 +178,46 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [macos, windows]
+    needs: [version, macos, windows]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+      # Into dist/, where .releaserc.json's `dist/*` asset glob looks.
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      # The updater verifies downloads against this file. It is written before the glob runs, so
+      # the list names the assets explicitly instead of `*`, which would include the file itself.
       - name: Checksums
         working-directory: dist
-        run: sha256sum *.dmg *.exe > SHA256SUMS.txt
-      - name: Draft release
+        run: sha256sum *.dmg *.zip *.exe > SHA256SUMS.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Release
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" --draft --generate-notes dist/*
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm install -g semantic-release@24 conventional-changelog-conventionalcommits@8
+          npx semantic-release
+      # Appended here, not through a notes plugin: semantic-release's notes come from commit
+      # subjects and say what changed, never how to run the result, and the binaries are unsigned.
+      - name: Append the install instructions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Reading the notes back keeps this additive. A missing release here means the step above
+          # failed quietly, which must fail the run.
+          gh release view "$TAG" --json body -q .body > /tmp/notes.md
+          cat .github/release-notes.md >> /tmp/notes.md
+          gh release edit "$TAG" --notes-file /tmp/notes.md
