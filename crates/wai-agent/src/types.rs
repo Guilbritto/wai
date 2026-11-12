@@ -156,6 +156,17 @@ pub enum SessionEvent {
         id: SessionId,
         text: String,
     },
+    /// A subagent's text, or with `thought` its thinking, a chunk at a time.
+    SubagentSaid {
+        id: SessionId,
+        thought: bool,
+        text: String,
+    },
+    /// A subagent's checklist, replaced whole.
+    SubagentPlan {
+        id: SessionId,
+        entries: Vec<PlanEntry>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +189,8 @@ pub struct SubagentPatch {
     pub description: Option<String>,
     pub state: Option<SubagentState>,
     pub used: Option<u64>,
+    /// The agent lets the client stop it alone (`capabilities.cancel`); `None` means unchanged.
+    pub can_stop: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

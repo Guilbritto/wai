@@ -217,6 +217,8 @@ pub struct Workspace {
     pub(crate) next_terminal: u32,
     /// The default agent's sessions, each with its cwd canonicalized for the project filter.
     pub history: Vec<(PathBuf, SessionSummary)>,
+    /// History ids whose Claude conversation was open in another process at the last refresh.
+    pub(crate) elsewhere: std::collections::HashSet<String>,
     pub all_projects: bool,
     pub(crate) history_task: Option<Task<()>>,
     pub sidebar_tab: SidebarTab,
@@ -433,6 +435,7 @@ impl Workspace {
             active_terminal: 0,
             next_terminal: 1,
             history: Vec::new(),
+            elsewhere: Default::default(),
             all_projects: false,
             history_task: None,
             sidebar_tab: SidebarTab::default(),

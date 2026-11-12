@@ -307,7 +307,7 @@ impl Workspace {
     }
 }
 
-fn plan_row(entry: &PlanEntry, cx: &App) -> impl IntoElement {
+pub(crate) fn plan_row(entry: &PlanEntry, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     let (icon, color) = match entry.status.as_str() {
         "completed" => (IconName::CircleCheck, theme.success),

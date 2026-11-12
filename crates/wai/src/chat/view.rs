@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -66,6 +67,33 @@ pub enum ChatEvent {
     Hide,
     /// Esc or Stop in a chat whose session has not started: back to the draft.
     StopStart,
+}
+
+/// Brings `map[key]` up to date with `text`: creates it, pushes the new tail, or starts over
+/// when the text shrank or the cut is no char boundary.
+pub(super) fn sync_markdown<K: Eq + Hash>(
+    map: &mut HashMap<K, Markdown>,
+    key: K,
+    text: &str,
+    cx: &mut App,
+) {
+    match map.get_mut(&key) {
+        Some(md) if text.len() >= md.pushed && text.is_char_boundary(md.pushed) => {
+            let delta = &text[md.pushed..];
+            md.state.update(cx, |state, cx| state.push_str(delta, cx));
+            md.pushed = text.len();
+        }
+        _ => {
+            let state = cx.new(|cx| TextViewState::markdown(text, cx).selectable(true));
+            map.insert(
+                key,
+                Markdown {
+                    state,
+                    pushed: text.len(),
+                },
+            );
+        }
+    }
 }
 
 /// A message's markdown and how many bytes of it the view already handed over.
@@ -143,6 +171,8 @@ pub struct ChatSession {
     pub(super) registry: WeakEntity<AgentRegistry>,
     /// Per `Agent`/`Thought` row.
     pub(super) texts: HashMap<usize, Markdown>,
+    /// Per subagent and `said` entry, its Markdown.
+    pub(super) sub_texts: HashMap<(String, usize), Markdown>,
     /// Per `Tool` row.
     pub(super) diffs: HashMap<usize, Vec<DiffView>>,
     /// Per waiting `Permission` card, by request id.
@@ -243,6 +273,7 @@ impl ChatSession {
             menu_closed: false,
             registry,
             texts: HashMap::new(),
+            sub_texts: HashMap::new(),
             diffs: HashMap::new(),
             card_diffs: HashMap::new(),
             open_thoughts: HashSet::new(),
@@ -599,8 +630,23 @@ impl ChatSession {
         }
     }
 
+    /// Cancels one subagent. Nothing changes until the agent reports it stopped.
+    pub fn stop_subagent(&self, id: &str) {
+        if self.model.stoppable(id) {
+            self.handle.cancel(id.into());
+        }
+    }
+
     pub fn handle_event(&mut self, ev: &SessionEvent, cx: &mut Context<Self>) {
         let rows = self.model.items.len();
+        if let SessionEvent::SubagentSaid { id, .. } = ev {
+            self.update_model(cx, |m| m.apply(ev));
+            // Only an open drawer shows it: a closed one wakes nothing.
+            if self.drawer.as_deref() == Some(id.as_str()) {
+                self.schedule_flush(cx);
+            }
+            return;
+        }
         self.pickers_stale |= matches!(ev, SessionEvent::ConfigChanged(_));
         let Some(ix) = self.update_model(cx, |m| m.apply(ev)) else {
             return cx.notify(); // header: title, usage, mode
@@ -889,6 +935,9 @@ impl ChatSession {
                 for ix in rows {
                     this.sync_row(ix, cx);
                 }
+                if this.drawer.is_some() {
+                    cx.notify();
+                }
             })
             .ok();
         }));
@@ -916,20 +965,7 @@ impl ChatSession {
                 self.diffs.insert(ix, diffs);
                 // A subagent's answer is shown as Markdown in its drawer.
                 if tool.kind == "subagent" && !tool.text.is_empty() {
-                    let text = &tool.text;
-                    match self.texts.get_mut(&ix) {
-                        Some(md) if text.len() >= md.pushed && text.is_char_boundary(md.pushed) => {
-                            let delta = &text[md.pushed..];
-                            md.state.update(cx, |state, cx| state.push_str(delta, cx));
-                            md.pushed = text.len();
-                        }
-                        _ => {
-                            let state =
-                                cx.new(|cx| TextViewState::markdown(text, cx).selectable(true));
-                            let pushed = text.len();
-                            self.texts.insert(ix, Markdown { state, pushed });
-                        }
-                    }
+                    sync_markdown(&mut self.texts, ix, &tool.text, cx);
                 }
             }
             ChatItem::Permission { .. } => {}
@@ -1013,17 +1049,18 @@ impl ChatSession {
         self.bound = next_binding();
         cx.emit(ChatEvent::Bound);
         self.model.items.clear();
+        self.model.subagents.clear();
         self.model.waiting.clear();
         self.model.steering.clear();
         self.model.usage = None;
         self.texts.clear();
+        self.sub_texts.clear();
         self.diffs.clear();
         self.card_diffs.clear();
         self.open_thoughts.clear();
         self.open_steps.clear();
         self.open_groups.clear();
         self.questions.clear();
-        self.model.subagents.clear();
         self.drawer = None;
         self.agent_cursor = None;
         self.scroller.update(cx, |list, cx| list.reset(0, cx));
@@ -1584,7 +1621,87 @@ mod tests {
                 drawer.try_find(("tool", read_ix)).is_some(),
                 "the call's line"
             );
-            assert!(drawer.try_find("subagent-answer").is_some(), "the answer");
+            assert!(drawer.try_find("subagent-plan").is_some(), "its checklist");
+            assert!(
+                drawer.try_find(("subagent-thought", 1usize)).is_some(),
+                "its thinking"
+            );
+            assert!(
+                drawer.try_find(("subagent-text", 2usize)).is_some(),
+                "its text"
+            );
+            assert!(
+                drawer.try_find("subagent-answer").is_none(),
+                "it spoke: its text holds the answer"
+            );
+        });
+    }
+
+    fn silent_subagent(session: &Entity<ChatSession>, reply: bool, cx: &mut VisualTestContext) {
+        session.update(cx, |s, cx| {
+            let patch = SubagentPatch {
+                id: "c".into(),
+                title: Some("Task".into()),
+                state: Some(SubagentState::Running),
+                ..Default::default()
+            };
+            s.handle_event(&SessionEvent::Subagent(patch), cx);
+            if reply {
+                let text = "found it".to_string();
+                s.handle_event(
+                    &SessionEvent::SubagentReply {
+                        id: "c".into(),
+                        text,
+                    },
+                    cx,
+                );
+            }
+        });
+    }
+
+    fn said(text: &str) -> SessionEvent {
+        SessionEvent::SubagentSaid {
+            id: "c".into(),
+            thought: false,
+            text: text.into(),
+        }
+    }
+
+    #[gpui_kit::test]
+    fn drawer_shows_the_answer_only_for_a_silent_subagent(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        silent_subagent(&session, true, cx);
+        session.update(cx, |s, cx| s.open_drawer(Some("c".into()), cx));
+        assert!(shows("subagent-answer", cx));
+
+        session.update(cx, |s, cx| s.handle_event(&said("found it"), cx));
+        wait_until(cx, "its text", |cx| shows(("subagent-text", 0usize), cx));
+        assert!(!shows("subagent-answer", cx));
+    }
+
+    #[gpui_kit::test]
+    fn subagent_words_wake_only_an_open_drawer(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        silent_subagent(&session, false, cx);
+        session.update(cx, |s, cx| s.handle_event(&said("hi"), cx));
+        assert!(session.read_with(cx, |s, _| s.flush.is_none()));
+
+        session.update(cx, |s, cx| {
+            s.open_drawer(Some("c".into()), cx);
+            s.handle_event(&said(" there"), cx);
+        });
+        assert!(session.read_with(cx, |s, _| s.flush.is_some()));
+        wait_until(cx, "its words", |cx| {
+            cx.update(|window, cx| window.render_frame(cx));
+            session.read_with(cx, |s, cx| {
+                s.sub_texts.get(&("c".to_string(), 0)).is_some_and(|md| {
+                    md.state.read(cx).rendered_text().as_str().trim() == "hi there"
+                })
+            })
         });
     }
 
@@ -1612,6 +1729,96 @@ mod tests {
         cx.simulate_keystrokes("escape");
         wait_until(cx, "the turn's end", |cx| {
             state(&session, cx) == TurnState::Idle
+        });
+    }
+
+    /// Review focus 2: Stop on an agent-list row stops that subagent and opens no drawer.
+    #[gpui_kit::test]
+    fn a_subagent_stops_from_the_agent_list(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(
+            cx,
+            fake_settings("--subagent --background --ask-permission"),
+        );
+        let session = start_session(&workspace, cx);
+        send("edit", cx);
+        let sub = session.read_with(cx, |s, _| format!("{}-sub", s.id));
+        wait_until(cx, "a stoppable subagent", |cx| {
+            session.read_with(cx, |s, _| s.model.done && s.model.stoppable(&sub))
+        });
+        click_edits(None, ("agent-stop", 0usize), cx);
+        wait_until(cx, "the subagent stopped", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model
+                    .subagents
+                    .iter()
+                    .any(|x| x.id == sub && x.state == SubagentState::Stopped)
+            })
+        });
+        session.read_with(cx, |s, _| {
+            assert!(s.model.waiting.is_empty());
+            assert!(s.drawer.is_none());
+        });
+        assert_eq!(state(&session, cx), TurnState::Idle);
+        assert!(!shows(("agent-stop", 0usize), cx));
+    }
+
+    /// Stop in the drawer's header stops the subagent; the drawer follows its state.
+    #[gpui_kit::test]
+    fn a_subagent_stops_from_its_drawer(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(
+            cx,
+            fake_settings("--subagent --background --ask-permission"),
+        );
+        let session = start_session(&workspace, cx);
+        send("edit", cx);
+        let sub = session.read_with(cx, |s, _| format!("{}-sub", s.id));
+        wait_until(cx, "a stoppable subagent", |cx| {
+            session.read_with(cx, |s, _| s.model.done && s.model.stoppable(&sub))
+        });
+        click_edits(None, ("agent-row", 0usize), cx);
+        click_edits(None, "subagent-stop", cx);
+        wait_until(cx, "the subagent stopped", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model
+                    .subagents
+                    .iter()
+                    .any(|x| x.id == sub && x.state == SubagentState::Stopped)
+            })
+        });
+        session.read_with(cx, |s, _| {
+            assert_eq!(s.drawer.as_deref(), Some(sub.as_str()));
+        });
+        assert!(!shows("subagent-stop", cx));
+    }
+
+    /// Review focus 3: a restart clears the subagents, since the agent re-announces its own.
+    #[gpui_kit::test]
+    fn restart_clears_the_subagents(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--subagent"));
+        let session = start_session(&workspace, cx);
+        send("hi", cx);
+        wait_until(cx, "the subagent", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.state == TurnState::Idle && !s.model.subagents.is_empty()
+            })
+        });
+        let sub = session.read_with(cx, |s, _| s.model.subagents[0].id.clone());
+        session.update(cx, |s, cx| {
+            s.open_drawer(Some(sub), cx);
+            super::sync_markdown(&mut s.sub_texts, ("stale".to_string(), 0), "x", cx);
+        });
+        cx.update(|window, cx| session.update(cx, |s, cx| s.load(false, window, cx)));
+        wait_until(cx, "the restart", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.state == TurnState::Idle && s.model.subagents.is_empty()
+            })
+        });
+        session.read_with(cx, |s, _| {
+            assert!(s.drawer.is_none());
+            assert!(s.sub_texts.is_empty());
         });
     }
 
@@ -1677,6 +1884,9 @@ mod tests {
                 started,
                 ended: Some(started),
                 turn: s.model.turn,
+                said: Vec::new(),
+                plan: Vec::new(),
+                can_stop: false,
             });
             s.open_drawer(Some("old".into()), cx);
         });
@@ -1827,6 +2037,9 @@ mod tests {
                     started: Instant::now(),
                     ended: None,
                     turn: 0,
+                    said: Vec::new(),
+                    plan: Vec::new(),
+                    can_stop: false,
                 });
             }
             cx.notify();
@@ -1944,6 +2157,9 @@ mod tests {
                 started,
                 ended: Some(started),
                 turn: s.model.turn,
+                said: Vec::new(),
+                plan: Vec::new(),
+                can_stop: false,
             });
             s.open_drawer(Some("old".into()), cx);
         });

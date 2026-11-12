@@ -340,4 +340,24 @@ mod tests {
             ids(&workspace, cx) == ["session-1"]
         });
     }
+
+    #[gpui_kit::test]
+    fn history_marks_conversations_open_elsewhere(cx: &mut TestAppContext) {
+        let (workspace, cx, tmp) = setup(cx, 2);
+        let home = tmp.path().join("home");
+        click(("history", 1usize), cx);
+        wait_until(cx, "the session", |cx| ids(&workspace, cx) == ["session-1"]);
+        fresh(&home, "session-0");
+        fresh(&home, "session-1");
+        workspace.update(cx, |w, cx| w.refresh_history(cx));
+        wait_until(cx, "the mark", |cx| {
+            workspace.read_with(cx, |w, _| w.elsewhere.contains("session-0"))
+        });
+        assert!(workspace.read_with(cx, |w, _| !w.elsewhere.contains("session-1")));
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find(("history-elsewhere", 0usize)).is_some());
+            assert!(window.try_find(("history-elsewhere", 1usize)).is_none());
+        });
+    }
 }
