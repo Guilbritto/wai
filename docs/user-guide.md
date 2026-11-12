@@ -90,7 +90,7 @@ Each open session has a coloured dot in the Sessions panel, and a time at the ri
 | Dot | Meaning |
 |---|---|
 | Teal in Aurora, cyan in light mode | `Working` |
-| Amber, labelled `Needs you` | A permission card or a question waits for you |
+| Amber | A permission card or a question waits for you: the row's second line reads `Permission:` or `Question:` |
 | Grey | Idle |
 | Red | `Error`: the agent exited or failed |
 
@@ -129,7 +129,7 @@ In a tab-indented file, the lines Revert puts back are indented with tabs: Claud
 - **Open elsewhere:** a Claude conversation that another process runs (`claude --resume` in a terminal, another wai) or that changed in the last 2 minutes asks first when you open it from History: **Fork** opens a copy beside, **Open anyway** opens it here.
 - **Right-click menus:** an **Open** row's menu has **Rename**, **Fork**, **Move to** each other group, **New group with this session** and, for a session in a group, **Remove from group**. A group header's menu has **Rename group** and **Delete group**, and a **History** row's has **Fork**. The rows themselves keep only **Open to the side** and, on **Open** rows, the **×** that ends the session.
 - **Renaming a session:** **Rename** in its **Open** row's menu, or a double click on the row, turns its title into a text box. **Enter**, or clicking elsewhere, keeps the name; **Esc** does not. The name shows wherever the session's title does, is kept on relaunch and is never sent to the agent, whose own titles no longer replace it. An empty name gives the agent's title back. Ending the session drops the name.
-- **Groups:** the **+** beside **Open** adds a group, ready for its name. Put a session in a group from its row's menu, or by dragging its **Open** row onto the group's header; take it out with **Remove from group**, or by dragging it onto the sessions above the groups (or the **Open** heading). A session is in one group at most. A group's header has a chevron that folds it, its name and how many sessions it holds; a double click on the name renames it. **Delete group** deletes the group only: its sessions stay open, in no group. A session that ends leaves its group, and an empty group stays until you delete it. Groups are kept on relaunch.
+- **Groups:** **New group** (the folder icon in the title row; its **+** starts a session) adds a group, ready for its name. Put a session in a group from its row's menu, or by dragging its **Open** row onto the group's header; take it out with **Remove from group**, or by dragging it onto the sessions above the groups (or the **Open** heading). A session is in one group at most. A group's header has a chevron that folds it, its name and how many sessions it holds; a double click on the name renames it. **Delete group** deletes the group only: its sessions stay open, in no group. A session that ends leaves its group, and an empty group stays until you delete it. Groups are kept on relaunch.
 - **Reordering:** drag an **Open** row onto another to take its place: dragged down, it lands after that row; dragged up, before it. A row dropped on a row of another group joins that group. The **Agents** cards follow the order, which is kept on relaunch.
 - **Opening a row:** a click shows the session in the focused pane. **Open to the side** adds a pane, while there are fewer than four.
 - **Following a session:** moving to a session from another folder (opening its row, clicking its pane, **⌘⌥→**, closing the pane beside it) opens that folder, as **⌘O** does: the editor pane closes, after asking about unsaved edits, and Files, Search, History and templates follow. Relaunching and sessions opened by extensions never move you; a session whose folder is gone just shows.
@@ -215,7 +215,7 @@ wai keeps a backup of every tab with unsaved edits:
 The Search tab searches file contents across the project:
 - **Options:** **Aa** matches case and **.\*** reads the query as a regular expression.
 - **When it runs:** typing pauses briefly before it searches, and a new query cancels the old one.
-- **Results:** they arrive in batches, grouped by file, under a summary such as `9 results in 3 files`. Each file's header (chevron, mark, name, its folder, a count) folds its matches; **Collapse all** in the title row folds every file. Matches show their line number, with the matched text highlighted; the last clicked one stays marked. A click opens the file at the line.
+- **Results:** they arrive in batches, grouped by file, under a summary such as `9 matches in 3 files`. Each file's header (chevron, mark, name, its folder, a count) folds its matches; **Collapse all** in the title row folds every file. Matches show their line number, with the matched text highlighted; the last clicked one stays marked. A click opens the file at the line.
 - **What it skips:** it skips what `.gitignore` excludes inside a git repository.
 - **Limit:** it stops at 10,000 matches (`Showing first 10,000`).
 
@@ -273,7 +273,7 @@ Clicking a card shows that session in the focused pane; dragging it onto a pane 
 | Move from an empty prompt into the agent list | ↓ | ↓ | prompt box |
 | In the agent list: move / open / back to the prompt | ↑ ↓ / Enter / Esc | ↑ ↓ / Enter / Esc | agent list |
 | Close the subagent drawer | Esc | Esc | chat session, drawer open |
-| Stop the turn | Esc | Esc | chat session, no drawer |
+| Stop the turn | Esc | Esc | chat session, no drawer or agent list |
 | Send the prompt / new line | Enter / Shift+Enter | Enter / Shift+Enter | prompt box |
 | Answer the top permission card | 1–9 | 1–9 | prompt box, while empty |
 | In the `/` menu: move / complete / close | ↑ ↓ / Enter or Tab / Esc | ↑ ↓ / Enter or Tab / Esc | prompt box |
