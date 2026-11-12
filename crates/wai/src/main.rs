@@ -5,6 +5,7 @@ mod aurora;
 mod chat;
 mod claude_config;
 mod editor;
+mod elsewhere;
 mod ext_host;
 mod ext_panel;
 mod extensions_view;
