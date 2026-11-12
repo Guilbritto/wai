@@ -159,6 +159,19 @@ impl ChatSession {
             let id = sub.id.clone();
             let on = selected(ix + 1, Some(&sub.id));
             let name_el = div().child(name.to_string());
+            let stop = self.model.stoppable(&sub.id).then(|| {
+                let target = sub.id.clone();
+                Button::new(("agent-stop", ix))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Square)
+                    .tooltip("Stop subagent")
+                    .accessibility_label("Stop subagent")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.stop_subagent(&target);
+                    }))
+            });
             row(
                 ("agent-row", ix).into(),
                 on,
@@ -168,6 +181,7 @@ impl ChatSession {
                 stat.clone(),
             )
             .aria_label(join([name, task, state, &stat]))
+            .children(stop)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.agent_cursor = None;
                 let again = this.drawer.as_deref() == Some(id.as_str());
@@ -400,6 +414,19 @@ impl ChatSession {
             .tooltip("Close")
             .accessibility_label("Close subagent")
             .on_click(cx.listener(|this, _, _, cx| this.open_drawer(None, cx)));
+        let stop = self.model.stoppable(&sub.id).then(|| {
+            let target = sub.id.clone();
+            Button::new("subagent-stop")
+                .ghost()
+                .xsmall()
+                .icon(IconName::Square)
+                .tooltip("Stop subagent")
+                .accessibility_label("Stop subagent")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.stop_subagent(&target);
+                }))
+        });
         let head = h_flex()
             .flex_none()
             .items_center()
@@ -425,6 +452,7 @@ impl ChatSession {
                     .child(task.to_string()),
             )
             .child(div().flex_none().text_color(faint).child(stat))
+            .children(stop)
             .child(close);
         // Follow the bottom only while it is where the reader is. The offset is last frame's,
         // so the view trails a growing body by a frame.

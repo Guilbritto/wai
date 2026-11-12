@@ -630,6 +630,13 @@ impl ChatSession {
         }
     }
 
+    /// Cancels one subagent. Nothing changes until the agent reports it stopped.
+    pub fn stop_subagent(&self, id: &str) {
+        if self.model.stoppable(id) {
+            self.handle.cancel(id.into());
+        }
+    }
+
     pub fn handle_event(&mut self, ev: &SessionEvent, cx: &mut Context<Self>) {
         let rows = self.model.items.len();
         if let SessionEvent::SubagentSaid { id, .. } = ev {
@@ -1722,6 +1729,67 @@ mod tests {
         wait_until(cx, "the turn's end", |cx| {
             state(&session, cx) == TurnState::Idle
         });
+    }
+
+    /// Review focus 2: Stop on an agent-list row stops that subagent and opens no drawer.
+    #[gpui_kit::test]
+    fn a_subagent_stops_from_the_agent_list(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(
+            cx,
+            fake_settings("--subagent --background --ask-permission"),
+        );
+        let session = start_session(&workspace, cx);
+        send("edit", cx);
+        let sub = session.read_with(cx, |s, _| format!("{}-sub", s.id));
+        wait_until(cx, "a stoppable subagent", |cx| {
+            session.read_with(cx, |s, _| s.model.done && s.model.stoppable(&sub))
+        });
+        click_edits(None, ("agent-stop", 0usize), cx);
+        wait_until(cx, "the subagent stopped", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model
+                    .subagents
+                    .iter()
+                    .any(|x| x.id == sub && x.state == SubagentState::Stopped)
+            })
+        });
+        session.read_with(cx, |s, _| {
+            assert!(s.model.waiting.is_empty());
+            assert!(s.drawer.is_none());
+        });
+        assert_eq!(state(&session, cx), TurnState::Idle);
+        assert!(!shows(("agent-stop", 0usize), cx));
+    }
+
+    /// Stop in the drawer's header stops the subagent; the drawer follows its state.
+    #[gpui_kit::test]
+    fn a_subagent_stops_from_its_drawer(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(
+            cx,
+            fake_settings("--subagent --background --ask-permission"),
+        );
+        let session = start_session(&workspace, cx);
+        send("edit", cx);
+        let sub = session.read_with(cx, |s, _| format!("{}-sub", s.id));
+        wait_until(cx, "a stoppable subagent", |cx| {
+            session.read_with(cx, |s, _| s.model.done && s.model.stoppable(&sub))
+        });
+        click_edits(None, ("agent-row", 0usize), cx);
+        click_edits(None, "subagent-stop", cx);
+        wait_until(cx, "the subagent stopped", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model
+                    .subagents
+                    .iter()
+                    .any(|x| x.id == sub && x.state == SubagentState::Stopped)
+            })
+        });
+        session.read_with(cx, |s, _| {
+            assert_eq!(s.drawer.as_deref(), Some(sub.as_str()));
+        });
+        assert!(!shows("subagent-stop", cx));
     }
 
     /// Review focus 3: a restart clears the subagents, since the agent re-announces its own.
