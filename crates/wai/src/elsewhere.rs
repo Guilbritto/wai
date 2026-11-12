@@ -101,7 +101,7 @@ impl Workspace {
                 if found.is_empty() {
                     then(this, window, cx)
                 } else {
-                    this.warn_elsewhere(summary, Rc::new(then), window, cx)
+                    this.warn_elsewhere(summary, then, window, cx)
                 }
             })
             .ok();
@@ -112,10 +112,11 @@ impl Workspace {
     fn warn_elsewhere(
         &mut self,
         summary: SessionSummary,
-        then: Rc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>,
+        then: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let then = Rc::new(then);
         let this = cx.entity().downgrade();
         let forkable = self.can_fork("claude", cx);
         window.open_dialog(cx, move |dialog, _, _| {
@@ -232,7 +233,7 @@ mod tests {
             .spawn()
             .unwrap();
         let home = tempfile::tempdir().unwrap();
-        let found = open_elsewhere(home.path(), &[id.clone()], &HashSet::new());
+        let found = open_elsewhere(home.path(), std::slice::from_ref(&id), &HashSet::new());
         let _ = child.kill();
         let _ = child.wait();
         assert!(found.contains(&id));
@@ -287,7 +288,7 @@ mod tests {
         let (workspace, cx, tmp) = setup(cx, 2);
         fresh(&tmp.path().join("home"), "session-0");
         click(("history", 0usize), cx);
-        wait_until(cx, "the warning", |cx| asking(cx));
+        wait_until(cx, "the warning", asking);
         cx.update(|window, _| window.find_by_label("This conversation is open elsewhere"));
         assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
         click("open-anyway", cx);
@@ -299,7 +300,7 @@ mod tests {
         let (workspace, cx, tmp) = setup(cx, 2);
         fresh(&tmp.path().join("home"), "session-0");
         click(("history", 0usize), cx);
-        wait_until(cx, "the warning", |cx| asking(cx));
+        wait_until(cx, "the warning", asking);
         click("confirm", cx);
         wait_until(cx, "the fork", |cx| {
             let ids = ids(&workspace, cx);
@@ -312,7 +313,7 @@ mod tests {
         let (workspace, cx, tmp) = setup(cx, 2);
         fresh(&tmp.path().join("home"), "session-0");
         click(("history", 0usize), cx);
-        wait_until(cx, "the warning", |cx| asking(cx));
+        wait_until(cx, "the warning", asking);
         click("cancel", cx);
         cx.run_until_parked();
         assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));

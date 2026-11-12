@@ -704,7 +704,10 @@ impl ChatSession {
         let current = self.place.as_ref().or(self.head.as_ref()).map(|h| &h.root);
         match self.roots.get(&dir) {
             Some(None) => return,
-            Some(Some(root)) if Some(root) == current => return,
+            Some(Some(root)) if Some(root) == current => {
+                self.place_read += 1;
+                return;
+            }
             _ => {}
         }
         self.place_read += 1;
@@ -2894,7 +2897,7 @@ mod tests {
         );
     }
 
-    /// `a` loses its process after one chunk; a new process starts `b` with the same id.
+    /// `a` loses its process (killed once it has replied); a new process starts `b` with the same id.
     fn two_sessions_one_id(
         cx: &mut TestAppContext,
     ) -> (
@@ -2902,11 +2905,23 @@ mod tests {
         Entity<ChatSession>,
         Entity<ChatSession>,
         &mut VisualTestContext,
+        tempfile::TempDir,
     ) {
         cx.executor().allow_parking(); // the fake agent is a real process
-        let (workspace, cx) = open(cx, fake_settings("--crash-after 1"));
+        let dir = tempfile::tempdir().unwrap();
+        let flag = format!("--pid-file '{}'", dir.path().join("agent.pid").display());
+        let (workspace, cx) = open(cx, fake_settings(&flag));
         let a = start_session(&workspace, cx);
         a.update(cx, |s, cx| s.send_text("hi", cx));
+        wait_until(cx, "a's reply", |cx| {
+            last_agent_text(&a, cx).as_deref() == Some("Hello from fake agent")
+        });
+        let pid = std::fs::read_to_string(dir.path().join("agent.pid")).unwrap();
+        // a process this test spawned
+        std::process::Command::new("kill")
+            .arg(pid.trim())
+            .status()
+            .unwrap();
         wait_until(cx, "the crash", |cx| {
             matches!(state(&a, cx), TurnState::Error(_))
         });
@@ -2916,7 +2931,7 @@ mod tests {
             b.read_with(cx, |s, _| s.id.clone()),
         );
         assert_eq!(ids, ("fake-1".to_string(), "fake-1".to_string()));
-        (workspace, a, b, cx)
+        (workspace, a, b, cx, dir)
     }
 
     fn notices(session: &Entity<ChatSession>, text: &str, cx: &mut VisualTestContext) -> bool {
@@ -2928,23 +2943,26 @@ mod tests {
 
     #[gpui_kit::test]
     fn an_id_the_agent_reuses_goes_to_its_new_session(cx: &mut TestAppContext) {
-        let (_workspace, a, b, cx) = two_sessions_one_id(cx);
+        let (_workspace, a, b, cx, _dir) = two_sessions_one_id(cx);
+        let count = |cx: &mut VisualTestContext| {
+            a.read_with(cx, |s, _| {
+                (s.model.items.iter())
+                    .filter(|i| matches!(i, ChatItem::Agent { .. }))
+                    .count()
+            })
+        };
+        let before = count(cx);
         b.update(cx, |s, cx| s.send_text("go", cx));
         wait_until(cx, "b's reply", |cx| {
-            last_agent_text(&b, cx).as_deref() == Some("Hello")
+            last_agent_text(&b, cx).as_deref() == Some("Hello from fake agent")
         });
-        let agents = a.read_with(cx, |s, _| {
-            (s.model.items.iter())
-                .filter(|i| matches!(i, ChatItem::Agent { .. }))
-                .count()
-        });
-        assert_eq!(agents, 1, "a keeps only its own reply");
+        assert_eq!(count(cx), before, "a keeps only its own reply");
         assert!(notices(&a, super::REUSED, cx));
     }
 
     #[gpui_kit::test]
     fn restart_takes_a_reused_id_back(cx: &mut TestAppContext) {
-        let (_workspace, a, b, cx) = two_sessions_one_id(cx);
+        let (_workspace, a, b, cx, _dir) = two_sessions_one_id(cx);
         cx.update(|window, cx| a.update(cx, |s, cx| s.load(false, window, cx)));
         wait_until(cx, "the replay", |cx| state(&a, cx) == TurnState::Idle);
         let replay = [
@@ -3320,6 +3338,31 @@ mod tests {
         assert!(session.read_with(cx, |s, _| s.place.is_none()));
         assert_eq!(pill("pill-folder", cx).as_deref(), Some("super"));
         assert_eq!(pill("pill-branch", cx).as_deref(), Some("main"));
+        leave(&workspace, cx);
+    }
+
+    #[gpui_kit::test]
+    fn a_cached_read_back_home_drops_an_earlier_read_in_flight(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir, (sup, _)) = follow_setup(cx, |sup, wt| {
+            format!(
+                "--read {}/a.txt --read {}/b.txt",
+                wt.display(),
+                sup.display()
+            )
+        });
+        let session = start_session(&workspace, cx);
+        head_landed(&session, cx);
+        session.update(cx, |s, _| {
+            let root = s.head.as_ref().unwrap().root.clone();
+            s.roots.insert(sup, Some(root));
+        });
+        send("go", cx);
+        wait_until(cx, "the turn", |cx| {
+            session.read_with(cx, |s, _| s.model.state == TurnState::Idle)
+        });
+        cx.run_until_parked();
+        assert!(session.read_with(cx, |s, _| s.place.is_none()));
+        assert_eq!(pill("pill-folder", cx).as_deref(), Some("super"));
         leave(&workspace, cx);
     }
 

@@ -145,16 +145,16 @@ pub(crate) fn head(folder: &Path) -> Option<Head> {
     let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
     let root = canon(top);
     let worktree = git_dir != common;
-    let main = if worktree {
+    let main_dir = if worktree {
         main_folder(folder, common)
     } else {
         None
     };
-    let folder = main.map_or_else(|| root.clone(), |m| canon(&m));
+    let main = main_dir.map_or_else(|| root.clone(), |m| canon(&m));
     Some(Head {
-        branch: current_branch(&folder),
+        branch: current_branch(&root),
         root,
-        folder,
+        folder: main,
         worktree,
     })
 }
@@ -365,7 +365,8 @@ pub(crate) mod tests {
             .unwrap();
         assert!(
             out.status.success(),
-            "{}",
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
     }
@@ -653,8 +654,8 @@ pub(crate) mod tests {
     #[test]
     fn repo_with_orders_branches_by_creation() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = repo_with(&tmp.path().join("r"), &["a", "b"]);
-        assert_eq!(repo(&root).unwrap().branches, ["b", "a", "main"]);
+        let root = repo_with(&tmp.path().join("r"), &["x", "y"]);
+        assert_eq!(repo(&root).unwrap().branches, ["y", "x", "main"]);
     }
 
     #[test]
