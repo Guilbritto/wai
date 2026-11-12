@@ -404,11 +404,14 @@ impl Workspace {
     /// The Sessions panel: its title row and filter, then the Open section (drafts and sessions
     /// outside any group, then each group under its header) over History. A row keeps its index
     /// in `sessions`, whichever group draws it. With text in the filter only matching titles show,
-    /// and a group holding one shows expanded without changing its own folded state.
+    /// and Open, History and a group holding one show expanded without changing their own folded
+    /// state.
     fn render_sessions(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let filter = self.filter(cx);
         let filtering = !filter.is_empty();
+        let open_folded = self.open_folded && !filtering;
+        let history_folded = self.history_folded && !filtering;
         let shown = |session: &Entity<ChatSession>| shows(&filter, session_title(session.read(cx)));
         let members = |group: Option<usize>| {
             (self.sessions.iter().enumerate())
@@ -480,19 +483,17 @@ impl Workspace {
                 .prefix(Icon::new(IconName::Search).xsmall().text_color(faint))
                 .suffix(kbd),
         );
-        let open_header = section_header(
-            "open-section",
-            "Open",
-            count.to_string(),
-            self.open_folded,
-            cx,
-        )
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.open_folded = !this.open_folded;
-            this.save_state(cx);
-            cx.notify();
-        }))
-        .test_support();
+        let open_header =
+            section_header("open-section", "Open", count.to_string(), open_folded, cx)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if this.filtering(cx) {
+                        return;
+                    }
+                    this.open_folded = !this.open_folded;
+                    this.save_state(cx);
+                    cx.notify();
+                }))
+                .test_support();
         v_flex()
             .size_full()
             .child(title)
@@ -515,7 +516,7 @@ impl Workspace {
                     .id("open-list")
                     .min_h_0()
                     .overflow_y_scroll()
-                    .when(!self.history_folded, |el| el.max_h(relative(0.6)))
+                    .when(!history_folded, |el| el.max_h(relative(0.6)))
                     .child(
                         // A row dropped here leaves its group.
                         v_flex()
@@ -528,19 +529,22 @@ impl Workspace {
                                 this.group_session(dragged, None, cx)
                             }))
                             .child(open_header)
-                            .when(!self.open_folded, |el| {
-                                el.children(drafts).children(ungrouped)
-                            })
+                            .when(!open_folded, |el| el.children(drafts).children(ungrouped))
                             .test_support(),
                     )
-                    .when(!self.open_folded, |el| el.children(groups)),
+                    .when(!open_folded, |el| el.children(groups)),
             )
-            .child(self.history_section(cx))
+            .child(self.history_section(history_folded, cx))
     }
 
     /// The Sessions filter's text, lowercased: rows show when their title holds it.
     fn filter(&self, cx: &App) -> String {
         self.sessions_filter.read(cx).value().to_lowercase()
+    }
+
+    /// The filter has text: the sections and groups show unfolded, and their toggles wait.
+    fn filtering(&self, cx: &App) -> bool {
+        !self.sessions_filter.read(cx).value().is_empty()
     }
 
     /// The History rows the filter leaves.
@@ -757,6 +761,9 @@ impl Workspace {
                         false => "Collapse group",
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.filtering(cx) {
+                            return;
+                        }
                         this.groups[ix].collapsed = !this.groups[ix].collapsed;
                         this.save_state(cx);
                         cx.notify();
@@ -832,15 +839,18 @@ impl Workspace {
     }
 
     /// History under Open: its header with the All switch (today's All projects), then the
-    /// agent's sessions the filter leaves, lazily, or the hint to choose an AI.
-    fn history_section(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+    /// agent's sessions the filter leaves, lazily, or the hint to choose an AI. `folded` as drawn.
+    fn history_section(&self, folded: bool, cx: &Context<Self>) -> impl IntoElement + use<> {
         let rows = self.listed_history(cx).len();
         let scope = match self.all_projects {
             true => "· all projects",
             false => "· this project",
         };
-        let header = section_header("history-section", "History", scope, self.history_folded, cx)
+        let header = section_header("history-section", "History", scope, folded, cx)
             .on_click(cx.listener(|this, _, _, cx| {
+                if this.filtering(cx) {
+                    return;
+                }
                 this.history_folded = !this.history_folded;
                 this.save_state(cx);
                 cx.notify();
@@ -862,7 +872,7 @@ impl Workspace {
                         })),
                 ),
             )
-            .when(!self.history_folded, |el| {
+            .when(!folded, |el| {
                 el.map(|el| match self.default_agent() {
                     None => el.child(
                         div()
@@ -2197,6 +2207,40 @@ mod tests {
         assert_eq!(open(cx), ["Session 1", "Session 2"]);
         assert_eq!(history(cx).len(), 3);
         assert_eq!(label("sessions-no-match", cx), None);
+    }
+
+    /// While the filter has text, folded Open and History show their matches and a group's
+    /// chevron does nothing; cleared, each is as folded as before.
+    #[gpui_kit::test]
+    fn filter_unfolds_sections_without_changing_them(cx: &mut TestAppContext) {
+        let (workspace, cx) = with_sessions(2, cx);
+        press("new-group", cx);
+        type_name("A", "enter", cx);
+        menu_item(open_row(1), "Move to A", cx);
+        press("open-section", cx);
+        press("history-section", cx);
+        let state = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, _| {
+                (w.open_folded, w.history_folded, w.groups[0].collapsed)
+            })
+        };
+        assert_eq!(state(cx), (true, true, false));
+
+        cx.simulate_keystrokes("secondary-k");
+        cx.simulate_input("session 1");
+        assert_eq!(label(open_row(1), cx).as_deref(), Some("Session 1"));
+        assert_eq!(label(("history", 0usize), cx).as_deref(), Some("Session 1"));
+        press(("group-toggle", 0usize), cx);
+        assert_eq!(label(open_row(1), cx).as_deref(), Some("Session 1"));
+        assert_eq!(
+            state(cx),
+            (true, true, false),
+            "nothing written while filtering"
+        );
+
+        cx.simulate_keystrokes("escape");
+        assert_eq!(label(open_row(1), cx), None);
+        assert_eq!(label(("history", 0usize), cx), None);
     }
 
     /// Open and History fold, and stay folded on a relaunch, as the groups keep their colours.
