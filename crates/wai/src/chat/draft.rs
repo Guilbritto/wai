@@ -949,7 +949,7 @@ impl Render for DraftView {
                 // Registers the id so tests can find it.
                 .test_support()
         };
-        let strip = composer::strip(cx)
+        let strip = composer::strip("draft-strip", cx)
             .child(chip(
                 "draft-folder",
                 &self.folders,
@@ -1021,10 +1021,10 @@ impl Render for DraftView {
             (false, false) => prompt.bg(theme.background).border_color(theme.input),
         }
         .children(notice)
-        .child(textarea)
         .when(!self.attachments.is_empty(), |el| {
             el.child(h_flex().gap_2().flex_wrap().children(chips))
         })
+        .child(textarea)
         .child(
             h_flex()
                 .gap_2()

@@ -9,10 +9,10 @@ use crate::aurora;
 
 /// `.strip`: one tab sitting on the composer's top edge, 18 px in from its left. Add the chips
 /// as children, then put it in `strip_row`.
-pub(super) fn strip(cx: &App) -> Stateful<Div> {
+pub(super) fn strip(id: &'static str, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
     let tab = h_flex()
-        .id("composer-strip")
+        .id(id)
         .min_w_0()
         .gap(px(2.))
         .px(px(6.))

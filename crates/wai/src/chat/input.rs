@@ -212,8 +212,12 @@ pub(super) fn pick_paths(cx: &mut App) -> impl Future<Output = Option<Vec<PathBu
 impl ChatSession {
     /// With the box empty, `1`-`9` answer the top card's n-th choice when it is a
     /// permission; any other key, or a question on top, goes through to the box.
-    fn answer_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn answer_key(&mut self, event: &KeyDownEvent, window: &Window, cx: &mut Context<Self>) {
         let key = &event.keystroke;
+        // Only while the caret is in the prompt: a bar picker's keys are its own.
+        if !self.input.read(cx).focus_handle(cx).is_focused(window) {
+            return;
+        }
         let Some(n) = (key.key.parse::<usize>().ok()).filter(|n| (1..=9).contains(n)) else {
             return;
         };
@@ -492,7 +496,9 @@ impl ChatSession {
             .p_3()
             .rounded(px(20.))
             .border_1()
-            .capture_key_down(cx.listener(|this, event, _, cx| this.answer_key(event, cx)))
+            .capture_key_down(
+                cx.listener(|this, event, window, cx| this.answer_key(event, window, cx)),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| this.focus(window, cx)),
@@ -564,21 +570,21 @@ impl ChatSession {
         let strip = self.render_strip(cx);
         let bar = self.render_bar(attach, stop, send, window, cx);
         let prompt = v_flex().gap_2().p_3().children(status).child(
-            v_flex().child(strip).child(
-                div()
-                    .relative()
-                    .child(
-                        field
-                            .when(!self.attachments.is_empty(), |el| {
-                                el.child(h_flex().gap_2().flex_wrap().children(chips))
-                            })
-                            .child(textarea)
-                            .child(bar)
-                            // Registers the id so tests can find it.
-                            .test_support(),
-                    )
-                    .children(self.render_menu(cx)),
-            ),
+            // The menu opens above the strip, not over it.
+            v_flex()
+                .relative()
+                .child(strip)
+                .child(
+                    field
+                        .when(!self.attachments.is_empty(), |el| {
+                            el.child(h_flex().gap_2().flex_wrap().children(chips))
+                        })
+                        .child(textarea)
+                        .child(bar)
+                        // Registers the id so tests can find it.
+                        .test_support(),
+                )
+                .children(self.render_menu(cx)),
         );
         self.menu_keys(prompt, cx)
     }
@@ -602,7 +608,7 @@ impl ChatSession {
                 .child("✳")
                 .into_any_element()
         });
-        let tab = composer::strip(cx)
+        let tab = composer::strip("composer-strip", cx)
             .child(composer::strip_label(
                 "pill-folder",
                 icon(gpui_kit::assets::IconName::Folder),
@@ -643,7 +649,23 @@ impl ChatSession {
         let is_mode = |id: &str| {
             (self.model.config.iter()).any(|o| o.id == id && o.category == ConfigCategory::Mode)
         };
-        let shield = || Icon::new(gpui_kit::assets::IconName::Shield).xsmall();
+        // The shield lies over the select's left padding, so a click on it reaches the select.
+        let with_shield = |state: AnyElement| {
+            div()
+                .relative()
+                .child(state)
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(6.))
+                        .top_0()
+                        .bottom_0()
+                        .flex()
+                        .items_center()
+                        .child(Icon::new(gpui_kit::assets::IconName::Shield).xsmall()),
+                )
+                .into_any_element()
+        };
         let bar_chip = |id: String, content: AnyElement| {
             composer::bar_chip(SharedString::from(id), content, cx)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -652,22 +674,12 @@ impl ChatSession {
         let mode = match self.pickers.iter().find(|(id, _)| is_mode(id)) {
             Some((id, state)) => Some(bar_chip(
                 format!("bar-{id}"),
-                h_flex()
-                    .gap(px(4.))
-                    .pl(px(6.))
-                    .child(shield())
-                    .child(select(state, max_h))
-                    .into_any_element(),
+                with_shield(select(state, max_h).pl(px(24.)).into_any_element()),
             )),
             None => self.legacy_mode_picker().map(|state| {
                 bar_chip(
                     "bar-mode".into(),
-                    h_flex()
-                        .gap(px(4.))
-                        .pl(px(6.))
-                        .child(shield())
-                        .child(select(state, max_h))
-                        .into_any_element(),
+                    with_shield(select(state, max_h).pl(px(24.)).into_any_element()),
                 )
             }),
         };

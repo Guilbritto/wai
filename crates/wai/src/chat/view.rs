@@ -2964,6 +2964,16 @@ mod tests {
                 strip.right() <= field.right() + px(0.5),
                 "{strip:?} {field:?}"
             );
+            // Wide, the tab is as wide as its chips; narrow, the chips shrank to fill the box
+            // and stay inside the tab.
+            let gap = field.right() - strip.right();
+            match narrow {
+                true => assert!(
+                    gap < px(1.),
+                    "the chips did not shrink: {strip:?} {field:?}"
+                ),
+                false => assert!(gap > px(100.), "{strip:?} {field:?}"),
+            }
             for id in ["pill-folder", "pill-branch", "pill-agent"] {
                 let chip = bounds(id);
                 assert!(chip.bottom() <= field.top() + px(0.5), "{id} {chip:?}");
@@ -2971,9 +2981,57 @@ mod tests {
                     chip.top() > list.bottom() - px(0.5),
                     "{id} is in the header"
                 );
-                assert!(chip.right() <= field.right() + px(0.5), "{id} {chip:?}");
+                assert!(chip.right() <= strip.right() + px(0.5), "{id} {chip:?}");
             }
         });
         leave(&workspace, cx);
+    }
+
+    /// An agent with no modes and no model options: the bar holds only attach and send.
+    #[gpui_kit::test]
+    fn bar_has_no_empty_chips_without_pickers(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        cx.run_until_parked();
+        assert!(session.read_with(cx, |s, _| s.pickers.is_empty()));
+        // The fake agent always reports modes, so its legacy mode chip is the only one.
+        let legacy = session.read_with(cx, |s, _| s.legacy_mode_picker().is_some());
+        let found = cx.update(|window, cx| {
+            window.render_frame(cx);
+            ["bar-model", "bar-effort", "bar-mode"].map(|id| window.try_find(id).is_some())
+        });
+        assert_eq!(found, [false, false, legacy]);
+    }
+
+    /// With a card waiting, a digit typed while a bar picker (not the prompt) has focus does
+    /// not answer it.
+    #[gpui_kit::test]
+    fn digits_do_not_answer_a_card_from_outside_the_prompt(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--models"));
+        let session = start_session(&workspace, cx);
+        session.update(cx, |s, cx| {
+            let id = s.id.clone();
+            let request = PermissionRequest {
+                id: 100,
+                session: id,
+                tool_call_id: "t".into(),
+                title: "Run".into(),
+                diff: None,
+                subagent: None,
+                options: vec![PermissionChoice {
+                    id: "y".into(),
+                    name: "Yes".into(),
+                    kind: ChoiceKind::AllowOnce,
+                }],
+            };
+            s.handle_permission(request, cx);
+        });
+        let waiting =
+            |cx: &mut VisualTestContext| session.read_with(cx, |s, _| !s.model.waiting.is_empty());
+        cx.update(|window, cx| window.blur(cx));
+        cx.simulate_keystrokes("1");
+        assert!(waiting(cx), "a digit outside the prompt answered the card");
     }
 }
