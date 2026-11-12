@@ -101,7 +101,9 @@ Revert refuses in these cases:
 - the file changed after the edit;
 - the edited text is no longer found exactly once;
 - undoing would delete a file that existed before the edit;
-- the file is tab-indented or uses CRLF line endings.
+- the file mixes CRLF and LF line endings.
+
+In a tab-indented file, the lines Revert puts back are indented with tabs: Claude reports each tab as two spaces.
 
 ### History, side by side, and forks
 

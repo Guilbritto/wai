@@ -6,7 +6,9 @@
 //!   Revert undoes its latest step not reverted yet, so the steps unwind newest first.
 //! - A step reverts only while the file still shows what the edit wrote (Review Focus 2, R32):
 //!   the whole file equals `new_text`, or else `new_text` (a hunk or snippet, as claude-agent-acp
-//!   sends them) occurs exactly once, on whole lines, and only that occurrence goes back.
+//!   sends them) occurs exactly once, on whole lines, and only that occurrence goes back. A file
+//!   with tabs or CRLF is compared as Claude reports it (leading tabs as two spaces, LF line
+//!   ends), and the old text goes back in the file's own form.
 //! - Deleting a file needs proof that the edit created it (R34): wai saw it absent before the
 //!   tool call ran, and the file still equals the non-empty `new_text`. A symlink is never
 //!   deleted (R38).
@@ -202,12 +204,83 @@ fn undo(now: &str, diff: &FileDiff, created: bool) -> Result<Undo, RevertError> 
     if now == new {
         return Ok(Undo::Whole(old.to_string()));
     }
-    let at = only_on_lines(now, new).ok_or(RevertError::Changed)?;
+    let Some(at) = only_on_lines(now, new) else {
+        return as_shown(now, old, new).ok_or(RevertError::Changed);
+    };
     Ok(Undo::Snippet(format!(
         "{}{old}{}",
         &now[..at],
         &now[at + new.len()..]
     )))
+}
+
+/// `text` as Claude Code shows it: LF line ends, each leading tab as two spaces.
+fn as_claude_shows(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .split_inclusive('\n')
+        .map(|line| {
+            let rest = line.trim_start_matches('\t');
+            format!("{}{rest}", "  ".repeat(line.len() - rest.len()))
+        })
+        .collect()
+}
+
+/// `text` (as Claude shows it) in the file's own form: with `tabs`, each leading run of `n`
+/// spaces is `n / 2` tabs and `n % 2` spaces; then the file's line ends.
+fn as_file_writes(text: &str, tabs: bool, crlf: bool) -> String {
+    let text: String = if tabs {
+        text.split_inclusive('\n')
+            .map(|line| {
+                let rest = line.trim_start_matches(' ');
+                let n = line.len() - rest.len();
+                format!("{}{}{rest}", "\t".repeat(n / 2), " ".repeat(n % 2))
+            })
+            .collect()
+    } else {
+        text.to_string()
+    };
+    editor::line_ends(&text, crlf)
+}
+
+/// The place in `now` that `at`, an offset of `seen` (`as_claude_shows(now)`) starting or ending
+/// a line, stands for. Both texts have the same lines.
+fn file_offset(now: &str, seen: &str, at: usize) -> usize {
+    let line = seen[..at].matches('\n').count();
+    let begin: usize = now.split_inclusive('\n').take(line).map(str::len).sum();
+    if at == 0 || seen.as_bytes()[at - 1] == b'\n' {
+        return begin;
+    }
+    let text = now[begin..].split_inclusive('\n').next().unwrap_or("");
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    begin + text.strip_suffix('\r').unwrap_or(text).len()
+}
+
+/// The undo for a file with tabs or CRLF, whose text only matches the edit as Claude shows it.
+fn as_shown(now: &str, old: &str, new: &str) -> Option<Undo> {
+    let crlf = now.contains("\r\n");
+    // Review focus 2: mixed line ends are not what Claude's edit reported.
+    if crlf && now.replace("\r\n", "").contains('\n') {
+        return None;
+    }
+    let tabs = now.lines().any(|l| l.starts_with('\t'));
+    if !crlf && !tabs {
+        return None;
+    }
+    let (seen, new, old) = (
+        as_claude_shows(now),
+        as_claude_shows(new),
+        as_claude_shows(old),
+    );
+    let back = as_file_writes(&old, tabs, crlf);
+    if seen == new {
+        return Some(Undo::Whole(back));
+    }
+    let at = only_on_lines(&seen, &new)?;
+    let (a, b) = (
+        file_offset(now, &seen, at),
+        file_offset(now, &seen, at + new.len()),
+    );
+    Some(Undo::Snippet(format!("{}{back}{}", &now[..a], &now[b..])))
 }
 
 /// Where `needle` sits in `hay`, if it occurs there exactly once (overlapping occurrences count)
@@ -611,6 +684,71 @@ mod tests {
             Undo::Whole(text) | Undo::Snippet(text) => text,
             Undo::Delete => panic!("a rewrite, not a deletion"),
         })
+    }
+
+    /// Claude's hunks show each leading tab as two spaces: the hunk still finds its place, and the
+    /// old lines go back with tabs.
+    #[test]
+    fn snippet_revert_reads_tabs_as_claude_shows_them() {
+        let now = "fn f() {\n\tif x {\n\t\tb()\n\t}\n}\n";
+        assert_eq!(
+            undo_snippet(
+                now,
+                Some("  if x {\n    a()\n  }"),
+                "  if x {\n    b()\n  }"
+            ),
+            Ok("fn f() {\n\tif x {\n\t\ta()\n\t}\n}\n".into())
+        );
+        // An odd space stays a space.
+        assert_eq!(
+            undo_snippet("\tb\n", Some("   a"), "  b"),
+            Ok("\t a\n".into())
+        );
+    }
+
+    /// Claude's hunks have LF line ends: a CRLF file matches them and keeps its CRLF.
+    #[test]
+    fn snippet_revert_keeps_crlf() {
+        let hunk = (Some("a\nb\nc"), "a\nb2\nc");
+        assert_eq!(
+            undo_snippet("top\r\na\r\nb2\r\nc\r\nend\r\n", hunk.0, hunk.1),
+            Ok("top\r\na\r\nb\r\nc\r\nend\r\n".into())
+        );
+        assert_eq!(
+            undo_snippet("x\r\n\tnew\r\ny\r\n", Some("x\n  old\ny"), "x\n  new\ny"),
+            Ok("x\r\n\told\r\ny\r\n".into()),
+            "tabs and CRLF together"
+        );
+        // A needle that ends with its line break.
+        assert_eq!(
+            undo_snippet("k\r\nb2\r\n", Some("b\n"), "b2\n"),
+            Ok("k\r\nb\r\n".into())
+        );
+    }
+
+    /// Review focus 2: a file that mixes line ends could not have been written by Claude's edit as
+    /// it reported it.
+    #[test]
+    fn revert_refuses_mixed_line_ends() {
+        assert_eq!(
+            undo_snippet("a\r\nb2\nc\r\n", Some("a\nb\nc"), "a\nb2\nc"),
+            Err(RevertError::Changed)
+        );
+        // A real change in a CRLF file is still a change.
+        assert_eq!(
+            undo_snippet("a\r\nb3\r\nc\r\n", Some("a\nb\nc"), "a\nb2\nc"),
+            Err(RevertError::Changed)
+        );
+    }
+
+    /// The whole file, through the disk: a CRLF file comes back CRLF.
+    #[test]
+    fn revert_puts_back_a_crlf_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("win.txt");
+        fs::write(&path, "a\r\nb2\r\n").unwrap();
+        revert(&diff(&path, Some("a\nb\n"), "a\nb2\n"), false).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a\r\nb\r\n");
     }
 
     /// R32: claude-agent-acp reports an Edit as hunks (context and changed lines, no trailing
