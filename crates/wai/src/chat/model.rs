@@ -486,7 +486,7 @@ impl ChatModel {
                 self.usage = Some(UsageInfo {
                     used: *used,
                     size: *size,
-                    cost_usd: *cost_usd,
+                    cost_usd: cost_usd.or(self.usage.as_ref().and_then(|u| u.cost_usd)),
                     rate_limit_status: rate_limit
                         .as_ref()
                         .and_then(|v| v.get("status"))
@@ -1653,6 +1653,24 @@ mod tests {
             m.usage.unwrap().rate_limit_status.as_deref(),
             Some("allowed")
         );
+    }
+
+    /// Review focus 1: Claude reports the cost only at a turn's end; its other usage updates carry
+    /// none and must not hide it.
+    #[test]
+    fn usage_keeps_the_last_cost() {
+        let mut m = ChatModel::default();
+        let usage = |cost_usd| SessionEvent::Usage {
+            used: 1,
+            size: 2,
+            cost_usd,
+            rate_limit: None,
+        };
+        m.apply(&usage(Some(0.42)));
+        m.apply(&usage(None));
+        assert_eq!(m.usage.as_ref().unwrap().cost_usd, Some(0.42));
+        m.apply(&usage(Some(0.5)));
+        assert_eq!(m.usage.unwrap().cost_usd, Some(0.5));
     }
 
     fn edit(

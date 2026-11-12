@@ -4,7 +4,7 @@ mod file;
 mod pane;
 pub mod recovery;
 
-pub use file::{load, save};
+pub use file::{line_ends, load, save};
 pub use pane::{EditorPane, Emptied, FileEditor, Saved};
 
 #[cfg(test)]

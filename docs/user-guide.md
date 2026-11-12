@@ -1,10 +1,10 @@
 # wai user guide
 
-This guide describes wai 0.6.2. On Windows, read **ctrl** where it says **⌘**, except where the shortcut table says otherwise.
+This guide describes the latest wai release. On Windows, read **ctrl** where it says **⌘**, except where the shortcut table says otherwise.
 
 ## The window
 
-- **Top bar.** It shows wai's version and the commit it was built from (`0.6.2 · 01dd232`), the project's name and how many agents are working or need you, and holds the buttons **New from template** (shown when templates exist), **Extensions**, the command palette, **Settings** (⚙), the terminal, the Agents panel (only while it is on the right) and **New session**. On macOS it is the title bar: drag it to move the window, double-click it to zoom.
+- **Top bar.** It shows wai's version and the commit it was built from (`1.2.3 · 01dd232`), the project's name and how many agents are working or need you, and holds the buttons **New from template** (shown when templates exist), **Extensions**, the command palette, **Settings** (⚙), the terminal, the Agents panel (only while it is on the right) and **New session**. On macOS it is the title bar: drag it to move the window, double-click it to zoom.
 - **Sidebar.** The tabs **Sessions**, **History**, **Files**, **Search** and **Agents**, plus one tab per extension panel.
 - **Agents panel.** Agents can leave the sidebar for its own panel right of the panes, which collapses with **⌘⌥B** (see [The Agents tab](#the-agents-tab)).
 - **Panes.** Up to four sit side by side. Each holds a chat session or the editor (one editor pane at most). **⌘⌥→** moves the focus to the next pane.
@@ -46,7 +46,7 @@ While the agent prepares the session, its pane shows `Preparing <agent>…`. **�
   - PNG, JPEG, GIF and WebP files up to 5 MB go as images; any other file, of any kind, goes as a reference to its path, which the agent reads with its own tools.
   - A pasted image is saved in the system's temporary folder as `wai-pasted/<id>.<ext>`. A TIFF, BMP, ICO or PNM image, which agents do not take, is saved as a PNG; an SVG goes as a file.
   - An agent that does not take images gets each image as a reference to its file instead.
-- **The header** shows the session's title (drag it to move the pane), the context used as `used / size`, and the close button.
+- **The header** shows the session's title (drag it to move the pane), the context used as `used / size`, what the conversation has cost so far as the agent reports it (`$0.42`; it starts again after a Restart), and the close button.
 - **The strip on the prompt box:** a tab on the box's top edge, 18 px in from its left, with the session's folder, its branch (a fork icon for a worktree; only when known) and the agent (`✳ Claude Code`). They are fixed once the session runs, so they are labels, not menus. In a narrow pane the branch and folder names shrink and truncate first.
 - **The bar under the prompt:** inside the box, under the text: **+** to attach, then the agent's mode picker (Claude Code's include default, plan and accept-edits), a gap, then a picker for each of the agent's `model` and `thought_level` options, when it offers them, then Stop (during a turn) and Send. An agent with no modes and no model options shows only **+** and Send.
 - **Model and mode pickers:** a change applies to that session only, from then on, and wai does not keep it across relaunches. A new session starts with the **Default model** from Settings, if you set one; if the agent no longer offers it, the session says `<agent> no longer offers the model <model>; using <current>.` and keeps the agent's own choice. Resumed, forked and restored sessions keep what the agent restores. An agent that offers no such option shows no picker.
@@ -101,7 +101,9 @@ Revert refuses in these cases:
 - the file changed after the edit;
 - the edited text is no longer found exactly once;
 - undoing would delete a file that existed before the edit;
-- the file is tab-indented or uses CRLF line endings.
+- the file mixes CRLF and LF line endings.
+
+In a tab-indented file, the lines Revert puts back are indented with tabs: Claude reports each tab as two spaces.
 
 ### History, side by side, and forks
 
@@ -269,21 +271,26 @@ Extensions with the `notify` permission can send their own, at most one every tw
 - install errors;
 - the update notice.
 
-## The update check
+## Updates
 
-It is **off by default**. When you turn it on:
-- once per launch, with no timer, it reads `https://api.github.com/repos/<repo>/releases/latest` for the repository in `updates.repo`;
-- if that release is newer, it shows `wai <version> is available` with **Open release page**.
+Every push to the `main` branch of `Guilbritto/wai` publishes a release on GitHub, and an installed wai updates itself from it.
 
-It never downloads or installs anything. When it fails (offline, rate-limited, a bad answer), the error goes to wai's log and nothing is shown.
+- **Automatic updates** is on by default. On each launch wai asks GitHub for the latest release, downloads it in the background, checks its SHA-256 against the release's `SHA256SUMS.txt`, and shows `wai <version> is ready` with **Restart now**. If you have unsaved edits, wai asks before restarting.
+- On macOS the new `wai.app` replaces the old one in place and the previous version stays next to it as `wai.app.old`. On Windows the installer runs for your user only, with no administrator rights, into `%LOCALAPPDATA%\wai`.
+- Downloads are kept in `~/Library/Caches/wai-updates` (macOS) or `%LOCALAPPDATA%\wai-updates` (Windows).
+- Only releases of `Guilbritto/wai` are installed. Pointing **Repository** at another repository only notifies you of its newer release, with **Open release page**; nothing is downloaded.
+- When wai cannot update itself where it is installed (a folder your account cannot write to, such as `/Applications` for a standard user), it notifies you instead, and Settings → Updates shows **Open release page**. On macOS install wai into `~/Applications`.
+- Failures (offline, rate-limited, a bad answer) go to wai's log and show nothing.
+
+The releases are unsigned. On the first launch macOS refuses to open the app: open it once, then use System Settings → Privacy & Security → **Open Anyway** (or run `xattr -dr com.apple.quarantine ~/Applications/wai.app`), and Windows SmartScreen needs **More info** then **Run anyway**. Without a Developer ID, macOS may also ask again for access to folders such as Documents after each update.
 
 ```toml
 [updates]
 check = true
-repo = "owner/wai"
+repo = "Guilbritto/wai"
 ```
 
-Only your own settings file can turn it on; a project's `.wai/settings.toml` cannot.
+Only your own settings file can change these; a project's `.wai/settings.toml` cannot.
 
 ## Settings
 
@@ -325,7 +332,7 @@ Settings is a modal over the window, not a pane.
 - **Appearance:** **Theme**, Dark or Light, applies at once.
 - **Conversation:** **Processing**, how a chat shows the agent's steps: Step by step, Grouped or Hidden (see [Chatting](#chatting)). It applies at once to every open session. Permission cards, questions and file edits always show.
 - **Terminal:** **Shell**, a path; empty is the system default. It applies to terminals opened afterwards, and changing it asks `Run a new command?`.
-- **Updates:** wai checks GitHub releases once a day, only when you turn it on: the **Check for updates** switch and **Repository**.
+- **Updates:** **Automatic updates** (switch), **Version** (the installed version, its status and one button: **Check now**, **Restart now** or **Open release page**) and **Repository** (see [Updates](#updates)).
 - **Extensions:** extensions add panels, commands, agents and MCP servers to wai. They run with your permissions. Install from a folder or a git URL. The **Installed** group lists each one with its version badge, permissions, any problem, the Claude plugins it suggests (**Install in terminal**), an **Enabled** switch and **Uninstall** (see [Extensions](#extensions)).
 
 The search filters the current page's rows by label (agents by name). A broken `settings.toml` shows its error banner on every wai page and makes them read-only.
@@ -333,7 +340,7 @@ The search filters the current page's rows by label (agents by name). A broken `
 **Claude pages** show what Claude Code loads from `~/.claude` and the project. They read it in the background: while they load, each says `Reading ~/.claude…`. A file that does not parse is named in a banner on the pages it feeds (`~/.claude/settings.json does not parse: <error>`), and the toggles that would write it are locked. Groups start open; on a page with more than 20 rows only the first group does. A search opens every group with a match and hides the rest. Each group's **+** is a disabled **Coming soon** button.
 
 - **Plugins.** "What Claude loads from `~/.claude/plugins`: commands, skills, agents, hooks and MCP servers. A change applies to new Claude sessions." The **Learn more about Claude Code plugins** link opens the docs in your browser. **Browse** and **⋯** are Coming soon. There is one group per marketplace. A plugin is listed when it is installed for you or for this project. Each row has its name, a `v<version>` badge, its path, a summary (component counts such as `15 skills · 1 hook`, else its description, else `No components`) and a toggle. The toggle writes `enabledPlugins` in `~/.claude/settings.json` and says `Applies to new Claude sessions`. It is locked, with the reason shown, when a project or local settings file sets that plugin, for a managed install (`Managed by your organization`), or while your settings file is broken. Disabled plugins contribute nothing to the MCP, Skills, Agents and Hooks pages.
-- **MCP Servers.** "Servers that give Claude more tools. Check status shows whether each one connects." **Add server…** is Coming soon. Groups: **From plugins** (enabled plugins only), **User**, **This project** (local scope and `.mcp.json`), and **claude.ai connectors** (one Coming soon row). Each row has its name, a badge (`plugin: <name>`, `user`, `local` or `.mcp.json`), its transport (`stdio`, `HTTP`, `SSE` or `WebSocket`), its status and a toggle. The toggle is Coming soon and disabled: wai does not change Claude's MCP servers yet, and it never writes `~/.claude.json`, Claude's own state file. Turn a server off or on with `/mcp` in Claude.
+- **MCP Servers.** "Servers that give Claude more tools. Check status shows whether each one connects." **Add server…** is Coming soon. Groups: **From plugins** (enabled plugins only), **User**, **This project** (local scope and `.mcp.json`), and **claude.ai connectors** (one Coming soon row). Each row has its name, a badge (`plugin: <name>`, `user`, `local` or `.mcp.json`), its transport (`stdio`, `HTTP`, `SSE` or `WebSocket`), its status and a toggle. Plugin, user and local rows have a working toggle. It adds or removes the server in `disabledMcpServers` for this project in `~/.claude.json`, Claude's own state file, and says `Applies to new Claude sessions`. It writes only that list, atomically, and keeps every other key, the file's mode and its formatting; if the file is missing or does not parse, nothing is written. The server's own configuration is untouched. The toggle of `.mcp.json` rows and of the claude.ai connectors row stays Coming soon and disabled: turn those on or off with `/mcp` in Claude.
   - **Check status** runs `claude mcp list` in the project folder; it is the only thing that starts these servers, and only when you click it. The button reads `Checking…` meanwhile and the check stops after 60 s. Until then a server's status is `Not checked`. Afterwards it is `Connected`, `Needs sign-in`, `Failed to connect · <reason>`, `Pending approval` or `Off for this project`. Without a `claude` command on your PATH it says `Needs the claude CLI`.
 - **Skills.** "Instructions Claude loads on its own when a task fits. They come with plugins; turn the plugin off to drop its skills." Groups **User**, **Project**, then one per enabled plugin. Each row has its name, its description in one line and **Open** (`SKILL.md`).
 - **Instructions.** "Files Claude reads at the start of every session (CLAUDE.md and what it includes)." Groups **User** (`~/.claude/CLAUDE.md` and its imports) and **Project** (each `CLAUDE.md`, `.claude/CLAUDE.md` and `CLAUDE.local.md` from the project folder up, and their imports). Each row has its file name, its path, a summary (its first heading, `Included by <file>`, `This project`, `Parent folder` or `Yours, not shared`) and **Open**.
@@ -478,7 +485,8 @@ The **Extensions** button opens Settings on its **Extensions** page, the list of
 **Consent.** Every install shows the extension's name, version and source, and **every permission it asks for**, with the warning `wai cannot restrict files or network access in this version; only install extensions you trust.`
 
 - Nothing is installed until you click **Install**, and consent is all or nothing.
-- To update an extension, uninstall it and install the new version.
+- To update an extension, install the same id again (folder or git URL). You consent again; it stays enabled or disabled as it was and keeps its data folder.
+- An extension's data folder, `<config>/extension-data/<id>/`, is kept when you uninstall it or update it.
 - **Claude Code plugins** an extension suggests are listed under it with **Install in terminal**. That types `claude plugin install <name>` into the terminal without pressing Enter: you confirm with Enter.
 
 **When an extension stops.**

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::install::{
-    self, InstallError, MANIFEST_FILE, Source, Staged, extensions_dir, staging_path,
+    self, InstallError, MANIFEST_FILE, Source, Staged, data_root, extensions_dir, staging_path,
 };
 use crate::{ExtId, Manifest, Permission, parse_manifest, parse_permission};
 
@@ -16,6 +16,8 @@ pub struct Installed {
     pub manifest: Manifest,
     /// `<config>/extensions/<id>`.
     pub dir: PathBuf,
+    /// `<config>/extension-data/<id>`: survives updates and uninstalls; may not exist yet.
+    pub data: PathBuf,
     pub enabled: bool,
     /// What the user consented to. Calls are checked against this, not against the manifest,
     /// which can change on disk.
@@ -80,8 +82,8 @@ impl ExtStore {
     }
 
     /// Moves the stage into `<config>/extensions/<id>/` and records the consent, enabled. v1
-    /// consent is all or nothing: `granted` must be exactly what the manifest asks for. v1 has no
-    /// upgrade: an installed id is refused (uninstall it first).
+    /// consent is all or nothing: `granted` must be exactly what the manifest asks for. An
+    /// installed id is refused here; `update` replaces it.
     pub fn commit(
         &mut self,
         staged: Staged,
@@ -103,6 +105,7 @@ impl ExtStore {
         self.installed.push(Installed {
             manifest: staged.manifest().clone(),
             dir: dir.clone(),
+            data: data_root(&self.config_dir).join(id.as_str()),
             enabled: true,
             granted,
         });
@@ -112,6 +115,44 @@ impl ExtStore {
             return Err(e.into());
         }
         Ok(id)
+    }
+
+    /// Replaces the code of an installed extension with `staged` (same id), keeping `enabled` and
+    /// the data folder. `granted` must be exactly what the new manifest asks for. Returns the id
+    /// and where the old code folder went: the caller deletes it off the main thread (like
+    /// `uninstall`) and stops the extension's processes first.
+    pub fn update(
+        &mut self,
+        staged: Staged,
+        granted: Vec<Permission>,
+    ) -> Result<(ExtId, PathBuf), InstallError> {
+        let asked = &staged.manifest().permissions;
+        if !(granted.iter().all(|p| asked.contains(p)) && asked.iter().all(|p| granted.contains(p)))
+        {
+            return Err(InstallError::Consent);
+        }
+        let id = staged.manifest().id.clone();
+        let ix = self
+            .position(&id)
+            .map_err(|_| InstallError::NotInstalled(id.as_str().into()))?;
+        let dir = self.installed[ix].dir.clone();
+        let trash = staging_path(&self.config_dir)?;
+        std::fs::rename(&dir, &trash)?;
+        if let Err(e) = std::fs::rename(staged.dir(), &dir) {
+            std::fs::rename(&trash, &dir).ok();
+            return Err(e.into());
+        }
+        let old_manifest =
+            std::mem::replace(&mut self.installed[ix].manifest, staged.manifest().clone());
+        let old_granted = std::mem::replace(&mut self.installed[ix].granted, granted);
+        if let Err(e) = self.save() {
+            self.installed[ix].manifest = old_manifest;
+            self.installed[ix].granted = old_granted;
+            std::fs::rename(&dir, staged.dir()).ok();
+            std::fs::rename(&trash, &dir).ok();
+            return Err(e.into());
+        }
+        Ok((id, trash))
     }
 
     pub fn list(&self) -> Vec<Installed> {
@@ -198,6 +239,7 @@ fn load(config_dir: &Path, r: &Record) -> Result<Installed, String> {
     Ok(Installed {
         manifest,
         dir,
+        data: data_root(config_dir).join(id.as_str()),
         enabled: r.enabled,
         granted,
     })

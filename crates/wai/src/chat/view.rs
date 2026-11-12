@@ -842,6 +842,7 @@ impl ChatSession {
         self.model.items.clear();
         self.model.waiting.clear();
         self.model.steering.clear();
+        self.model.usage = None;
         self.texts.clear();
         self.diffs.clear();
         self.card_diffs.clear();
@@ -936,9 +937,13 @@ mod tests {
     use super::{tick_period, until_next_tick};
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{ElementId, Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
+    use gpui_kit::{
+        ElementId, Entity, InputEvent, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
+        TestAppContext, VisualTestContext, point, px,
+    };
     use wai_agent::{
-        ChoiceKind, PermissionChoice, PermissionRequest, StopReason, SubagentState, ToolStatus,
+        ChoiceKind, PermissionChoice, PermissionRequest, SessionEvent, StopReason, SubagentState,
+        ToolStatus,
     };
     use wai_settings::{AppState, Change, OpenSession, Processing, Settings};
 
@@ -1823,7 +1828,7 @@ mod tests {
         let height = session.read_with(cx, |s, _| s.waiting_height);
         let (is_clear, stack) = clear(cx);
         assert!(
-            (height - stack).abs() <= px(2.),
+            (height - stack).abs() < px(0.5),
             "inset {height:?} vs stack {stack:?}"
         );
         assert!(is_clear, "at the tail, the last row sits above the stack");
@@ -2403,7 +2408,7 @@ mod tests {
     }
 
     /// A step is one compact line of its own, touching the next; unfolded, its output sits in a
-    /// box under the line.
+    /// box under the line; a Thought opens the same way.
     #[gpui_kit::test]
     fn step_lines_are_compact_and_open_below(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
@@ -2428,10 +2433,70 @@ mod tests {
         );
         click_edits(None, ("step", 2usize), cx);
         let (line, output) = (bounds(("step", 2), cx), bounds(("step-output", 2), cx));
+        let gap = cx.update(|window, _| window.rem_size() * 0.25); // `gap_1`
         assert!(
-            output.top() >= line.bottom(),
-            "{output:?} is not under {line:?}"
+            (output.top() - line.bottom() - gap).abs() < px(0.5),
+            "{output:?} is not {gap:?} under {line:?}"
         );
+        click_edits(None, ("thought", 1usize), cx);
+        let (line, output) = (
+            bounds(("thought", 1), cx),
+            bounds(("thought-output", 1), cx),
+        );
+        assert!(
+            (output.top() - line.bottom() - gap).abs() < px(0.5),
+            "{output:?} {line:?}"
+        );
+    }
+
+    /// D9: an × drawn before the queue changed does nothing (two clicks in one frame).
+    #[gpui_kit::test]
+    fn stale_queue_clicks_do_nothing(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(&slow_reply(200, 20)));
+        let session = start_session(&workspace, cx);
+        send("go", cx);
+        wait_until(cx, "the first chunk", |cx| {
+            last_agent_text(&session, cx).is_some()
+        });
+        for message in ["first", "second", "third"] {
+            send(message, cx);
+        }
+        // Both clicks land in one frame: `window.click` redraws between them, so send raw events.
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            let centres: Vec<_> = (0usize..2)
+                .map(|i| window.find(("queued-remove", i)).bounds().center())
+                .collect();
+            for position in centres {
+                let none = Modifiers::none();
+                for event in [
+                    MouseDownEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers: none,
+                        click_count: 1,
+                        first_mouse: false,
+                    }
+                    .to_platform_input(),
+                    MouseUpEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers: none,
+                        click_count: 1,
+                    }
+                    .to_platform_input(),
+                ] {
+                    window.dispatch_event(event, cx);
+                }
+            }
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        let queued = session.read_with(cx, |s, _| {
+            s.queued.iter().map(|m| m.text.clone()).collect::<Vec<_>>()
+        });
+        assert_eq!(queued, ["second", "third"]);
+        assert_eq!(typed(&session, cx), "first");
     }
 
     /// `--steps 2` is a thought (row 1) and two Read calls (rows 2 and 3). Step by step, each is
@@ -3235,6 +3300,25 @@ mod tests {
                 .try_find(id)
                 .and_then(|e| e.label().map(str::to_owned))
         })
+    }
+
+    /// 2.4: the header shows what the conversation cost, as the agent reports it.
+    #[gpui_kit::test]
+    fn header_shows_the_conversation_cost(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        let usage = |cost_usd| SessionEvent::Usage {
+            used: 43_000,
+            size: 1_000_000,
+            cost_usd,
+            rate_limit: None,
+        };
+        assert_eq!(pill("session-cost", cx), None, "no cost reported yet");
+        session.update(cx, |s, cx| s.handle_event(&usage(Some(0.4237)), cx));
+        assert_eq!(pill("session-cost", cx).as_deref(), Some("$0.42"));
+        session.update(cx, |s, cx| s.handle_event(&usage(None), cx));
+        assert_eq!(pill("session-cost", cx).as_deref(), Some("$0.42"));
     }
 
     #[gpui_kit::test]

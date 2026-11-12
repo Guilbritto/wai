@@ -1041,6 +1041,7 @@ mod limits {
         host.enabled = vec![Installed {
             manifest: parse_manifest(manifest, dir).unwrap(),
             dir: dir.into(),
+            data: dir.join("data"),
             enabled: true,
             granted: vec![Permission::Process],
         }];

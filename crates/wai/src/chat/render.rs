@@ -85,6 +85,11 @@ fn usage_label(usage: &UsageInfo) -> String {
     }
 }
 
+/// `$0.42`: what the conversation has cost.
+fn cost_label(usd: f64) -> String {
+    format!("${usd:.2}")
+}
+
 /// Where a row sits in its turn's card: which segment edges it draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CardEdges {
@@ -316,6 +321,20 @@ impl ChatSession {
                 (self.model.usage.as_ref())
                     .map(|usage| aurora::pill(cx).flex_none().child(usage_label(usage))),
             )
+            .children(
+                (self.model.usage.as_ref())
+                    .and_then(|usage| usage.cost_usd)
+                    .map(cost_label)
+                    .map(|label| {
+                        aurora::pill(cx)
+                            .id("session-cost")
+                            .flex_none()
+                            .aria_label(label.clone())
+                            .child(label)
+                            // Registers the id so tests can find it.
+                            .test_support()
+                    }),
+            )
             .child(
                 Button::new("session-close")
                     .ghost()
@@ -388,8 +407,8 @@ impl ChatSession {
             .test_support()
     }
 
-    /// The head of a run of steps: `3 steps · <each tool's title once>`, with the run's status. A click
-    /// unfolds the run into its step lines.
+    /// The head of a run of steps: `3 steps · <each tool's title once>`, with the run's status. A
+    /// click unfolds the run into its step lines.
     fn render_group(
         &self,
         run: std::ops::Range<usize>,
@@ -520,11 +539,13 @@ impl ChatSession {
                             .test_support(),
                     )
                     .when(open, |el| {
-                        el.children(
-                            self.texts
-                                .get(&ix)
-                                .map(|md| output_box(cx).child(TextView::new(&md.state))),
-                        )
+                        el.children(self.texts.get(&ix).map(|md| {
+                            output_box(cx)
+                                .id(("thought-output", ix))
+                                .child(TextView::new(&md.state))
+                                // Registers the id so tests can find it.
+                                .test_support()
+                        }))
                     })
                     .into_any_element()
             }
@@ -543,7 +564,7 @@ impl ChatSession {
             .into_any_element(),
             ChatItem::Question { request, answered } => permission::closed(
                 ("question", ix).into(),
-                request.message.lines().next().unwrap_or_default(),
+                first_line(&request.message),
                 answered.as_deref().unwrap_or_default(),
                 cx,
             )
@@ -773,6 +794,14 @@ impl ChatSession {
     }
 }
 
+/// The first line with non-blank text, trimmed; `""` when there is none.
+fn first_line(text: &str) -> &str {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+}
+
 impl ChatSession {
     /// The O1 stack: every waiting card, oldest first, as a glass panel laid over the list's
     /// bottom. `None` when nothing waits.
@@ -785,24 +814,30 @@ impl ChatSession {
         {
             return None;
         }
-        let waiting = self.model.waiting.clone();
         let on_open = Self::on_open(cx);
-        let cards = waiting.iter().enumerate().map(|(k, card)| match card {
-            ChatItem::Permission { request, .. } => {
-                let id = request.id;
-                let on_choose =
-                    Rc::new(cx.listener(move |this, choice: &PermissionChoice, _, cx| {
-                        this.answer(id, choice, cx)
-                    }));
-                let diffs = self.card_diffs.get(&id).map_or(&[][..], Vec::as_slice);
-                permission::card(request, diffs, on_choose, &on_open, k == 0, cx).into_any_element()
-            }
-            ChatItem::Question { request, .. } => {
-                question::card(request, &mut self.questions, window, cx)
-            }
-            _ => div().into_any_element(),
-        });
+        let cards = self
+            .model
+            .waiting
+            .iter()
+            .enumerate()
+            .map(|(k, card)| match card {
+                ChatItem::Permission { request, .. } => {
+                    let id = request.id;
+                    let on_choose =
+                        Rc::new(cx.listener(move |this, choice: &PermissionChoice, _, cx| {
+                            this.answer(id, choice, cx)
+                        }));
+                    let diffs = self.card_diffs.get(&id).map_or(&[][..], Vec::as_slice);
+                    permission::card(request, diffs, on_choose, &on_open, k == 0, cx)
+                        .into_any_element()
+                }
+                ChatItem::Question { request, .. } => {
+                    question::card(request, &mut self.questions, window, cx)
+                }
+                _ => div().into_any_element(),
+            });
         let cards: Vec<_> = cards.collect();
+        let len = self.queued.len();
         let queued: Vec<_> = (self.queued.iter().enumerate())
             .map(|(ix, message)| {
                 let remove = Button::new(("queued-remove", ix))
@@ -812,7 +847,7 @@ impl ChatSession {
                     .tooltip("Back to the prompt box")
                     .accessibility_label("Back to the prompt box")
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if ix >= this.queued.len() {
+                        if this.queued.len() != len {
                             return;
                         }
                         let message = this.queued.remove(ix);
@@ -840,7 +875,8 @@ impl ChatSession {
         let height = canvas(
             move |bounds, _, cx| {
                 view.update(cx, |this, cx| {
-                    this.set_waiting_height(bounds.size.height, cx)
+                    // The canvas fills the stack inside its 1 px border.
+                    this.set_waiting_height(bounds.size.height + px(2.), cx)
                 })
             },
             |_, _, _, _| {},
@@ -980,9 +1016,18 @@ impl Render for ChatSession {
 
 #[cfg(test)]
 mod tests {
+    use super::first_line;
+
+    #[test]
+    fn first_line_skips_blank_lines() {
+        assert_eq!(first_line("\n\n  Pick one\nmore"), "Pick one");
+        assert_eq!(first_line("Pick"), "Pick");
+        assert_eq!(first_line(" \n"), "");
+    }
+
     use wai_agent::ToolStatus;
 
-    use super::{CardEdges, card_edges, code_ranges, tokens};
+    use super::{CardEdges, card_edges, code_ranges, cost_label, tokens};
     use crate::chat::model::{ChatItem, ToolItem};
 
     #[test]
@@ -990,6 +1035,14 @@ mod tests {
         assert_eq!(
             [999, 43_000, 1_000_000, 1_500_000].map(tokens),
             ["999", "43k", "1M", "1.5M"]
+        );
+    }
+
+    #[test]
+    fn cost_reads_in_dollars() {
+        assert_eq!(
+            [0.0, 0.4237, 12.3].map(cost_label),
+            ["$0.00", "$0.42", "$12.30"]
         );
     }
 

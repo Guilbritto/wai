@@ -1,0 +1,36 @@
+# Tests that fail on Windows, skipped there by ci.yml (substring match, one per line).
+# Windows had never run the suite before 0.7.0; these predate it (\\?\ paths, git on Windows).
+# Fix each in the Windows phase of the master plan, then delete its line.
+chat::view::tests::close_drops_session_and_pane_and_ends_its_turn
+claude_config::tests::agents_page_lists_user_project_and_plugin_agents
+claude_config::tests::changed_settings_are_not_overwritten
+claude_config::tests::coming_soon_controls_are_disabled
+claude_config::tests::groups_collapse_and_search_opens_them
+claude_config::tests::hooks_page_shows_events_not_commands
+claude_config::tests::mcp_rows_carry_no_secret
+claude_config::tests::modal_opens_before_claude_is_read
+claude_config::tests::plugin_skill_opens_read_only
+claude_config::tests::plugin_toggle_writes_enabled_plugins
+claude_config::tests::skills_page_opens_skill_md
+claude_config::tests::toggles_wait_for_the_write
+git::tests::clone_makes_a_folder_named_after_the_repo
+git::tests::clone_refuses_an_existing_folder
+git::tests::head_tells_a_worktree_apart
+git::tests::ignored_worktrees_dir_leaves_exclude_alone
+git::tests::offline_fetch_starts_from_the_local_base
+git::tests::worktree_name_clash_gets_a_suffix
+git::tests::worktree_starts_from_the_fetched_base
+start::tests::cloned_folder_becomes_the_drafts_folder
+start::tests::escape_after_the_worktree_keeps_it_for_the_retry
+start::tests::local_send_on_another_branch_checks_it_out
+start::tests::new_worktree_send_creates_it_from_the_fetched_base
+start::tests::offline_fetch_still_starts_the_session
+start::tests::retry_after_a_created_worktree_reuses_it
+start::tests::worktree_base_is_remembered_per_repository
+start::tests::worktree_keeps_the_subfolder
+claude_config::tests::mcp_toggle_reports_invalid_file
+claude_config::tests::mcp_toggle_writes_disabled_list
+claude_config::tests::mcp_toggles_wait_for_the_write
+late_permission_answer_is_stale
+tree::tests::global_ignores_follow_the_flag
+claude::tests::mcp_on_without_entry_writes_nothing

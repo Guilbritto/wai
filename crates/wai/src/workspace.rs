@@ -50,6 +50,7 @@ use crate::settings_view::{
 use crate::sidebar::{SidebarTab, canonical};
 use crate::terminal_view::{self, TerminalView};
 use crate::topbar::BRAND;
+use crate::update::{self, Outcome, UpdateStatus};
 
 pub(crate) const CHOOSE_AI: &str = "Choose an AI to start a session.";
 const SIDEBAR_WIDTH: f32 = 280.;
@@ -149,6 +150,8 @@ pub(crate) enum Leave {
     Quit,
     Close,
     Open(PathBuf),
+    /// Quit to install the staged update (asked about like a quit).
+    Update,
 }
 
 /// The title of the dialog that asks before quitting or closing with `n` busy sessions.
@@ -184,6 +187,11 @@ pub struct Workspace {
     pub settings: Settings,
     /// Why `settings.toml` did not load; Settings shows it and stays read-only.
     pub settings_error: Option<String>,
+    /// What the update check found, staged or announced; Settings shows it.
+    pub(crate) update: UpdateStatus,
+    /// Why this copy cannot install an update, for Settings. Refreshed when Settings opens and on
+    /// Check now: finding it writes a probe file, so it is not done per render.
+    pub(crate) update_blocker: Option<String>,
     /// The "New from template" menu's entries; empty hides the menu.
     pub templates: Vec<Template>,
     /// The config dir: the user's `templates.toml` (re-read on a project switch) and `scratch/`,
@@ -464,6 +472,8 @@ impl Workspace {
             state_path,
             next_recovery: 0,
             settings_error: None,
+            update: UpdateStatus::Idle,
+            update_blocker: None,
             focus,
             _subscriptions: vec![
                 routing,
@@ -2042,6 +2052,132 @@ impl Workspace {
                 window,
                 cx,
             ),
+            Leave::Update if busy == 0 => self.install_update(window, cx),
+            Leave::Update => self.confirm(
+                still_working(busy),
+                "Restarting ends their turns. End them anyway?",
+                "Restart anyway",
+                |this, window, cx| this.install_update(window, cx),
+                window,
+                cx,
+            ),
+        }
+    }
+
+    /// Stores the update status and shows it in an open Settings.
+    pub(crate) fn set_update(&mut self, status: UpdateStatus, cx: &mut Context<Self>) {
+        self.update = status;
+        self.sync_settings_view(cx);
+    }
+
+    /// Looks for a newer wai and, when this copy can install it, stages it (see `update::run`),
+    /// off the main thread. On launch a result worth acting on is a notice and a failure only a
+    /// log line; from Settings everything shows in its status row and nothing pops up.
+    pub(crate) fn check_updates(
+        &mut self,
+        from_launch: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.update == UpdateStatus::Checking {
+            return;
+        }
+        // Checking is off: nothing runs, not even the blocker's probe file.
+        if from_launch && !self.settings.updates.check {
+            return;
+        }
+        let mut settings = self.settings.updates.clone();
+        // ponytail: "Check now" is an explicit ask, so it ignores the automatic-updates switch.
+        settings.check |= !from_launch;
+        if !from_launch {
+            self.update_blocker = update::blocker();
+        }
+        self.set_update(UpdateStatus::Checking, cx);
+        let found = cx.background_spawn(async move { update::check_and_stage(&settings) });
+        cx.spawn_in(window, async move |this, cx| {
+            let found = found.await;
+            this.update_in(cx, |this, window, cx| {
+                this.checked(found, from_launch, window, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn checked(
+        &mut self,
+        found: anyhow::Result<Outcome>,
+        from_launch: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let status = match found {
+            Ok(Outcome::Off) if from_launch => UpdateStatus::Idle,
+            Ok(Outcome::Off) => {
+                UpdateStatus::Failed("Set a repository to check for updates.".into())
+            }
+            Ok(Outcome::UpToDate) => UpdateStatus::UpToDate,
+            Ok(Outcome::Available { release, why }) => UpdateStatus::Available { release, why },
+            Ok(Outcome::Ready(staged)) => UpdateStatus::Ready(staged),
+            Err(e) => {
+                if from_launch {
+                    eprintln!("wai: update check failed: {}", update::logged(&e));
+                }
+                UpdateStatus::Failed(update::logged(&e))
+            }
+        };
+        if from_launch {
+            self.announce_update(&status, window, cx);
+        }
+        self.set_update(status, cx);
+    }
+
+    /// The launch notice: Restart now for a staged build, Open release page for one this copy
+    /// will not install.
+    fn announce_update(&self, status: &UpdateStatus, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        let notice = match status {
+            UpdateStatus::Ready(staged) => Notification::info(staged.text())
+                .autohide(false)
+                .action(move |_, _, cx| {
+                    let (this, notice) = (this.clone(), cx.entity());
+                    Button::new("update-restart").label("Restart now").on_click(
+                        move |_, window, cx| {
+                            notice.update(cx, |n, cx| n.dismiss(window, cx));
+                            this.update(cx, |w, cx| w.leave(Leave::Update, window, cx))
+                                .ok();
+                        },
+                    )
+                }),
+            UpdateStatus::Available { release, .. } => {
+                let page = release.page.clone();
+                Notification::info(release.text()).action(move |_, _, cx| {
+                    let (page, notice) = (page.clone(), cx.entity());
+                    Button::new("update-open")
+                        .label("Open release page")
+                        .on_click(move |_, window, cx| {
+                            cx.open_url(&page);
+                            notice.update(cx, |n, cx| n.dismiss(window, cx));
+                        })
+                })
+            }
+            _ => return,
+        };
+        window.push_notification(notice, cx);
+    }
+
+    /// Installs the staged update and quits so it starts; any failure leaves wai open.
+    pub(crate) fn install_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let UpdateStatus::Ready(staged) = self.update.clone() else {
+            return;
+        };
+        match update::install(&staged) {
+            Ok(()) => cx.quit(),
+            Err(e) => {
+                let message = format!("{e:#}");
+                window.push_notification(Notification::error(message.clone()), cx);
+                self.set_update(UpdateStatus::Failed(message), cx);
+            }
         }
     }
 
@@ -2319,6 +2455,8 @@ impl Workspace {
             context: self.settings_context(),
             extensions: self.extensions.clone(),
             home: self.claude_home.clone(),
+            update: self.update.clone(),
+            update_blocker: self.update_blocker.clone(),
             agents: self.agent_rows(cx),
             project_default: wai_settings::project_default_agent(&self.project)
                 .filter(|p| Some(p) == self.settings.default_agent.as_ref()),
@@ -2433,6 +2571,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let notice = notice.map(|n| SharedString::from(n.to_string()));
+        self.update_blocker = update::blocker();
         self.extensions(window, cx);
         let data = self.settings_data(notice, cx);
         self.refresh_claude(cx);
@@ -2462,12 +2601,17 @@ impl Workspace {
                 }
                 SettingsEvent::Test(id) => this.test_agent(id, window, cx),
                 SettingsEvent::CheckMcp => this.check_mcp(cx),
+                SettingsEvent::CheckUpdates => this.check_updates(false, window, cx),
+                SettingsEvent::RestartToUpdate => this.leave(Leave::Update, window, cx),
                 SettingsEvent::Open { path, read_only } => {
                     this.close_settings(window, cx);
                     this.open(path.clone(), None, *read_only, window, cx)
                 }
                 SettingsEvent::TogglePlugin { id, on, seen } => {
                     this.toggle_plugin(id.clone(), *on, *seen, window, cx)
+                }
+                SettingsEvent::ToggleMcp { name, on } => {
+                    this.toggle_mcp(name.clone(), *on, window, cx)
                 }
             },
         )
@@ -5108,6 +5252,87 @@ pub(crate) mod tests {
             session.read_with(cx, |s, _| s.status().clone()),
             TurnState::Working
         );
+    }
+
+    fn staged(file: &Path, sha256: &str) -> crate::update::UpdateStatus {
+        crate::update::UpdateStatus::Ready(crate::update::Staged {
+            tag: "v9.0.0".into(),
+            file: file.into(),
+            sha256: sha256.into(),
+        })
+    }
+
+    fn leave_update(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.leave(super::Leave::Update, window, cx));
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn restart_asks_while_a_session_works(cx: &mut TestAppContext) {
+        let (workspace, cx) = working(cx);
+        let session = start_now(&workspace, cx);
+        work(&session, cx);
+        let ready = staged(Path::new("/nonexistent/wai.zip"), "00");
+        workspace.update(cx, |w, _| w.update = ready.clone());
+
+        leave_update(&workspace, cx);
+        assert!(asked(cx));
+        cx.update(|window, _| window.find_by_label("1 session is still working"));
+        click("cancel", cx);
+        assert!(!asked(cx));
+        assert_eq!(workspace.read_with(cx, |w, _| w.update.clone()), ready);
+        assert!(!cx.cx.update(|app| app.windows().is_empty()));
+        assert_eq!(
+            session.read_with(cx, |s, _| s.status().clone()),
+            TurnState::Working
+        );
+    }
+
+    #[gpui_kit::test]
+    fn restart_asks_about_unsaved_edits(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, Settings::default());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "a").unwrap();
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.open_file(path, None, window, cx)));
+        cx.run_until_parked();
+        let tab = workspace.read_with(cx, |w, cx| {
+            let Some(Pane::Editor(editor)) = w.panes.iter().find(|p| matches!(p, Pane::Editor(_)))
+            else {
+                panic!("an editor pane")
+            };
+            editor.read(cx).tabs[0].clone()
+        });
+        tab.update(cx, |t, _| t.dirty = true);
+
+        leave_update(&workspace, cx);
+        assert!(cx.update(|window, cx| window.has_active_dialog(cx)));
+        assert!(
+            !asked(cx),
+            "the unsaved-edits dialog comes first, not the busy one"
+        );
+        click("cancel", cx);
+        assert!(!cx.update(|window, cx| window.has_active_dialog(cx)));
+    }
+
+    #[gpui_kit::test]
+    fn failed_install_keeps_wai_open(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, Settings::default());
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("wai.zip");
+        std::fs::write(&file, b"abd").unwrap();
+        workspace.update(cx, |w, _| w.update = staged(&file, &"0".repeat(64)));
+
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.install_update(window, cx)));
+        cx.run_until_parked();
+        let status = workspace.read_with(cx, |w, _| w.update.clone());
+        let crate::update::UpdateStatus::Failed(msg) = status else {
+            panic!("{status:?}")
+        };
+        assert!(msg.contains("changed on disk"), "{msg}");
+        assert!(!cx.cx.update(|app| app.windows().is_empty()));
     }
 
     #[gpui_kit::test]

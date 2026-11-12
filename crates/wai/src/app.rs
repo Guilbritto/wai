@@ -150,6 +150,8 @@ fn terminal_ctrl_keymap() -> [(&'static str, Box<dyn Action>); 12] {
 /// `notices`: what the settings left out, shown once in the window (a reload shows only new
 /// ones); `template_notices`, what the templates did.
 /// `state_path`: where the open sessions, the project and the terminal's visibility are kept.
+// ponytail: one more launch input than clippy likes; a struct when the next one arrives.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     project: PathBuf,
     settings: Settings,
@@ -158,12 +160,12 @@ pub fn run(
     template_notices: Vec<String>,
     settings_error: Option<String>,
     state_path: PathBuf,
+    update_notice: Option<(String, bool)>,
 ) {
     // Without the asset source every component icon (status, chevrons) renders blank.
     let app = gpui_kit::application().with_assets(AppAssets);
     app.run(move |cx| {
         init(&settings, cx);
-        let updates = settings.updates.clone();
         // Quit is the workspace's: it asks about unsaved edits first.
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -216,12 +218,23 @@ pub fn run(
                     let pending = unapproved(&Settings::default(), &w.settings, &w.approved);
                     w.ask_approval(pending, window, cx);
                 });
+                if let Some((text, failed)) = update_notice {
+                    let note = match failed {
+                        true => Notification::warning(text).autohide(false),
+                        false => Notification::success(text),
+                    };
+                    window.push_notification(note, cx);
+                }
                 for notice in template_notices {
                     window.push_notification(Notification::warning(notice).autohide(false), cx);
                 }
             })
             .expect("window just opened");
-        crate::update::check_on_launch(updates, opened.0, cx);
+        window
+            .update(cx, |_, window, cx| {
+                workspace.update(cx, |w, cx| w.check_updates(true, window, cx))
+            })
+            .ok();
         cx.activate(true);
 
         #[cfg(feature = "demo")]
