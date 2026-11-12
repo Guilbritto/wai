@@ -1,7 +1,9 @@
-use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::{IconName, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::*;
 
+use crate::aurora;
 use crate::app::{CloseTerminal, NewTerminal, NextTerminal, PrevTerminal, ToggleTerminal};
 use crate::terminal_view::{TerminalChanged, TerminalView};
 use crate::workspace::Workspace;
@@ -15,22 +17,80 @@ pub(crate) struct TerminalTab {
     _changed: Subscription,
 }
 
+/// The tab's text: the shell's title without control characters, cut to 24 characters, else
+/// "Terminal N".
+fn tab_label(number: u32, title: Option<&str>) -> String {
+    let title: String = title.unwrap_or_default().chars().filter(|c| !c.is_control()).collect();
+    let title = title.trim();
+    match title.chars().count() {
+        0 => format!("Terminal {number}"),
+        1..=24 => title.to_string(),
+        _ => title.chars().take(23).chain(['…']).collect(),
+    }
+}
+
 impl Workspace {
     /// The active terminal.
     pub(crate) fn terminal(&self) -> Option<&Entity<TerminalView>> {
         self.terminals.get(self.active_terminal).map(|t| &t.view)
     }
 
-    /// The panel's content: the active terminal.
+    /// The panel's content: the tab strip over the active terminal.
     pub(crate) fn render_terminal_panel(
         &self,
         _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let tabs = self.terminals.iter().enumerate().map(|(ix, tab)| {
+            let label = tab_label(tab.number, tab.view.read(cx).title());
+            aurora::tab(ix == self.active_terminal, cx)
+                .id(("terminal-tab", ix))
+                .role(Role::Tab)
+                .aria_label(label.clone())
+                .h(px(24.))
+                .pl_2()
+                .pr_1()
+                .gap_1()
+                .rounded(px(8.))
+                .text_xs()
+                .child(div().whitespace_nowrap().child(label))
+                .child(
+                    Button::new(("terminal-tab-close", ix))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_terminal(ix, window, cx);
+                        })),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| this.select_terminal(ix, window, cx)))
+        });
+        v_flex()
             .size_full()
-            .children(self.terminal().cloned())
-            .into_any_element()
+            .child(
+                h_flex()
+                    .h(px(28.))
+                    .flex_none()
+                    .gap_1()
+                    .overflow_x_hidden()
+                    .children(tabs)
+                    .child(
+                        Button::new("new-terminal")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Plus)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_terminal(window, cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .children(self.terminal().cloned()),
+            )
     }
 
     /// Shows the terminal panel, with a first tab created in the project folder on the first
@@ -140,11 +200,32 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Removes tab `ix`, which stops its shell. The last one takes the panel with it.
+    /// Closes tab `ix`, after asking when a command is still running in it.
     pub(crate) fn close_terminal(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if ix >= self.terminals.len() {
+        let Some(tab) = self.terminals.get(ix) else {
             return;
+        };
+        if !tab.view.read(cx).busy() {
+            return self.remove_terminal(ix, window, cx);
         }
+        let number = tab.number;
+        self.confirm(
+            "A command is still running".into(),
+            "Closing this terminal ends it. Close it anyway?",
+            "Close terminal",
+            move |this, window, cx| {
+                // The tabs may have shifted while the dialog was open.
+                if let Some(ix) = this.terminals.iter().position(|t| t.number == number) {
+                    this.remove_terminal(ix, window, cx);
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Removes tab `ix`, which stops its shell. The last one takes the panel with it.
+    fn remove_terminal(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.terminals.remove(ix);
         if self.terminals.is_empty() {
             self.terminal_visible = false;
@@ -176,6 +257,7 @@ impl Workspace {
 #[cfg(all(test, unix))]
 mod tests {
     use gpui_kit::component::WindowExt as _;
+    use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
     use wai_settings::Settings;
 
@@ -183,7 +265,7 @@ mod tests {
     use crate::app::NewTerminal;
     use crate::terminal_view::TerminalView;
     use crate::workspace::Workspace;
-    use crate::workspace::tests::{open, wait_until};
+    use crate::workspace::tests::{click, open, wait_until};
 
     fn numbers(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<u32> {
         workspace.read_with(cx, |w, _| w.terminals.iter().map(|t| t.number).collect())
@@ -284,5 +366,89 @@ mod tests {
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.close_terminal(0, window, cx)));
         cx.simulate_keystrokes("secondary-t");
         assert_eq!(numbers(&workspace, cx), [2, 3]);
+    }
+
+    #[test]
+    fn tab_label_cleans_the_title() {
+        assert_eq!(super::tab_label(1, None), "Terminal 1");
+        assert_eq!(super::tab_label(2, Some("  \u{7}build ")), "build");
+        let long = "x".repeat(40);
+        assert_eq!(super::tab_label(1, Some(&long)), format!("{}…", "x".repeat(23)));
+        assert_eq!(super::tab_label(3, Some("   ")), "Terminal 3");
+    }
+
+    #[gpui_kit::test]
+    fn strip_selects_adds_and_closes(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        click("new-terminal", cx);
+        cx.update(|window, _| {
+            window.find(("terminal-tab", 0usize));
+            window.find(("terminal-tab", 1usize));
+        });
+        assert_eq!(workspace.read_with(cx, |w, _| w.active_terminal), 1);
+        click(("terminal-tab", 0usize), cx);
+        assert_eq!(workspace.read_with(cx, |w, _| w.active_terminal), 0);
+        click(("terminal-tab-close", 0usize), cx);
+        assert_eq!(numbers(&workspace, cx), [2]);
+    }
+
+    fn asked(cx: &mut VisualTestContext) -> Option<String> {
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.try_find("confirm-title").and_then(|t| t.label().map(str::to_owned))
+        })
+    }
+
+    #[gpui_kit::test]
+    fn closing_a_tab_with_a_running_job_asks(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
+        cx.simulate_input("sleep 30");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "the job", |cx| terminal.read_with(cx, |t, _| t.busy()));
+        click(("terminal-tab-close", 0usize), cx);
+        assert_eq!(asked(cx).as_deref(), Some("A command is still running"));
+        assert_eq!(numbers(&workspace, cx), [1]);
+        click("cancel", cx);
+        assert_eq!(numbers(&workspace, cx), [1]);
+        click(("terminal-tab-close", 0usize), cx);
+        click("confirm", cx);
+        assert!(numbers(&workspace, cx).is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn exited_tab_closes_without_asking(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
+        cx.simulate_input("exit");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "the exit", |cx| terminal.read_with(cx, |t, _| !t.has_shell()));
+        click(("terminal-tab-close", 0usize), cx);
+        assert_eq!(asked(cx), None);
+        assert!(numbers(&workspace, cx).is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn tab_label_follows_the_title(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
+        cx.simulate_input(r"printf '\033]0;hello\007'");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "the title", |cx| {
+            terminal.read_with(cx, |t, _| t.title() == Some("hello"))
+        });
+        let label = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find(("terminal-tab", 0usize)).label().map(str::to_owned)
+        });
+        assert_eq!(label.as_deref(), Some("hello"));
     }
 }

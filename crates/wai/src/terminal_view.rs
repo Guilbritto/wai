@@ -76,6 +76,11 @@ impl TerminalView {
         self.title.as_deref()
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_shell(&self) -> bool {
+        self.model.is_some()
+    }
+
     /// A job other than the shell runs in the terminal.
     pub fn busy(&self) -> bool {
         self.model.as_ref().is_some_and(TerminalModel::busy)

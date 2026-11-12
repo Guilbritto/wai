@@ -55,7 +55,7 @@ use crate::update::{self, Outcome, UpdateStatus};
 
 pub(crate) const CHOOSE_AI: &str = "Choose an AI to start a session.";
 const SIDEBAR_WIDTH: f32 = 280.;
-const TERMINAL_HEIGHT: f32 = 260.;
+const TERMINAL_HEIGHT: f32 = 288.;
 pub const MAX_PANES: usize = 4;
 /// Events kept per session id that is not open yet (see `Workspace::early`).
 const EARLY_EVENTS: usize = 1_000;
@@ -4281,7 +4281,7 @@ pub(crate) mod tests {
             let terminal = cx.debug_bounds("terminal").expect("terminal drawn");
             assert_eq!(
                 (sidebar.size.width, terminal.size.height),
-                (px(super::SIDEBAR_WIDTH), px(260.)),
+                (px(super::SIDEBAR_WIDTH), px(super::TERMINAL_HEIGHT)),
                 "window {window:?}"
             );
         }
