@@ -20,7 +20,7 @@ pub(crate) fn walker(start: &Path, root: &Path, global_ignores: bool) -> WalkBui
     builder
 }
 
-/// The `.gitignore` of each folder from `root` down to, excluding, `dir`: what a walk starting at
+/// The `.gitignore` of each folder from `root` down to `dir` included: what a walk starting at
 /// `dir` misses outside a git repository. Empty inside one, where `parents(true)` covers it.
 pub(crate) fn inherited(root: &Path, dir: &Path) -> Vec<Gitignore> {
     if in_repo(root) {
@@ -28,7 +28,6 @@ pub(crate) fn inherited(root: &Path, dir: &Path) -> Vec<Gitignore> {
     }
     let mut folders: Vec<_> = dir
         .ancestors()
-        .skip(1)
         .take_while(|a| a.starts_with(root))
         .collect();
     folders.reverse();
