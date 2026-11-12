@@ -28,3 +28,9 @@ start::tests::offline_fetch_still_starts_the_session
 start::tests::retry_after_a_created_worktree_reuses_it
 start::tests::worktree_base_is_remembered_per_repository
 start::tests::worktree_keeps_the_subfolder
+claude_config::tests::mcp_toggle_reports_invalid_file
+claude_config::tests::mcp_toggle_writes_disabled_list
+claude_config::tests::mcp_toggles_wait_for_the_write
+late_permission_answer_is_stale
+tree::tests::global_ignores_follow_the_flag
+claude::tests::mcp_on_without_entry_writes_nothing
