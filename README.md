@@ -16,7 +16,7 @@ A native, AI-first IDE for macOS and Windows, written in Rust with GPUI.
 
 **Status:** see the [latest release](https://github.com/Guilbritto/wai/releases/latest).
 - macOS on Apple silicon is the primary platform.
-- Windows x86_64 builds only in CI, and CI runs once the repository has a remote.
+- Windows x86_64 builds only in CI, and CI runs on GitHub (Guilbritto/wai).
 - Linux is best-effort.
 
 ## Requirements

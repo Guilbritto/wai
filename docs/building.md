@@ -94,7 +94,7 @@ installer uses `assets/icon/icon.ico`; `wai.exe` itself has no embedded icon yet
 
 Every push to `main` runs `.github/workflows/release.yml`: it runs CI, computes the next version with
 semantic-release from the conventional commits since the last tag (`feat:` is minor, `fix:` patch,
-`!` or `BREAKING CHANGE:` major; `docs:`, `ci:` and the like publish nothing), builds both platforms
+`!` or `BREAKING CHANGE:` major; only `fix:`, `feat:`, `perf:`, `revert:` and breaking changes publish; `docs:`, `ci:` and the like do not), builds both platforms
 with that version stamped into `Cargo.toml`, and publishes a release `v<version>` with these assets:
 
 - `wai_<version>_aarch64.dmg` (download) and `wai_<version>_aarch64.app.zip` (what the in-app updater

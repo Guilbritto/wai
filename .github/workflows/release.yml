@@ -38,13 +38,11 @@ jobs:
       version: ${{ steps.compute.outputs.version }}
       sha: ${{ steps.compute.outputs.sha }}
     steps:
-      # The branch tip, not the event SHA. semantic-release refuses to compute a version when the
-      # checked-out branch is behind its remote, and the event SHA is behind the moment any other
-      # commit lands on main while this runs. The concurrency group serialises runs, so the last
-      # one sees the newest tip.
+      # The event SHA, the commit the `ci` job just tested. Every later job checks out the sha
+      # this job outputs, so what CI tested, what is built and what is tagged is one commit.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           fetch-tags: true
       - uses: actions/setup-node@v4
@@ -54,6 +52,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # A newer push to main makes this run's commit stale: semantic-release would refuse a
+          # checkout behind its remote (and the build would not be the tip). That push has its own
+          # run, serialised after this one, which releases everything up to it.
+          git fetch origin main
+          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
+            echo "Superseded by a newer push to main; that run releases."
+            echo "version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           npm install -g semantic-release@24 conventional-changelog-conventionalcommits@8
           set +e
           OUT=$(npx semantic-release --dry-run 2>&1); echo "$OUT"
@@ -73,7 +80,7 @@ jobs:
           fi
           echo "Computed version: $V"
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
   macos:
     needs: version
@@ -89,9 +96,10 @@ jobs:
         with:
           ref: ${{ needs.version.outputs.sha }}
       # The repository keeps a placeholder version; the release version exists only in the build.
+      # The check allows `\r`: Windows runners check out with CRLF line endings.
       - name: Stamp version
         shell: bash
-        run: perl -0pi -e 's/^version = "[^"]*"/version = "'"$V"'"/m' Cargo.toml && grep -qxF "version = \"$V\"" Cargo.toml
+        run: perl -0pi -e 's/^version = "[^"]*"/version = "'"$V"'"/m' Cargo.toml && perl -ne '$f = 1 if /^version = "\Q$ENV{V}\E"\r?$/; END { exit !$f }' Cargo.toml
       # The toolchain, its components and targets come from rust-toolchain.toml.
       - run: rustup toolchain install
       - run: cargo install cargo-packager --version 0.11.8 --locked
@@ -148,7 +156,7 @@ jobs:
           ref: ${{ needs.version.outputs.sha }}
       - name: Stamp version
         shell: bash
-        run: perl -0pi -e 's/^version = "[^"]*"/version = "'"$V"'"/m' Cargo.toml && grep -qxF "version = \"$V\"" Cargo.toml
+        run: perl -0pi -e 's/^version = "[^"]*"/version = "'"$V"'"/m' Cargo.toml && perl -ne '$f = 1 if /^version = "\Q$ENV{V}\E"\r?$/; END { exit !$f }' Cargo.toml
       - run: rustup toolchain install
       - run: cargo install cargo-packager --version 0.11.8 --locked
       # Built before the certificate is in the store; the packager's own build is then a no-op.
@@ -202,7 +210,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      # A push that landed while the builds ran supersedes this commit: its own run, queued behind
+      # this one, releases everything up to it, so this run stops without failing.
+      - name: Check this commit is still the tip
+        id: fresh
+        env:
+          SHA: ${{ needs.version.outputs.sha }}
+        run: |
+          git fetch origin main
+          if [ "$(git rev-parse origin/main)" = "$SHA" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Superseded by a newer push to main; that run releases."
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Release
+        if: steps.fresh.outputs.fresh == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -211,13 +234,14 @@ jobs:
       # Appended here, not through a notes plugin: semantic-release's notes come from commit
       # subjects and say what changed, never how to run the result, and the binaries are unsigned.
       - name: Append the install instructions
+        if: steps.fresh.outputs.fresh == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: v${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          # Reading the notes back keeps this additive. A missing release here means the step above
-          # failed quietly, which must fail the run.
+          # Reading the notes back keeps this additive. The tip is fresh here, so a missing release
+          # means the step above failed quietly, which must fail the run.
           gh release view "$TAG" --json body -q .body > /tmp/notes.md
           cat .github/release-notes.md >> /tmp/notes.md
           gh release edit "$TAG" --notes-file /tmp/notes.md
