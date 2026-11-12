@@ -147,6 +147,7 @@ pub struct ChatSession {
     /// The agent list's keyboard row (0 is `main`) while it has the keys; `None`: the prompt.
     pub(super) agent_cursor: Option<usize>,
     pub(super) agent_scroll: ScrollHandle,
+    pub(super) drawer_scroll: ScrollHandle,
     /// Pending while streamed text waits for `STREAM_FLUSH`.
     flush: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -225,6 +226,7 @@ impl ChatSession {
             drawer: None,
             agent_cursor: None,
             agent_scroll: ScrollHandle::new(),
+            drawer_scroll: ScrollHandle::new(),
             flush: None,
             _subscriptions: subscriptions,
         };
@@ -741,6 +743,23 @@ impl ChatSession {
             ChatItem::Tool(tool) => {
                 let diffs = diff_views(&tool.diffs, &tool.locations, &self.cwd);
                 self.diffs.insert(ix, diffs);
+                // A subagent's answer is shown as Markdown in its drawer.
+                if tool.kind == "subagent" && !tool.text.is_empty() {
+                    let text = &tool.text;
+                    match self.texts.get_mut(&ix) {
+                        Some(md) if text.len() >= md.pushed && text.is_char_boundary(md.pushed) => {
+                            let delta = &text[md.pushed..];
+                            md.state.update(cx, |state, cx| state.push_str(delta, cx));
+                            md.pushed = text.len();
+                        }
+                        _ => {
+                            let state =
+                                cx.new(|cx| TextViewState::markdown(text, cx).selectable(true));
+                            let pushed = text.len();
+                            self.texts.insert(ix, Markdown { state, pushed });
+                        }
+                    }
+                }
             }
             ChatItem::Permission { .. } => {}
             ChatItem::User { .. }
@@ -1322,8 +1341,8 @@ mod tests {
         });
     }
 
-    /// A subagent shows as a card with its title, status and answer; its tool call stays inline,
-    /// tagged with it; its plan does not replace the session's.
+    /// A subagent shows as one card (kind, task, pill); its tool call leaves the transcript and
+    /// shows, with the answer, in its drawer; its plan does not replace the session's.
     #[gpui_kit::test]
     fn subagent_shows_in_the_chat(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
@@ -1341,25 +1360,144 @@ mod tests {
                         .any(|a| a.id == sub && a.state == SubagentState::Done)
             })
         });
-        let tool = |id: &str, cx: &mut VisualTestContext| {
+        let row = |id: &str, cx: &mut VisualTestContext| {
             session.read_with(cx, |s, _| {
-                s.model.items.iter().find_map(|item| match item {
-                    ChatItem::Tool(t) if t.id == id => Some(t.clone()),
-                    _ => None,
-                })
+                s.model
+                    .items
+                    .iter()
+                    .enumerate()
+                    .find_map(|(ix, item)| match item {
+                        ChatItem::Tool(t) if t.id == id => Some((ix, t.clone())),
+                        _ => None,
+                    })
             })
         };
-        let card = tool(&sub, cx).expect("the subagent's card");
+        let (card_ix, card) = row(&sub, cx).expect("the subagent's card");
         assert_eq!(card.status, ToolStatus::Completed);
         assert_eq!(card.title, "Explore the code");
         assert_eq!(card.text, "found it");
-        let read = tool("sub-read", cx).expect("the subagent's call");
+        let (read_ix, read) = row("sub-read", cx).expect("the subagent's call");
         assert_eq!(read.subagent.as_deref(), Some(sub.as_str()));
         assert_eq!(session.read_with(cx, |s, _| s.model.plan.len()), 3);
         assert_eq!(
             last_agent_text(&session, cx).as_deref(),
             Some("Hello from fake agent")
         );
+
+        assert!(shows(("subagent-card", card_ix), cx));
+        assert!(
+            !shows(("tool", read_ix), cx),
+            "the call left the transcript"
+        );
+        assert!(!shows("subagent-drawer", cx));
+        click_edits(None, ("subagent-card", card_ix), cx);
+        assert_eq!(agents_at(&session, cx), (None, Some(sub)));
+        assert!(shows("subagent-drawer", cx));
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            let drawer = window.within("subagent-drawer");
+            assert!(
+                drawer.try_find(("tool", read_ix)).is_some(),
+                "the call's line"
+            );
+            assert!(drawer.try_find("subagent-answer").is_some(), "the answer");
+        });
+    }
+
+    /// With the drawer open, Esc closes it and the turn runs on; the next Esc stops the turn.
+    #[gpui_kit::test]
+    fn esc_closes_the_drawer_not_the_turn(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(
+            cx,
+            fake_settings("--subagent --background --chunk-delay-ms 300"),
+        );
+        let session = start_session(&workspace, cx);
+        send("go", cx);
+        wait_until(cx, "the subagent", |cx| {
+            session.read_with(cx, |s, _| !s.model.subagents.is_empty())
+        });
+        click_edits(None, ("agent-row", 0usize), cx);
+        assert!(shows("subagent-drawer", cx));
+        assert_eq!(state(&session, cx), TurnState::Working);
+
+        cx.simulate_keystrokes("escape");
+        assert!(!shows("subagent-drawer", cx));
+        assert_eq!(state(&session, cx), TurnState::Working);
+
+        cx.simulate_keystrokes("escape");
+        wait_until(cx, "the turn's end", |cx| {
+            state(&session, cx) == TurnState::Idle
+        });
+    }
+
+    /// Review focus 1: the drawer closes with its subject: another session shown in the pane,
+    /// the subagent gone from the model, the session ended.
+    #[gpui_kit::test]
+    fn drawer_closes_when_its_subject_goes(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--subagent"));
+        let session = start_session(&workspace, cx);
+        turn(&session, cx);
+        let sub = session.read_with(cx, |s, _| format!("{}-sub", s.id));
+        let open_it = |cx: &mut VisualTestContext| {
+            session.update(cx, |s, cx| s.open_drawer(Some(sub.clone()), cx));
+            assert!(shows("subagent-drawer", cx));
+        };
+
+        open_it(cx);
+        let other = start_session(&workspace, cx);
+        assert_eq!(agents_at(&session, cx), (None, None), "(a) another session");
+        assert!(!other.read_with(cx, |s, _| s.drawer.is_some()));
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.show(session.clone(), false, window, cx))
+        });
+
+        open_it(cx);
+        session.update(cx, |s, _| s.model.subagents.clear());
+        assert!(!shows("subagent-drawer", cx), "(b) no subagent");
+        assert_eq!(agents_at(&session, cx), (None, None));
+
+        let ix = workspace.read_with(cx, |w, _| w.sessions.iter().position(|s| s == &session));
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.click(("open-close", ix.unwrap()), cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            workspace.read_with(cx, |w, _| !w.sessions.contains(&session)),
+            "(c) ended"
+        );
+    }
+
+    /// A permission card stays above the drawer and answerable.
+    #[gpui_kit::test]
+    fn waiting_cards_stay_above_the_drawer(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--subagent --ask-permission"));
+        let session = start_session(&workspace, cx);
+        send("edit", cx);
+        wait_until(cx, "the permission card", |cx| {
+            state(&session, cx) == TurnState::NeedsYou
+                && session.read_with(cx, |s, _| !s.model.subagents.is_empty())
+        });
+        click_edits(None, ("agent-row", 0usize), cx);
+        assert!(shows("subagent-drawer", cx));
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            let (waiting, drawer) = (
+                window.find("waiting").bounds(),
+                window.find("subagent-drawer").bounds(),
+            );
+            assert!(
+                drawer.bottom() <= waiting.top() + px(1.),
+                "{drawer:?} {waiting:?}"
+            );
+            window.click("perm-allow_once", cx);
+        });
+        wait_until(cx, "the answer", |cx| {
+            state(&session, cx) != TurnState::NeedsYou
+        });
     }
 
     /// The agent list under the prompt: not drawn until a subagent shows, then `main` and a row
@@ -1504,9 +1642,10 @@ mod tests {
         assert_eq!(agents_at(&session, cx), (None, None));
     }
 
-    /// A drawer whose subagent left the list (a new turn) is closed: the first Esc stops the turn.
+    /// A drawer still showing (its subagent is in the model, though from an earlier turn) is closed by
+    /// the first Esc, which keeps the turn; the second stops it.
     #[gpui_kit::test]
-    fn escape_stops_the_turn_past_a_drawer_that_left_the_list(cx: &mut TestAppContext) {
+    fn escape_closes_a_visible_drawer_then_stops_the_turn(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, fake_settings(&slow_reply(200, 20)));
         let session = start_session(&workspace, cx);
@@ -1530,6 +1669,13 @@ mod tests {
             last_agent_text(&session, cx).is_some()
         });
         cx.simulate_keystrokes("escape");
+        assert_eq!(agents_at(&session, cx), (None, None));
+        assert_eq!(
+            state(&session, cx),
+            TurnState::Working,
+            "the first Esc kept the turn"
+        );
+        cx.simulate_keystrokes("escape");
         wait_until(cx, "the turn's end", |cx| {
             state(&session, cx) == TurnState::Idle
         });
@@ -1538,7 +1684,7 @@ mod tests {
             kind: NoticeKind::Info,
         };
         let last = session.read_with(cx, |s, _| s.model.items.last().cloned());
-        assert_eq!(last, Some(cancelled), "the first Esc did not stop the turn");
+        assert_eq!(last, Some(cancelled), "the second Esc stops the turn");
         assert_eq!(agents_at(&session, cx), (None, None));
     }
 

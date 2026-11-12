@@ -10,9 +10,10 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use wai_agent::{PermissionChoice, ToolStatus};
+use wai_agent::{PermissionChoice, SubagentState, ToolStatus};
 use wai_settings::Processing;
 
+use super::agents::state_look;
 use super::model::{ChatItem, NoticeKind, ToolItem, TurnState, UsageInfo, show_label};
 use super::view::{ChatEvent, ChatSession, Mode};
 use super::{permission, question};
@@ -329,8 +330,11 @@ impl ChatSession {
     /// Whether row `ix` draws anything under the processing mode: Step by step, every row;
     /// Hidden, no step; Grouped, a step only when it heads its run or its group is open.
     pub(super) fn shown(&self, ix: usize) -> bool {
-        if !self.model.items[ix].is_step() {
-            return true;
+        match &self.model.items[ix] {
+            // A subagent's calls show only in its drawer.
+            ChatItem::Tool(t) if t.subagent.is_some() => return false,
+            item if !item.is_step() => return true,
+            _ => {}
         }
         match self.processing {
             Processing::Steps => true,
@@ -524,7 +528,10 @@ impl ChatSession {
                     })
                     .into_any_element()
             }
-            ChatItem::Tool(tool) => self.render_tool(ix, tool, cx).into_any_element(),
+            ChatItem::Tool(tool) => match self.subagent_card(ix, tool, cx) {
+                Some(card) => card,
+                None => self.render_tool(ix, tool, cx).into_any_element(),
+            },
             ChatItem::Permission { request, answered } => permission::closed(
                 ("permission", ix).into(),
                 &request.title,
@@ -584,7 +591,7 @@ impl ChatSession {
 
     /// One folded line: the call's title and status; a click unfolds its output and diffs. An
     /// edit that reached the disk reads `Edited <file>`, in every processing mode.
-    fn render_tool(
+    pub(super) fn render_tool(
         &self,
         ix: usize,
         tool: &ToolItem,
@@ -678,6 +685,72 @@ impl ChatSession {
                 .enumerate()
                 .map(|(k, d)| d.render(("diff", k).into(), &on_open, cx)),
         )
+    }
+
+    /// `.sub`: a subagent's card in the transcript, one line; a click opens its drawer. `None`
+    /// for any other tool call.
+    fn subagent_card(&self, ix: usize, tool: &ToolItem, cx: &Context<Self>) -> Option<AnyElement> {
+        if tool.kind != "subagent" {
+            return None;
+        }
+        let sub = self.model.subagents.iter().find(|s| s.id == tool.id)?;
+        let theme = cx.theme();
+        let dark = theme.is_dark();
+        let (mark, color, _) = state_look(sub.state, cx);
+        let (pill, tone) = match sub.state {
+            SubagentState::Done | SubagentState::Ended => ("Done", state_look(sub.state, cx).1),
+            SubagentState::Stopped | SubagentState::Failed => ("Failed", color),
+            _ => ("Running", color),
+        };
+        let violet = if dark { aurora::lilas() } else { theme.primary };
+        let (kind, task) = match &sub.kind {
+            Some(kind) => (kind.as_str(), sub.title.as_str()),
+            None => (sub.title.as_str(), ""),
+        };
+        let id = sub.id.clone();
+        let card = h_flex()
+            .id(("subagent-card", ix))
+            .w_full()
+            .items_center()
+            .gap_2()
+            .px(px(8.))
+            .py(px(5.))
+            .border_1()
+            .rounded(px(9.))
+            .text_size(px(12.))
+            .cursor_pointer()
+            .child(div().text_color(color).child(mark))
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(violet)
+                    .child(kind.to_string()),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(task.to_string()))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(10.5))
+                    .rounded(px(6.))
+                    .px(px(6.))
+                    .py(px(1.))
+                    .border_1()
+                    .border_color(tone.alpha(0.33))
+                    .bg(tone.alpha(0.08))
+                    .text_color(tone)
+                    .child(pill),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_drawer(Some(id.clone()), cx);
+            }));
+        let card = match dark {
+            true => card
+                .bg(hsla(0., 0., 1., 0.024))
+                .border_color(aurora::borda()),
+            false => card.border_color(theme.border),
+        };
+        // Registers the id so tests can find and click it.
+        Some(card.test_support().into_any_element())
     }
 
     /// The old mode picker, unless the agent offers `mode` as a config option.
@@ -826,6 +899,7 @@ impl Render for ChatSession {
         self.sync_mode_select(window, cx);
         self.sync_pickers(window, cx);
         self.sync_unsent(window, cx);
+        self.prune_agents();
         let empty = self.model.items.is_empty() && self.model.state == TurnState::Idle;
         let messages = div()
             .id("transcript")
@@ -848,6 +922,7 @@ impl Render for ChatSession {
             // row but the last carries its own, except rows inside a card (only the card's last
             // does). The scroller remeasures the row before an append, whose "last" flips.
             false => messages.child({
+                let dim = self.drawer.is_some();
                 let scroller = MessageScroller::new(
                     "messages",
                     self.scroller.clone(),
@@ -873,21 +948,31 @@ impl Render for ChatSession {
                     }),
                 )
                 .with_row_style(StyleRefinement::default().pb_0());
-                match self.waiting_height > px(0.) {
+                let scroller = match self.waiting_height > px(0.) {
                     true => scroller
                         .with_list_style(StyleRefinement::default().pb(inset))
                         .with_jump_button_style(StyleRefinement::default().mb(inset)),
                     false => scroller,
+                };
+                // The transcript dims behind the drawer.
+                match dim {
+                    true => div()
+                        .size_full()
+                        .opacity(0.35)
+                        .child(scroller)
+                        .into_any_element(),
+                    false => scroller.into_any_element(),
                 }
             }),
         };
+        let drawer = self.render_drawer(cx);
         v_flex()
             .key_context("ChatSession")
             .on_action(cx.listener(Self::cancel))
             .on_drop(cx.listener(Self::attach))
             .size_full()
             .child(self.render_header(cx))
-            .child(messages.children(waiting))
+            .child(messages.children(drawer).children(waiting))
             .child(self.render_prompt(window, cx))
             .children(self.render_agents(cx))
     }

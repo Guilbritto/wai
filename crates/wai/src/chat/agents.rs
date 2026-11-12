@@ -1,13 +1,15 @@
 //! The agent list under the prompt box (mockup `.agents`): `main` and the session's subagents,
 //! by mouse and keyboard; opening one sets `drawer`.
 
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Enter, MoveDown, MoveUp};
-use gpui_kit::component::{ActiveTheme as _, v_flex};
+use gpui_kit::component::text::TextView;
+use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::SubagentState;
 
-use super::model::{Subagent, elapsed};
+use super::model::{ChatItem, Subagent, elapsed};
 use super::render::tokens;
 use super::view::ChatSession;
 use crate::aurora;
@@ -20,7 +22,7 @@ const ROWS: f32 = 6.;
 /// `9s`, `done · 32s`, then ` · ↓ 46k tokens` when the agent reports them.
 // ponytail: live times repaint on the turn clock's ticks; a background subagent's time holds
 // still between turns. Give the session a 1 s tick while one runs if that matters.
-fn sub_stat(sub: &Subagent) -> String {
+pub(super) fn sub_stat(sub: &Subagent) -> String {
     let time = match sub.ended {
         Some(end) => format!("done · {}", elapsed((end - sub.started).as_secs())),
         None => elapsed(sub.started.elapsed().as_secs()),
@@ -28,6 +30,27 @@ fn sub_stat(sub: &Subagent) -> String {
     match sub.used {
         Some(n) => format!("{time} · ↓ {} tokens", tokens(n)),
         None => time,
+    }
+}
+
+/// A subagent's state mark, its colour and its word, as the list, the drawer and the card show it.
+pub(super) fn state_look(state: SubagentState, cx: &App) -> (&'static str, Hsla, &'static str) {
+    let theme = cx.theme();
+    let pick = |aurora: Hsla, light: Hsla| if theme.is_dark() { aurora } else { light };
+    let cyan = pick(aurora::boreal(), theme.info);
+    match state {
+        SubagentState::Running => ("○", cyan, "running"),
+        SubagentState::NeedsYou => ("○", pick(aurora::ambar(), theme.warning), "needs you"),
+        SubagentState::Done | SubagentState::Ended => {
+            ("✓", pick(aurora::ok(), theme.success), "done")
+        }
+        SubagentState::Stopped => ("✗", pick(aurora::erro(), theme.danger), "stopped"),
+        SubagentState::Failed => ("✗", pick(aurora::erro(), theme.danger), "failed"),
+        SubagentState::Unknown => (
+            "○",
+            pick(aurora::nevoa(), theme.muted_foreground),
+            "starting",
+        ),
     }
 }
 
@@ -53,12 +76,6 @@ impl ChatSession {
             pick(aurora::tinta_2(), theme.foreground),
             pick(aurora::nevoa(), theme.muted_foreground),
             pick(aurora::nevoa_2(), theme.muted_foreground),
-        );
-        let (cyan, amber, green, red) = (
-            pick(aurora::boreal(), theme.info),
-            pick(aurora::ambar(), theme.warning),
-            pick(aurora::ok(), theme.success),
-            pick(aurora::erro(), theme.danger),
         );
         // The cursor's row while the list has the keys, else the open drawer's, else `main`.
         let cursor = self.agent_cursor.map(|c| c.min(subs.len()));
@@ -127,14 +144,7 @@ impl ChatSession {
             // Registers the id so tests can find and click it.
             .test_support();
         let rows = subs.iter().enumerate().map(|(ix, sub)| {
-            let (mark, color, state) = match sub.state {
-                SubagentState::Running => ("○", cyan, "running"),
-                SubagentState::NeedsYou => ("○", amber, "needs you"),
-                SubagentState::Done | SubagentState::Ended => ("✓", green, "done"),
-                SubagentState::Stopped => ("✗", red, "stopped"),
-                SubagentState::Failed => ("✗", red, "failed"),
-                SubagentState::Unknown => ("○", muted, "starting"),
-            };
+            let (mark, color, state) = state_look(sub.state, cx);
             // Without a kind the title is the name and there is no task.
             let (name, task) = match &sub.kind {
                 Some(kind) => (kind.as_str(), sub.title.as_str()),
@@ -199,23 +209,21 @@ impl ChatSession {
         Some(el.into_any_element())
     }
 
-    /// Closes a drawer whose subagent left the list (a new turn), and leaves the list once it is
-    /// gone, so Esc and Enter are the prompt's again.
+    /// Closes a drawer whose subagent is gone from the model, and leaves the list once it has
+    /// no rows, so Esc and Enter are the prompt's again. A subagent of an earlier turn keeps its
+    /// drawer: its transcript card opens it.
     pub(super) fn prune_agents(&mut self) {
-        let shown = self.model.shown_subagents();
-        let open = shown
-            .iter()
-            .any(|s| self.drawer.as_deref() == Some(s.id.as_str()));
-        if shown.is_empty() {
+        if self.model.shown_subagents().is_empty() {
             self.agent_cursor = None;
         }
-        if !open {
+        let known = (self.model.subagents.iter()).any(|s| self.drawer.as_deref() == Some(&s.id));
+        if !known {
             self.drawer = None;
         }
     }
 
     /// Opens the subagent `id`'s drawer; `None` closes it (back to `main`).
-    pub(super) fn open_drawer(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn open_drawer(&mut self, id: Option<String>, cx: &mut Context<Self>) {
         self.drawer = id;
         cx.notify();
     }
@@ -263,6 +271,145 @@ impl ChatSession {
 
     fn prompt_empty(&self, cx: &App) -> bool {
         self.input.read(cx).value().is_empty() && self.attachments.is_empty()
+    }
+}
+
+impl ChatSession {
+    /// `.drawer`: the open subagent's calls and answer, as a glass panel laid over the
+    /// transcript's bottom (like `render_waiting`, which is drawn after it, on top).
+    pub(super) fn render_drawer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let sub = self.drawer.as_deref().and_then(|id| {
+            let found = self.model.subagents.iter().find(|s| s.id == id);
+            found.cloned()
+        })?;
+        let theme = cx.theme();
+        let dark = theme.is_dark();
+        let (fg, fg2, muted, faint) = match dark {
+            true => (
+                aurora::tinta(),
+                aurora::tinta_2(),
+                aurora::nevoa(),
+                aurora::nevoa_2(),
+            ),
+            false => (
+                theme.foreground,
+                theme.foreground,
+                theme.muted_foreground,
+                theme.muted_foreground,
+            ),
+        };
+        let (mark, color, _) = state_look(sub.state, cx);
+        let (name, task) = match &sub.kind {
+            Some(kind) => (kind.as_str(), sub.title.as_str()),
+            None => (sub.title.as_str(), ""),
+        };
+        let stat = sub_stat(&sub);
+        let calls: Vec<AnyElement> = (self.model.items.iter().enumerate())
+            .filter_map(|(ix, item)| match item {
+                ChatItem::Tool(t) if t.subagent.as_deref() == Some(&sub.id) => Some((ix, t)),
+                _ => None,
+            })
+            .map(|(ix, t)| self.render_tool(ix, t, cx).into_any_element())
+            .collect();
+        // The card is the `Tool` whose id is the subagent's; its row owns the answer's markdown.
+        let answer = (self.model.items.iter().enumerate())
+            .find(|(_, item)| matches!(item, ChatItem::Tool(t) if t.id == sub.id))
+            .and_then(|(ix, _)| self.texts.get(&ix))
+            .map(|md| {
+                div()
+                    .id("subagent-answer")
+                    .child(TextView::new(&md.state))
+                    // Registers the id so tests can find it.
+                    .test_support()
+            });
+        let theme = cx.theme();
+        let close = Button::new("subagent-drawer-close")
+            .ghost()
+            .xsmall()
+            .icon(IconName::Close)
+            .tooltip("Close")
+            .accessibility_label("Close subagent")
+            .on_click(cx.listener(|this, _, _, cx| this.open_drawer(None, cx)));
+        let head = h_flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .px(px(12.))
+            .py(px(7.))
+            .border_b_1()
+            .border_color(if dark { aurora::borda() } else { theme.border })
+            .text_size(px(12.))
+            .child(div().text_color(color).child(mark))
+            .child(
+                div()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(fg)
+                    .child(name.to_string()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(muted)
+                    .child(task.to_string()),
+            )
+            .child(div().flex_none().text_color(faint).child(stat))
+            .child(close);
+        // Follow the bottom only while it is where the reader is. The offset is last frame's,
+        // so the view trails a growing body by a frame.
+        let at_bottom = {
+            let (max, y) = (
+                self.drawer_scroll.max_offset().y,
+                self.drawer_scroll.offset().y,
+            );
+            max <= px(0.) || -y >= max - px(1.)
+        };
+        if at_bottom {
+            self.drawer_scroll.scroll_to_bottom();
+        }
+        let body = v_flex()
+            .id("subagent-body")
+            .flex_1()
+            .min_h_0()
+            .gap_1()
+            .px(px(12.))
+            .py(px(8.))
+            .overflow_y_scroll()
+            .track_scroll(&self.drawer_scroll)
+            .font_family(theme.mono_font_family.clone())
+            .text_size(px(11.5))
+            .text_color(fg2)
+            .children(calls)
+            .children(answer);
+        let panel = v_flex()
+            .id("subagent-drawer")
+            .absolute()
+            .left(px(10.))
+            .right(px(10.))
+            .bottom(self.waiting_height + px(16.))
+            .h(relative(0.46))
+            .occlude()
+            .rounded(px(14.))
+            .border_1()
+            .child(head)
+            .child(body);
+        let panel = match dark {
+            true => panel
+                .border_color(theme.list_active_border)
+                .bg(aurora::noite_2().alpha(0.95))
+                .shadow(vec![
+                    BoxShadow::new(px(0.), px(-10.), hsla(0., 0., 0., 0.5)).blur_radius(px(20.)),
+                ]),
+            false => panel
+                .border_color(theme.list_active_border)
+                .bg(theme.background.opacity(0.95))
+                .shadow(vec![
+                    BoxShadow::new(px(0.), px(-6.), hsla(0., 0., 0., 0.2)).blur_radius(px(12.)),
+                ]),
+        };
+        // Registers the id so tests can find it.
+        Some(panel.test_support().into_any_element())
     }
 }
 

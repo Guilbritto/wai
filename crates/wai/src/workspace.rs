@@ -1165,6 +1165,13 @@ impl Workspace {
         }
     }
 
+    /// The session shown in pane `ix` is about to give way: its subagent drawer closes.
+    fn close_drawer_at(&self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(shown) = self.panes[ix].session() {
+            shown.update(cx, |s, cx| s.open_drawer(None, cx));
+        }
+    }
+
     /// Shows `session` in the focused pane (beside the editor pane, see `session_pane`), or with
     /// `side` in a new pane while there are fewer than `MAX_PANES` (an empty focused pane is used
     /// instead). A session already in a pane is focused there: one session is drawn once.
@@ -1189,6 +1196,7 @@ impl Workspace {
                 } else {
                     self.session_pane()
                 };
+                self.close_drawer_at(ix, cx);
                 self.panes[ix] = Pane::Session(session);
                 ix
             }
@@ -1700,6 +1708,7 @@ impl Workspace {
         let ticket = self.next_ticket;
         self.next_ticket += 1;
         if let Some(ix) = ix {
+            self.close_drawer_at(ix, cx);
             self.panes[ix] = Pane::Preparing {
                 agent: agent.clone(),
                 ticket,
