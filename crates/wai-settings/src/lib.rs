@@ -497,6 +497,10 @@ pub struct AppState {
     pub last_bases: BTreeMap<PathBuf, String>,
     /// Agent id -> the modes its last session reported.
     pub modes_seen: BTreeMap<String, SeenModes>,
+    /// The editor tabs, in order (tool outputs excluded).
+    pub open_files: Vec<PathBuf>,
+    /// The editor tab that was showing.
+    pub active_file: Option<PathBuf>,
 }
 
 /// A named group of open sessions.
@@ -547,6 +551,8 @@ impl Default for AppState {
             last_models: BTreeMap::new(),
             last_bases: BTreeMap::new(),
             modes_seen: BTreeMap::new(),
+            open_files: Vec::new(),
+            active_file: None,
         }
     }
 }
@@ -586,6 +592,30 @@ mod tests {
         let p = dir.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, body).unwrap();
+    }
+
+    #[test]
+    fn state_without_open_files_still_loads() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("state.json");
+        std::fs::write(&path, r#"{"project": "/p"}"#).unwrap();
+        let state = AppState::load(&path);
+        assert_eq!(state.project, Some(PathBuf::from("/p")));
+        assert!(state.open_files.is_empty());
+        assert_eq!(state.active_file, None);
+    }
+
+    #[test]
+    fn open_files_round_trip() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("state.json");
+        let state = AppState {
+            open_files: vec!["/p/a.rs".into(), "/p/b.rs".into()],
+            active_file: Some("/p/b.rs".into()),
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        assert_eq!(AppState::load(&path), state);
     }
 
     #[test]
@@ -920,6 +950,8 @@ mod tests {
                 },
             )]
             .into(),
+            open_files: vec!["/tmp/proj/a.rs".into()],
+            active_file: Some("/tmp/proj/a.rs".into()),
         };
         state.save(&path).unwrap();
         assert_eq!(AppState::load(&path), state);

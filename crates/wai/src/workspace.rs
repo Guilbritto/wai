@@ -36,7 +36,7 @@ use crate::app::{
 };
 use crate::aurora;
 use crate::chat::{ChatEvent, ChatSession, DraftView, TurnState, signed_out};
-use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved, recovery};
+use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved, TabsChanged, recovery};
 use crate::ext_host::{ExtHost, SessionCall};
 use crate::extensions_view::{ExtensionsView, InstallPlugin};
 use crate::files::{FileTree, OpenFile};
@@ -840,7 +840,11 @@ impl Workspace {
         self.agents_collapsed = state.agents_collapsed;
         self.focus_pane(0, window, cx);
         self.save_state(cx);
-        self.recover(window, cx);
+        let (files, active) = match state.project.as_deref() == Some(self.project.as_path()) {
+            true => (state.open_files, state.active_file),
+            false => (Vec::new(), None),
+        };
+        self.recover(files, active, window, cx);
     }
 
     /// Where unsaved edits are kept: beside the state file.
@@ -850,9 +854,15 @@ impl Workspace {
 
     /// Hot-exit: reopens the last run's unsaved edits (read on the background executor), each as
     /// an edited tab with the banner.
-    fn recover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn recover(
+        &mut self,
+        files: Vec<PathBuf>,
+        active: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(dir) = self.recovery_dir() else {
-            return;
+            return self.restore_files(files, active, window, cx);
         };
         cx.spawn_in(window, async move |this, cx| {
             let found = cx
@@ -871,10 +881,62 @@ impl Workspace {
                     let tab = cx.new(|cx| FileEditor::recovered(found, window, cx));
                     this.add_tab(tab, None, window, cx);
                 }
+                this.restore_files(files, active, window, cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Reopens the last run's editor tabs in their order, `active` showing again and the pane
+    /// that had focus keeping it. A path that has a tab already (a recovered one) is skipped; a
+    /// file that cannot be read is dropped, quietly.
+    fn restore_files(
+        &mut self,
+        files: Vec<PathBuf>,
+        active: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if files.is_empty() {
+            return;
+        }
+        let focused = self.focused_pane;
+        cx.spawn_in(window, async move |this, cx| {
+            let read = files.clone();
+            let loaded = cx
+                .background_spawn(async move {
+                    let load = |path: PathBuf| match editor::load(&path) {
+                        Ok(loaded) => Some((path, loaded)),
+                        Err(e) => {
+                            eprintln!("wai: could not reopen {}: {e}", path.display());
+                            None
+                        }
+                    };
+                    read.into_iter().map(load).collect::<Vec<_>>()
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                for (path, loaded) in loaded.into_iter().flatten() {
+                    if !this.has_tab(&path, cx) {
+                        this.open_loaded(path, loaded, None, false, window, cx);
+                    }
+                }
+                if let Some(active) = active {
+                    this.reveal(&active, None, window, cx);
+                }
+                this.focus_pane(focused.min(this.panes.len() - 1), window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn has_tab(&self, path: &Path, cx: &App) -> bool {
+        self.panes.iter().any(|pane| match pane {
+            Pane::Editor(pane) => pane.read(cx).find(path, cx).is_some(),
+            _ => false,
+        })
     }
 
     /// Writes what the next launch restores: on each structural change and at quit, never on a
@@ -895,6 +957,17 @@ impl Workspace {
             }
         });
         let unrestored = self.unrestored.iter().cloned();
+        let editor = self.panes.iter().find_map(|pane| match pane {
+            Pane::Editor(pane) => Some(pane.read(cx)),
+            _ => None,
+        });
+        let tabs = editor.iter().flat_map(|p| &p.tabs).map(|t| t.read(cx));
+        let open_files = tabs.filter(|t| !t.scratch).map(|t| t.path.clone());
+        let active_file = editor
+            .and_then(|p| p.tabs.get(p.active))
+            .map(|t| t.read(cx))
+            .filter(|t| !t.scratch)
+            .map(|t| t.path.clone());
         let state = AppState {
             project: Some(self.project.clone()),
             open_sessions: open_sessions.chain(unrestored).collect(),
@@ -909,6 +982,8 @@ impl Workspace {
             last_models: self.last_models.clone(),
             last_bases: self.last_bases.clone(),
             modes_seen: self.modes_seen.clone(),
+            open_files: open_files.collect(),
+            active_file,
         };
         // ponytail: a few hundred bytes on the UI thread; move to the background executor if
         // it ever shows in a frame.
@@ -2322,24 +2397,36 @@ impl Workspace {
                 };
                 // Opened meanwhile (a double click): one tab per file.
                 if !this.reveal(&path, line, window, cx) {
-                    #[cfg(feature = "demo")]
-                    let started = std::time::Instant::now();
-                    let keep = this.recovery_dir().filter(|_| !scratch);
-                    let keep = keep.map(|dir| recovery::next_file(&dir, &mut this.next_recovery));
-                    let tab = cx
-                        .new(|cx| FileEditor::new(path.clone(), loaded, scratch, keep, window, cx));
-                    this.add_tab(tab, line, window, cx);
-                    #[cfg(feature = "demo")]
-                    eprintln!(
-                        "wai: {} took {:?} on the main thread",
-                        path.display(),
-                        started.elapsed()
-                    );
+                    this.open_loaded(path, loaded, line, scratch, window, cx);
                 }
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Adds the tab of a file `editor::load` read.
+    fn open_loaded(
+        &mut self,
+        path: PathBuf,
+        loaded: editor::Loaded,
+        line: Option<u32>,
+        scratch: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(feature = "demo")]
+        let started = std::time::Instant::now();
+        let keep = self.recovery_dir().filter(|_| !scratch);
+        let keep = keep.map(|dir| recovery::next_file(&dir, &mut self.next_recovery));
+        let tab = cx.new(|cx| FileEditor::new(path.clone(), loaded, scratch, keep, window, cx));
+        self.add_tab(tab, line, window, cx);
+        #[cfg(feature = "demo")]
+        eprintln!(
+            "wai: {} took {:?} on the main thread",
+            path.display(),
+            started.elapsed()
+        );
     }
 
     /// Adds `tab` to the editor pane and focuses it, at `line`.
@@ -2409,6 +2496,8 @@ impl Workspace {
             }
         })
         .detach();
+        cx.subscribe(&pane, |this, _, _: &TabsChanged, cx| this.save_state(cx))
+            .detach();
         let ix = match self.panes.iter().position(|p| matches!(p, Pane::Empty(_))) {
             Some(ix) => ix,
             None if self.panes.len() < MAX_PANES => {

@@ -4,8 +4,8 @@ mod file;
 mod pane;
 pub mod recovery;
 
-pub use file::{line_ends, load, save};
-pub use pane::{EditorPane, Emptied, FileEditor, Saved};
+pub use file::{Loaded, line_ends, load, save};
+pub use pane::{EditorPane, Emptied, FileEditor, Saved, TabsChanged};
 
 #[cfg(test)]
 mod tests {
@@ -921,6 +921,144 @@ mod tests {
         quit(cx);
 
         assert_eq!(recovered_texts(&state), ["again first a", "theirs b"]);
+    }
+
+    fn two_files(root: &Path) -> [PathBuf; 2] {
+        let [a, b] = ["a.txt", "b.txt"].map(|name| canonical(root).join(name));
+        fs::write(&a, "a").unwrap();
+        fs::write(&b, "b").unwrap();
+        [a, b]
+    }
+
+    /// The editor tabs come back on the next launch, in order, the active one showing.
+    #[gpui_kit::test]
+    fn editor_tabs_come_back_on_reopen(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        let [a, b] = two_files(dir.path());
+        let (workspace, cx) = run_at(&state, cx);
+        open_file(&workspace, &a, None, cx);
+        open_file(&workspace, &b, None, cx);
+        let pane = editor_pane(&workspace, cx);
+        cx.update(|window, cx| pane.update(cx, |p, cx| p.activate(0, window, cx)));
+        let focused = workspace.read_with(cx, |w, _| w.focused_pane);
+        quit(cx);
+
+        let (workspace, cx) = open_at(&mut cx.cx, Settings::default(), Some(state.clone()));
+        crate::workspace::tests::launch(&workspace, cx);
+        wait_until(cx, "the tabs", |cx| {
+            workspace.read_with(cx, |w, cx| {
+                let tabs = w.panes.iter().any(|p| matches!(p, Pane::Editor(e) if e.read(cx).tabs.len() == 2));
+                tabs
+            })
+        });
+        let pane = editor_pane(&workspace, cx);
+        assert_eq!(paths(&pane, cx), [a.clone(), b]);
+        assert_eq!(active_tab(&workspace, cx).read_with(cx, |t, _| t.path.clone()), a);
+        assert_eq!(workspace.read_with(cx, |w, _| w.focused_pane), focused);
+    }
+
+    #[gpui_kit::test]
+    fn restore_ignores_the_files_of_another_project(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        let [a, b] = two_files(dir.path());
+        wai_settings::AppState {
+            project: Some("/other".into()),
+            open_files: vec![a.clone(), b],
+            active_file: Some(a),
+            ..Default::default()
+        }
+        .save(&state)
+        .unwrap();
+
+        let (workspace, cx) = run_at(&state, cx);
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+
+        workspace.read_with(cx, |w, _| {
+            assert!(!w.panes.iter().any(|p| matches!(p, Pane::Editor(_))))
+        });
+    }
+
+    #[gpui_kit::test]
+    fn restore_skips_a_file_that_is_gone(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        let [a, b] = two_files(dir.path());
+        let (workspace, cx) = run_at(&state, cx);
+        open_file(&workspace, &a, None, cx);
+        open_file(&workspace, &b, None, cx);
+        quit(cx);
+        fs::remove_file(&a).unwrap();
+
+        let (workspace, cx) = open_at(&mut cx.cx, Settings::default(), Some(state.clone()));
+        crate::workspace::tests::launch(&workspace, cx);
+        wait_until(cx, "the tab", |cx| {
+            workspace.read_with(cx, |w, _| w.panes.iter().any(|p| matches!(p, Pane::Editor(_))))
+        });
+
+        let pane = editor_pane(&workspace, cx);
+        assert_eq!(paths(&pane, cx), [b]);
+        assert_eq!(notices(cx), 0);
+    }
+
+    #[gpui_kit::test]
+    fn recovered_edits_win_over_a_clean_reopen(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        let [a, _] = two_files(dir.path());
+        let (workspace, cx) = run_at(&state, cx);
+        open_file(&workspace, &a, None, cx);
+        cx.simulate_input("mine ");
+        quit(cx);
+
+        let (workspace, cx) = open_at(&mut cx.cx, Settings::default(), Some(state.clone()));
+        crate::workspace::tests::launch(&workspace, cx);
+        wait_until(cx, "the tab", |cx| {
+            workspace.read_with(cx, |w, _| w.panes.iter().any(|p| matches!(p, Pane::Editor(_))))
+        });
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+
+        let pane = editor_pane(&workspace, cx);
+        assert_eq!(paths(&pane, cx), [a]);
+        assert!(active_tab(&workspace, cx).read_with(cx, |t, _| t.dirty));
+        assert!(recovered_banner(cx));
+    }
+
+    #[gpui_kit::test]
+    fn scratch_tabs_are_not_saved(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        let [a, b] = two_files(dir.path());
+        let (workspace, cx) = run_at(&state, cx);
+        open_file(&workspace, &a, None, cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.open(b, None, true, window, cx))
+        });
+        cx.run_until_parked();
+
+        let pane = editor_pane(&workspace, cx);
+        assert_eq!(paths(&pane, cx).len(), 2);
+        assert_eq!(wai_settings::AppState::load(&state).open_files, [a]);
+    }
+
+    #[gpui_kit::test]
+    fn closing_a_tab_saves_the_state(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("config").join("state.json");
+        let [a, b] = two_files(dir.path());
+        let (workspace, cx) = run_at(&state, cx);
+        open_file(&workspace, &a, None, cx);
+        open_file(&workspace, &b, None, cx);
+        assert_eq!(wai_settings::AppState::load(&state).open_files, [a, b.clone()]);
+
+        let pane = editor_pane(&workspace, cx);
+        cx.update(|window, cx| pane.update(cx, |p, cx| p.close(0, window, cx)));
+        cx.run_until_parked();
+
+        assert_eq!(wai_settings::AppState::load(&state).open_files, [b]);
     }
 
     /// R61: an entry over 50 MB is not written, and a notice says so once.
