@@ -388,7 +388,9 @@ pub(crate) mod tests {
 
     /// A superproject with the submodule `inventories` and a linked worktree of that submodule.
     pub(crate) fn submodule_worktree(tmp: &Path) -> (PathBuf, PathBuf) {
-        let src = repo_with(&tmp.join("inv-src"), &[]);
+        // Git reads the canonical \\?\ form Windows gives as a host name: hand it the plain path.
+        let src = tmp.join("inv-src");
+        repo_with(&src, &[]);
         let sup = repo_with(&tmp.join("super"), &[]);
         git(
             &sup,
@@ -415,7 +417,8 @@ pub(crate) mod tests {
 
     /// A bare origin (HEAD main) and a clone of it.
     pub(crate) fn cloned(tmp: &Path) -> (PathBuf, PathBuf) {
-        let src = repo_with(&tmp.join("src"), &[]);
+        let src = tmp.join("src");
+        repo_with(&src, &[]);
         let bare = tmp.join("origin.git");
         git(
             tmp,

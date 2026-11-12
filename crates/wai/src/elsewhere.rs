@@ -204,12 +204,16 @@ mod tests {
         let none = HashSet::new();
         assert!(open_elsewhere(home.path(), &ids, &none).contains("abc"));
         let old = SystemTime::now() - Duration::from_secs(600);
-        std::fs::File::open(&file)
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
             .unwrap()
             .set_modified(old)
             .unwrap();
         assert!(!open_elsewhere(home.path(), &ids, &none).contains("abc"));
-        std::fs::File::open(&file)
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
             .unwrap()
             .set_modified(SystemTime::now())
             .unwrap();
