@@ -143,6 +143,7 @@ impl Render for Preview {
 pub(crate) enum Renamed {
     Session(Entity<ChatSession>),
     Group(usize),
+    Area(usize),
 }
 
 /// What waits on the question about unsaved edits.

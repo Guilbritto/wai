@@ -15,8 +15,8 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::SessionSummary;
-use wai_settings::SessionGroup;
 pub use wai_settings::canonical;
+use wai_settings::{SessionGroup, WorkArea};
 
 use crate::agents::AgentStatus;
 use crate::app::{FilterSessions, NewSession};
@@ -437,8 +437,10 @@ impl Workspace {
         let history_folded = self.history_folded && !filtering;
         let shown = |session: &Entity<ChatSession>| shows(&filter, session_title(session.read(cx)));
         let members = |group: Option<usize>| {
-            (self.sessions.iter().enumerate())
-                .filter(move |(_, session)| self.group_of(&session.read(cx).id) == group)
+            (self.sessions.iter().enumerate()).filter(move |(_, session)| {
+                let id = &session.read(cx).id;
+                self.group_of(id) == group && (group.is_some() || self.area_of(id).is_none())
+            })
         };
         let drafts: Vec<_> = (self.drafts.iter().enumerate())
             .filter(|(_, draft)| shows(&filter, &draft_title(draft, cx)))
@@ -449,6 +451,34 @@ impl Workspace {
             .map(|(ix, session)| self.open_row(ix, session, false, cx).into_any_element())
             .collect();
         let mut matched = !drafts.is_empty() || !ungrouped.is_empty();
+        let mut areas = Vec::new();
+        for (ax, area) in self.work_areas.iter().enumerate() {
+            let ids = self.area_now(ax, cx).panes;
+            let all: Vec<_> = (ids.iter())
+                .filter_map(|id| {
+                    self.sessions
+                        .iter()
+                        .enumerate()
+                        .find(|(_, s)| s.read(cx).id == *id)
+                })
+                .collect();
+            let hits: Vec<_> = all.iter().filter(|(_, session)| shown(session)).collect();
+            if filtering && hits.is_empty() {
+                continue;
+            }
+            matched = true;
+            let on = self.shown_area == Some(ax);
+            let needs = (all.iter())
+                .filter(|(_, s)| matches!(s.read(cx).status(), TurnState::NeedsYou))
+                .count();
+            let collapsed = area.collapsed && !filtering;
+            let header = self.work_area_row(ax, area, all.len(), on, needs, collapsed, cx);
+            areas.push(header.into_any_element());
+            if !collapsed {
+                let rows = hits.iter().map(|(ix, s)| self.open_row(*ix, s, true, cx));
+                areas.extend(rows.map(IntoElement::into_any_element));
+            }
+        }
         let mut groups = Vec::new();
         for (gx, group) in self.groups.iter().enumerate() {
             let all: Vec<_> = members(Some(gx)).collect();
@@ -469,7 +499,7 @@ impl Workspace {
             }
         }
         let no_match = filtering && !matched && self.listed_history(cx).is_empty();
-        let count = self.drafts.len() + self.sessions.len();
+        let count = self.drafts.len() + members(None).count();
         let faint = faint(cx);
         let title = panel_title("Sessions", cx)
             .child(
@@ -486,6 +516,9 @@ impl Workspace {
                     cx.listener(|this, _, _, cx| {
                         for group in &mut this.groups {
                             group.collapsed = true;
+                        }
+                        for area in &mut this.work_areas {
+                            area.collapsed = true;
                         }
                         this.save_state(cx);
                         cx.notify();
@@ -540,6 +573,26 @@ impl Workspace {
                     .min_h_0()
                     .overflow_y_scroll()
                     .when(!history_folded, |el| el.max_h(relative(0.6)))
+                    .child(
+                        h_flex()
+                            .id("work-areas-heading")
+                            .w_full()
+                            .pl(px(4.))
+                            .pr(px(6.))
+                            .pt(px(6.))
+                            .pb(px(3.))
+                            .text_size(px(10.5))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(theme.muted_foreground)
+                            .child(div().flex_1().child("WORK AREAS"))
+                            .child(
+                                title_button("new-work-area", IconName::Plus, "New work area")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.new_work_area(window, cx)
+                                    })),
+                            ),
+                    )
+                    .children(areas)
                     .child(
                         // A row dropped here leaves its group.
                         v_flex()
@@ -627,11 +680,16 @@ impl Workspace {
         &mut self,
         dragged: &DraggedSession,
         target: &Entity<ChatSession>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Dragged::Open(session) = &dragged.source else {
             return;
         };
+        if let Some(area) = self.area_of(&target.read(cx).id) {
+            self.add_to_area(area, session, window, cx);
+            return;
+        }
         let at = |s: &Entity<ChatSession>| self.sessions.iter().position(|x| x == s);
         let (Some(from), Some(to)) = (at(session), at(target)) else {
             return;
@@ -683,6 +741,30 @@ impl Workspace {
         cx.notify();
     }
 
+    /// A work area named "New work area" at the end of the list, its name being typed. It stays
+    /// hidden until clicked.
+    fn new_work_area(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.work_areas.push(WorkArea {
+            name: "New work area".into(),
+            ..Default::default()
+        });
+        self.save_state(cx);
+        self.rename(Renamed::Area(self.work_areas.len() - 1), window, cx);
+    }
+
+    /// Deletes work area `ix`; its sessions stay open, back in the Open list. Panes stay as they are.
+    fn delete_work_area(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.renaming = None;
+        self.shown_area = match self.shown_area {
+            Some(shown) if shown == ix => None,
+            Some(shown) if shown > ix => Some(shown - 1),
+            other => other,
+        };
+        self.work_areas.remove(ix);
+        self.save_state(cx);
+        cx.notify();
+    }
+
     /// Turns a session's title or a group's name into an input holding it: Enter, or the focus
     /// leaving, renames; Esc does not.
     fn rename(&mut self, what: Renamed, window: &mut Window, cx: &mut Context<Self>) {
@@ -692,6 +774,7 @@ impl Workspace {
                 title.unwrap_or_default().to_string()
             }
             Renamed::Group(ix) => self.groups[*ix].name.clone(),
+            Renamed::Area(ix) => self.work_areas[*ix].name.clone(),
         };
         let input = cx.new(|cx| InputState::new(window, cx).default_value(value));
         input.update(cx, |input, cx| {
@@ -731,6 +814,11 @@ impl Workspace {
             Renamed::Group(ix) => {
                 if let Some(group) = self.groups.get_mut(ix).filter(|_| !name.is_empty()) {
                     group.name = name;
+                }
+            }
+            Renamed::Area(ix) => {
+                if let Some(area) = self.work_areas.get_mut(ix).filter(|_| !name.is_empty()) {
+                    area.name = name;
                 }
             }
         }
@@ -859,6 +947,129 @@ impl Workspace {
                 .item(
                     PopupMenuItem::new("Delete group").on_click(move |_, _, cx| {
                         delete.update(cx, |w, cx| w.delete_group(ix, cx)).ok();
+                    }),
+                )
+            })
+    }
+
+    /// A work area's row, built like `group_header`: its chevron, then `▥`, its name and session
+    /// count, and while hidden an amber `● N` for those that need you. A click shows the area, a
+    /// double click renames it; an open session dropped on it joins it.
+    #[allow(clippy::too_many_arguments)]
+    fn work_area_row(
+        &self,
+        ix: usize,
+        area: &WorkArea,
+        count: usize,
+        shown: bool,
+        needs: usize,
+        collapsed: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let chevron = match collapsed {
+            true => IconName::ChevronRight,
+            false => IconName::ChevronDown,
+        };
+        let input = self.renaming(&Renamed::Area(ix));
+        let name = area.name.clone();
+        let (faint, warn) = (faint(cx), cx.theme().warning);
+        let workspace = cx.entity().downgrade();
+        h_flex()
+            .id(("work-area-row", ix))
+            .w_full()
+            .h(px(25.))
+            .pt(px(4.))
+            .pl(px(4.))
+            .pr(px(6.))
+            .gap(px(2.))
+            .text_size(px(11.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(fg2(cx))
+            .child(
+                Button::new(("work-area-toggle", ix))
+                    .ghost()
+                    .xsmall()
+                    .icon(chevron)
+                    .accessibility_label(match collapsed {
+                        true => "Expand work area",
+                        false => "Collapse work area",
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.filtering(cx) {
+                            return;
+                        }
+                        this.work_areas[ix].collapsed = !this.work_areas[ix].collapsed;
+                        this.save_state(cx);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                aurora::tab(shown, cx)
+                    .id(("work-area", ix))
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .px(px(4.))
+                    .gap(px(6.))
+                    .rounded(px(7.))
+                    .aria_label(format!("{name}, {count}"))
+                    .aria_selected(shown)
+                    .drag_over(light)
+                    .on_drop(
+                        cx.listener(move |this, dragged: &DraggedSession, window, cx| {
+                            if let Dragged::Open(session) = &dragged.source {
+                                this.add_to_area(ix, session, window, cx);
+                            }
+                        }),
+                    )
+                    .on_action(cx.listener(|this, _: &Escape, window, cx| {
+                        this.end_rename(false, window, cx)
+                    }))
+                    .child(div().flex_none().text_color(faint).child("▥"))
+                    .map(|el| match input {
+                        Some(input) => el.child(input),
+                        None => el
+                            .child(div().min_w_0().truncate().child(name))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(faint)
+                                    .child(count.to_string()),
+                            )
+                            .child(div().flex_1())
+                            .children((!shown && needs > 0).then(|| {
+                                let text = format!("● {needs}");
+                                div()
+                                    .id(("work-area-needs", ix))
+                                    .flex_none()
+                                    .text_size(px(10.5))
+                                    .text_color(warn)
+                                    .aria_label(text.clone())
+                                    .child(text)
+                                    .test_support()
+                            }))
+                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                match event.click_count() {
+                                    1 => this.show_area(ix, None, window, cx),
+                                    _ => this.rename(Renamed::Area(ix), window, cx),
+                                }
+                            })),
+                    })
+                    .test_support(),
+            )
+            .context_menu(move |menu, _, _| {
+                let (rename, delete) = (workspace.clone(), workspace.clone());
+                menu.item(
+                    PopupMenuItem::new("Rename work area").on_click(move |_, window, cx| {
+                        rename
+                            .update(cx, |w, cx| w.rename(Renamed::Area(ix), window, cx))
+                            .ok();
+                    }),
+                )
+                .item(
+                    PopupMenuItem::new("Delete work area").on_click(move |_, _, cx| {
+                        delete.update(cx, |w, cx| w.delete_work_area(ix, cx)).ok();
                     }),
                 )
             })
@@ -1011,9 +1222,11 @@ impl Workspace {
                     _ => style,
                 },
             )
-            .on_drop(cx.listener(move |this, dragged: &DraggedSession, _, cx| {
-                this.reorder(dragged, &target, cx)
-            }))
+            .on_drop(
+                cx.listener(move |this, dragged: &DraggedSession, window, cx| {
+                    this.reorder(dragged, &target, window, cx)
+                }),
+            )
             .child(
                 h_flex()
                     .id(("open", ix))
@@ -1576,7 +1789,7 @@ pub(crate) mod tests {
         VisualTestContext, point, px, size,
     };
     use wai_agent::{SessionEvent, SessionSummary};
-    use wai_settings::{AppState, SessionGroup, Settings};
+    use wai_settings::{AppState, SessionGroup, Settings, WorkArea};
 
     use gpui_kit::component::ActiveTheme as _;
 
@@ -1584,7 +1797,7 @@ pub(crate) mod tests {
 
     use super::{Detail, TurnState, detail, initials, relative_date, short_age, status_color};
     use crate::agents::RegistryEvent;
-    use crate::chat::ChatModel;
+    use crate::chat::{ChatModel, ChatSession};
     use crate::workspace::Workspace;
     use crate::workspace::tests::{
         click, drag_to_pane, fake_settings, history_settings, launch, load_history, menu_item,
@@ -1907,6 +2120,190 @@ pub(crate) mod tests {
 
     fn group(ix: usize) -> ElementId {
         ("group", ix).into()
+    }
+
+    fn work_area(ix: usize) -> ElementId {
+        ("work-area", ix).into()
+    }
+
+    fn area(name: &str, panes: &[&Entity<ChatSession>], cx: &mut VisualTestContext) -> WorkArea {
+        WorkArea {
+            name: name.into(),
+            panes: panes
+                .iter()
+                .map(|s| s.read_with(cx, |s, _| s.id.clone()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn set_areas(w: &Entity<Workspace>, areas: Vec<WorkArea>, cx: &mut VisualTestContext) {
+        w.update(cx, |w, cx| {
+            w.work_areas = areas;
+            cx.notify()
+        });
+    }
+
+    fn areas(w: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<WorkArea> {
+        w.read_with(cx, |w, _| w.work_areas.clone())
+    }
+
+    fn on_screen(w: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<Option<String>> {
+        w.read_with(cx, |w, cx| {
+            let id = |p: &crate::workspace::Pane| p.session().map(|s| s.read(cx).id.clone());
+            w.panes.iter().map(id).collect()
+        })
+    }
+
+    fn y_of(id: impl Into<ElementId>, cx: &mut VisualTestContext) -> Pixels {
+        center_of(id, cx).y
+    }
+
+    #[gpui_kit::test]
+    fn work_areas_are_created_and_renamed(cx: &mut TestAppContext) {
+        let (workspace, cx) = with_sessions(1, cx);
+        let before = on_screen(&workspace, cx);
+        press("new-work-area", cx);
+        let new = WorkArea {
+            name: "New work area".into(),
+            ..Default::default()
+        };
+        assert_eq!(areas(&workspace, cx), [new.clone()]);
+        assert!(workspace.read_with(cx, |w, _| w.renaming.is_some()));
+        assert_eq!(workspace.read_with(cx, |w, _| w.shown_area), None);
+        assert_eq!(on_screen(&workspace, cx), before);
+        type_name("Evolution BB", "enter", cx);
+        assert_eq!(label(work_area(0), cx).as_deref(), Some("Evolution BB, 0"));
+
+        menu_item(work_area(0), "Rename work area", cx);
+        type_name("", "enter", cx);
+        assert_eq!(areas(&workspace, cx)[0].name, "Evolution BB");
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.double_click(work_area(0), cx);
+        });
+        cx.run_until_parked();
+        type_name("Later", "escape", cx);
+        assert_eq!(areas(&workspace, cx)[0].name, "Evolution BB");
+    }
+
+    #[gpui_kit::test]
+    fn rows_drag_onto_a_work_area_and_back(cx: &mut TestAppContext) {
+        let (workspace, cx) = with_sessions(3, cx);
+        let s = workspace.read_with(cx, |w, _| w.sessions.clone());
+        set_areas(&workspace, vec![area("A", &[], cx)], cx);
+        let ids = |cx: &mut VisualTestContext, ix: &[usize]| -> Vec<String> {
+            ix.iter()
+                .map(|&i| s[i].read_with(cx, |s, _| s.id.clone()))
+                .collect()
+        };
+        drag(open_row(0), work_area(0), cx);
+        assert_eq!(areas(&workspace, cx)[0].panes, ids(cx, &[0]));
+        assert_eq!(label(work_area(0), cx).as_deref(), Some("A, 1"));
+        let row = y_of(open_row(0), cx);
+        assert!(row > y_of(work_area(0), cx) && row < y_of("open-section", cx));
+        drag(open_row(1), open_row(0), cx);
+        assert_eq!(areas(&workspace, cx)[0].panes, ids(cx, &[0, 1]));
+        drag(open_row(0), "open-ungrouped", cx);
+        assert_eq!(areas(&workspace, cx)[0].panes, ids(cx, &[1]));
+        assert_eq!(label("open-section", cx).as_deref(), Some("Open 2"));
+    }
+
+    #[gpui_kit::test]
+    fn clicking_a_work_area_shows_it(cx: &mut TestAppContext) {
+        let (workspace, cx) = with_sessions(3, cx);
+        let s = workspace.read_with(cx, |w, _| w.sessions.clone());
+        let id = |cx: &mut VisualTestContext, i: usize| s[i].read_with(cx, |s, _| s.id.clone());
+        let (a, b) = (area("A", &[&s[0], &s[1]], cx), area("B", &[&s[2]], cx));
+        set_areas(&workspace, vec![a, b], cx);
+        press(work_area(0), cx);
+        assert_eq!(
+            on_screen(&workspace, cx),
+            [Some(id(cx, 0)), Some(id(cx, 1))]
+        );
+        let selected = |i: usize, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.find(work_area(i)).selected()
+            })
+        };
+        assert_eq!(selected(0, cx), Some(true));
+        assert_eq!(selected(1, cx), Some(false));
+        press(open_row(2), cx);
+        assert_eq!(on_screen(&workspace, cx), [Some(id(cx, 2))]);
+        assert_eq!(workspace.read_with(cx, |w, _| w.shown_area), Some(1));
+        assert_eq!(selected(1, cx), Some(true));
+    }
+
+    #[gpui_kit::test]
+    fn a_hidden_work_area_says_who_needs_you(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--ask-permission"));
+        let s0 = start_now(&workspace, cx);
+        let s1 = start_now(&workspace, cx);
+        let (a, b) = (area("A", &[&s0], cx), area("B", &[&s1], cx));
+        set_areas(&workspace, vec![a, b], cx);
+        press(work_area(0), cx);
+        cx.simulate_input("edit");
+        cx.simulate_keystrokes("enter");
+        press(work_area(1), cx);
+        wait_until(cx, "needs you", |cx| {
+            s0.read_with(cx, |s, _| s.model.state == TurnState::NeedsYou)
+        });
+        assert_eq!(
+            label(("work-area-needs", 0usize), cx).as_deref(),
+            Some("● 1")
+        );
+        assert_eq!(label(("work-area-needs", 1usize), cx), None);
+        press(work_area(0), cx);
+        assert_eq!(label(("work-area-needs", 0usize), cx), None);
+    }
+
+    #[gpui_kit::test]
+    fn a_work_area_folds_and_deletes(cx: &mut TestAppContext) {
+        let (workspace, cx) = with_sessions(3, cx);
+        let s = workspace.read_with(cx, |w, _| w.sessions.clone());
+        let (a, b) = (area("A", &[&s[0]], cx), area("B", &[&s[1]], cx));
+        set_areas(&workspace, vec![a, b.clone()], cx);
+        press(("work-area-toggle", 0usize), cx);
+        assert!(areas(&workspace, cx)[0].collapsed);
+        assert_eq!(label(open_row(0), cx), None);
+        press(("work-area-toggle", 0usize), cx);
+        assert!(label(open_row(0), cx).is_some());
+        press(work_area(1), cx);
+        menu_item(work_area(0), "Delete work area", cx);
+        assert_eq!(areas(&workspace, cx), [b]);
+        assert_eq!(workspace.read_with(cx, |w, _| w.shown_area), Some(0));
+        assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 3);
+        assert!(label(open_row(0), cx).is_some());
+        assert_eq!(
+            on_screen(&workspace, cx),
+            [Some(s[1].read_with(cx, |s, _| s.id.clone()))]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn filter_finds_sessions_in_work_areas(cx: &mut TestAppContext) {
+        let (workspace, cx) = with_sessions(3, cx);
+        let s = workspace.read_with(cx, |w, _| w.sessions.clone());
+        let a = WorkArea {
+            collapsed: true,
+            ..area("A", &[&s[0]], cx)
+        };
+        set_areas(&workspace, vec![a], cx);
+        cx.simulate_keystrokes("secondary-k");
+        cx.simulate_input("SESSION 0");
+        cx.run_until_parked();
+        assert!(label(open_row(0), cx).is_some());
+        assert!(label(work_area(0), cx).is_some());
+        cx.simulate_keystrokes("escape");
+        cx.simulate_input("zzz");
+        cx.run_until_parked();
+        assert_eq!(label(work_area(0), cx), None);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(areas(&workspace, cx)[0].collapsed);
+        assert_eq!(label(open_row(0), cx), None);
     }
 
     /// Each group's name, collapsed state and sessions (its colour left at 0).
