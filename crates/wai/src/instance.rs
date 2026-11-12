@@ -19,7 +19,12 @@ pub enum Acquired {
 }
 
 pub fn acquire(lock_path: &Path, wait: Duration) -> Acquired {
-    let file = match OpenOptions::new().create(true).write(true).open(lock_path) {
+    let file = match OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+    {
         Ok(file) => file,
         Err(e) => return Acquired::Unusable(format!("{}: {e}", lock_path.display())),
     };
