@@ -220,7 +220,7 @@ Clicking a card shows that session in the focused pane; dragging it onto a pane 
 
 **ctrl-`** shows or hides the terminal in the project folder.
 
-- **Tabs:** a strip on top of the terminal has one tab per shell, a **+** to add one and a **×** on each tab to close it. Tabs are labelled by their shell and number, and there are at most 8. Closing a tab with a program still running asks first.
+- **Tabs:** a strip on top of the terminal has one tab per shell, a **+** to add one and a **×** on each tab to close it. Tabs are labelled by the title the shell or program sets, else "Terminal N", and there are at most 8. Closing a tab with a program still running asks first.
 - **Keys:** new tab **⌘T** (**ctrl-t**; **ctrl-shift-t** while the terminal has focus on Windows and Linux), close the tab **⌘W** (**ctrl-shift-w**), next and previous tab **⌘⇧]** and **⌘⇧[** (**ctrl-shift-]** and **ctrl-shift-[**).
 - **Install in terminal** and **Continue in terminal** open a new tab.
 - **Mouse wheel:** scrolls inside `less` and `vim`.

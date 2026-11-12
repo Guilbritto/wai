@@ -303,9 +303,6 @@ Todas as metas foram batidas, e o fundo estático de reserva da Tarefa 2 (um PNG
   - **Um PATH novo (outra versão do Node no nvm, por exemplo) só vale no launch seguinte.** A 1ª abertura depois da mudança ainda usa o cache.
   - Só a 1ª abertura (sem cache) espera o shell, com limite de 3 s; passou disso, segue com o PATH do launchd. O `.zshrc` desta máquina leva ~1,5–1,8 s. Nas outras aberturas esse tempo corre em segundo plano.
   - Testei com HOMEs de rascunho e um `.zshrc` de 1,5 s. A 1ª abertura esperou 1543 ms; as seguintes leram o cache (a linha do log sai ~60 ms após o exec, só o início do processo). Um agente `command = "npx"` achou o `npx` do `.zprofile`, e a troca de v1 para v2 valeu na abertura seguinte.
-- **As configurações só são lidas ao abrir o wai.**
-  - O `.wai/settings.toml` vale só para a pasta com que o wai foi aberto.
-  - Ao trocar de pasta (⌘O), modelos e sugestões de extensão são relidos.
 - **A v1 não isola extensões.** Elas rodam com os seus poderes e herdam o ambiente do wai; `network` e `fs:` são só declarativos.
 - **Um wai por vez.** Dois processos dividem `state.json` e `recovery/`.
 - **Hot-exit:**
