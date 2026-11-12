@@ -307,7 +307,7 @@ pub(crate) fn clone(url: &str, parent: &Path) -> Result<PathBuf, String> {
         return Err("Enter a repository URL".into());
     }
     let name = url.trim_end_matches('/');
-    let name = name.rsplit(['/', ':']).next().unwrap_or_default();
+    let name = name.rsplit(['/', '\\', ':']).next().unwrap_or_default();
     let name = name.strip_suffix(".git").unwrap_or(name);
     if name.is_empty() || name == ".." {
         return Err("Enter a repository URL".into());
