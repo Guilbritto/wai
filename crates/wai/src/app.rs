@@ -20,7 +20,9 @@ gpui_kit::assets::icon_assets!(
         Shield,
         MessageSquare,
         Sparkles,
-        Puzzle
+        Puzzle,
+        FolderPlus,
+        ChevronsDownUp
     ]
 );
 
@@ -59,7 +61,8 @@ actions!(
         Save,
         OpenPalette,
         OpenSettings,
-        ToggleAgents
+        ToggleAgents,
+        FilterSessions
     ]
 );
 
@@ -103,6 +106,7 @@ fn bind_keys(cx: &mut App) {
         ("secondary-o", Box::new(OpenFolder), workspace),
         ("secondary-shift-p", Box::new(OpenPalette), workspace),
         ("secondary-,", Box::new(OpenSettings), workspace),
+        ("secondary-k", Box::new(FilterSessions), workspace),
         // The prompt box lets Escape through (it has nothing to clear).
         ("escape", Box::new(CancelTurn), Some("ChatSession")),
         (paste, Box::new(Paste), Some("Terminal")),
@@ -124,9 +128,9 @@ fn bind_keys(cx: &mut App) {
 }
 
 /// Off macOS (Windows, and Linux alike), in the Terminal context: `NoAction` hides the app's
-/// ctrl-c/v/n/w/o/q (`secondary-` is ctrl there), so they reach the shell, and the app's actions
-/// move to ctrl-shift.
-fn terminal_ctrl_keymap() -> [(&'static str, Box<dyn Action>); 10] {
+/// ctrl-c/v/n/w/o/q/k (`secondary-` is ctrl there), so they reach the shell, and the app's
+/// actions move to ctrl-shift.
+fn terminal_ctrl_keymap() -> [(&'static str, Box<dyn Action>); 12] {
     [
         ("ctrl-c", Box::new(NoAction)),
         ("ctrl-v", Box::new(NoAction)),
@@ -134,10 +138,12 @@ fn terminal_ctrl_keymap() -> [(&'static str, Box<dyn Action>); 10] {
         ("ctrl-w", Box::new(NoAction)),
         ("ctrl-o", Box::new(NoAction)),
         ("ctrl-q", Box::new(NoAction)),
+        ("ctrl-k", Box::new(NoAction)),
         ("ctrl-shift-n", Box::new(NewSession)),
         ("ctrl-shift-w", Box::new(ClosePane)),
         ("ctrl-shift-o", Box::new(OpenFolder)),
         ("ctrl-shift-q", Box::new(Quit)),
+        ("ctrl-shift-k", Box::new(FilterSessions)),
     ]
 }
 
@@ -606,10 +612,12 @@ mod tests {
             ("ctrl-w", shell),
             ("ctrl-o", shell),
             ("ctrl-q", shell),
+            ("ctrl-k", shell),
             ("ctrl-shift-n", "wai::NewSession"),
             ("ctrl-shift-w", "wai::ClosePane"),
             ("ctrl-shift-o", "wai::OpenFolder"),
             ("ctrl-shift-q", "wai::Quit"),
+            ("ctrl-shift-k", "wai::FilterSessions"),
         ];
         assert_eq!(table, expected);
     }

@@ -4,6 +4,7 @@
 use std::ops::Range;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
@@ -18,13 +19,30 @@ use wai_settings::SessionGroup;
 pub use wai_settings::canonical;
 
 use crate::agents::AgentStatus;
-use crate::app::NewSession;
+use crate::app::{FilterSessions, NewSession};
 use crate::aurora;
 use crate::chat::{ChatItem, ChatModel, ChatSession, DraftView, TurnState};
 use crate::settings_view::Section;
 use crate::workspace::{Dragged, DraggedSession, MAX_PANES, Renamed, Workspace};
 
 pub(crate) const ROW_HEIGHT: f32 = 28.;
+
+/// The filter's shortcut, as its hint shows it.
+const FILTER_KEY: &str = if cfg!(target_os = "macos") {
+    "⌘K"
+} else {
+    "Ctrl+K"
+};
+
+/// The groups' swatches, in the order new groups take them.
+pub(crate) const GROUP_COLORS: [fn() -> Hsla; 6] = [
+    aurora::lilas,
+    aurora::boreal,
+    aurora::ceu,
+    aurora::magenta,
+    aurora::ambar,
+    aurora::ok,
+];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SidebarTab {
@@ -90,7 +108,7 @@ pub(crate) fn detail(m: &ChatModel) -> Detail {
         TurnState::NeedsYou => match m.waiting.first() {
             Some(ChatItem::Permission { request, .. }) => Detail::Permission(request.title.clone()),
             Some(ChatItem::Question { request, .. }) => Detail::Question(request.message.clone()),
-            _ => Detail::Idle,
+            _ => Detail::Doing(m.activity().unwrap_or_default()),
         },
         TurnState::Idle if m.done => Detail::Done,
         TurnState::Idle => Detail::Idle,
@@ -104,6 +122,17 @@ pub(crate) fn live_subagents(m: &ChatModel) -> usize {
         .iter()
         .filter(|a| matches!(a.state, Running | NeedsYou))
         .count()
+}
+
+/// A history row's date, from the agent's RFC 3339 `updated_at`: its age as `short_age` gives
+/// it, but a day old reads `yesterday`.
+pub(crate) fn relative_date(updated_at: &str, now: DateTime<Utc>) -> Option<String> {
+    let at = DateTime::parse_from_rfc3339(updated_at).ok()?;
+    let age = (now - at.to_utc()).to_std().unwrap_or_default();
+    Some(match age.as_secs() / 86_400 {
+        1 => "yesterday".into(),
+        _ => short_age(age),
+    })
 }
 
 /// Whole units, rounded down: `45s`, `3m`, `2h`, `5d`.
@@ -372,59 +401,167 @@ impl Workspace {
             ))
     }
 
-    /// The open sessions outside any group, then each group under its header. A row keeps its
-    /// index in `sessions`, whichever group draws it.
+    /// The Sessions panel: its title row and filter, then the Open section (drafts and sessions
+    /// outside any group, then each group under its header) over History. A row keeps its index
+    /// in `sessions`, whichever group draws it. With text in the filter only matching titles show,
+    /// and a group holding one shows expanded without changing its own folded state.
     fn render_sessions(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
-        let rows = |group: Option<usize>| {
-            let sessions = self.sessions.iter().enumerate();
-            sessions
+        let theme = cx.theme();
+        let filter = self.filter(cx);
+        let filtering = !filter.is_empty();
+        let shown = |session: &Entity<ChatSession>| shows(&filter, session_title(session.read(cx)));
+        let members = |group: Option<usize>| {
+            (self.sessions.iter().enumerate())
                 .filter(move |(_, session)| self.group_of(&session.read(cx).id) == group)
-                .map(|(ix, session)| self.open_row(ix, session, cx).into_any_element())
         };
-        let drafts = (self.drafts.iter().enumerate())
-            .map(|(ix, draft)| self.draft_row(ix, draft, cx).into_any_element());
-        let groups = self.groups.iter().enumerate().flat_map(|(ix, group)| {
-            let header = self.group_header(ix, group, rows(Some(ix)).count(), cx);
-            let rows = rows(Some(ix)).filter(|_| !group.collapsed);
-            std::iter::once(header.into_any_element()).chain(rows)
-        });
+        let drafts: Vec<_> = (self.drafts.iter().enumerate())
+            .filter(|(_, draft)| shows(&filter, &draft_title(draft, cx)))
+            .map(|(ix, draft)| self.draft_row(ix, draft, cx).into_any_element())
+            .collect();
+        let ungrouped: Vec<_> = members(None)
+            .filter(|(_, session)| shown(session))
+            .map(|(ix, session)| self.open_row(ix, session, false, cx).into_any_element())
+            .collect();
+        let mut matched = !drafts.is_empty() || !ungrouped.is_empty();
+        let mut groups = Vec::new();
+        for (gx, group) in self.groups.iter().enumerate() {
+            let all: Vec<_> = members(Some(gx)).collect();
+            let hits: Vec<_> = all.iter().filter(|(_, session)| shown(session)).collect();
+            if filtering && hits.is_empty() {
+                continue;
+            }
+            matched = true;
+            let needs = (all.iter())
+                .filter(|(_, s)| matches!(s.read(cx).status(), TurnState::NeedsYou))
+                .count();
+            let collapsed = group.collapsed && !filtering;
+            let header = self.group_header(gx, group, all.len(), needs, collapsed, cx);
+            groups.push(header.into_any_element());
+            if !collapsed {
+                let rows = hits.iter().map(|(ix, s)| self.open_row(*ix, s, true, cx));
+                groups.extend(rows.map(IntoElement::into_any_element));
+            }
+        }
+        let no_match = filtering && !matched && self.listed_history(cx).is_empty();
+        let count = self.drafts.len() + self.sessions.len();
+        let faint = faint(cx);
+        let title = panel_title("Sessions", cx)
+            .child(
+                title_button("sessions-new", IconName::Plus, "New session").on_click(
+                    cx.listener(|this, _, window, cx| this.new_session(&NewSession, window, cx)),
+                ),
+            )
+            .child(
+                title_button("new-group", Lucide::FolderPlus, "New group")
+                    .on_click(cx.listener(|this, _, window, cx| this.new_group(None, window, cx))),
+            )
+            .child(
+                title_button("groups-collapse", Lucide::ChevronsDownUp, "Collapse all").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        for group in &mut this.groups {
+                            group.collapsed = true;
+                        }
+                        this.save_state(cx);
+                        cx.notify();
+                    }),
+                ),
+            );
+        let kbd = div()
+            .px(px(4.))
+            .rounded(px(5.))
+            .border_1()
+            .border_color(theme.border)
+            .text_size(px(10.))
+            .text_color(faint)
+            .child(FILTER_KEY);
+        let filter_field = div().id("sessions-filter").px(px(2.)).pb(px(4.)).child(
+            Input::new(&self.sessions_filter)
+                .small()
+                .prefix(Icon::new(IconName::Search).xsmall().text_color(faint))
+                .suffix(kbd),
+        );
+        let open_header = section_header(
+            "open-section",
+            "Open",
+            count.to_string(),
+            self.open_folded,
+            cx,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.open_folded = !this.open_folded;
+            this.save_state(cx);
+            cx.notify();
+        }))
+        .test_support();
         v_flex()
             .size_full()
+            .child(title)
+            .child(filter_field.test_support())
+            .children(no_match.then(|| {
+                div()
+                    .id("sessions-no-match")
+                    .px(px(8.))
+                    .py(px(4.))
+                    .text_size(px(11.))
+                    .text_color(faint)
+                    .aria_label("No sessions match")
+                    .child("No sessions match")
+                    .test_support()
+            }))
             .child(
-                // A row dropped here leaves its group.
+                // Sized to its rows, up to 60 % of the panel while History is open; then it
+                // scrolls, header included.
                 v_flex()
-                    .id("open-ungrouped")
-                    // The lit border's room, so nothing moves when it lights.
-                    .border_1()
-                    .border_color(gpui_kit::transparent_black())
-                    .drag_over(light)
-                    .on_drop(cx.listener(|this, dragged: &DraggedSession, _, cx| {
-                        this.group_session(dragged, None, cx)
-                    }))
+                    .id("open-list")
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .when(!self.history_folded, |el| el.max_h(relative(0.6)))
                     .child(
-                        h_flex()
-                            .pr_1()
-                            .justify_between()
-                            .child(heading("Open", cx))
-                            .child(
-                                Button::new("new-group")
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Plus)
-                                    .tooltip("New group")
-                                    .accessibility_label("New group")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.new_group(None, window, cx)
-                                    })),
-                            ),
+                        // A row dropped here leaves its group.
+                        v_flex()
+                            .id("open-ungrouped")
+                            // The lit border's room, so nothing moves when it lights.
+                            .border_1()
+                            .border_color(gpui_kit::transparent_black())
+                            .drag_over(light)
+                            .on_drop(cx.listener(|this, dragged: &DraggedSession, _, cx| {
+                                this.group_session(dragged, None, cx)
+                            }))
+                            .child(open_header)
+                            .when(!self.open_folded, |el| {
+                                el.children(drafts).children(ungrouped)
+                            })
+                            .test_support(),
                     )
-                    .children(drafts)
-                    .children(rows(None))
-                    .test_support(),
+                    .when(!self.open_folded, |el| el.children(groups)),
             )
-            .children(groups)
-            // Until the History section replaces it, today's list sits under the open ones.
-            .child(div().flex_1().min_h_0().child(self.render_history(cx)))
+            .child(self.history_section(cx))
+    }
+
+    /// The Sessions filter's text, lowercased: rows show when their title holds it.
+    fn filter(&self, cx: &App) -> String {
+        self.sessions_filter.read(cx).value().to_lowercase()
+    }
+
+    /// The History rows the filter leaves.
+    fn listed_history(&self, cx: &App) -> Vec<&SessionSummary> {
+        let filter = self.filter(cx);
+        let mut rows = self.history_rows();
+        rows.retain(|row| shows(&filter, history_title(row)));
+        rows
+    }
+
+    /// ⌘K: shows the Sessions panel with the caret in its filter.
+    pub(crate) fn filter_sessions(
+        &mut self,
+        _: &FilterSessions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar_tab = SidebarTab::Sessions;
+        self.sessions_filter
+            .update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
     }
 
     /// The group holding session `id`.
@@ -502,6 +639,7 @@ impl Workspace {
             name: "New group".into(),
             collapsed: false,
             sessions: with.map(str::to_string).into_iter().collect(),
+            color: (self.groups.len() % GROUP_COLORS.len()) as u8,
         });
         self.save_state(cx);
         self.rename(Renamed::Group(self.groups.len() - 1), window, cx);
@@ -576,31 +714,45 @@ impl Workspace {
         (renamed == what).then(|| Input::new(input).xsmall().flex_1())
     }
 
-    /// A group's header: its chevron, name and session count; its menu renames or deletes it.
-    /// An open session dropped on it joins the group.
+    /// A group's header (the mockup's `.grp`): its chevron, swatch, name and session count, and
+    /// while collapsed an amber `● N` for those that need you; its menu renames or deletes it. An
+    /// open session dropped on it joins the group.
     fn group_header(
         &self,
         ix: usize,
         group: &SessionGroup,
         count: usize,
+        needs: usize,
+        collapsed: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
-        let chevron = match group.collapsed {
+        let theme = cx.theme();
+        let chevron = match collapsed {
             true => IconName::ChevronRight,
             false => IconName::ChevronDown,
         };
         let input = self.renaming(&Renamed::Group(ix));
         let name = group.name.clone();
+        let swatch = GROUP_COLORS[group.color as usize % GROUP_COLORS.len()]();
+        let (faint, warn) = (faint(cx), theme.warning);
         let workspace = cx.entity().downgrade();
-        row(false, cx)
+        h_flex()
             .id(("group-row", ix))
-            .pl_1()
+            .w_full()
+            .h(px(25.))
+            .pt(px(4.))
+            .pl(px(4.))
+            .pr(px(6.))
+            .gap(px(2.))
+            .text_size(px(11.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(fg2(cx))
             .child(
                 Button::new(("group-toggle", ix))
                     .ghost()
                     .xsmall()
                     .icon(chevron)
-                    .accessibility_label(match group.collapsed {
+                    .accessibility_label(match collapsed {
                         true => "Expand group",
                         false => "Collapse group",
                     })
@@ -616,8 +768,9 @@ impl Workspace {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .gap_2()
-                    .rounded(px(10.))
+                    .px(px(4.))
+                    .gap(px(6.))
+                    .rounded(px(7.))
                     .border_1()
                     .border_color(gpui_kit::transparent_black())
                     .aria_label(format!("{name}, {count}"))
@@ -628,18 +781,30 @@ impl Workspace {
                     .on_action(cx.listener(|this, _: &Escape, window, cx| {
                         this.end_rename(false, window, cx)
                     }))
+                    .child(div().flex_none().size(px(8.)).rounded(px(2.)).bg(swatch))
                     .map(|el| match input {
                         Some(input) => el.child(input),
                         None => el
+                            .child(div().min_w_0().truncate().child(name))
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(name),
+                                    .flex_none()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(faint)
+                                    .child(count.to_string()),
                             )
-                            .child(div().text_xs().child(count.to_string()))
+                            .child(div().flex_1())
+                            .children((collapsed && needs > 0).then(|| {
+                                let text = format!("● {needs}");
+                                div()
+                                    .id(("group-needs", ix))
+                                    .flex_none()
+                                    .text_size(px(10.5))
+                                    .text_color(warn)
+                                    .aria_label(text.clone())
+                                    .child(text)
+                                    .test_support()
+                            }))
                             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                                 if event.click_count() > 1 {
                                     this.rename(Renamed::Group(ix), window, cx)
@@ -666,66 +831,92 @@ impl Workspace {
             })
     }
 
-    fn render_history(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
-        let rows = self.history_rows().len();
+    /// History under Open: its header with the All switch (today's All projects), then the
+    /// agent's sessions the filter leaves, lazily, or the hint to choose an AI.
+    fn history_section(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let rows = self.listed_history(cx).len();
+        let scope = match self.all_projects {
+            true => "· all projects",
+            false => "· this project",
+        };
+        let header = section_header("history-section", "History", scope, self.history_folded, cx)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.history_folded = !this.history_folded;
+                this.save_state(cx);
+                cx.notify();
+            }))
+            .test_support();
         v_flex()
-            .size_full()
+            .flex_1()
+            .mt(px(4.))
             .child(
-                h_flex()
-                    .pr_3()
-                    .justify_between()
-                    .child(heading(&format!("History · {rows}"), cx))
-                    .child(
-                        Switch::new("all-projects")
-                            .xsmall()
-                            .label("All projects")
-                            .checked(self.all_projects)
-                            .on_click(cx.listener(|this, all: &bool, _, cx| {
-                                this.all_projects = *all;
-                                cx.notify();
-                            })),
-                    ),
+                h_flex().pr(px(4.)).child(header).child(
+                    Switch::new("all-projects")
+                        .xsmall()
+                        .label("All")
+                        .checked(self.all_projects)
+                        .on_click(cx.listener(|this, all: &bool, _, cx| {
+                            this.all_projects = *all;
+                            cx.notify();
+                        })),
+                ),
             )
-            // Only the visible rows render: an agent can hold thousands of sessions.
-            .when(self.default_agent().is_none(), |el| {
-                el.child(
-                    div()
-                        .id("history-hint")
-                        .p_2()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Choose an AI in Settings to see its history.")
-                        .test_support(),
-                )
-            })
-            .when(self.default_agent().is_some(), |el| {
-                el.child(
-                    uniform_list(
-                        "history",
-                        rows,
-                        cx.processor(|this, range: Range<usize>, _, cx| {
-                            let rows = this.history_rows();
-                            range
-                                .map(|ix| this.history_row(ix, rows[ix], cx))
-                                .collect::<Vec<_>>()
-                        }),
-                    )
-                    .flex_1(),
-                )
+            .when(!self.history_folded, |el| {
+                el.map(|el| match self.default_agent() {
+                    None => el.child(
+                        div()
+                            .id("history-hint")
+                            .p_2()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Choose an AI in Settings to see its history.")
+                            .test_support(),
+                    ),
+                    // Only the visible rows render: an agent can hold thousands of sessions.
+                    Some(_) => el.child(
+                        uniform_list(
+                            "history",
+                            rows,
+                            cx.processor(|this, range: Range<usize>, _, cx| {
+                                let rows = this.listed_history(cx);
+                                range
+                                    .map(|ix| this.history_row(ix, rows[ix], cx))
+                                    .collect::<Vec<_>>()
+                            }),
+                        )
+                        .flex_1()
+                        .min_h_0(),
+                    ),
+                })
             })
     }
 
+    /// An open session's row (the mockup's `.r2`): the status dot, its title and how long it has
+    /// been in its state (a turn: since it started), then what it does; Open to the side and ×
+    /// show on hover. A group's rows sit further in.
     fn open_row(
         &self,
         ix: usize,
         session: &Entity<ChatSession>,
+        grouped: bool,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let s = session.read(cx);
         let dot = status_color(s.status(), theme);
-        let label = matches!(s.status(), TurnState::NeedsYou).then_some("Needs you");
-        let title = s.model.shown_title().unwrap_or("New session").to_string();
+        let title = session_title(s).to_string();
+        // ponytail: repainted by the sessions' own ticks, so an idle row's time moves only when
+        // something else repaints; a 1 s timer while any row shows a time if that matters.
+        let age = s.since.map(|since| match s.status() {
+            TurnState::Working => short_age(s.turn_started().unwrap_or(since).elapsed()),
+            _ => short_age(since.elapsed()),
+        });
+        let detail = line_two(
+            ("open-detail", ix),
+            detail(&s.model),
+            live_subagents(&s.model),
+            cx,
+        );
         let active = self.panes[self.focused_pane].session() == Some(session);
         let (open, side, end) = (session.clone(), session.clone(), session.clone());
         let menu_session = session.clone();
@@ -736,7 +927,31 @@ impl Workspace {
             source: Dragged::Open(session.clone()),
         };
         let (over, target) = (session.clone(), session.clone());
-        row(active, cx)
+        let (fg, faint) = (theme.foreground, faint(cx));
+        let renamed = input.is_some();
+        let line_one = h_flex().gap(px(6.)).map(|el| match input {
+            Some(input) => el.child(input),
+            None => el
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(fg)
+                        .child(title.clone()),
+                )
+                .children(age.map(|age| {
+                    div()
+                        .id(("open-age", ix))
+                        .flex_none()
+                        .text_size(px(10.5))
+                        .text_color(faint)
+                        .aria_label(age.clone())
+                        .child(age)
+                        .test_support()
+                })),
+        });
+        two_line_row(active, grouped, cx)
             .id(("open-row", ix))
             // Another open row dropped here takes this one's place.
             .drag_over(
@@ -753,55 +968,48 @@ impl Workspace {
                     .id(("open", ix))
                     .flex_1()
                     .min_w_0()
-                    .h_full()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_none()
-                            .size(px(8.))
-                            .rounded_full()
-                            .bg(dot)
-                            .shadow(vec![
-                                BoxShadow::new(px(0.), px(0.), dot.alpha(0.7)).blur_radius(px(4.)),
-                            ]),
-                    )
-                    .aria_label(title.clone())
+                    .items_start()
+                    .gap(px(9.))
+                    .child(status_dot(dot).mt(px(5.)))
+                    .child(v_flex().flex_1().min_w_0().child(line_one).child(detail))
+                    .aria_label(title)
                     .on_action(cx.listener(|this, _: &Escape, window, cx| {
                         this.end_rename(false, window, cx)
                     }))
-                    .map(|el| match input {
-                        Some(input) => el.child(input),
-                        // A second click renames.
-                        None => el
-                            .child(div().flex_1().min_w_0().truncate().child(title))
-                            .children(label.map(|l| div().text_xs().text_color(dot).child(l)))
-                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                                match event.click_count() {
-                                    1 => this.show(open.clone(), false, window, cx),
-                                    _ => this.rename(Renamed::Session(open.clone()), window, cx),
-                                }
-                            }))
-                            .on_drag(dragged, DraggedSession::preview),
+                    // A second click renames.
+                    .when(!renamed, |el| {
+                        el.on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            match event.click_count() {
+                                1 => this.show(open.clone(), false, window, cx),
+                                _ => this.rename(Renamed::Session(open.clone()), window, cx),
+                            }
+                        }))
+                        .on_drag(dragged, DraggedSession::preview)
                     })
                     // Registers the id so tests can find and drag it.
                     .test_support(),
             )
-            .when(self.panes.len() < MAX_PANES, |el| {
-                el.child(side_button(("open-side", ix)).on_click(cx.listener(
-                    move |this, _, window, cx| this.show(side.clone(), true, window, cx),
-                )))
-            })
             .child(
-                Button::new(("open-close", ix))
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Close)
-                    .tooltip("End session")
-                    .accessibility_label("End session")
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| {
-                            this.close_session(&end, window, cx)
-                        }),
+                hover_chip(cx)
+                    .when(self.panes.len() < MAX_PANES, |el| {
+                        el.child(side_button(("open-side", ix)).on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.show(side.clone(), true, window, cx)
+                            },
+                        )))
+                    })
+                    .child(
+                        Button::new(("open-close", ix))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip("End session")
+                            .accessibility_label("End session")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_session(&end, window, cx)
+                            })),
                     ),
             )
             .context_menu(move |menu, _, cx| {
@@ -812,7 +1020,8 @@ impl Workspace {
             })
     }
 
-    /// A draft's row: a hollow dot, "New session" and the Draft tag; × discards it.
+    /// A draft's row: a hollow dot, "New session" and `Draft` (once it sends, its session's
+    /// dot and line); × discards it.
     fn draft_row(
         &self,
         ix: usize,
@@ -823,47 +1032,60 @@ impl Workspace {
         let active = self.panes[self.focused_pane].draft() == Some(draft);
         let (open, end) = (draft.clone(), draft.clone());
         let starting = draft.read(cx).starting.as_ref().map(|chat| chat.read(cx));
-        let title = starting.and_then(|s| s.model.shown_title());
-        let title = title.unwrap_or("New session").to_string();
+        let title = draft_title(draft, cx);
         let dot = starting.map(|s| status_color(s.status(), theme));
+        let line = match starting {
+            Some(s) => line_two(
+                ("draft-detail", ix),
+                detail(&s.model),
+                live_subagents(&s.model),
+                cx,
+            ),
+            None => line_two(("draft-detail", ix), Detail::Draft, 0, cx),
+        };
+        let title_color = match starting {
+            Some(_) => theme.foreground,
+            None => theme.muted_foreground,
+        };
         let dragged = DraggedSession {
             title: title.clone().into(),
             source: Dragged::Draft(draft.clone()),
         };
-        row(active, cx)
+        two_line_row(active, false, cx)
             .id(("draft-row", ix))
             .child(
                 h_flex()
                     .id(("draft", ix))
                     .flex_1()
                     .min_w_0()
-                    .h_full()
-                    .gap_2()
-                    .child(match dot {
-                        Some(dot) => div()
-                            .flex_none()
-                            .size(px(8.))
-                            .rounded_full()
-                            .bg(dot)
-                            .shadow(vec![
-                                BoxShadow::new(px(0.), px(0.), dot.alpha(0.7)).blur_radius(px(4.)),
-                            ]),
-                        None => div()
-                            .flex_none()
-                            .size(px(8.))
-                            .rounded_full()
-                            .border_1()
-                            .border_dashed()
-                            .border_color(aurora::nevoa()),
-                    })
-                    .aria_label(title.clone())
-                    .child(div().flex_1().min_w_0().truncate().child(title))
-                    .children(dot.is_none().then(|| {
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Draft")
-                    }))
+                    .items_start()
+                    .gap(px(9.))
+                    .child(
+                        match dot {
+                            Some(dot) => status_dot(dot),
+                            None => div()
+                                .flex_none()
+                                .size(px(8.))
+                                .rounded_full()
+                                .border_1()
+                                .border_dashed()
+                                .border_color(faint(cx)),
+                        }
+                        .mt(px(5.)),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_color(title_color)
+                                    .child(title.clone()),
+                            )
+                            .child(line),
+                    )
+                    .aria_label(title)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.show_draft(open.clone(), false, window, cx)
                     }))
@@ -872,15 +1094,18 @@ impl Workspace {
                     .test_support(),
             )
             .child(
-                Button::new(("draft-close", ix))
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Close)
-                    .tooltip("Discard draft")
-                    .accessibility_label("Discard draft")
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.close_draft(&end, window, cx)),
-                    ),
+                hover_chip(cx).child(
+                    Button::new(("draft-close", ix))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .tooltip("Discard draft")
+                        .accessibility_label("Discard draft")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_draft(&end, window, cx)
+                        })),
+                ),
             )
     }
 
@@ -941,13 +1166,16 @@ impl Workspace {
         })
     }
 
+    /// A History row (the mockup's `.r1`): ↺, the title and how long ago it was updated; Open to
+    /// the side shows on hover.
     fn history_row(
         &self,
         ix: usize,
         summary: &SessionSummary,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
-        let title = summary.title.clone().unwrap_or_else(|| summary.id.clone());
+        let title = history_title(summary).to_string();
+        let date = (summary.updated_at.as_deref()).and_then(|at| relative_date(at, Utc::now()));
         let (open, side, source) = (summary.clone(), summary.clone(), summary.clone());
         let workspace = cx.entity().downgrade();
         let dragged = DraggedSession {
@@ -957,15 +1185,39 @@ impl Workspace {
         let forkable = self
             .default_agent()
             .is_some_and(|agent| self.can_fork(&agent, cx));
-        row(false, cx)
+        let (muted, faint) = (cx.theme().muted_foreground, faint(cx));
+        aurora::tab(false, cx)
             .id(("history-row", ix))
+            .group(ROW_GROUP)
+            .relative()
+            .h(px(23.))
+            .ml(px(4.))
+            .px(px(8.))
+            .rounded(px(7.))
+            .text_size(px(12.))
             .child(
-                div()
+                h_flex()
                     .id(("history", ix))
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .child(title)
+                    .gap(px(7.))
+                    .aria_label(title.clone())
+                    .child(div().flex_none().text_color(faint).child("↺"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(muted)
+                            .child(title),
+                    )
+                    .children(date.map(|date| {
+                        div()
+                            .flex_none()
+                            .text_size(px(10.5))
+                            .text_color(faint)
+                            .child(date)
+                    }))
                     .on_click(
                         cx.listener(move |this, _, window, cx| {
                             this.resume(&open, false, window, cx)
@@ -976,9 +1228,16 @@ impl Workspace {
                     .test_support(),
             )
             .when(self.panes.len() < MAX_PANES, |el| {
-                el.child(side_button(("history-side", ix)).on_click(
-                    cx.listener(move |this, _, window, cx| this.resume(&side, true, window, cx)),
-                ))
+                el.child(
+                    hover_chip(cx)
+                        .top_0()
+                        .child(side_button(("history-side", ix)).on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.resume(&side, true, window, cx)
+                            },
+                        ))),
+                )
             })
             .context_menu(move |menu, _, _| {
                 let (workspace, source) = (workspace.clone(), source.clone());
@@ -1015,21 +1274,184 @@ pub(crate) fn panel_title(label: &str, cx: &App) -> Div {
         .child(div().flex_1().child(label.to_uppercase()))
 }
 
-fn heading(text: &str, cx: &App) -> Div {
+/// Faint text: counts, times, the filter's key (the mockup's `--dim`).
+fn faint(cx: &App) -> Hsla {
+    match cx.theme().is_dark() {
+        true => aurora::nevoa_2(),
+        false => cx.theme().muted_foreground,
+    }
+}
+
+/// Secondary text: group names (the mockup's `--fg2`).
+fn fg2(cx: &App) -> Hsla {
+    match cx.theme().is_dark() {
+        true => aurora::tinta_2(),
+        false => cx.theme().foreground,
+    }
+}
+
+/// A title row's icon button.
+fn title_button(id: &'static str, icon: impl Into<Icon>, tip: &'static str) -> Button {
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .icon(icon.into())
+        .tooltip(tip)
+        .accessibility_label(tip)
+}
+
+/// A Sessions section's header (the mockup's `.sec`): chevron, name, then `note` fainter; the
+/// caller's click folds it.
+fn section_header(
+    id: &'static str,
+    name: &str,
+    note: impl Into<SharedString>,
+    folded: bool,
+    cx: &App,
+) -> Stateful<Div> {
     let theme = cx.theme();
-    let color = if theme.is_dark() {
-        aurora::nevoa_2()
-    } else {
-        theme.muted_foreground
+    let (faint, ring) = (faint(cx), theme.ring);
+    let note = note.into();
+    let chevron = match folded {
+        true => IconName::ChevronRight,
+        false => IconName::ChevronDown,
     };
+    h_flex()
+        .id(id)
+        .flex_1()
+        .min_w_0()
+        .gap(px(5.))
+        .px(px(4.))
+        .pt(px(6.))
+        .pb(px(3.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(gpui_kit::transparent_black())
+        .cursor_pointer()
+        .text_size(px(10.5))
+        .font_weight(FontWeight::BOLD)
+        .text_color(theme.muted_foreground)
+        .role(Role::Button)
+        .aria_label(format!("{name} {note}"))
+        .aria_expanded(!folded)
+        .focus_visible(move |el| el.border_color(ring))
+        // Focusable, and Enter or Space clicks it.
+        .tab_index(0)
+        .child(Icon::new(chevron).size(px(10.)).text_color(faint))
+        .child(name.to_uppercase())
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(faint)
+                .child(note.to_uppercase()),
+        )
+}
+
+/// A session's status dot, glowing in its colour.
+fn status_dot(color: Hsla) -> Div {
     div()
-        .px_3()
-        .pt_3()
-        .pb_1()
+        .flex_none()
+        .size(px(8.))
+        .rounded_full()
+        .bg(color)
+        .shadow(vec![
+            BoxShadow::new(px(0.), px(0.), color.alpha(0.7)).blur_radius(px(4.)),
+        ])
+}
+
+/// The group the rows' hover chips follow.
+const ROW_GROUP: &str = "session-row";
+
+/// A session or draft row (the mockup's `.r2`): two lines, 9 px corners, 5 × 8 px padding; a
+/// group's rows sit 10 px further in.
+fn two_line_row(active: bool, grouped: bool, cx: &App) -> Div {
+    aurora::tab(active, cx)
+        .group(ROW_GROUP)
+        .relative()
+        .items_start()
+        .py(px(5.))
+        .px(px(8.))
+        .ml(px(if grouped { 14. } else { 4. }))
+        .rounded(px(9.))
+        .text_size(px(13.))
+}
+
+/// A row's buttons on a small glass chip at its top right, shown while the row is hovered.
+/// Transparent otherwise, they stay in place for the keyboard and the screen reader. The chip
+/// lies over the row's own click: its buttons stop theirs.
+fn hover_chip(cx: &App) -> Div {
+    let theme = cx.theme();
+    let (fill, border) = match theme.is_dark() {
+        true => (aurora::card_fill(), aurora::borda()),
+        false => (theme.background, theme.border),
+    };
+    h_flex()
+        .absolute()
+        .top(px(2.))
+        .right(px(4.))
+        .rounded(px(7.))
+        .bg(fill)
+        .border_1()
+        .border_color(border)
+        .opacity(0.)
+        .group_hover(ROW_GROUP, |style| style.opacity(1.))
+}
+
+/// A row's second line (11 px, muted): what the session does, its lead word coloured by state,
+/// then its live subagents. Its accessible name is the whole line.
+fn line_two(id: impl Into<ElementId>, detail: Detail, live: usize, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let (lead, rest) = match detail {
+        Detail::Doing(text) => (None, text),
+        Detail::Permission(title) => (Some(("Permission:", theme.warning)), format!(" {title}")),
+        Detail::Question(text) => (Some(("Question:", theme.warning)), format!(" {text}")),
+        Detail::Done => (Some(("✓ Done", theme.success)), String::new()),
+        Detail::Idle => (None, "Idle".into()),
+        Detail::Exited => (Some(("Agent exited", theme.danger)), " · Restart".into()),
+        Detail::Draft => (None, "Draft".into()),
+    };
+    let mut text = format!("{}{}", lead.map_or("", |(l, _)| l), rest.replace('\n', " "));
+    match live {
+        0 => {}
+        1 => text.push_str(" · 1 subagent"),
+        n => text.push_str(&format!(" · {n} subagents")),
+    }
+    let highlight = lead.map(|(l, color)| {
+        let style = HighlightStyle {
+            color: Some(color),
+            ..Default::default()
+        };
+        (0..l.len(), style)
+    });
+    div()
+        .id(id)
+        .truncate()
         .text_size(px(11.))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(color)
-        .child(text.to_uppercase())
+        .text_color(theme.muted_foreground)
+        .aria_label(text.clone())
+        .child(StyledText::new(text).with_highlights(highlight))
+        .test_support()
+}
+
+fn session_title(s: &ChatSession) -> &str {
+    s.model.shown_title().unwrap_or("New session")
+}
+
+fn draft_title(draft: &Entity<DraftView>, cx: &App) -> String {
+    let starting = draft.read(cx).starting.as_ref().map(|chat| chat.read(cx));
+    let title = starting.and_then(|s| s.model.shown_title());
+    title.unwrap_or("New session").to_string()
+}
+
+fn history_title(summary: &SessionSummary) -> &str {
+    summary.title.as_deref().unwrap_or(&summary.id)
+}
+
+/// Whether a row titled `title` shows for the lowercased `filter`; an empty one shows all.
+fn shows(filter: &str, title: &str) -> bool {
+    filter.is_empty() || title.to_lowercase().contains(filter)
 }
 
 pub(crate) fn row(active: bool, cx: &App) -> Div {
@@ -1092,7 +1514,7 @@ mod tests {
 
     use std::time::Duration;
 
-    use super::{Detail, TurnState, detail, initials, short_age, status_color};
+    use super::{Detail, TurnState, detail, initials, relative_date, short_age, status_color};
     use crate::agents::RegistryEvent;
     use crate::chat::ChatModel;
     use crate::workspace::Workspace;
@@ -1123,6 +1545,19 @@ mod tests {
     }
 
     #[test]
+    fn history_dates_are_relative() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-12T12:00:00Z").unwrap();
+        let date = |at: &str| relative_date(at, now.to_utc());
+        assert_eq!(date("2026-11-12T13:00:00+02:00").as_deref(), Some("1h"));
+        assert_eq!(
+            date("2026-11-11T09:30:00.123Z").as_deref(),
+            Some("yesterday")
+        );
+        assert_eq!(date("2026-11-10T12:00:00Z").as_deref(), Some("2d"));
+        assert_eq!(date("yesterday"), None);
+    }
+
+    #[test]
     fn detail_says_what_the_session_does() {
         let mut m = ChatModel::default();
         assert_eq!(detail(&m), Detail::Idle);
@@ -1144,6 +1579,8 @@ mod tests {
             subagent: None,
         });
         assert_eq!(detail(&m), Detail::Permission("Write notes.md".into()));
+        m.waiting.clear();
+        assert_eq!(detail(&m), Detail::Doing("Waiting for you…".into()));
         m.state = TurnState::Error("exit 1".into());
         assert_eq!(detail(&m), Detail::Exited);
     }
@@ -1378,9 +1815,17 @@ mod tests {
         ("group", ix).into()
     }
 
-    /// Each group's name, collapsed state and sessions.
+    /// Each group's name, collapsed state and sessions (its colour left at 0).
     fn groups(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<SessionGroup> {
-        workspace.read_with(cx, |w, _| w.groups.clone())
+        let groups = workspace.read_with(cx, |w, _| w.groups.clone());
+        groups
+            .into_iter()
+            .map(|g| SessionGroup { color: 0, ..g })
+            .collect()
+    }
+
+    fn colors(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<u8> {
+        workspace.read_with(cx, |w, _| w.groups.iter().map(|g| g.color).collect())
     }
 
     fn named(name: &str, sessions: &[&str]) -> SessionGroup {
@@ -1388,6 +1833,7 @@ mod tests {
             name: name.into(),
             collapsed: false,
             sessions: sessions.iter().map(|s| s.to_string()).collect(),
+            color: 0,
         }
     }
 
@@ -1645,5 +2091,163 @@ mod tests {
         let state = AppState::load(&path);
         assert_eq!(state.open_sessions[0].name.as_deref(), Some("Mine"));
         assert_eq!(state.groups, std::slice::from_ref(&review));
+    }
+
+    /// A row's second line follows the running tool, then says Done; its time shows once the
+    /// state first changed.
+    #[gpui_kit::test]
+    fn rows_say_what_sessions_do(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--steps 1 --chunk-delay-ms 300"));
+        let session = start_now(&workspace, cx);
+        assert_eq!(label(("open-age", 0usize), cx), None);
+        assert_eq!(label(("open-detail", 0usize), cx).as_deref(), Some("Idle"));
+        cx.simulate_input("go");
+        cx.simulate_keystrokes("enter");
+        let doing = |cx: &mut VisualTestContext| {
+            session.read_with(cx, |s, _| s.model.activity().unwrap_or_default())
+        };
+        wait_until(cx, "the tool", |cx| doing(cx).starts_with("Read"));
+        let (detail, doing) = cx.update(|window, cx| {
+            window.render_frame(cx);
+            let detail = window
+                .find(("open-detail", 0usize))
+                .label()
+                .map(str::to_string);
+            (detail.unwrap(), session.read(cx).model.activity().unwrap())
+        });
+        assert!(detail.starts_with(&doing), "{detail:?} for {doing:?}");
+        assert!(label(("open-age", 0usize), cx).is_some());
+        wait_until(cx, "the turn's end", |cx| {
+            session.read_with(cx, |s, _| s.model.state == TurnState::Idle && s.model.done)
+        });
+        assert_eq!(
+            label(("open-detail", 0usize), cx).as_deref(),
+            Some("✓ Done")
+        );
+    }
+
+    /// A collapsed group counts its sessions that wait for the user; expanded, its rows say it.
+    #[gpui_kit::test]
+    fn collapsed_group_says_who_needs_you(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--ask-permission"));
+        let session = start_now(&workspace, cx);
+        cx.simulate_input("edit");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "needs you", |cx| {
+            session.read_with(cx, |s, _| s.model.state == TurnState::NeedsYou)
+        });
+        let detail = label(("open-detail", 0usize), cx).unwrap();
+        assert!(detail.starts_with("Permission: "), "{detail:?}");
+        menu_item(open_row(0), "New group with this session", cx);
+        type_name("Mine", "enter", cx);
+        assert_eq!(label(("group-needs", 0usize), cx), None);
+        press(("group-toggle", 0usize), cx);
+        assert_eq!(label(("group-needs", 0usize), cx).as_deref(), Some("● 1"));
+        press(("group-toggle", 0usize), cx);
+        assert_eq!(label(("group-needs", 0usize), cx), None);
+    }
+
+    /// The filter narrows Open and History to matching titles and shows matching groups
+    /// expanded; Esc clears it and every group is folded as it was.
+    #[gpui_kit::test]
+    fn filter_narrows_open_and_history(cx: &mut TestAppContext) {
+        let (workspace, cx) = with_sessions(3, cx);
+        for name in ["A", "B"] {
+            press("new-group", cx);
+            type_name(name, "enter", cx);
+        }
+        menu_item(open_row(0), "Move to A", cx);
+        menu_item(open_row(2), "Move to B", cx);
+        press(("group-toggle", 0usize), cx);
+        let before = groups(&workspace, cx);
+        let open = |cx: &mut VisualTestContext| -> Vec<String> {
+            (0..3).filter_map(|ix| label(open_row(ix), cx)).collect()
+        };
+        let history = |cx: &mut VisualTestContext| -> Vec<String> {
+            (0..3usize)
+                .filter_map(|ix| label(("history", ix), cx))
+                .collect()
+        };
+        assert_eq!(open(cx), ["Session 1", "Session 2"]);
+
+        cx.simulate_keystrokes("secondary-k");
+        cx.simulate_input("SESSION 0");
+        assert_eq!(open(cx), ["Session 0"], "its group shows expanded");
+        assert_eq!(history(cx), ["Session 0"]);
+        assert_eq!(label(group(1), cx), None, "a group with no match hides");
+        assert_eq!(label("sessions-no-match", cx), None);
+
+        cx.simulate_keystrokes("escape");
+        assert_eq!(open(cx), ["Session 1", "Session 2"]);
+        cx.simulate_input("zzz");
+        assert_eq!(open(cx), Vec::<String>::new());
+        assert_eq!(history(cx), Vec::<String>::new());
+        let none = label("sessions-no-match", cx);
+        assert_eq!(none.as_deref(), Some("No sessions match"));
+
+        cx.simulate_keystrokes("escape");
+        assert_eq!(groups(&workspace, cx), before);
+        assert_eq!(open(cx), ["Session 1", "Session 2"]);
+        assert_eq!(history(cx).len(), 3);
+        assert_eq!(label("sessions-no-match", cx), None);
+    }
+
+    /// Open and History fold, and stay folded on a relaunch, as the groups keep their colours.
+    #[gpui_kit::test]
+    fn sections_fold_and_survive_a_relaunch(
+        cx: &mut TestAppContext,
+        relaunch: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(path.clone()));
+        launch(&workspace, cx);
+        while question(&workspace, cx).is_some() {
+            click("approval-allow", cx);
+        }
+        start_now(&workspace, cx);
+        for name in ["A", "B"] {
+            press("new-group", cx);
+            type_name(name, "enter", cx);
+        }
+        let folded = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, _| (w.open_folded, w.history_folded))
+        };
+        assert_eq!(folded(&workspace, cx), (false, false));
+        assert!(label(open_row(0), cx).is_some());
+        press("open-section", cx);
+        assert!(label(open_row(0), cx).is_none());
+        assert!(label(group(0), cx).is_none());
+        press("history-section", cx);
+        assert_eq!(folded(&workspace, cx), (true, true));
+        let state = AppState::load(&path);
+        assert!(state.open_folded && state.history_folded);
+
+        relaunch.executor().allow_parking();
+        let (workspace, cx) = open_at(relaunch, fake_settings(""), Some(path.clone()));
+        launch(&workspace, cx);
+        assert_eq!(folded(&workspace, cx), (true, true));
+        assert_eq!(colors(&workspace, cx), [0, 1]);
+        assert!(label(open_row(0), cx).is_none());
+        press("open-section", cx);
+        assert!(label(open_row(0), cx).is_some());
+        assert_eq!(
+            label(("open-age", 0usize), cx),
+            None,
+            "a restored session has no time"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn new_groups_take_the_next_colour(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, Settings::default());
+        for name in ["A", "B", "C"] {
+            press("new-group", cx);
+            type_name(name, "enter", cx);
+        }
+        assert_eq!(colors(&workspace, cx), [0, 1, 2]);
     }
 }

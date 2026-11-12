@@ -822,6 +822,8 @@ impl ChatSession {
         self.questions.clear();
         self.scroller.update(cx, |list, cx| list.reset(0, cx));
         self.update_model(cx, |m| m.state = TurnState::Working);
+        // Loading is no change of the session's own: its row shows no time until one.
+        self.since = None;
         self.loading = true;
         let (id, cwd, registry) = (self.id.clone(), self.cwd.clone(), self.registry.clone());
         cx.spawn_in(window, async move |this, cx| {
@@ -834,6 +836,7 @@ impl ChatSession {
                         registry.update(cx, |r, cx| r.mark_ready(&agent, cx)).ok();
                         this.take_started(started, window, cx);
                         this.update_model(cx, |m| m.state = TurnState::Idle);
+                        this.since = None;
                     }
                     Err(AgentError::AuthRequired) => {
                         this.update_model(cx, |m| m.on_auth_required(&agent));
@@ -1111,7 +1114,7 @@ mod tests {
             );
             let (waiting, input) = (
                 window.find("waiting").bounds(),
-                window.find("input-state").bounds(),
+                window.within("prompt-box").find("input-state").bounds(),
             );
             assert!(waiting.bottom() <= input.top());
         });
@@ -1372,12 +1375,9 @@ mod tests {
                     .is_some(),
                 "the card is pinned"
             );
+            let input = window.within("prompt-box").find("input-state").bounds();
             let bounds = |id: &'static str| window.find(id).bounds();
-            let (waiting, list, input) = (
-                bounds("waiting"),
-                bounds("transcript"),
-                bounds("input-state"),
-            );
+            let (waiting, list) = (bounds("waiting"), bounds("transcript"));
             // O1: the stack lies over the list's bottom, inside its area, not below it.
             assert!(
                 list.top() < waiting.top() && waiting.bottom() <= list.bottom(),
@@ -2350,8 +2350,8 @@ mod tests {
         assert_eq!(menu(&session, cx).unwrap(), all);
         assert!(shows("commands", cx) && shows(("command", 3usize), cx));
         let (list, input) = cx.update(|window, _| {
-            let bounds = |id: &'static str| window.find(id).bounds();
-            (bounds("commands"), bounds("input-state"))
+            let input = window.within("prompt-box").find("input-state").bounds();
+            (window.find("commands").bounds(), input)
         });
         assert!(
             list.bottom() < input.top(),
@@ -2488,7 +2488,8 @@ mod tests {
         cx.run_until_parked();
         let (inputs, send) = cx.update(|window, cx| {
             window.render_frame(cx);
-            let inputs: Vec<_> = (window.find_all("input-state").iter())
+            let pane = window.within(ElementId::View(session.entity_id()));
+            let inputs: Vec<_> = (pane.find_all("input-state").iter())
                 .map(|input| input.bounds())
                 .collect();
             (inputs, window.find("send").bounds())
@@ -2892,8 +2893,10 @@ mod tests {
         assert_eq!(pill("pill-folder", cx), Some(name));
         assert_eq!(pill("pill-branch", cx).as_deref(), Some("feature"));
         assert_eq!(pill("pill-agent", cx).as_deref(), Some("fake"));
-        let placeholder =
-            cx.update(|window, _| window.find("input-state").placeholder().map(str::to_owned));
+        let placeholder = cx.update(|window, _| {
+            let input = window.within("prompt-box").find("input-state");
+            input.placeholder().map(str::to_owned)
+        });
         assert_eq!(placeholder.as_deref(), Some("Message fake…"));
         leave(&workspace, cx);
     }

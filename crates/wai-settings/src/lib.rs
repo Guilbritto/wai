@@ -485,6 +485,9 @@ pub struct AppState {
     pub last_bases: BTreeMap<PathBuf, String>,
     /// Agent id -> the modes its last session reported.
     pub modes_seen: BTreeMap<String, SeenModes>,
+    /// The Sessions panel's Open and History sections are folded.
+    pub open_folded: bool,
+    pub history_folded: bool,
 }
 
 /// A named group of open sessions.
@@ -495,6 +498,9 @@ pub struct SessionGroup {
     /// Its sessions' ids.
     // ponytail: by session id alone; add the agent if two agents ever share an id.
     pub sessions: Vec<String>,
+    /// Its swatch: an index into the sidebar's cycle of accents.
+    #[serde(default)]
+    pub color: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -535,6 +541,8 @@ impl Default for AppState {
             last_models: BTreeMap::new(),
             last_bases: BTreeMap::new(),
             modes_seen: BTreeMap::new(),
+            open_folded: false,
+            history_folded: false,
         }
     }
 }
@@ -870,7 +878,10 @@ mod tests {
                 name: "Review".into(),
                 collapsed: true,
                 sessions: vec!["s1".into()],
+                color: 3,
             }],
+            open_folded: true,
+            history_folded: true,
             last_models: [("claude".to_string(), "opus".to_string())].into(),
             last_bases: [(PathBuf::from("/tmp/proj"), "feature".to_string())].into(),
             modes_seen: [(
@@ -902,6 +913,11 @@ mod tests {
         let state = AppState::load(&path);
         assert_eq!(state.open_sessions[0].name, None);
         assert_eq!(state.groups, []);
+        assert!(!state.open_folded && !state.history_folded);
+        // A state from before group colours.
+        let old = r#"{"groups":[{"name":"g","collapsed":false,"sessions":[]}]}"#;
+        std::fs::write(&path, old).unwrap();
+        assert_eq!(AppState::load(&path).groups[0].color, 0);
     }
 
     #[test]

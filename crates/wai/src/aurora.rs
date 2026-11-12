@@ -58,7 +58,6 @@ pub(crate) fn magenta() -> Hsla {
     rgb(0xff6ec7).into()
 }
 /// Info, links.
-#[cfg(test)]
 pub(crate) fn ceu() -> Hsla {
     rgb(0x5bb8ff).into()
 }

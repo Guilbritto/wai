@@ -258,6 +258,11 @@ pub struct Workspace {
     pub groups: Vec<SessionGroup>,
     /// The Open row or group being renamed, with its input.
     pub(crate) renaming: Option<(Renamed, Entity<InputState>, Subscription)>,
+    /// The Sessions panel's filter; its text narrows Open and History.
+    pub(crate) sessions_filter: Entity<InputState>,
+    /// The Sessions panel's sections are folded; kept in `state.json`.
+    pub(crate) open_folded: bool,
+    pub(crate) history_folded: bool,
     /// The agent commands and shells the user allowed; kept in `state.json`, never in
     /// `settings.toml`.
     pub approved: BTreeSet<String>,
@@ -444,6 +449,13 @@ impl Workspace {
             drafts: Vec::new(),
             groups: Vec::new(),
             renaming: None,
+            sessions_filter: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Filter sessions")
+                    .clean_on_escape()
+            }),
+            open_folded: false,
+            history_folded: false,
             approved,
             shell,
             asking: Vec::new(),
@@ -820,6 +832,8 @@ impl Workspace {
         }
         self.agents_right = state.agents_right;
         self.agents_collapsed = state.agents_collapsed;
+        self.open_folded = state.open_folded;
+        self.history_folded = state.history_folded;
         self.focus_pane(0, window, cx);
         self.save_state(cx);
         self.recover(window, cx);
@@ -891,6 +905,8 @@ impl Workspace {
             last_models: self.last_models.clone(),
             last_bases: self.last_bases.clone(),
             modes_seen: self.modes_seen.clone(),
+            open_folded: self.open_folded,
+            history_folded: self.history_folded,
         };
         // ponytail: a few hundred bytes on the UI thread; move to the background executor if
         // it ever shows in a frame.
@@ -2833,6 +2849,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::focus_next_pane))
             .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::open_palette))
+            .on_action(cx.listener(Self::filter_sessions))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_settings(Section::Ai, None, window, cx)
             }))

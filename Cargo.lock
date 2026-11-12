@@ -8145,6 +8145,7 @@ version = "0.6.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "chrono",
  "gpui-kit",
  "http-body-util",
  "hyper",
