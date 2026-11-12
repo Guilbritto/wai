@@ -160,7 +160,7 @@ impl ChatSession {
         let input = cx.new(|cx| {
             let mut input = TextareaState::new(window, cx)
                 .auto_grow(1, 8)
-                .placeholder(format!("Message {agent}…"));
+                .placeholder(format!("Message {}…", wai_settings::agent_label(&agent)));
             input.set_submit_on_enter(true, cx);
             input
         });
@@ -2867,6 +2867,9 @@ mod tests {
         assert_eq!(pill("pill-folder", cx), Some(name));
         assert_eq!(pill("pill-branch", cx).as_deref(), Some("feature"));
         assert_eq!(pill("pill-agent", cx).as_deref(), Some("fake"));
+        let placeholder =
+            cx.update(|window, _| window.find("input-state").placeholder().map(str::to_owned));
+        assert_eq!(placeholder.as_deref(), Some("Message fake…"));
         leave(&workspace, cx);
     }
 
