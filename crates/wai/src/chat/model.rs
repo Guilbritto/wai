@@ -947,10 +947,14 @@ impl ChatModel {
             .collect();
         for id in live {
             self.patch_subagent(&SubagentPatch {
-                id,
+                id: id.clone(),
                 state: Some(SubagentState::Unknown),
                 ..Default::default()
             });
+            // Parked: nothing ends it now, so its clock stops here.
+            if let Some(sub) = self.subagents.iter_mut().find(|s| s.id == id) {
+                sub.ended = Some(Instant::now());
+            }
         }
     }
 }
@@ -1186,6 +1190,10 @@ mod tests {
         m.on_exited(None);
         let states: Vec<_> = m.subagents.iter().map(|s| s.state).collect();
         assert_eq!(states, [SubagentState::Unknown, SubagentState::Done]);
+        assert!(
+            m.subagents[0].ended.is_some(),
+            "a parked subagent's clock stops"
+        );
         assert_eq!(card(&m, "a").status, ToolStatus::Pending);
         assert_eq!(card(&m, "b").status, ToolStatus::Completed);
     }

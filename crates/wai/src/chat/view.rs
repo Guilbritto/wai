@@ -1023,6 +1023,9 @@ impl ChatSession {
         self.open_steps.clear();
         self.open_groups.clear();
         self.questions.clear();
+        self.model.subagents.clear();
+        self.drawer = None;
+        self.agent_cursor = None;
         self.scroller.update(cx, |list, cx| list.reset(0, cx));
         self.update_model(cx, |m| m.state = TurnState::Working);
         // Loading is no change of the session's own: its row shows no time until one.
@@ -1119,7 +1122,7 @@ mod tests {
     };
     use wai_agent::{
         ChoiceKind, Location, PermissionChoice, PermissionRequest, SessionEvent, StopReason,
-        SubagentState, ToolCallView, ToolStatus,
+        SubagentPatch, SubagentState, ToolCallView, ToolStatus,
     };
     use wai_settings::{AppState, Change, OpenSession, Processing, Settings};
 
@@ -1650,6 +1653,39 @@ mod tests {
             workspace.read_with(cx, |w, _| !w.sessions.contains(&session)),
             "(c) ended"
         );
+    }
+
+    /// The agent's exit parks a live subagent: its clock stops and it shows stopped, not running.
+    /// A Restart starts over with no subagent, drawer or list cursor.
+    #[gpui_kit::test]
+    fn exit_parks_subagents_and_restart_clears_them(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        session.update(cx, |s, cx| {
+            let patch = SubagentPatch {
+                id: "bg".into(),
+                title: Some("Background task".into()),
+                state: Some(SubagentState::Running),
+                ..Default::default()
+            };
+            s.handle_event(&SessionEvent::Subagent(patch), cx);
+            s.open_drawer(Some("bg".into()), cx);
+            s.agent_cursor = Some(1);
+        });
+        session.update(cx, |s, cx| s.handle_agent_exited("gone", cx));
+        let ended = session.read_with(cx, |s, _| s.model.subagents[0].ended.is_some());
+        assert!(ended, "the clock stops");
+        let label = cx.update(|window, cx| {
+            window.render_frame(cx);
+            let row = window.find(("agent-row", 0usize));
+            row.label().map(str::to_owned).unwrap_or_default()
+        });
+        assert!(label.contains("stopped"), "{label}");
+
+        cx.update(|window, cx| session.update(cx, |s, cx| s.load(false, window, cx)));
+        assert!(session.read_with(cx, |s, _| s.model.subagents.is_empty()));
+        assert_eq!(agents_at(&session, cx), (None, None));
     }
 
     /// A permission card stays above the drawer and answerable.

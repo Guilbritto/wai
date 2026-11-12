@@ -34,11 +34,11 @@ pub(super) fn sub_stat(sub: &Subagent) -> String {
 }
 
 /// A subagent's state mark, its colour and its word, as the list, the drawer and the card show it.
-pub(super) fn state_look(state: SubagentState, cx: &App) -> (&'static str, Hsla, &'static str) {
+pub(super) fn state_look(sub: &Subagent, cx: &App) -> (&'static str, Hsla, &'static str) {
     let theme = cx.theme();
     let pick = |aurora: Hsla, light: Hsla| if theme.is_dark() { aurora } else { light };
     let cyan = pick(aurora::boreal(), theme.info);
-    match state {
+    match sub.state {
         SubagentState::Running => ("○", cyan, "running"),
         SubagentState::NeedsYou => ("○", pick(aurora::ambar(), theme.warning), "needs you"),
         SubagentState::Done | SubagentState::Ended => {
@@ -46,6 +46,10 @@ pub(super) fn state_look(state: SubagentState, cx: &App) -> (&'static str, Hsla,
         }
         SubagentState::Stopped => ("✗", pick(aurora::erro(), theme.danger), "stopped"),
         SubagentState::Failed => ("✗", pick(aurora::erro(), theme.danger), "failed"),
+        // Parked by the agent's exit (`wind_down`).
+        SubagentState::Unknown if sub.ended.is_some() => {
+            ("✗", pick(aurora::erro(), theme.danger), "stopped")
+        }
         SubagentState::Unknown => (
             "○",
             pick(aurora::nevoa(), theme.muted_foreground),
@@ -144,7 +148,7 @@ impl ChatSession {
             // Registers the id so tests can find and click it.
             .test_support();
         let rows = subs.iter().enumerate().map(|(ix, sub)| {
-            let (mark, color, state) = state_look(sub.state, cx);
+            let (mark, color, state) = state_look(sub, cx);
             // Without a kind the title is the name and there is no task.
             let (name, task) = match &sub.kind {
                 Some(kind) => (kind.as_str(), sub.title.as_str()),
@@ -298,7 +302,7 @@ impl ChatSession {
                 theme.muted_foreground,
             ),
         };
-        let (mark, color, _) = state_look(sub.state, cx);
+        let (mark, color, _) = state_look(&sub, cx);
         let (name, task) = match &sub.kind {
             Some(kind) => (kind.as_str(), sub.title.as_str()),
             None => (sub.title.as_str(), ""),

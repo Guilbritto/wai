@@ -725,11 +725,12 @@ impl ChatSession {
         let sub = self.model.subagents.iter().find(|s| s.id == tool.id)?;
         let theme = cx.theme();
         let dark = theme.is_dark();
-        let (mark, color, _) = state_look(sub.state, cx);
-        let (pill, tone) = match sub.state {
-            SubagentState::Done | SubagentState::Ended => ("Done", state_look(sub.state, cx).1),
-            SubagentState::Stopped | SubagentState::Failed => ("Failed", color),
-            _ => ("Running", color),
+        let (mark, tone, _) = state_look(sub, cx);
+        let pill = match sub.state {
+            SubagentState::Done | SubagentState::Ended => "Done",
+            SubagentState::Running | SubagentState::NeedsYou => "Running",
+            SubagentState::Unknown if sub.ended.is_none() => "Running",
+            _ => "Failed",
         };
         let violet = if dark { aurora::lilas() } else { theme.primary };
         let (kind, task) = match &sub.kind {
@@ -748,7 +749,7 @@ impl ChatSession {
             .rounded(px(9.))
             .text_size(px(12.))
             .cursor_pointer()
-            .child(div().text_color(color).child(mark))
+            .child(div().text_color(tone).child(mark))
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
