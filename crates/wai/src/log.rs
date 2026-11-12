@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+#[cfg(target_os = "macos")]
 const MAX_BYTES: u64 = 1024 * 1024;
 
 static PATH: OnceLock<PathBuf> = OnceLock::new();
@@ -13,6 +14,7 @@ pub fn path() -> Option<&'static Path> {
 }
 
 /// Moves `path` to `path.1` (replacing it) when it holds more than `max` bytes.
+#[cfg(any(target_os = "macos", test))]
 pub fn rotate(path: &Path, max: u64) -> std::io::Result<()> {
     match std::fs::metadata(path) {
         Ok(m) if m.len() > max => {

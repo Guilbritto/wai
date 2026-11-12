@@ -33,7 +33,7 @@ pub struct Inputs {
 }
 
 pub fn os_line() -> String {
-    let mut line = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
+    let line = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
     #[cfg(target_os = "macos")]
     if let Ok(out) = std::process::Command::new("sw_vers")
         .arg("-productVersion")
@@ -41,7 +41,7 @@ pub fn os_line() -> String {
     {
         let v = String::from_utf8_lossy(&out.stdout);
         if !v.trim().is_empty() {
-            let _ = write!(line, " {}", v.trim());
+            return format!("{line} {}", v.trim());
         }
     }
     line
