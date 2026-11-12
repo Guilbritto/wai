@@ -11,6 +11,7 @@ mod ext_panel;
 mod extensions_view;
 mod files;
 mod git;
+mod instance;
 mod layout;
 mod notify;
 mod palette;
@@ -51,6 +52,20 @@ fn main() -> anyhow::Result<()> {
         || Ok(config_dir().join("state.json")),
         |p| std::path::absolute(PathBuf::from(p)),
     )?;
+    // One wai per state folder; the guard lives to the end of `main`.
+    let _instance =
+        match instance::acquire(&state_path.with_file_name("wai.lock"), instance::LOCK_WAIT) {
+            instance::Acquired::Held(guard) => Some(guard),
+            instance::Acquired::Taken => {
+                let arg = std::env::args_os().nth(1).map(PathBuf::from);
+                instance::tell_taken(arg.as_deref().unwrap_or(Path::new("wai")));
+                return Ok(());
+            }
+            instance::Acquired::Unusable(e) => {
+                eprintln!("wai: not locking the state folder: {e}");
+                None
+            }
+        };
     let state = AppState::load(&state_path);
     let project = resolve_project(std::env::args_os().nth(1).map(PathBuf::from), state.project)?;
     // Everything relative is resolved by now; agents spawn from a neutral dir, not a repo.
