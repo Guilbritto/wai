@@ -3639,6 +3639,7 @@ mod tests {
     }
 
     /// `a` loses its process (killed once it has replied); a new process starts `b` with the same id.
+    #[cfg(unix)]
     fn two_sessions_one_id(
         cx: &mut TestAppContext,
     ) -> (
@@ -3675,6 +3676,7 @@ mod tests {
         (workspace, a, b, cx, dir)
     }
 
+    #[cfg(unix)]
     fn notices(session: &Entity<ChatSession>, text: &str, cx: &mut VisualTestContext) -> bool {
         session.read_with(cx, |s, _| {
             (s.model.items.iter())
@@ -3682,6 +3684,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     #[gpui_kit::test]
     fn an_id_the_agent_reuses_goes_to_its_new_session(cx: &mut TestAppContext) {
         let (_workspace, a, b, cx, _dir) = two_sessions_one_id(cx);
@@ -3701,6 +3704,7 @@ mod tests {
         assert!(notices(&a, super::REUSED, cx));
     }
 
+    #[cfg(unix)]
     #[gpui_kit::test]
     fn restart_takes_a_reused_id_back(cx: &mut TestAppContext) {
         let (_workspace, a, b, cx, _dir) = two_sessions_one_id(cx);
@@ -4046,8 +4050,9 @@ mod tests {
 
     #[gpui_kit::test]
     fn strip_follows_the_agent_into_a_submodule_worktree(cx: &mut TestAppContext) {
-        let (workspace, cx, _dir, (_sup, wt)) =
-            follow_setup(cx, |_, wt| format!("--read {}/a.txt", wt.display()));
+        let (workspace, cx, _dir, (_sup, wt)) = follow_setup(cx, |_, wt| {
+            format!("--read {}", wai_agent::quote(wt.join("a.txt")))
+        });
         let session = start_session(&workspace, cx);
         head_landed(&session, cx);
         send("go", cx);
@@ -4065,9 +4070,9 @@ mod tests {
     fn strip_comes_back_with_the_agent(cx: &mut TestAppContext) {
         let (workspace, cx, _dir, _) = follow_setup(cx, |sup, wt| {
             format!(
-                "--read {}/a.txt --read {}/b.txt",
-                wt.display(),
-                sup.display()
+                "--read {} --read {}",
+                wai_agent::quote(wt.join("a.txt")),
+                wai_agent::quote(sup.join("b.txt"))
             )
         });
         let session = start_session(&workspace, cx);
@@ -4088,9 +4093,9 @@ mod tests {
     fn a_cached_read_back_home_drops_an_earlier_read_in_flight(cx: &mut TestAppContext) {
         let (workspace, cx, _dir, (sup, _)) = follow_setup(cx, |sup, wt| {
             format!(
-                "--read {}/a.txt --read {}/b.txt",
-                wt.display(),
-                sup.display()
+                "--read {} --read {}",
+                wai_agent::quote(wt.join("a.txt")),
+                wai_agent::quote(sup.join("b.txt"))
             )
         });
         let session = start_session(&workspace, cx);
@@ -4115,7 +4120,7 @@ mod tests {
         std::fs::create_dir(plain.path().join("plain")).unwrap();
         let read = plain.path().join("plain/n.txt");
         let (workspace, cx, _dir, _) =
-            follow_setup(cx, |_, _| format!("--read {}", read.display()));
+            follow_setup(cx, |_, _| format!("--read {}", wai_agent::quote(&read)));
         let session = start_session(&workspace, cx);
         head_landed(&session, cx);
         let before = (pill("pill-folder", cx), pill("pill-branch", cx));
@@ -4154,7 +4159,7 @@ mod tests {
     #[gpui_kit::test]
     fn detached_submodule_shows_no_branch_chip(cx: &mut TestAppContext) {
         let (workspace, cx, _dir, (sup, _wt)) = follow_setup(cx, |sup, _| {
-            format!("--read {}/inventories/a.txt", sup.display())
+            format!("--read {}", wai_agent::quote(sup.join("inventories/a.txt")))
         });
         git(&sup.join("inventories"), &["checkout", "--detach"]);
         let session = start_session(&workspace, cx);
@@ -4185,7 +4190,7 @@ mod tests {
             ..AppState::default()
         };
         state.save(&path).unwrap();
-        let flag = format!("--read {}/a.txt", wt.display());
+        let flag = format!("--read {}", wai_agent::quote(wt.join("a.txt")));
         let (workspace, cx) = open_at(cx, fake_settings(&flag), Some(path));
         cx.deactivate_window();
 

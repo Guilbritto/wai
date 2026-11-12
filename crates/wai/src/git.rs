@@ -75,7 +75,7 @@ fn current_branch(dir: &Path) -> Option<String> {
 
 pub(crate) fn repo(folder: &Path) -> Option<Repo> {
     let top = run(folder, &["rev-parse", "--show-toplevel"]).ok()?;
-    let root = std::fs::canonicalize(top).ok()?;
+    let root = wai_settings::try_canonical(Path::new(&top)).ok()?;
     let current = current_branch(&root);
     let branches = run(
         &root,
@@ -142,7 +142,7 @@ pub(crate) fn head(folder: &Path) -> Option<Head> {
     .ok()?;
     let mut lines = out.lines();
     let (top, git_dir, common) = (lines.next()?, lines.next()?, lines.next()?);
-    let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
+    let canon = |p: &str| wai_settings::canonical(Path::new(p));
     let root = canon(top);
     let worktree = git_dir != common;
     let main_dir = if worktree {
@@ -307,7 +307,7 @@ pub(crate) fn clone(url: &str, parent: &Path) -> Result<PathBuf, String> {
         return Err("Enter a repository URL".into());
     }
     let name = url.trim_end_matches('/');
-    let name = name.rsplit(['/', ':']).next().unwrap_or_default();
+    let name = name.rsplit(['/', '\\', ':']).next().unwrap_or_default();
     let name = name.strip_suffix(".git").unwrap_or(name);
     if name.is_empty() || name == ".." {
         return Err("Enter a repository URL".into());
@@ -383,14 +383,12 @@ pub(crate) mod tests {
             git(dir, &["add", "."]);
             dated_commit(dir, n + 1, b);
         }
-        std::fs::canonicalize(dir).unwrap()
+        wai_settings::canonical(dir)
     }
 
     /// A superproject with the submodule `inventories` and a linked worktree of that submodule.
     pub(crate) fn submodule_worktree(tmp: &Path) -> (PathBuf, PathBuf) {
-        // Git reads the canonical \\?\ form Windows gives as a host name: hand it the plain path.
-        let src = tmp.join("inv-src");
-        repo_with(&src, &[]);
+        let src = repo_with(&tmp.join("inv-src"), &[]);
         let sup = repo_with(&tmp.join("super"), &[]);
         git(
             &sup,
@@ -410,15 +408,14 @@ pub(crate) mod tests {
             &["worktree", "add", "-b", "feat-x", ".claude/worktrees/x"],
         );
         (
-            std::fs::canonicalize(&sup).unwrap(),
-            std::fs::canonicalize(sub.join(".claude/worktrees/x")).unwrap(),
+            wai_settings::canonical(&sup),
+            wai_settings::canonical(&sub.join(".claude/worktrees/x")),
         )
     }
 
     /// A bare origin (HEAD main) and a clone of it.
     pub(crate) fn cloned(tmp: &Path) -> (PathBuf, PathBuf) {
-        let src = tmp.join("src");
-        repo_with(&src, &[]);
+        let src = repo_with(&tmp.join("src"), &[]);
         let bare = tmp.join("origin.git");
         git(
             tmp,
@@ -434,7 +431,7 @@ pub(crate) mod tests {
             tmp,
             &["clone", bare.to_str().unwrap(), clone.to_str().unwrap()],
         );
-        (bare, std::fs::canonicalize(clone).unwrap())
+        (bare, wai_settings::canonical(&clone))
     }
 
     fn exclude_count(root: &Path) -> usize {
@@ -701,7 +698,7 @@ pub(crate) mod tests {
         );
         let w = create_worktree(&repo(&root).unwrap(), "x", "main").unwrap();
         let h = head(&w.path).unwrap();
-        assert_eq!(h.root, std::fs::canonicalize(&w.path).unwrap());
+        assert_eq!(h.root, wai_settings::canonical(&w.path));
         assert_eq!(h.folder, root);
         assert_eq!(h.branch.as_deref(), Some("wai/x"));
         assert!(h.worktree);
@@ -711,7 +708,7 @@ pub(crate) mod tests {
     fn head_names_the_submodule_of_a_submodule_worktree() {
         let tmp = tempfile::tempdir().unwrap();
         let (sup, wt) = submodule_worktree(tmp.path());
-        let sub = std::fs::canonicalize(sup.join("inventories")).unwrap();
+        let sub = wai_settings::canonical(&sup.join("inventories"));
         assert_eq!(
             head(&wt),
             Some(Head {
@@ -731,7 +728,7 @@ pub(crate) mod tests {
     fn detached_submodule_has_no_branch() {
         let tmp = tempfile::tempdir().unwrap();
         let (sup, _wt) = submodule_worktree(tmp.path());
-        let sub = std::fs::canonicalize(sup.join("inventories")).unwrap();
+        let sub = wai_settings::canonical(&sup.join("inventories"));
         git(&sub, &["checkout", "--detach"]);
         let h = head(&sub).unwrap();
         assert_eq!(h.branch, None);
