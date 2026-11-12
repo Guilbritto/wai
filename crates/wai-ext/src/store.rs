@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::install::{
-    self, InstallError, MANIFEST_FILE, Source, Staged, extensions_dir, staging_path,
+    self, InstallError, MANIFEST_FILE, Source, Staged, data_root, extensions_dir, staging_path,
 };
 use crate::{ExtId, Manifest, Permission, parse_manifest, parse_permission};
 
@@ -16,6 +16,8 @@ pub struct Installed {
     pub manifest: Manifest,
     /// `<config>/extensions/<id>`.
     pub dir: PathBuf,
+    /// `<config>/extension-data/<id>`: survives updates and uninstalls; may not exist yet.
+    pub data: PathBuf,
     pub enabled: bool,
     /// What the user consented to. Calls are checked against this, not against the manifest,
     /// which can change on disk.
@@ -103,6 +105,7 @@ impl ExtStore {
         self.installed.push(Installed {
             manifest: staged.manifest().clone(),
             dir: dir.clone(),
+            data: data_root(&self.config_dir).join(id.as_str()),
             enabled: true,
             granted,
         });
@@ -198,6 +201,7 @@ fn load(config_dir: &Path, r: &Record) -> Result<Installed, String> {
     Ok(Installed {
         manifest,
         dir,
+        data: data_root(config_dir).join(id.as_str()),
         enabled: r.enabled,
         granted,
     })

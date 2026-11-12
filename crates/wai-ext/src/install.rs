@@ -97,6 +97,11 @@ impl Drop for Staged {
     }
 }
 
+/// Each extension's own folder, `<root>/<id>`; nothing here touches it.
+pub(crate) fn data_root(config_dir: &Path) -> PathBuf {
+    config_dir.join("extension-data")
+}
+
 pub(crate) fn extensions_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("extensions")
 }

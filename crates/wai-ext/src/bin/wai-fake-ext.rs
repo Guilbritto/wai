@@ -129,6 +129,7 @@ fn main() {
                 let init = json!({
                     "params": msg["params"],
                     "env_ext_dir": std::env::var("WAI_EXT_DIR").ok(),
+                    "env_ext_data": std::env::var("WAI_EXT_DATA").ok(),
                     "cwd": std::env::current_dir().ok(),
                 });
                 report("initialize", init.to_string());

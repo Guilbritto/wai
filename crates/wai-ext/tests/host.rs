@@ -39,6 +39,7 @@ fn installed(dir: &Path, args: &[&str], granted: Vec<Permission>) -> Installed {
     Installed {
         manifest,
         dir: dir.to_path_buf(),
+        data: dir.join("data"),
         enabled: true,
         granted,
     }
@@ -96,7 +97,9 @@ fn initialize_roundtrip() {
     let dir = tmp.path().join("fake");
     std::fs::create_dir_all(&dir).unwrap();
     let granted = vec![Permission::Process, Permission::Notify, Permission::Panels];
-    let ext = installed(&dir, &[], granted);
+    let mut ext = installed(&dir, &[], granted);
+    let data = tmp.path().join("data");
+    ext.data = data.clone();
     run(Duration::from_secs(10), async {
         let (handle, rx) = ExtHandle::spawn(&ext, Path::new("/some/project"));
         let first = rx.recv().await.unwrap();
@@ -111,14 +114,19 @@ fn initialize_roundtrip() {
             init["params"],
             json!({
                 "protocol": 1,
+                "api": "1.1",
                 "wai_version": env!("CARGO_PKG_VERSION"),
                 "ext_id": "fake",
                 "granted": ["process", "notify", "panels"],
                 "project": "/some/project",
                 "ext_dir": dir,
+                "data_dir": data.to_str().unwrap(),
             })
         );
         assert_eq!(init["env_ext_dir"], dir);
+        assert_eq!(init["env_ext_data"], data.to_str().unwrap());
+        assert_eq!(init["params"]["data_dir"], data.to_str().unwrap());
+        assert!(data.is_dir());
         // R18: never the extension's folder.
         assert_ne!(init["cwd"], dir);
 

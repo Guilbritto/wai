@@ -143,6 +143,28 @@ fn enable_disable_and_uninstall_persist() {
     assert!(store.set_enabled(&unknown, true).is_err());
 }
 
+#[test]
+fn data_survives_uninstall_and_reinstall() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config");
+    let mut store = ExtStore::open(&config);
+    let staged = store.stage(&Source::Folder(sample(tmp.path()))).unwrap();
+    let id = store.commit(staged, perms()).unwrap();
+    let data = store.list()[0].data.clone();
+    assert!(data.ends_with("extension-data/sample"));
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("state.txt"), "x").unwrap();
+
+    store.uninstall(&id).unwrap();
+    let staged = store.stage(&Source::Folder(sample(tmp.path()))).unwrap();
+    store.commit(staged, perms()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(data.join("state.txt")).unwrap(),
+        "x"
+    );
+    assert_eq!(store.list()[0].data, data);
+}
+
 /// R40: the temp file is recreated with create_new after removing whatever held its name (here
 /// a link to a file outside), then renamed over `extensions.json`.
 #[test]
