@@ -451,6 +451,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn collapse_all_folds_every_folder(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the watcher reports from a real thread
         let dir = tempfile::tempdir().unwrap();
         let root = canonical(dir.path());
         for d in ["a", "b"] {
@@ -471,6 +472,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn the_open_file_is_marked(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the watcher reports from a real thread
         let dir = tempfile::tempdir().unwrap();
         let root = canonical(dir.path());
         fs::write(root.join("limits.rs"), "").unwrap();
