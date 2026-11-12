@@ -65,6 +65,8 @@ impl Workspace {
                         })),
                 )
                 .on_click(cx.listener(move |this, _, window, cx| this.select_terminal(ix, window, cx)))
+                // Registers the id so tests can find and click it (a Button does it itself).
+                .test_support()
         });
         v_flex()
             .size_full()
@@ -397,7 +399,7 @@ mod tests {
     fn asked(cx: &mut VisualTestContext) -> Option<String> {
         cx.update(|window, cx| {
             window.render_frame(cx);
-            window.try_find("confirm-title").and_then(|t| t.label().map(str::to_owned))
+            window.try_find("confirm-heading").and_then(|t| t.label().map(str::to_owned))
         })
     }
 
