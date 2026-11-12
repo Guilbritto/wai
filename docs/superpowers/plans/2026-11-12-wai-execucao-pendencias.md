@@ -89,3 +89,37 @@ Mexem em Settings, no `main.rs`, no ciclo de vida do app ou na barra lateral, os
 
 - **2.8** Primeira execução do `.exe`; `wai-rotinas` no Windows (hoje recusa todo script, R67). A CI já roda no remoto.
 - **3.15** Ícone no `wai.exe` (R64), filhos do `npx` sobrevivendo ao agente, `--prefix` do `wai-navegador` num prefixo do usuário (R71).
+
+---
+
+## Andamento (2026-11-12, fim do dia)
+
+- **Fase 1:**
+  - chat: mergeada em `099205b`.
+  - extensões e settings: mergeada em `852c8e7`.
+  - sessões: mergeada em `0fc0a5a`; a 0.8 passou 20/20 depois da correção da ordem do cancel no `wai-agent`.
+  - Suíte na `development` `0fc0a5a`: 697 passaram, 0 falharam, 11 ignorados.
+- **Trilha workspace:** estava rodando quando a sessão fechou. Worktree `.claude/worktrees/onda2-workspace`, branch `feat/onda2-workspace` a partir de `0fc0a5a`, ledger em `<worktree>/.superpowers/sdd/2026-11-12-wai-onda-2-workspace/progress.md`.
+- **Registro do controlador:** `.superpowers/sdd/master-onda-2/` (fora do git). Lá estão `progress.md` com as decisões, `track-*-report.md` com o que conferir no app, os logs da suíte e `controller-brief.md`, o modelo de instrução para cada coordenador de trilha.
+- **Documentos novos:** a spec `2026-11-12-wai-work-areas-design.md` e os planos `2026-11-12-wai-work-areas.md`, `2026-11-12-wai-sidebar-followups.md` e `2026-11-12-wai-fase-2-core.md`.
+
+## Próxima sessão: passo a passo (só execução)
+
+Cada plano roda com um coordenador por worktree, a partir do modelo em `.superpowers/sdd/master-onda-2/controller-brief.md`. Depois de cada trilha, quem coordena faz o merge na `development`, roda a suíte inteira, `cargo clean` e remove o worktree. Antes de cada merge, rodar `git log --oneline -5 development`, porque outras sessões também commitam.
+
+1. **Terminar a trilha workspace.** Ver em `git -C .claude/worktrees/onda2-workspace log --oneline 0fc0a5a..` o que já foi feito. Abrir um coordenador com o plano `2026-11-12-wai-onda-2-workspace.md` no mesmo worktree: ele retoma pelo ledger. Merge e suíte.
+2. **Conferir no app e versionar.**
+   - A 0.6 e a 0.7 desta lista.
+   - Os itens "owner check" de `track-chat-report.md`, `track-ext-settings-report.md`, `track-sessions-report.md` e `track-workspace-report.md`.
+   - Versionar pelo processo que estiver no `CLAUDE.md`. A frente de release mudou o fluxo: ler o `CLAUDE.md` antes.
+3. **Fase 2 núcleo:** plano `2026-11-12-wai-fase-2-core.md` (2.3, 2.2, 3.13). Já está liberado, porque a atualização automática foi mergeada.
+4. **Quando `feat/sidebar-redesign` estiver na `development`:**
+   - primeiro o plano `2026-11-12-wai-sidebar-followups.md` (1.11, 2.1b, 3.1, 3.2);
+   - depois `2026-11-12-wai-work-areas.md` (1.12).
+
+   Um depois do outro, porque os dois mexem no painel Sessions. O 1º passo de cada um é reconferir as funções que o plano cita.
+5. **Só o dono:**
+   - confirmar a lista "My calls" da spec `2026-11-12-wai-work-areas-design.md` antes do passo 4;
+   - a 2.7: instalar e fazer login no Codex, no Antigravity e no Copilot;
+   - os itens da Fase 0.
+6. **Depois:** Fase 3, que precisa de spec com o dono (3.8, 3.9, extensões). Por último, a Fase 4 (Windows).
