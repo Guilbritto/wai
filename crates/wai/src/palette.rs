@@ -27,6 +27,7 @@ pub(crate) enum Entry {
     MoveAgents,
     Extensions,
     Settings,
+    CopyDiagnostics,
     Template(usize),
     Command(ExtId, CommandSpec),
     NewSessionWith(String),
@@ -52,6 +53,7 @@ impl Workspace {
             (move_agents.into(), Entry::MoveAgents),
             ("Extensions".into(), Entry::Extensions),
             ("Settings".into(), Entry::Settings),
+            ("Copy diagnostics".into(), Entry::CopyDiagnostics),
         ];
         let templates = (self.all_templates(cx).into_iter().enumerate())
             .map(|(ix, t)| (clamp(&t.name, TITLE_CHARS).into(), Entry::Template(ix)));
@@ -143,6 +145,7 @@ impl Workspace {
                 self.show_extensions(window, cx);
             }
             Entry::Settings => self.open_settings(Section::Ai, None, window, cx),
+            Entry::CopyDiagnostics => self.copy_diagnostics(window, cx),
             Entry::Template(ix) => self.start_template(ix, window, cx),
             Entry::Command(ext, command) => self.run_ext_command(&ext, command, window, cx),
             Entry::NewSessionWith(agent) => self.open_draft(agent, None, window, cx),
@@ -232,7 +235,8 @@ mod tests {
                         "Agents",
                         "Move Agents to the right",
                         "Extensions",
-                        "Settings"
+                        "Settings",
+                        "Copy diagnostics"
                     ])
                 ),
                 ("Templates".into(), strings(&["Release notes", "Triage"])),
@@ -277,6 +281,13 @@ mod tests {
         cx.simulate_keystrokes("secondary-shift-p");
         cx.simulate_keystrokes("escape");
         assert!(!dialog(cx), "Escape closes it");
+    }
+
+    #[gpui_kit::test]
+    fn palette_lists_copy_diagnostics(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, Settings::default());
+        let (_, wai) = labels(&workspace, cx).remove(0);
+        assert!(wai.contains(&"Copy diagnostics".to_string()));
     }
 
     /// A built-in shows its name, not its id.

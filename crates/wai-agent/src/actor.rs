@@ -221,6 +221,8 @@ impl AgentHandle {
         .await?
     }
 
+    /// `session` may be a subagent's id the agent granted `cancel`: only that subagent stops, and
+    /// only its own open requests are answered `cancelled`.
     pub fn cancel(&self, session: SessionId) {
         self.send(Command::Cancel { session });
     }

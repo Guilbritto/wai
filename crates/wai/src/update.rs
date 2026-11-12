@@ -6,6 +6,7 @@
 //! rights, and a configurable repository is a configurable source of that code, so any other
 //! repository is only announced. Every failure is only logged.
 
+pub mod adapter;
 mod download;
 #[cfg(target_os = "macos")]
 pub mod macos;

@@ -771,6 +771,7 @@ fn subagent_traffic_reaches_the_parent() {
                 description: Some("Explore".into()),
                 state: Some(state),
                 used: None,
+                can_stop: Some(true),
             })
         };
         let position = |want: &SessionEvent| updates.iter().position(|e| *e == want);
@@ -792,6 +793,23 @@ fn subagent_traffic_reaches_the_parent() {
             text: "found it".into(),
         }));
         assert!(!updates.iter().any(|e| matches!(e, SessionEvent::Plan(_))));
+        for (thought, text) in [(true, "sub thought"), (false, "sub text")] {
+            assert!(
+                updates.contains(&&SessionEvent::SubagentSaid {
+                    id: sub.clone(),
+                    thought,
+                    text: text.into(),
+                }),
+                "{updates:?}"
+            );
+        }
+        assert!(
+            updates
+                .iter()
+                .any(|e| matches!(e, SessionEvent::SubagentPlan { id, entries }
+                if *id == sub && entries.len() == 1)),
+            "{updates:?}"
+        );
         assert_eq!(agent_text(&events), "Hello from fake agent");
     });
 }
@@ -889,6 +907,43 @@ fn stop_leaves_a_background_subagents_request_open() {
             Ok(())
         );
         until(&rx, |e| subagent_state(e, SubagentState::Done)).await;
+    });
+}
+
+/// A `session/cancel` for the child stops only it: its card closes, it ends `Stopped`, and the
+/// parent's turn goes on to its own end.
+#[test]
+fn cancelling_a_subagent_stops_only_it() {
+    run(async {
+        let reply = vec!["word"; 50].join(" ");
+        let (agent, rx) = spawn(&[
+            "--subagent",
+            "--background",
+            "--ask-permission",
+            "--reply",
+            &reply,
+            "--chunk-delay-ms",
+            "20",
+        ]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        agent.prompt(session.id.clone(), hello());
+        let request = permission(&rx).await;
+        agent.cancel(request.subagent.clone().expect("a subagent's request"));
+        // The background turn may end before or after the card closes and the subagent stops.
+        let end = AgentEvent::TurnEnded {
+            session: session.id,
+            reason: StopReason::EndTurn,
+        };
+        let (mut resolved, mut stopped, mut ended) = (false, false, false);
+        let events = until(&rx, |e| {
+            resolved |= *e == AgentEvent::PermissionResolved { id: request.id };
+            stopped |= subagent_state(e, SubagentState::Stopped);
+            ended |= *e == end;
+            resolved && stopped && ended
+        })
+        .await;
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::TurnEnded { reason, .. } if *reason != StopReason::EndTurn)), "{events:?}");
     });
 }
 

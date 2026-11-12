@@ -1,9 +1,11 @@
 mod agents;
 mod agents_view;
 mod app;
+mod areas;
 mod aurora;
 mod chat;
 mod claude_config;
+mod diagnostics;
 mod editor;
 mod elsewhere;
 mod ext_host;
@@ -11,7 +13,9 @@ mod ext_panel;
 mod extensions_view;
 mod files;
 mod git;
+mod instance;
 mod layout;
+mod log;
 mod notify;
 mod palette;
 mod search_view;
@@ -51,6 +55,32 @@ fn main() -> anyhow::Result<()> {
         || Ok(config_dir().join("state.json")),
         |p| std::path::absolute(PathBuf::from(p)),
     )?;
+    // A first launch has no folder yet, and the lock lives in it.
+    if let Some(dir) = state_path.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+    // One wai per state folder; the guard lives to the end of `main`.
+    let mut unlocked = None;
+    let _instance =
+        match instance::acquire(&state_path.with_file_name("wai.lock"), instance::LOCK_WAIT) {
+            instance::Acquired::Held(guard) => Some(guard),
+            instance::Acquired::Taken => {
+                let arg = std::env::args_os().nth(1).map(PathBuf::from);
+                instance::tell_taken(arg.as_deref().unwrap_or(Path::new("wai")));
+                return Ok(());
+            }
+            instance::Acquired::Unusable(e) => {
+                unlocked = Some(e);
+                None
+            }
+        };
+    // After the lock, so a refused second launch cannot rotate the first one's log.
+    if let Some(dir) = state_path.parent() {
+        log::init(dir);
+    }
+    if let Some(e) = unlocked {
+        eprintln!("wai: not locking the state folder: {e}");
+    }
     let state = AppState::load(&state_path);
     let project = resolve_project(std::env::args_os().nth(1).map(PathBuf::from), state.project)?;
     // Everything relative is resolved by now; agents spawn from a neutral dir, not a repo.

@@ -107,6 +107,11 @@ pub(crate) fn subagent_patch(u: acp::SubagentUpdate) -> SubagentPatch {
         },
         state,
         used: None,
+        can_stop: match u.capabilities {
+            MaybeUndefined::Value(c) => Some(c.cancel.is_some()),
+            MaybeUndefined::Null => Some(false),
+            MaybeUndefined::Undefined => None,
+        },
     }
 }
 

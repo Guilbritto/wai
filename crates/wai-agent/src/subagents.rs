@@ -51,7 +51,30 @@ impl Subagents {
                         ..Default::default()
                     }),
                 )),
-                // ponytail: a subagent's text, plan and commands are not shown.
+                SessionEvent::AgentText(text) => Some((
+                    root,
+                    SessionEvent::SubagentSaid {
+                        id: session,
+                        thought: false,
+                        text,
+                    },
+                )),
+                SessionEvent::AgentThought(text) => Some((
+                    root,
+                    SessionEvent::SubagentSaid {
+                        id: session,
+                        thought: true,
+                        text,
+                    },
+                )),
+                SessionEvent::Plan(entries) => Some((
+                    root,
+                    SessionEvent::SubagentPlan {
+                        id: session,
+                        entries,
+                    },
+                )),
+                // ponytail: a subagent's title changes, modes and commands are not shown.
                 _ => None,
             },
         }
@@ -136,8 +159,37 @@ mod tests {
             matches!(&update, Some((root, SessionEvent::ToolCallUpdate(_))) if root == "r"),
             "{update:?}"
         );
-        assert_eq!(s.route("c".into(), agent_chunk("x")), None);
-        assert_eq!(s.route("c".into(), plan()), None);
+        assert_eq!(
+            s.route("c".into(), agent_chunk("x")),
+            Some((
+                "r".into(),
+                SessionEvent::SubagentSaid {
+                    id: "c".into(),
+                    thought: false,
+                    text: "x".into()
+                }
+            ))
+        );
+        let thought = acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(
+            acp::ContentBlock::Text(acp::TextContent::new("hm")),
+        ));
+        assert_eq!(
+            s.route("c".into(), thought),
+            Some((
+                "r".into(),
+                SessionEvent::SubagentSaid {
+                    id: "c".into(),
+                    thought: true,
+                    text: "hm".into()
+                }
+            ))
+        );
+        let routed = s.route("c".into(), plan());
+        assert!(
+            matches!(&routed, Some((root, SessionEvent::SubagentPlan { id, entries }))
+                if root == "r" && id == "c" && entries.len() == 1 && entries[0].content == "Sub step"),
+            "{routed:?}"
+        );
         assert_eq!(
             s.route("r".into(), agent_chunk("hi")),
             Some(("r".into(), SessionEvent::AgentText("hi".into())))
@@ -160,6 +212,7 @@ mod tests {
                     title: None,
                     description: None,
                     state: None,
+                    can_stop: None,
                 })
             ))
         );
@@ -231,6 +284,13 @@ mod tests {
                 "{state:?}"
             );
         }
+        let caps = acp::SubagentSessionCapabilities::new();
+        let can_stop = |c: acp::SubagentSessionCapabilities| {
+            convert::subagent_patch(acp::SubagentUpdate::new("c").capabilities(c)).can_stop
+        };
+        let cancel = caps.clone().cancel(acp::SessionCancelCapabilities::new());
+        assert_eq!(can_stop(cancel), Some(true));
+        assert_eq!(can_stop(caps), Some(false));
         assert_eq!(
             convert::subagent_patch(acp::SubagentUpdate::new("c")),
             SubagentPatch {

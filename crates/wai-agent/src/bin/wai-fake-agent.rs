@@ -17,12 +17,14 @@
 //!   schema type (`_shape`).
 //! - `--subagent`: before the reply, run a subagent `Explore the code` as a child session
 //!   `<session>-sub`: announced `running` on the parent; on the child a Read tool call `sub-read`
-//!   (`Read lib.rs`), a one-entry plan (`Sub step`), the text `sub text`, then the call completed;
+//!   (`Read lib.rs`), a one-entry plan (`Sub step`), the thought `sub thought`, the text `sub text`,
+//!   then the call completed;
 //!   then on the parent its reply `found it` (a `session_message`) and `idle` (`end_turn`). Like
 //!   claude-agent-acp, only for a client that advertised `subagents`. With `--ask-permission` or
 //!   `--ask-question`, the subagent asks (on the child, after `sub-read` starts; `requires_action`
 //!   on the parent before, `running` once answered), and the turn still replies `chose:…` or
-//!   `answered:…`.
+//!   `answered:…`. It is announced with `capabilities.cancel`; a `session/cancel` for the child
+//!   stops it: `sub-read` completes `failed`, the parent gets `idle` (`cancelled`) and no reply.
 //! - `--background`: with `--subagent`, the subagent outlives the turn: the turn streams its reply
 //!   and ends right after the subagent's tool call starts (with `--ask-permission`, the request is
 //!   on the wire before the first reply chunk, and the turn does not wait for it). The rest
@@ -441,6 +443,10 @@ impl Fake {
         let announce = acp::SubagentUpdate::new(child.clone())
             .title("Explore the code".to_string())
             .description("Explore".to_string())
+            .capabilities(
+                acp::SubagentSessionCapabilities::new()
+                    .cancel(acp::SessionCancelCapabilities::new()),
+            )
             .state(acp::StateUpdate::Running(acp::RunningStateUpdate::new()));
         send(cx, session, acp::SessionUpdate::SubagentUpdate(announce))?;
         let call = acp::ToolCall::new("sub-read", "Read lib.rs")
@@ -454,6 +460,11 @@ impl Fake {
         );
         let plan = acp::SessionUpdate::Plan(acp::Plan::new(vec![entry]));
         send(cx, &child, plan)?;
+        send(
+            cx,
+            &child,
+            acp::SessionUpdate::AgentThoughtChunk(chunk("sub thought")),
+        )?;
         send(
             cx,
             &child,
@@ -484,9 +495,25 @@ impl Fake {
         session: acp::SessionId,
         sub: Sub,
     ) -> Result<Option<String>, Error> {
+        let mut stopped = false;
         let answer = match sub.asked {
             Some(asked) => {
                 let answer = asked.await?;
+                // The cancel notification and the cancelled answer race.
+                let tries = if answer.ends_with(":cancelled") {
+                    100
+                } else {
+                    1
+                };
+                for i in 0..tries {
+                    if i > 0 {
+                        smol::Timer::after(Duration::from_millis(10)).await;
+                    }
+                    stopped = self.is_cancelled(&sub.child);
+                    if stopped {
+                        break;
+                    }
+                }
                 let running = acp::StateUpdate::Running(acp::RunningStateUpdate::new());
                 send(&cx, &session, subagent_state(&sub.child, running))?;
                 Some(answer)
@@ -495,18 +522,25 @@ impl Fake {
                 if self.opts.background {
                     smol::Timer::after(Duration::from_millis(100)).await;
                 }
+                stopped = self.is_cancelled(&sub.child);
                 None
             }
         };
-        let fields = acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Completed);
+        let (status, reason) = match stopped {
+            true => (acp::ToolCallStatus::Failed, acp::IdleStopReason::Cancelled),
+            false => (acp::ToolCallStatus::Completed, acp::IdleStopReason::EndTurn),
+        };
+        let fields = acp::ToolCallUpdateFields::new().status(status);
         let update = acp::ToolCallUpdate::new("sub-read", fields);
         send(&cx, &sub.child, acp::SessionUpdate::ToolCallUpdate(update))?;
-        let reply = acp::SessionMessage::new("sub-reply")
-            .sender_session_id(sub.child.clone())
-            .recipient_session_id(session.clone())
-            .content(vec![text_block("found it")]);
-        send(&cx, &session, acp::SessionUpdate::SessionMessage(reply))?;
-        let idle = acp::IdleStateUpdate::new().stop_reason(acp::IdleStopReason::EndTurn);
+        if !stopped {
+            let reply = acp::SessionMessage::new("sub-reply")
+                .sender_session_id(sub.child.clone())
+                .recipient_session_id(session.clone())
+                .content(vec![text_block("found it")]);
+            send(&cx, &session, acp::SessionUpdate::SessionMessage(reply))?;
+        }
+        let idle = acp::IdleStateUpdate::new().stop_reason(reason);
         send(
             &cx,
             &session,
