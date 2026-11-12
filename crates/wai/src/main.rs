@@ -1,6 +1,7 @@
 mod agents;
 mod agents_view;
 mod app;
+mod areas;
 mod aurora;
 mod chat;
 mod claude_config;

@@ -20,12 +20,12 @@ use wai_agent::{
 };
 use wai_ext::{CommandSpec, ExtEvent, ExtId, HostEvent, Reply};
 use wai_project::{FsChange, ProjectWatcher};
-use wai_settings::SessionGroup;
 use wai_settings::{
     AgentConfig, AppState, Approval, Change, OpenSession, SeenModel, SeenModes, Settings, Template,
     agent_label, config_dir, is_approved, load_templates, seed_approved, shown, unapproved,
     write_change,
 };
+use wai_settings::{SessionGroup, WorkArea};
 use wai_terminal::DEFAULT_BG;
 
 use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
@@ -143,6 +143,7 @@ impl Render for Preview {
 pub(crate) enum Renamed {
     Session(Entity<ChatSession>),
     Group(usize),
+    Area(usize),
 }
 
 /// What waits on the question about unsaved edits.
@@ -271,6 +272,10 @@ pub struct Workspace {
     pub drafts: Vec<Entity<DraftView>>,
     /// The Open list's groups, each with its sessions' ids; kept in `state.json`.
     pub groups: Vec<SessionGroup>,
+    /// The work areas, each with its sessions' ids; kept in `state.json`.
+    pub work_areas: Vec<WorkArea>,
+    /// The area on screen: its truth is `panes` (see `area_now`).
+    pub(crate) shown_area: Option<usize>,
     /// The Open row or group being renamed, with its input.
     pub(crate) renaming: Option<(Renamed, Entity<InputState>, Subscription)>,
     /// The Sessions panel's filter; its text narrows Open and History.
@@ -469,6 +474,8 @@ impl Workspace {
             models_seen: remembered.map(|s| s.models_seen).unwrap_or_default(),
             drafts: Vec::new(),
             groups: Vec::new(),
+            work_areas: Vec::new(),
+            shown_area: None,
             renaming: None,
             sessions_filter: cx.new(|cx| {
                 InputState::new(window, cx)
@@ -831,6 +838,7 @@ impl Workspace {
         };
         let state = AppState::load(path);
         self.groups = state.groups;
+        self.work_areas = state.work_areas;
         // Groups saved before swatches all load as colour 0: spread them over the cycle once.
         if self.groups.len() > 1 && self.groups.iter().all(|g| g.color == 0) {
             for (ix, group) in self.groups.iter_mut().enumerate() {
@@ -864,7 +872,10 @@ impl Workspace {
         self.agents_collapsed = state.agents_collapsed;
         self.open_folded = state.open_folded;
         self.history_folded = state.history_folded;
-        self.focus_pane(0, window, cx);
+        if let Some(ix) = state.shown_area.filter(|&ix| ix < self.work_areas.len()) {
+            self.focused_pane = self.lay_out_area(ix, None, cx);
+        }
+        self.focus_pane(self.focused_pane, window, cx);
         self.save_state(cx);
         let (files, active) = match state.project.as_deref() == Some(self.project.as_path()) {
             true => (state.open_files, state.active_file),
@@ -1005,6 +1016,10 @@ impl Workspace {
             approved: Some(self.approved.clone()),
             models_seen: self.models_seen.clone(),
             groups: self.groups.clone(),
+            work_areas: (0..self.work_areas.len())
+                .map(|ix| self.area_now(ix, cx))
+                .collect(),
+            shown_area: self.shown_area,
             last_models: self.last_models.clone(),
             last_bases: self.last_bases.clone(),
             modes_seen: self.modes_seen.clone(),
@@ -1297,7 +1312,10 @@ impl Workspace {
     /// A session in no pane closes its subagent drawer.
     fn close_hidden_drawers(&self, cx: &mut Context<Self>) {
         for session in &self.sessions {
-            if !self.panes.iter().any(|p| p.session() == Some(session)) {
+            let id = &session.read(cx).id;
+            if self.area_of(id).is_none()
+                && !self.panes.iter().any(|p| p.session() == Some(session))
+            {
                 session.update(cx, |s, cx| s.open_drawer(None, cx));
             }
         }
@@ -1305,7 +1323,9 @@ impl Workspace {
 
     /// Shows `session` in the focused pane (beside the editor pane, see `session_pane`), or with
     /// `side` in a new pane while there are fewer than `MAX_PANES` (an empty focused pane is used
-    /// instead). A session already in a pane is focused there: one session is drawn once.
+    /// instead). A session already in a pane is focused there: one session is drawn once. A
+    /// session of an area shows that area (`show_area`) unless it is the shown one with the
+    /// session on screen; a session of no area, not `side`, goes alone (`show_alone`).
     pub fn show(
         &mut self,
         session: Entity<ChatSession>,
@@ -1313,6 +1333,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let on_screen = self.panes.iter().any(|p| p.session() == Some(&session));
+        match self.area_of(&session.read(cx).id) {
+            Some(area) if !(self.shown_area == Some(area) && on_screen) => {
+                return self.show_area(area, Some(&session), window, cx);
+            }
+            None if !side && !on_screen => return self.show_alone(session, window, cx),
+            _ => {}
+        }
         let ix = match self
             .panes
             .iter()
@@ -1327,10 +1355,13 @@ impl Workspace {
                 } else {
                     self.session_pane()
                 };
-                self.panes[ix] = Pane::Session(session);
+                self.panes[ix] = Pane::Session(session.clone());
                 ix
             }
         };
+        if side {
+            self.adopt(&session, cx);
+        }
         self.focus_pane(ix, window, cx);
         self.follow_session(window, cx);
         self.save_state(cx);
@@ -1540,6 +1571,9 @@ impl Workspace {
                     },
                 })
                 .collect();
+            if let Some(session) = &session {
+                self.adopt(session, cx);
+            }
             self.save_state(cx);
         }
         let shown = self.panes.iter().position(holds);
@@ -1958,6 +1992,15 @@ impl Workspace {
     pub(crate) fn close_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Pane::Editor(pane) = &self.panes[ix] {
             return pane.update(cx, |p, cx| p.close(p.active, window, cx));
+        }
+        if let Some(session) = self.panes[ix].session() {
+            let id = session.read(cx).id.clone();
+            if let Some(area) = self.shown_area
+                && self.area_of(&id) == Some(area)
+            {
+                self.work_areas[area] = self.area_now(area, cx);
+                self.ungroup(&id);
+            }
         }
         self.drop_pane(ix, window, cx);
         self.follow_session(window, cx);
