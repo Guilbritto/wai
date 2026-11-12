@@ -75,7 +75,7 @@ impl TerminalView {
         self.title.as_deref()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn has_shell(&self) -> bool {
         self.model.is_some()
     }
