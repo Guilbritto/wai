@@ -69,6 +69,8 @@ pub struct AgentRegistry {
     /// The enabled extensions' MCP servers: every new, loaded or forked session gets them.
     mcp: Vec<McpServer>,
     agents: HashMap<String, Agent>,
+    /// npm's latest version per adapter package, once checked.
+    latest: BTreeMap<String, String>,
 }
 
 impl EventEmitter<RegistryEvent> for AgentRegistry {}
@@ -81,6 +83,7 @@ impl AgentRegistry {
             extension: BTreeMap::new(),
             mcp: Vec::new(),
             agents: HashMap::new(),
+            latest: BTreeMap::new(),
         }
     }
 
@@ -193,6 +196,20 @@ impl AgentRegistry {
     /// The adapter's `(name, version)`, from `Ready` until the process exits.
     pub fn adapter(&self, id: &str) -> Option<&(String, String)> {
         self.agents.get(id)?.adapter.as_ref()
+    }
+
+    /// Records (or, with `None`, forgets) the newer version of an adapter package.
+    pub fn set_latest(&mut self, pkg: String, version: Option<String>) {
+        match version {
+            Some(v) => self.latest.insert(pkg, v),
+            None => self.latest.remove(&pkg),
+        };
+    }
+
+    /// The newer version of `id`'s pinned adapter, when one is known.
+    pub fn newer_adapter(&self, id: &str) -> Option<String> {
+        let (pkg, _) = crate::update::adapter::pinned(self.command(id)?)?;
+        self.latest.get(&pkg).cloned()
     }
 
     pub fn status(&self, name: &str) -> Option<&AgentStatus> {

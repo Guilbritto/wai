@@ -246,6 +246,8 @@ pub struct AgentRow {
     pub status: RowStatus,
     /// `"<name> <version>"` of the running adapter; `None` until it is `Ready`.
     pub adapter: Option<String>,
+    /// `"<version> is out (wai runs <pinned>)"` when npm has a newer adapter.
+    pub adapter_note: Option<String>,
     /// The command in force (approved).
     pub command: String,
     pub models: Vec<SeenModel>,
@@ -694,6 +696,14 @@ impl SettingsView {
                 .text_color(muted)
                 .child(format!("Adapter {a}"))
         });
+        let adapter_note = row.adapter_note.as_ref().map(|note| {
+            let selector = format!("settings-adapter-note-{}", row.id);
+            div()
+                .debug_selector(move || selector)
+                .text_size(px(12.))
+                .text_color(muted)
+                .child(note.clone())
+        });
         v_flex()
             .py_2()
             .child(
@@ -730,6 +740,7 @@ impl SettingsView {
                     ),
             )
             .children(adapter)
+            .children(adapter_note)
             .children(install)
             .children(warn)
             .child(self.default_model(row, cx))
@@ -1700,5 +1711,33 @@ mod tests {
             text.ends_with("/bin/zsh") && !text.contains("fish"),
             "{text}"
         );
+    }
+
+    #[gpui_kit::test]
+    fn ai_row_shows_the_adapter_note(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.agents.insert(
+            "npx".into(),
+            wai_settings::AgentConfig {
+                command: "npx -y @a/b@1.0.0".into(),
+            },
+        );
+        let (workspace, cx) = open(cx, settings);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Ai, None, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-adapter-note-npx").is_none());
+        workspace.update(cx, |w, cx| {
+            w.registry
+                .update(cx, |r, _| r.set_latest("@a/b".into(), Some("1.1.0".into())));
+            w.sync_settings_view(cx);
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        assert_eq!(
+            row(&workspace, "npx", cx).adapter_note.as_deref(),
+            Some("1.1.0 is out (wai runs 1.0.0)")
+        );
+        assert!(cx.debug_bounds("settings-adapter-note-npx").is_some());
     }
 }
