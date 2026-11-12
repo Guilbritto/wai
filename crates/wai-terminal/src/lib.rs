@@ -1,5 +1,5 @@
 mod keys;
-pub use keys::{key_to_bytes, paste_bytes};
+pub use keys::{WheelMode, key_to_bytes, paste_bytes, wheel_bytes};
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -289,6 +289,23 @@ impl TerminalModel {
         self.term.lock().mode().contains(TermMode::APP_CURSOR)
     }
 
+    /// What the wheel does now (alacritty's rule): mouse reports when the program asked for the
+    /// mouse, arrows in the alternate screen, else wai's history.
+    pub fn wheel_mode(&self) -> WheelMode {
+        let mode = *self.term.lock().mode();
+        if mode.intersects(TermMode::MOUSE_MODE) {
+            WheelMode::Mouse {
+                sgr: mode.contains(TermMode::SGR_MOUSE),
+            }
+        } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
+            WheelMode::Arrows {
+                app_cursor: mode.contains(TermMode::APP_CURSOR),
+            }
+        } else {
+            WheelMode::History
+        }
+    }
+
     pub fn bracketed_paste(&self) -> bool {
         self.term.lock().mode().contains(TermMode::BRACKETED_PASTE)
     }
@@ -432,6 +449,28 @@ mod tests {
             assert!(Instant::now() < deadline, "timed out; grid: {snap:?}");
             let _ = rx.recv_blocking_timeout(deadline);
         }
+    }
+
+    #[test]
+    fn wheel_mode_follows_the_screen() {
+        let (m, rx, _dir) = spawn();
+        assert_eq!(m.wheel_mode(), WheelMode::History);
+        m.write(b"printf '\\033[?1049h'; echo wai-alt\r");
+        wait_for(&m, &rx, |s| s.rows.iter().any(|r| text(r).contains("wai-alt")));
+        assert_eq!(m.wheel_mode(), WheelMode::Arrows { app_cursor: false });
+        m.write(b"printf '\\033[?1049l'\r");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let until = |mode| {
+            while m.wheel_mode() != mode {
+                assert!(Instant::now() < deadline, "never became {mode:?}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        until(WheelMode::History);
+        m.write(b"printf '\\033[?1000h\\033[?1006h'\r");
+        until(WheelMode::Mouse { sgr: true });
+        m.write(b"printf '\\033[?1000l'\r");
+        until(WheelMode::History);
     }
 
     #[test]

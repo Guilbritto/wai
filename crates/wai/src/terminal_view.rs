@@ -4,7 +4,7 @@ use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::*;
 use wai_terminal::{
     DEFAULT_BG, DEFAULT_FG, GridSize, GridSnapshot, Rgb, TerminalEvent, TerminalModel,
-    key_to_bytes, paste_bytes,
+    WheelMode, key_to_bytes, paste_bytes, wheel_bytes,
 };
 
 use crate::app::{CopySelection, Paste};
@@ -17,8 +17,7 @@ const EXITED: &str = "[process exited] Click to restart.";
 /// The bottom panel: a shell in the project folder, painted from the model's grid snapshots.
 /// It redraws only when the shell writes (`Wakeup`), the panel changes size, or the user scrolls
 /// (10,000 lines of history) or selects with the mouse.
-// ponytail: the wheel scrolls wai's history only; in the alternate screen (less, vim) it does
-// nothing, where alacritty sends arrow keys. A drag that leaves the panel stops extending.
+// ponytail: a drag that leaves the panel stops extending.
 pub struct TerminalView {
     /// The next shell; a running one stays.
     pub shell: Option<String>,
@@ -202,7 +201,8 @@ impl TerminalView {
         }
     }
 
-    /// The wheel scrolls through the history, a line per line height moved.
+    /// The wheel scrolls through the history, a line per line height moved; in the alternate
+    /// screen or a mouse mode it goes to the program.
     fn on_scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(model) = &self.model else {
             return;
@@ -211,9 +211,25 @@ impl TerminalView {
         let lines = (self.wheel / self.cell.height).trunc();
         if lines != 0. {
             self.wheel -= self.cell.height * lines;
-            model.scroll(lines as i32);
-            self.refresh(false, None, cx);
+            match model.wheel_mode() {
+                WheelMode::History => {
+                    model.scroll(lines as i32);
+                    self.refresh(false, None, cx);
+                }
+                mode => {
+                    let (col, row) = self.cell_at(event.position);
+                    self.write(&wheel_bytes(mode, lines as i32, col, row), cx);
+                }
+            }
         }
+    }
+
+    /// The grid cell under `at`, clamped to the grid.
+    fn cell_at(&self, at: Point<Pixels>) -> (u16, u16) {
+        let at = at - self.grid.origin;
+        let col = ((at.x / self.cell.width).max(0.) as u16).min(self.size.cols - 1);
+        let row = ((at.y / self.cell.height).max(0.) as u16).min(self.size.rows - 1);
+        (col, row)
     }
 
     /// Starts (`start`) or extends the selection to the cell under `at`.
@@ -221,11 +237,8 @@ impl TerminalView {
         let Some(model) = &self.model else {
             return;
         };
-        let at = at - self.grid.origin;
-        let x = (at.x / self.cell.width).max(0.);
-        let col = (x as u16).min(self.size.cols - 1);
-        let row = ((at.y / self.cell.height).max(0.) as u16).min(self.size.rows - 1);
-        let right = x - col as f32 >= 0.5;
+        let (col, row) = self.cell_at(at);
+        let right = ((at.x - self.grid.origin.x) / self.cell.width) - col as f32 >= 0.5;
         if start {
             model.select(col, row, right);
         } else {
@@ -395,7 +408,7 @@ mod tests {
 
     use std::{cell::Cell, rc::Rc};
 
-    use super::{EXITED, TerminalChanged, TerminalView};
+    use super::{EXITED, TerminalChanged, TerminalView, WheelMode};
     use crate::workspace::tests::{open, wait_until};
 
     /// The visible row holding `text`, and where in it.
@@ -434,6 +447,50 @@ mod tests {
         // Typing goes back to the bottom.
         cx.simulate_input("x");
         assert_eq!(terminal.read_with(cx, |t, _| t.snapshot.display_offset), 0);
+    }
+
+    /// Scrolls one line up over the grid.
+    fn wheel_up(cx: &mut VisualTestContext) {
+        let bounds = cx.debug_bounds("terminal").expect("terminal drawn");
+        cx.simulate_event(ScrollEvent {
+            position: bounds.center(),
+            delta: ScrollDelta::Lines(point(0., 1.)),
+            ..Default::default()
+        });
+    }
+
+    #[gpui_kit::test]
+    fn wheel_in_the_alternate_screen_sends_arrows(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the shell is a real process
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
+        cx.simulate_input("printf '\\033[?1049h'; cat");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "the alternate screen", |cx| {
+            terminal.read_with(cx, |t, _| {
+                t.model.as_ref().unwrap().wheel_mode() != WheelMode::History
+            })
+        });
+        wheel_up(cx);
+        wait_until(cx, "the arrow echoed", |cx| find(&terminal, "^[[A", cx).is_some());
+    }
+
+    #[gpui_kit::test]
+    fn wheel_in_mouse_mode_sends_reports(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the shell is a real process
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
+        cx.simulate_input("printf '\\033[?1000h\\033[?1006h'; cat");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "the mouse mode", |cx| {
+            terminal.read_with(cx, |t, _| {
+                t.model.as_ref().unwrap().wheel_mode() != WheelMode::History
+            })
+        });
+        wheel_up(cx);
+        wait_until(cx, "the report echoed", |cx| find(&terminal, "^[[<64;", cx).is_some());
     }
 
     /// R41: output that comes while scrolled up moves the view with it, ahead of the snapshot

@@ -51,9 +51,46 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     out
 }
 
+/// What the wheel does for the screen the program is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WheelMode {
+    /// wai's own history.
+    History,
+    /// Arrow keys (the alternate screen, as `less` and `vim` read them).
+    Arrows { app_cursor: bool },
+    /// Wheel button reports (a program that asked for the mouse).
+    Mouse { sgr: bool },
+}
+
+/// The bytes the wheel writes to the program: `lines > 0` is the wheel moving up, `col`/`row`
+/// the 0-based visible cell under the pointer.
+pub fn wheel_bytes(mode: WheelMode, lines: i32, col: u16, row: u16) -> Vec<u8> {
+    let up = lines > 0;
+    let mut out = Vec::new();
+    for _ in 0..lines.unsigned_abs() {
+        match mode {
+            WheelMode::History => {}
+            WheelMode::Arrows { app_cursor } => {
+                out.extend_from_slice(if app_cursor { b"\x1bO" } else { b"\x1b[" });
+                out.push(if up { b'A' } else { b'B' });
+            }
+            WheelMode::Mouse { sgr } => {
+                let button = if up { 64 } else { 65 };
+                let (c, r) = (col as u32 + 1, row as u32 + 1);
+                if sgr {
+                    out.extend(format!("\x1b[<{button};{c};{r}M").bytes());
+                } else if c <= 223 && r <= 223 {
+                    out.extend_from_slice(&[0x1b, b'[', b'M', 32 + button, 32 + c as u8, 32 + r as u8]);
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{key_to_bytes, paste_bytes};
+    use super::{WheelMode, key_to_bytes, paste_bytes, wheel_bytes};
 
     #[test]
     fn paste_brackets_only_when_the_shell_asks() {
@@ -89,5 +126,37 @@ mod tests {
             Some(b"\x1bf".to_vec())
         );
         assert_eq!(k("unknown", None, false, false, false), None);
+    }
+
+    #[test]
+    fn arrows_follow_app_cursor() {
+        let m = |app_cursor| WheelMode::Arrows { app_cursor };
+        assert_eq!(wheel_bytes(m(false), 2, 0, 0), b"\x1b[A\x1b[A");
+        assert_eq!(wheel_bytes(m(true), -1, 0, 0), b"\x1bOB");
+    }
+
+    #[test]
+    fn sgr_wheel_reports() {
+        let m = WheelMode::Mouse { sgr: true };
+        assert_eq!(wheel_bytes(m, 1, 4, 9), b"\x1b[<64;5;10M");
+        assert_eq!(wheel_bytes(m, -1, 4, 9), b"\x1b[<65;5;10M");
+    }
+
+    #[test]
+    fn x10_wheel_reports() {
+        let m = WheelMode::Mouse { sgr: false };
+        assert_eq!(wheel_bytes(m, 1, 4, 9), [&b"\x1b[M"[..], &[96, 37, 42]].concat());
+    }
+
+    #[test]
+    fn x10_reports_past_222_are_dropped() {
+        let m = WheelMode::Mouse { sgr: false };
+        assert!(wheel_bytes(m, 1, 223, 0).is_empty());
+        assert!(wheel_bytes(m, 1, 0, 223).is_empty());
+    }
+
+    #[test]
+    fn history_sends_nothing() {
+        assert!(wheel_bytes(WheelMode::History, 3, 1, 1).is_empty());
     }
 }
