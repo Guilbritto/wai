@@ -82,8 +82,8 @@ impl ExtStore {
     }
 
     /// Moves the stage into `<config>/extensions/<id>/` and records the consent, enabled. v1
-    /// consent is all or nothing: `granted` must be exactly what the manifest asks for. v1 has no
-    /// upgrade: an installed id is refused (uninstall it first).
+    /// consent is all or nothing: `granted` must be exactly what the manifest asks for. An
+    /// installed id is refused here; `update` replaces it.
     pub fn commit(
         &mut self,
         staged: Staged,

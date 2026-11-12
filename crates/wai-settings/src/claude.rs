@@ -1216,7 +1216,12 @@ pub fn set_mcp_enabled(
     server: &str,
     on: bool,
 ) -> Result<(), WriteError> {
-    replace_json(&home.join(".claude.json"), None, |root| {
+    let path = home.join(".claude.json");
+    if matches!(std::fs::symlink_metadata(&path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Err(WriteError::Invalid("~/.claude.json does not exist".into()));
+    }
+    replace_json(&path, None, |root| {
         let obj = root
             .as_object_mut()
             .ok_or("~/.claude.json is not a JSON object")?;
@@ -1506,6 +1511,7 @@ l: https://l.test (SSE) - ⊘ Disabled for this project (re-enable via /mcp)\n";
                 "a@m":[{"scope":"user","installPath":"","version":"1"}],
                 "b@m":[{"scope":"user","version":"1"}]}}),
         );
+        let _cwd = crate::CWD.lock().unwrap_or_else(|e| e.into_inner());
         let old = std::env::current_dir().unwrap();
         std::env::set_current_dir(&cwd).unwrap();
         let d = read_claude(&home, &project);
@@ -2116,6 +2122,14 @@ l: https://l.test (SSE) - ⊘ Disabled for this project (re-enable via /mcp)\n";
         set_mcp_enabled(t.path(), "/p", "db", false).unwrap();
         let v: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
         assert_eq!(v["projects"]["/p"]["disabledMcpServers"], json!(["db"]));
+    }
+
+    #[test]
+    fn mcp_write_refuses_a_missing_file() {
+        let t = tempfile::tempdir().unwrap();
+        let r = set_mcp_enabled(t.path(), "/p", "db", false);
+        assert!(matches!(r, Err(WriteError::Invalid(_))));
+        assert!(!claude_json(t.path()).exists());
     }
 
     #[test]

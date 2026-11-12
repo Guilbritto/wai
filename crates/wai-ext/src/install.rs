@@ -59,7 +59,7 @@ pub enum InstallError {
     Git(String),
     #[error("no wai-extension.toml in the extension folder")]
     NoManifest,
-    #[error("{0} is already installed; uninstall it first")]
+    #[error("{0} is already installed; install it again to update it")]
     AlreadyInstalled(String),
     #[error("{0} is not installed")]
     NotInstalled(String),

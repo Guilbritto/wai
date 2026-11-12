@@ -156,6 +156,9 @@ impl Workspace {
             this.update_in(cx, |this, window, cx| {
                 let notice = match result {
                     Ok(()) => Notification::success("Applies to new Claude sessions"),
+                    Err(WriteError::Changed) => Notification::warning(
+                        "Could not change ~/.claude.json: Claude was writing it; try again",
+                    ),
                     Err(e) => {
                         Notification::warning(format!("Could not change ~/.claude.json: {e}"))
                     }
