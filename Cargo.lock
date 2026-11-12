@@ -8153,6 +8153,7 @@ dependencies = [
  "hyper-util",
  "image",
  "notify-rust",
+ "regex",
  "rustix",
  "serde",
  "serde_json",

@@ -244,7 +244,7 @@ pub(crate) enum Mark {
 }
 
 impl Mark {
-    fn color(self, cx: &App) -> Hsla {
+    pub(crate) fn color(self, cx: &App) -> Hsla {
         let theme = cx.theme();
         match self {
             // The mockup's `rs` orange has no Aurora token.

@@ -2,16 +2,18 @@
 //! search and grouped by file.
 
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
+use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::*;
 use wai_project::{MAX_MATCHES, Match, SearchHandle, SearchQuery, search_in};
 
+use crate::files::file_mark;
 use crate::sidebar;
 use crate::workspace::folder_name;
 
@@ -25,7 +27,11 @@ pub struct OpenMatch {
 }
 
 enum Row {
-    File { path: PathBuf, count: usize },
+    File {
+        path: PathBuf,
+        count: usize,
+        folded: bool,
+    },
     Match(Match),
 }
 
@@ -42,6 +48,8 @@ pub struct SearchView {
     invalid: bool,
     /// The index in `rows` of the file header the last match went under.
     header: usize,
+    /// The match row last clicked; a new search clears it.
+    clicked: Option<usize>,
     /// Dropping the handle stops the worker.
     handle: Option<SearchHandle>,
     /// Draining the running search, and waiting out the typing burst: replacing either drops
@@ -77,6 +85,7 @@ impl SearchView {
             searching: false,
             invalid: false,
             header: 0,
+            clicked: None,
             handle: None,
             drain: None,
             pending: None,
@@ -111,6 +120,7 @@ impl SearchView {
         self.rows.clear();
         self.total = 0;
         self.header = 0;
+        self.clicked = None;
         let pattern = self.input.read(cx).value().to_string();
         self.searching = !pattern.is_empty();
         self.invalid = false;
@@ -156,6 +166,7 @@ impl SearchView {
                 self.rows.push(Row::File {
                     path: m.path.clone(),
                     count: 0,
+                    folded: false,
                 });
             }
             if let Some(Row::File { count, .. }) = self.rows.get_mut(self.header) {
@@ -175,28 +186,117 @@ impl SearchView {
         self.start(cx);
     }
 
+    fn fold(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(Row::File { folded, .. }) = self.rows.get_mut(ix) {
+            *folded = !*folded;
+            cx.notify();
+        }
+    }
+
+    fn collapse_all(&mut self, cx: &mut Context<Self>) {
+        for row in &mut self.rows {
+            if let Row::File { folded, .. } = row {
+                *folded = true;
+            }
+        }
+        cx.notify();
+    }
+
+    /// The indexes in `rows` that show: a folded file hides its matches.
+    fn visible(&self) -> Vec<usize> {
+        let mut folded = false;
+        let mut shown = Vec::with_capacity(self.rows.len());
+        for (ix, row) in self.rows.iter().enumerate() {
+            match row {
+                Row::File { folded: f, .. } => {
+                    folded = *f;
+                    shown.push(ix);
+                }
+                Row::Match(_) if !folded => shown.push(ix),
+                Row::Match(_) => {}
+            }
+        }
+        shown
+    }
+
     fn row(&self, ix: usize, cx: &Context<Self>) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
         match &self.rows[ix] {
-            Row::File { path, count } => {
+            Row::File {
+                path,
+                count,
+                folded,
+            } => {
                 let shown = path.strip_prefix(&self.root).unwrap_or(path);
-                h_flex()
-                    .w_full()
-                    .h(px(sidebar::ROW_HEIGHT))
-                    .pl_3()
-                    .pr_2()
-                    .gap_2()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(div().flex_1().min_w_0().truncate().child(display(shown)))
-                    .child(div().text_xs().text_color(muted).child(count.to_string()))
+                let name = folder_name(shown);
+                let dir = shown
+                    .parent()
+                    .and_then(|p| p.to_str())
+                    .filter(|p| !p.is_empty());
+                let (text, mark) = file_mark(&name);
+                let chevron = match folded {
+                    true => IconName::ChevronRight,
+                    false => IconName::ChevronDown,
+                };
+                sidebar::row(false, cx)
+                    .id(("search-file", ix))
+                    .pl(px(8.))
+                    .child(Icon::new(chevron).xsmall().text_color(muted))
+                    .child(
+                        div()
+                            .w(px(12.))
+                            .flex_none()
+                            .text_center()
+                            .text_size(px(10.))
+                            .text_color(mark.color(cx))
+                            .child(text),
+                    )
+                    .child(
+                        div().flex_1().min_w_0().truncate().child(
+                            div().font_weight(FontWeight::SEMIBOLD).child(name).child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .children(dir.map(|dir| format!("  {dir}"))),
+                            ),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .px_1p5()
+                            .rounded_full()
+                            .bg(muted.opacity(0.15))
+                            .text_size(px(10.))
+                            .text_color(muted)
+                            .child(count.to_string()),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.fold(ix, cx)))
+                    .test_support()
                     .into_any_element()
             }
             Row::Match(m) => {
                 let (path, line) = (m.path.clone(), m.line);
-                sidebar::row(false, cx)
+                let marks = highlights(
+                    &m.text,
+                    self.input.read(cx).value().as_ref(),
+                    self.regex,
+                    self.case_sensitive,
+                );
+                let hl = HighlightStyle {
+                    background_color: Some(theme.warning.opacity(0.25)),
+                    ..Default::default()
+                };
+                let text = StyledText::new(m.text.clone())
+                    .with_highlights(marks.into_iter().map(|r| (r, hl)));
+                let active = self.clicked == Some(ix);
+                sidebar::row(active, cx)
                     .id(("match", ix))
+                    .aria_selected(active)
                     .pl(px(24.))
+                    .font_family(theme.mono_font_family.clone())
+                    .text_size(px(12.))
                     .child(
                         div()
                             .flex_none()
@@ -204,8 +304,10 @@ impl SearchView {
                             .text_color(muted)
                             .child(m.line.to_string()),
                     )
-                    .child(div().flex_1().min_w_0().truncate().child(m.text.clone()))
-                    .on_click(cx.listener(move |_, _, _, cx| {
+                    .child(div().flex_1().min_w_0().truncate().child(text))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.clicked = Some(ix);
+                        cx.notify();
                         cx.emit(OpenMatch {
                             path: path.clone(),
                             line,
@@ -250,15 +352,23 @@ fn summary(matches: usize, files: usize) -> String {
     )
 }
 
-fn display(path: &Path) -> String {
-    let name = folder_name(path);
-    match path
-        .parent()
-        .and_then(|p| p.to_str())
-        .filter(|p| !p.is_empty())
+/// The byte ranges of `query` in `text`, as the search matches it; none for an invalid regex.
+fn highlights(text: &str, query: &str, regex: bool, case: bool) -> Vec<Range<usize>> {
+    let pattern = if regex {
+        query.into()
+    } else {
+        regex::escape(query)
+    };
+    match regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!case)
+        .build()
     {
-        Some(dir) => format!("{name}  {dir}"),
-        None => name,
+        Ok(re) if !query.is_empty() => re
+            .find_iter(text)
+            .filter(|m| !m.is_empty())
+            .map(|m| m.range())
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -267,35 +377,54 @@ fn thousands(n: usize) -> String {
 }
 
 impl Render for SearchView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let status = self.status(cx);
+        let theme = cx.theme();
+        let focused = self.input.focus_handle(cx).contains_focused(window, cx);
+        let title = sidebar::panel_title("Search", cx).child(
+            Button::new("search-collapse")
+                .ghost()
+                .xsmall()
+                .icon(Lucide::ChevronsDownUp)
+                .tooltip("Collapse all")
+                .accessibility_label("Collapse all")
+                .on_click(cx.listener(|this, _, _, cx| this.collapse_all(cx))),
+        );
+        let field = h_flex()
+            .mx_2()
+            .mb_1()
+            .pr_1()
+            .gap_1()
+            .items_center()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(match focused {
+                true => theme.primary,
+                false => theme.border,
+            })
+            .child(Input::new(&self.input).appearance(false).flex_1())
+            .child(
+                Button::new("search-case")
+                    .ghost()
+                    .xsmall()
+                    .label("Aa")
+                    .tooltip("Match case")
+                    .selected(self.case_sensitive)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle(false, cx))),
+            )
+            .child(
+                Button::new("search-regex")
+                    .ghost()
+                    .xsmall()
+                    .label(".*")
+                    .tooltip("Regular expression")
+                    .selected(self.regex)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle(true, cx))),
+            );
         v_flex()
             .size_full()
-            .child(
-                h_flex()
-                    .px_2()
-                    .py_1()
-                    .gap_1()
-                    .child(Input::new(&self.input).flex_1())
-                    .child(
-                        Button::new("search-regex")
-                            .ghost()
-                            .xsmall()
-                            .label(".*")
-                            .tooltip("Regular expression")
-                            .selected(self.regex)
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle(true, cx))),
-                    )
-                    .child(
-                        Button::new("search-case")
-                            .ghost()
-                            .xsmall()
-                            .label("Aa")
-                            .tooltip("Match case")
-                            .selected(self.case_sensitive)
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle(false, cx))),
-                    ),
-            )
+            .child(title)
+            .child(field)
             .children(status.map(|text| {
                 div()
                     .px_3()
@@ -308,9 +437,13 @@ impl Render for SearchView {
             .child(
                 uniform_list(
                     "search-results",
-                    self.rows.len(),
+                    self.visible().len(),
                     cx.processor(|this, range: Range<usize>, _, cx| {
-                        range.map(|ix| this.row(ix, cx)).collect::<Vec<_>>()
+                        let visible = this.visible();
+                        visible[range]
+                            .iter()
+                            .map(|&ix| this.row(ix, cx))
+                            .collect::<Vec<_>>()
                     }),
                 )
                 .flex_1(),
@@ -326,7 +459,7 @@ mod tests {
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
     use wai_settings::Settings;
 
-    use super::summary;
+    use super::{highlights, summary};
     use crate::sidebar::canonical;
     use crate::workspace::tests::{open, wait_until};
     use crate::workspace::{Pane, Workspace};
@@ -336,6 +469,71 @@ mod tests {
         assert_eq!(summary(1, 1), "1 match in 1 file");
         assert_eq!(summary(2, 1), "2 matches in 1 file");
         assert_eq!(summary(5, 3), "5 matches in 3 files");
+    }
+
+    #[test]
+    fn highlights_find_every_match() {
+        let text = "let per_route = per_route;";
+        assert_eq!(highlights(text, "per_route", false, true), [4..13, 16..25]);
+        assert_eq!(highlights(text, "PER", false, false), [4..7, 16..19]);
+        assert_eq!(highlights(text, r"per_\w+", true, true), [4..13, 16..25]);
+        assert_eq!(highlights("ação ação", "ção", false, true), [1..6, 8..13]);
+        assert!(highlights(text, "(", true, true).is_empty());
+    }
+
+    /// Two files with one match each, searched: rows are file, match, file, match.
+    fn two_files(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Workspace>, &mut VisualTestContext, tempfile::TempDir) {
+        cx.executor().allow_parking(); // the search runs on a real thread
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonical(dir.path());
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("a.txt"), "one\nneedle\n").unwrap();
+        fs::write(root.join("b.txt"), "needle\n").unwrap();
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.set_project(root.clone(), window, cx))
+        });
+        cx.run_until_parked();
+        click("tab-search", cx);
+        cx.update(|window, cx| window.input("needle", cx));
+        wait_until(cx, "both matches", |cx| match_count(&workspace, cx) == 2);
+        (workspace, cx, dir)
+    }
+
+    fn shown(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> usize {
+        workspace.read_with(cx, |w, cx| w.search.read(cx).visible().len())
+    }
+
+    #[gpui_kit::test]
+    fn files_fold_in_results(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = two_files(cx);
+        assert_eq!(shown(&workspace, cx), 4);
+        click(("search-file", 0usize), cx);
+        assert_eq!(shown(&workspace, cx), 3);
+        click("search-collapse", cx);
+        assert_eq!(shown(&workspace, cx), 2);
+        // A new search starts unfolded.
+        click("search-case", cx);
+        wait_until(cx, "both matches again", |cx| {
+            match_count(&workspace, cx) == 2
+        });
+        assert_eq!(shown(&workspace, cx), 4);
+    }
+
+    #[gpui_kit::test]
+    fn clicked_match_is_marked(cx: &mut TestAppContext) {
+        let (_workspace, cx, _dir) = two_files(cx);
+        let marked = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                [1usize, 3].map(|ix| window.find(("match", ix)).selected())
+            })
+        };
+        assert_eq!(marked(cx), [Some(false), Some(false)]);
+        click(("match", 1usize), cx);
+        assert_eq!(marked(cx), [Some(true), Some(false)]);
     }
 
     fn click(id: impl Into<gpui_kit::ElementId>, cx: &mut VisualTestContext) {
