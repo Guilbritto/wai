@@ -80,7 +80,14 @@ pub fn wheel_bytes(mode: WheelMode, lines: i32, col: u16, row: u16) -> Vec<u8> {
                 if sgr {
                     out.extend(format!("\x1b[<{button};{c};{r}M").bytes());
                 } else if c <= 223 && r <= 223 {
-                    out.extend_from_slice(&[0x1b, b'[', b'M', 32 + button, 32 + c as u8, 32 + r as u8]);
+                    out.extend_from_slice(&[
+                        0x1b,
+                        b'[',
+                        b'M',
+                        32 + button,
+                        32 + c as u8,
+                        32 + r as u8,
+                    ]);
                 }
             }
         }
@@ -145,7 +152,10 @@ mod tests {
     #[test]
     fn x10_wheel_reports() {
         let m = WheelMode::Mouse { sgr: false };
-        assert_eq!(wheel_bytes(m, 1, 4, 9), [&b"\x1b[M"[..], &[96, 37, 42]].concat());
+        assert_eq!(
+            wheel_bytes(m, 1, 4, 9),
+            [&b"\x1b[M"[..], &[96, 37, 42]].concat()
+        );
     }
 
     #[test]

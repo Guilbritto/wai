@@ -948,13 +948,17 @@ mod tests {
         crate::workspace::tests::launch(&workspace, cx);
         wait_until(cx, "the tabs", |cx| {
             workspace.read_with(cx, |w, cx| {
-                let tabs = w.panes.iter().any(|p| matches!(p, Pane::Editor(e) if e.read(cx).tabs.len() == 2));
-                tabs
+                w.panes
+                    .iter()
+                    .any(|p| matches!(p, Pane::Editor(e) if e.read(cx).tabs.len() == 2))
             })
         });
         let pane = editor_pane(&workspace, cx);
         assert_eq!(paths(&pane, cx), [a.clone(), b]);
-        assert_eq!(active_tab(&workspace, cx).read_with(cx, |t, _| t.path.clone()), a);
+        assert_eq!(
+            active_tab(&workspace, cx).read_with(cx, |t, _| t.path.clone()),
+            a
+        );
         assert_eq!(workspace.read_with(cx, |w, _| w.focused_pane), focused);
     }
 
@@ -995,7 +999,9 @@ mod tests {
         let (workspace, cx) = open_at(&mut cx.cx, Settings::default(), Some(state.clone()));
         crate::workspace::tests::launch(&workspace, cx);
         wait_until(cx, "the tab", |cx| {
-            workspace.read_with(cx, |w, _| w.panes.iter().any(|p| matches!(p, Pane::Editor(_))))
+            workspace.read_with(cx, |w, _| {
+                w.panes.iter().any(|p| matches!(p, Pane::Editor(_)))
+            })
         });
 
         let pane = editor_pane(&workspace, cx);
@@ -1016,7 +1022,9 @@ mod tests {
         let (workspace, cx) = open_at(&mut cx.cx, Settings::default(), Some(state.clone()));
         crate::workspace::tests::launch(&workspace, cx);
         wait_until(cx, "the tab", |cx| {
-            workspace.read_with(cx, |w, _| w.panes.iter().any(|p| matches!(p, Pane::Editor(_))))
+            workspace.read_with(cx, |w, _| {
+                w.panes.iter().any(|p| matches!(p, Pane::Editor(_)))
+            })
         });
         cx.executor().advance_clock(Duration::from_millis(100));
         cx.run_until_parked();
@@ -1034,9 +1042,7 @@ mod tests {
         let [a, b] = two_files(dir.path());
         let (workspace, cx) = run_at(&state, cx);
         open_file(&workspace, &a, None, cx);
-        cx.update(|window, cx| {
-            workspace.update(cx, |w, cx| w.open(b, None, true, window, cx))
-        });
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.open(b, None, true, window, cx)));
         cx.run_until_parked();
 
         let pane = editor_pane(&workspace, cx);
@@ -1052,7 +1058,10 @@ mod tests {
         let (workspace, cx) = run_at(&state, cx);
         open_file(&workspace, &a, None, cx);
         open_file(&workspace, &b, None, cx);
-        assert_eq!(wai_settings::AppState::load(&state).open_files, [a, b.clone()]);
+        assert_eq!(
+            wai_settings::AppState::load(&state).open_files,
+            [a, b.clone()]
+        );
 
         let pane = editor_pane(&workspace, cx);
         cx.update(|window, cx| pane.update(cx, |p, cx| p.close(0, window, cx)));

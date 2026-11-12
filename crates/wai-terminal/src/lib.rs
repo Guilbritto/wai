@@ -245,7 +245,11 @@ impl TerminalModel {
     pub fn busy(&self) -> bool {
         #[cfg(unix)]
         {
-            let leader = self.master.lock().ok().and_then(|m| m.process_group_leader());
+            let leader = self
+                .master
+                .lock()
+                .ok()
+                .and_then(|m| m.process_group_leader());
             let shell = self.child.lock().ok().and_then(|c| c.process_id());
             if let (Some(leader), Some(shell)) = (leader, shell) {
                 return u32::try_from(leader).is_ok_and(|leader| leader != shell);
@@ -456,7 +460,9 @@ mod tests {
         let (m, rx, _dir) = spawn();
         assert_eq!(m.wheel_mode(), WheelMode::History);
         m.write(b"printf '\\033[?1049h'; echo wai-alt\r");
-        wait_for(&m, &rx, |s| s.rows.iter().any(|r| text(r).contains("wai-alt")));
+        wait_for(&m, &rx, |s| {
+            s.rows.iter().any(|r| text(r).contains("wai-alt"))
+        });
         assert_eq!(m.wheel_mode(), WheelMode::Arrows { app_cursor: false });
         m.write(b"printf '\\033[?1049l'\r");
         let deadline = Instant::now() + Duration::from_secs(5);

@@ -4,8 +4,8 @@ use gpui_kit::*;
 
 use crate::app::{CloseTerminal, NewTerminal, NextTerminal, PrevTerminal, ToggleTerminal};
 use crate::terminal_view::{TerminalChanged, TerminalView, color};
-use wai_terminal::DEFAULT_FG;
 use crate::workspace::Workspace;
+use wai_terminal::DEFAULT_FG;
 
 pub(crate) const MAX_TERMINALS: usize = 8;
 
@@ -32,7 +32,11 @@ fn strip_icon(id: impl Into<ElementId>, icon: IconName, fg: Hsla) -> Stateful<Di
 /// The tab's text: the shell's title without control characters, cut to 24 characters, else
 /// "Terminal N".
 fn tab_label(number: u32, title: Option<&str>) -> String {
-    let title: String = title.unwrap_or_default().chars().filter(|c| !c.is_control()).collect();
+    let title: String = title
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
     let title = title.trim();
     match title.chars().count() {
         0 => format!("Terminal {number}"),
@@ -80,7 +84,9 @@ impl Workspace {
                         }))
                         .test_support(),
                 )
-                .on_click(cx.listener(move |this, _, window, cx| this.select_terminal(ix, window, cx)));
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.select_terminal(ix, window, cx)),
+                );
             if active {
                 chip = chip.bg(fg.alpha(0.14));
             }
@@ -104,12 +110,7 @@ impl Workspace {
                             .test_support(),
                     ),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .children(self.terminal().cloned()),
-            )
+            .child(div().flex_1().min_h_0().children(self.terminal().cloned()))
     }
 
     /// Shows the terminal panel, with a first tab created in the project folder on the first
@@ -208,7 +209,12 @@ impl Workspace {
         Some(view)
     }
 
-    pub(crate) fn select_terminal(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn select_terminal(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if ix >= self.terminals.len() {
             return;
         }
@@ -220,7 +226,12 @@ impl Workspace {
     }
 
     /// Closes tab `ix`, after asking when a command is still running in it.
-    pub(crate) fn close_terminal(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_terminal(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tab) = self.terminals.get(ix) else {
             return;
         };
@@ -409,9 +420,15 @@ mod tests {
         for _ in 1..MAX_TERMINALS {
             cx.dispatch_action(NewTerminal);
         }
-        assert_eq!(workspace.read_with(cx, |w, _| w.terminals.len()), MAX_TERMINALS);
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w.terminals.len()),
+            MAX_TERMINALS
+        );
         cx.dispatch_action(NewTerminal);
-        assert_eq!(workspace.read_with(cx, |w, _| w.terminals.len()), MAX_TERMINALS);
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w.terminals.len()),
+            MAX_TERMINALS
+        );
         assert_eq!(cx.update(|window, cx| window.notifications(cx).len()), 1);
     }
 
@@ -431,7 +448,10 @@ mod tests {
         assert_eq!(super::tab_label(1, None), "Terminal 1");
         assert_eq!(super::tab_label(2, Some("  \u{7}build ")), "build");
         let long = "x".repeat(40);
-        assert_eq!(super::tab_label(1, Some(&long)), format!("{}…", "x".repeat(23)));
+        assert_eq!(
+            super::tab_label(1, Some(&long)),
+            format!("{}…", "x".repeat(23))
+        );
         assert_eq!(super::tab_label(3, Some("   ")), "Terminal 3");
     }
 
@@ -455,7 +475,9 @@ mod tests {
     fn asked(cx: &mut VisualTestContext) -> Option<String> {
         cx.update(|window, cx| {
             window.render_frame(cx);
-            window.try_find("confirm-heading").and_then(|t| t.label().map(str::to_owned))
+            window
+                .try_find("confirm-heading")
+                .and_then(|t| t.label().map(str::to_owned))
         })
     }
 
@@ -486,7 +508,9 @@ mod tests {
         let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
         cx.simulate_input("exit");
         cx.simulate_keystrokes("enter");
-        wait_until(cx, "the exit", |cx| terminal.read_with(cx, |t, _| !t.has_shell()));
+        wait_until(cx, "the exit", |cx| {
+            terminal.read_with(cx, |t, _| !t.has_shell())
+        });
         click(("terminal-tab-close", 0usize), cx);
         assert_eq!(asked(cx), None);
         assert!(numbers(&workspace, cx).is_empty());
@@ -505,7 +529,10 @@ mod tests {
         });
         let label = cx.update(|window, cx| {
             window.render_frame(cx);
-            window.find(("terminal-tab", 0usize)).label().map(str::to_owned)
+            window
+                .find(("terminal-tab", 0usize))
+                .label()
+                .map(str::to_owned)
         });
         assert_eq!(label.as_deref(), Some("hello"));
     }

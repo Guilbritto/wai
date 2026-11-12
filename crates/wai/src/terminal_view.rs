@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::*;
 use wai_terminal::{
-    DEFAULT_BG, DEFAULT_FG, GridSize, GridSnapshot, Rgb, TerminalEvent, TerminalModel,
-    WheelMode, key_to_bytes, paste_bytes, wheel_bytes,
+    DEFAULT_BG, DEFAULT_FG, GridSize, GridSnapshot, Rgb, TerminalEvent, TerminalModel, WheelMode,
+    key_to_bytes, paste_bytes, wheel_bytes,
 };
 
 use crate::app::{CopySelection, Paste};
@@ -103,14 +103,19 @@ impl TerminalView {
                 // One snapshot and one redraw per burst; the last title of the burst wins.
                 let mut exited = false;
                 let mut title = None;
-                for event in std::iter::once(event).chain(std::iter::from_fn(|| events.try_recv().ok())) {
+                for event in
+                    std::iter::once(event).chain(std::iter::from_fn(|| events.try_recv().ok()))
+                {
                     match event {
                         TerminalEvent::Exited => exited = true,
                         TerminalEvent::Title(t) => title = Some(t),
                         _ => {}
                     }
                 }
-                if this.update(cx, |t, cx| t.refresh(exited, title, cx)).is_err() {
+                if this
+                    .update(cx, |t, cx| t.refresh(exited, title, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -473,7 +478,9 @@ mod tests {
             })
         });
         wheel_up(cx);
-        wait_until(cx, "the arrow echoed", |cx| find(&terminal, "^[[A", cx).is_some());
+        wait_until(cx, "the arrow echoed", |cx| {
+            find(&terminal, "^[[A", cx).is_some()
+        });
     }
 
     #[gpui_kit::test]
@@ -490,7 +497,9 @@ mod tests {
             })
         });
         wheel_up(cx);
-        wait_until(cx, "the report echoed", |cx| find(&terminal, "^[[<64;", cx).is_some());
+        wait_until(cx, "the report echoed", |cx| {
+            find(&terminal, "^[[<64;", cx).is_some()
+        });
     }
 
     /// R41: output that comes while scrolled up moves the view with it, ahead of the snapshot

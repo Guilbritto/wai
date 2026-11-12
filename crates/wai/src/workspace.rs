@@ -3058,11 +3058,7 @@ impl Render for Workspace {
         let terminal_card = aurora::card(false, cx)
             .bg(terminal_view::color(DEFAULT_BG))
             .p(px(5.));
-        let terminal = on_card(
-            terminal_card,
-            terminal_panel,
-        )
-        .debug_selector(|| "terminal".into());
+        let terminal = on_card(terminal_card, terminal_panel).debug_selector(|| "terminal".into());
         // ponytail: fixed at the sidebar's width, which does not resize either.
         let agents = (self.agents_right && !self.agents_collapsed).then(|| {
             on_card(aurora::card(false, cx), self.render_agents(cx))
@@ -5119,9 +5115,7 @@ pub(crate) mod tests {
             workspace.update(cx, |w, cx| w.toggle_terminal(&ToggleTerminal, window, cx));
         });
         let shell = |cx: &mut VisualTestContext| {
-            workspace.read_with(cx, |w, cx| {
-                w.terminal().unwrap().read(cx).shell.clone()
-            })
+            workspace.read_with(cx, |w, cx| w.terminal().unwrap().read(cx).shell.clone())
         };
         let before = shell(cx);
         std::fs::write(
@@ -5820,9 +5814,7 @@ pub(crate) mod tests {
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| w.toggle_terminal(&ToggleTerminal, window, cx));
         });
-        let shell = workspace.read_with(cx, |w, cx| {
-            w.terminal().unwrap().read(cx).shell.clone()
-        });
+        let shell = workspace.read_with(cx, |w, cx| w.terminal().unwrap().read(cx).shell.clone());
         assert_eq!(shell, Some(before));
     }
 
