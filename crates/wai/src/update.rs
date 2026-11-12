@@ -1,8 +1,18 @@
 //! The opt-in update check: once per launch, when the user's `updates.check` is on and
-//! `updates.repo` names a GitHub repository, one GET of its latest release. A newer wai shows a
-//! notice whose button opens the release page; nothing is ever downloaded. Every failure is only
-//! logged.
+//! `updates.repo` names a GitHub repository, one GET of its latest release. A newer wai is
+//! announced; when this copy can install it, `run` also downloads the release's build for this OS
+//! and `SHA256SUMS.txt`, checks the build against its listed hash and stages it in the cache.
+//! Only `DEFAULT_REPO`'s releases are ever installed: a build is code that runs with the user's
+//! rights, and a configurable repository is a configurable source of that code, so any other
+//! repository is only announced. Every failure is only logged.
 
+// ponytail: `run`, `Outcome`, `verify`, `cache_dir` and the download have no caller until the UI
+// wiring (check_on_launch replaced); remove this allow then.
+#![allow(dead_code)]
+
+mod download;
+
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow, bail, ensure};
@@ -16,7 +26,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use serde::Deserialize;
 use wai_ext::panel::cut;
-use wai_settings::UpdateSettings;
+use wai_settings::{DEFAULT_REPO, UpdateSettings};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 /// GitHub's answer is a few KB; one past this is not read.
@@ -27,9 +37,32 @@ const MAX_SHOWN: usize = 32;
 /// A fetch's HTTP status and body (at most `MAX_BODY` bytes).
 type Fetched = anyhow::Result<(u16, Vec<u8>)>;
 
+/// The build's file-name ending for this OS; nothing is installed where it is empty.
+#[cfg(target_os = "macos")]
+const ASSET_SUFFIX: &str = "_aarch64.app.zip";
+#[cfg(windows)]
+const ASSET_SUFFIX: &str = "_x64-setup.exe";
+#[cfg(not(any(target_os = "macos", windows)))]
+const ASSET_SUFFIX: &str = "";
+
+/// The release asset that lists the SHA-256 of every build.
+const SUMS_ASSET: &str = "SHA256SUMS.txt";
+/// The sums file is a few lines.
+const MAX_SUMS: u64 = 64 * 1024;
+
+/// A file attached to a release.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Asset {
+    pub name: String,
+    #[serde(rename = "browser_download_url")]
+    pub url: String,
+    pub size: u64,
+}
+
 /// The latest release, when it is newer than this wai.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Release {
+    pub assets: Vec<Asset>,
     /// Its tag: a semver version (`v` allowed), so ASCII `[0-9A-Za-z.+-]` only (see `version`).
     pub tag: String,
     /// `https://github.com/<repo>/releases/…`.
@@ -96,6 +129,153 @@ pub fn check(
     Ok(newer(current, &release.tag).then_some(release))
 }
 
+/// A downloaded build whose hash matched `SHA256SUMS.txt`, waiting in the cache.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Staged {
+    pub tag: String,
+    pub file: PathBuf,
+    /// Lowercase hex.
+    pub sha256: String,
+}
+
+impl Staged {
+    /// `wai <version> is ready`, the version clamped.
+    pub fn text(&self) -> String {
+        let version = self.tag.strip_prefix('v').unwrap_or(&self.tag);
+        format!("wai {} is ready", cut(version, MAX_SHOWN))
+    }
+}
+
+/// What a check-and-stage found.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Outcome {
+    /// Checking is off or no repository is set.
+    Off,
+    UpToDate,
+    /// Newer, but this copy will not install it; `why` is the sentence Settings shows.
+    Available {
+        release: Release,
+        why: Option<String>,
+    },
+    Ready(Staged),
+}
+
+/// Where builds are staged: wiped and refilled by each `run` that stages one.
+pub fn cache_dir() -> PathBuf {
+    let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
+    base.join("wai-updates")
+}
+
+/// The first asset `want` accepts whose name is one plain file name (it is joined onto the cache)
+/// and whose URL `download` may fetch.
+fn asset(release: &Release, want: impl Fn(&str) -> bool) -> Option<&Asset> {
+    let plain = |n: &str| {
+        let ok = |c: char| c.is_ascii_alphanumeric() || "-_.+".contains(c);
+        !n.is_empty() && n != "." && n != ".." && n.chars().all(ok)
+    };
+    let usable = |a: &&Asset| plain(&a.name) && download::allowed(&a.url) && want(&a.name);
+    release.assets.iter().find(usable)
+}
+
+/// `check`, then, for a newer release this copy may install (`DEFAULT_REPO`, no `blocker`, a build
+/// for this OS and the sums file): download both into `cache` and verify the build against the
+/// sums. `download(url, dest)` writes `dest`; on any `Err` the cache holds no build.
+pub fn run(
+    settings: &UpdateSettings,
+    current: &str,
+    blocker: Option<String>,
+    cache: &Path,
+    fetch: impl FnOnce(&str) -> Fetched,
+    download: impl Fn(&str, &Path) -> anyhow::Result<()>,
+) -> anyhow::Result<Outcome> {
+    let Some(release) = check(settings, current, fetch)? else {
+        let asked = settings.check && settings.repo.is_some();
+        return Ok(if asked {
+            Outcome::UpToDate
+        } else {
+            Outcome::Off
+        });
+    };
+    let repo = settings.repo.as_deref().unwrap_or_default();
+    let why = match repo.eq_ignore_ascii_case(DEFAULT_REPO) {
+        true => blocker,
+        false => Some(format!(
+            "wai installs updates only from {DEFAULT_REPO}, not {repo}"
+        )),
+    };
+    if why.is_some() {
+        return Ok(Outcome::Available { release, why });
+    }
+    let build = (!ASSET_SUFFIX.is_empty())
+        .then(|| asset(&release, |n| n.ends_with(ASSET_SUFFIX)))
+        .flatten();
+    let sums = asset(&release, |n| n == SUMS_ASSET);
+    let (Some(build), Some(sums)) = (build, sums) else {
+        let why = format!("this release has no {ASSET_SUFFIX} build with {SUMS_ASSET}");
+        return Ok(Outcome::Available {
+            release,
+            why: Some(why),
+        });
+    };
+    let staged = stage(&release.tag, build, sums, cache, &download)?;
+    Ok(Outcome::Ready(staged))
+}
+
+/// Empties `cache`, downloads the sums and the build into it, and keeps the build only when its
+/// hash is the one listed.
+fn stage(
+    tag: &str,
+    build: &Asset,
+    sums: &Asset,
+    cache: &Path,
+    download: &impl Fn(&str, &Path) -> anyhow::Result<()>,
+) -> anyhow::Result<Staged> {
+    match std::fs::remove_dir_all(cache) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
+    std::fs::create_dir_all(cache)?;
+    let sums_file = cache.join(SUMS_ASSET);
+    download(&sums.url, &sums_file).context("downloading the checksums")?;
+    ensure!(
+        std::fs::metadata(&sums_file)?.len() <= MAX_SUMS,
+        "the checksums file is too large"
+    );
+    let listed = std::fs::read_to_string(&sums_file).context("reading the checksums")?;
+    let file = cache.join(&build.name);
+    let staged = (|| {
+        download(&build.url, &file).context("downloading the update")?;
+        let sha256 = download::sha256_file(&file)?;
+        let want = download::expected_sum(&listed, &build.name);
+        ensure!(
+            want.as_deref() == Some(&sha256),
+            "the downloaded update does not match its checksum"
+        );
+        anyhow::Ok(sha256)
+    })();
+    match staged {
+        Ok(sha256) => Ok(Staged {
+            tag: tag.to_string(),
+            file,
+            sha256,
+        }),
+        Err(e) => {
+            std::fs::remove_file(&file).ok();
+            Err(e)
+        }
+    }
+}
+
+/// Re-hashes the staged build, so a file changed since staging is never installed.
+pub fn verify(staged: &Staged) -> anyhow::Result<()> {
+    let now = download::sha256_file(&staged.file).ok();
+    ensure!(
+        now.as_deref() == Some(&staged.sha256),
+        "the downloaded update changed on disk; check for updates again"
+    );
+    Ok(())
+}
+
 /// GitHub's `owner/repo`: one slash, letters, digits, `-`, `_` and `.`, no `.`/`..` part.
 fn valid_repo(repo: &str) -> bool {
     let part = |p: &str| {
@@ -110,6 +290,8 @@ fn valid_repo(repo: &str) -> bool {
 struct Latest {
     tag_name: String,
     html_url: Option<String>,
+    #[serde(default)]
+    assets: Vec<Asset>,
 }
 
 /// The `/releases/latest` answer for `repo`: its tag, which must be a version, and its page when
@@ -134,6 +316,7 @@ fn parse_release(body: &[u8], repo: &str) -> anyhow::Result<Release> {
     Ok(Release {
         tag,
         page: page.unwrap_or(releases),
+        assets: latest.assets,
     })
 }
 
@@ -143,7 +326,7 @@ type Version<'a> = ([u64; 3], bool, Vec<(bool, u64, &'a str)>);
 
 /// `tag` as a `Version`; `v` and build metadata (`+…`) are allowed, the metadata ignored. `None`
 /// for anything else, so a tag that parses is ASCII `[0-9A-Za-z.+-]` only.
-fn version(tag: &str) -> Option<Version<'_>> {
+pub(crate) fn version(tag: &str) -> Option<Version<'_>> {
     let tag = tag.strip_prefix('v').unwrap_or(tag);
     let (tag, build) = match tag.split_once('+') {
         Some((tag, build)) => (tag, Some(build)),
@@ -245,9 +428,11 @@ async fn get(url: &str) -> Fetched {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     use super::*;
+    use download::sha256_file;
+    use wai_settings::DEFAULT_REPO;
 
     fn on(repo: &str) -> UpdateSettings {
         UpdateSettings {
@@ -278,7 +463,8 @@ mod tests {
             release,
             Release {
                 tag: "v0.2.0".into(),
-                page: page.into()
+                page: page.into(),
+                assets: vec![],
             }
         );
         assert_eq!(release.text(), "wai 0.2.0 is available");
@@ -474,6 +660,251 @@ mod tests {
         };
         assert_eq!(check(&on("Owner-1/w.ai_x"), "0.1.0", fetch).unwrap(), None);
         assert_eq!(calls.get(), 1);
+    }
+
+    const SUMS: &str = "SHA256SUMS.txt";
+
+    fn asset_name() -> String {
+        format!("wai_9.0.0{ASSET_SUFFIX}")
+    }
+
+    fn url_of(name: &str) -> String {
+        format!("https://github.com/Guilbritto/wai/releases/download/v9.0.0/{name}")
+    }
+
+    fn with_assets(names: &[&str]) -> Vec<u8> {
+        let assets: Vec<_> = names
+            .iter()
+            .map(|n| serde_json::json!({"name": n, "browser_download_url": url_of(n), "size": 7}))
+            .collect();
+        let mut v = serde_json::from_slice::<serde_json::Value>(&body("v9.0.0", "")).unwrap();
+        v["assets"] = assets.into();
+        v.to_string().into_bytes()
+    }
+
+    fn latest(names: &[&str]) -> impl FnOnce(&str) -> Fetched {
+        let body = with_assets(names);
+        move |_| Ok((200, body))
+    }
+
+    fn never_download(_: &str, _: &Path) -> anyhow::Result<()> {
+        panic!("nothing may be downloaded")
+    }
+
+    #[test]
+    fn parses_assets() {
+        let release = parse_release(&with_assets(&["a.zip", "b.exe"]), "owner/wai").unwrap();
+        assert_eq!(
+            release.assets,
+            vec![
+                Asset {
+                    name: "a.zip".into(),
+                    url: url_of("a.zip"),
+                    size: 7
+                },
+                Asset {
+                    name: "b.exe".into(),
+                    url: url_of("b.exe"),
+                    size: 7
+                },
+            ]
+        );
+        let bare = parse_release(&body("v9.0.0", ""), "owner/wai").unwrap();
+        assert!(bare.assets.is_empty());
+    }
+
+    #[test]
+    fn only_the_default_repo_installs() {
+        let cache = tempfile::tempdir().unwrap();
+        let names = [asset_name(), SUMS.to_string()];
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let out = run(
+            &on("other/wai"),
+            "0.1.0",
+            None,
+            cache.path(),
+            latest(&names),
+            never_download,
+        )
+        .unwrap();
+        let Outcome::Available { why: Some(why), .. } = out else {
+            panic!("{out:?}")
+        };
+        assert!(why.contains("other/wai"), "{why}");
+
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            let calls = Cell::new(0);
+            let download = |_: &str, _: &Path| {
+                calls.set(calls.get() + 1);
+                anyhow::bail!("stop")
+            };
+            let out = run(
+                &on("guilbritto/WAI"),
+                "0.1.0",
+                None,
+                cache.path(),
+                latest(&names),
+                download,
+            );
+            assert!(out.is_err());
+            assert_eq!(calls.get(), 1);
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", windows))]
+    fn release_without_asset_only_notifies() {
+        let cache = tempfile::tempdir().unwrap();
+        let (asset, sums) = (asset_name(), SUMS);
+        for names in [vec![sums], vec![asset.as_str()], vec!["other.zip", sums]] {
+            let out = run(
+                &on(DEFAULT_REPO),
+                "0.1.0",
+                None,
+                cache.path(),
+                latest(&names),
+                never_download,
+            )
+            .unwrap();
+            assert!(
+                matches!(out, Outcome::Available { why: Some(_), .. }),
+                "{out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn blocked_copy_only_notifies() {
+        let cache = tempfile::tempdir().unwrap();
+        let names = [asset_name(), SUMS.to_string()];
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let out = run(
+            &on(DEFAULT_REPO),
+            "0.1.0",
+            Some("x".into()),
+            cache.path(),
+            latest(&names),
+            never_download,
+        )
+        .unwrap();
+        let Outcome::Available { why, .. } = out else {
+            panic!("{out:?}")
+        };
+        assert_eq!(why.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn off_and_current_need_no_download() {
+        let cache = tempfile::tempdir().unwrap();
+        let off = UpdateSettings {
+            check: false,
+            repo: None,
+        };
+        let never = |_: &str| -> Fetched { panic!("no request when off") };
+        let out = run(&off, "0.1.0", None, cache.path(), never, never_download);
+        assert_eq!(out.unwrap(), Outcome::Off);
+        let out = run(
+            &on(DEFAULT_REPO),
+            "9.0.0",
+            None,
+            cache.path(),
+            latest(&[]),
+            never_download,
+        );
+        assert_eq!(out.unwrap(), Outcome::UpToDate);
+    }
+
+    /// A `download` that serves `bytes` for the asset and `sums` for the sums file.
+    #[cfg(any(target_os = "macos", windows))]
+    fn serve<'a>(
+        bytes: &'a [u8],
+        sums: &'a str,
+        seen: &'a RefCell<Vec<String>>,
+    ) -> impl Fn(&str, &Path) -> anyhow::Result<()> + 'a {
+        move |url, dest| {
+            seen.borrow_mut().push(url.to_string());
+            let body = if url.ends_with(SUMS) {
+                sums.as_bytes()
+            } else {
+                bytes
+            };
+            std::fs::write(dest, body)?;
+            Ok(())
+        }
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    fn stage(cache: &Path, bytes: &[u8], sums: &str) -> anyhow::Result<Outcome> {
+        let names = [asset_name(), SUMS.to_string()];
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let seen = RefCell::new(vec![]);
+        let download = serve(bytes, sums, &seen);
+        run(
+            &on(DEFAULT_REPO),
+            "0.1.0",
+            None,
+            cache,
+            latest(&names),
+            download,
+        )
+    }
+
+    const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    #[test]
+    #[cfg(any(target_os = "macos", windows))]
+    fn stages_a_verified_asset() {
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::write(cache.path().join("old.zip"), b"old").unwrap();
+        let sums = format!("{ABC}  {}\n", asset_name());
+        let out = stage(cache.path(), b"abc", &sums).unwrap();
+        let Outcome::Ready(staged) = out else {
+            panic!("{out:?}")
+        };
+        assert_eq!(staged.tag, "v9.0.0");
+        assert_eq!(staged.sha256, ABC);
+        assert_eq!(staged.file, cache.path().join(asset_name()));
+        assert_eq!(staged.text(), "wai 9.0.0 is ready");
+        assert!(!cache.path().join("old.zip").exists());
+        verify(&staged).unwrap();
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", windows))]
+    fn rejects_a_wrong_checksum() {
+        let cache = tempfile::tempdir().unwrap();
+        let sums = format!("{}  {}\n", "0".repeat(64), asset_name());
+        let err = stage(cache.path(), b"abc", &sums).unwrap_err();
+        assert!(format!("{err:#}").contains("checksum"), "{err:#}");
+        assert!(!cache.path().join(asset_name()).exists());
+        // No line for the asset at all is refused the same way.
+        let err = stage(cache.path(), b"abc", "").unwrap_err();
+        assert!(format!("{err:#}").contains("checksum"), "{err:#}");
+        assert!(!cache.path().join(asset_name()).exists());
+    }
+
+    #[test]
+    fn staged_file_is_hashed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("wai.zip");
+        std::fs::write(&file, b"abc").unwrap();
+        let staged = Staged {
+            tag: "v9.0.0".into(),
+            file: file.clone(),
+            sha256: sha256_file(&file).unwrap(),
+        };
+        verify(&staged).unwrap();
+        std::fs::write(&file, b"abd").unwrap();
+        let err = verify(&staged).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "the downloaded update changed on disk; check for updates again"
+        );
+        std::fs::write(&file, b"ab").unwrap();
+        assert!(verify(&staged).is_err());
+        std::fs::remove_file(&file).unwrap();
+        assert!(verify(&staged).is_err());
     }
 
     /// The real fetch, without the network: a plain-HTTP URL is refused before any connection
