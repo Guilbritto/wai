@@ -13,6 +13,7 @@ mod files;
 mod git;
 mod instance;
 mod layout;
+mod log;
 mod notify;
 mod palette;
 mod search_view;
@@ -66,6 +67,10 @@ fn main() -> anyhow::Result<()> {
                 None
             }
         };
+    // After the lock, so a refused second launch cannot rotate the first one's log.
+    if let Some(dir) = state_path.parent() {
+        log::init(dir);
+    }
     let state = AppState::load(&state_path);
     let project = resolve_project(std::env::args_os().nth(1).map(PathBuf::from), state.project)?;
     // Everything relative is resolved by now; agents spawn from a neutral dir, not a repo.
