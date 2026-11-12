@@ -22,7 +22,7 @@ This guide describes the latest wai release. On Windows, read **ctrl** where it 
 ### Starting
 
 There are four ways to start a session:
-- **⌘N**, the **+** button or a double click on the **Sessions** tab starts one with the default agent (`default_agent`, which you choose in [Settings](#the-settings-screen); until you do, these open Settings instead).
+- **⌘N**, the **+** button, a double click on the **Sessions** icon, or a double click on the empty part of the **Sessions** panel (under **History**) starts one with the default agent (`default_agent`, which you choose in [Settings](#the-settings-screen); until you do, these open Settings instead).
 - **New from template** (the file icon in the top bar) starts one from a template.
 - The palette's **New session with &lt;agent&gt;** picks the agent.
 - A row in the **History** section of the Sessions panel reopens a past session.

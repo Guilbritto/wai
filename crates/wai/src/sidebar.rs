@@ -872,36 +872,48 @@ impl Workspace {
                         })),
                 ),
             )
-            .when(!folded, |el| {
-                el.map(|el| match self.default_agent() {
-                    None => el.child(
-                        div()
-                            .id("history-hint")
-                            .p_2()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Choose an AI in Settings to see its history.")
-                            .test_support(),
-                    ),
-                    // Only the visible rows render: an agent can hold thousands of sessions.
-                    Some(_) => el.child(
-                        uniform_list(
-                            "history",
-                            rows,
-                            cx.processor(|this, range: Range<usize>, _, cx| {
-                                let rows = this.listed_history(cx);
-                                range
-                                    .map(|ix| this.history_row(ix, rows[ix], cx))
-                                    .collect::<Vec<_>>()
-                            }),
-                        )
-                        .flex_1()
-                        .min_h_0()
-                        // The rows' 4 px inset (the mockup's `.r1` margin).
-                        .pl(px(4.)),
-                    ),
-                })
-            })
+            .child(
+                v_flex()
+                    .id("sessions-blank")
+                    .flex_1()
+                    .min_h_0()
+                    .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                        if event.click_count() == 2 {
+                            this.new_session(&NewSession, window, cx);
+                        }
+                    }))
+                    .when(!folded, |el| {
+                        el.map(|el| match self.default_agent() {
+                            None => el.child(
+                                div()
+                                    .id("history-hint")
+                                    .p_2()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Choose an AI in Settings to see its history.")
+                                    .test_support(),
+                            ),
+                            // Only the visible rows render: an agent can hold thousands of sessions.
+                            Some(_) => el.child(
+                                uniform_list(
+                                    "history",
+                                    rows,
+                                    cx.processor(|this, range: Range<usize>, _, cx| {
+                                        let rows = this.listed_history(cx);
+                                        range
+                                            .map(|ix| this.history_row(ix, rows[ix], cx))
+                                            .collect::<Vec<_>>()
+                                    }),
+                                )
+                                .flex_1()
+                                .min_h_0()
+                                // The rows' 4 px inset (the mockup's `.r1` margin).
+                                .pl(px(4.)),
+                            ),
+                        })
+                    })
+                    .test_support(),
+            )
     }
 
     /// An open session's row (the mockup's `.r2`): the status dot, its title and how long it has
@@ -1224,6 +1236,7 @@ impl Workspace {
                     }))
                     .on_click(
                         cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
                             this.resume(&open, false, window, cx)
                         }),
                     )
@@ -1694,6 +1707,26 @@ mod tests {
             assert_eq!(w.drafts.len(), 1);
             assert!(w.sessions.is_empty());
         });
+    }
+
+    /// A double click under History opens a draft; one on a History row only opens that row.
+    #[gpui_kit::test]
+    fn double_click_on_the_empty_panel_opens_a_draft(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, history_settings(1));
+        load_history(&workspace, 1, cx);
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.double_click("sessions-blank", cx);
+        });
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.drafts.len(), 1);
+            assert!(w.sessions.is_empty());
+        });
+
+        cx.update(|window, cx| window.double_click(("history", 0usize), cx));
+        cx.run_until_parked();
+        workspace.read_with(cx, |w, _| assert_eq!(w.drafts.len(), 1));
     }
 
     #[gpui_kit::test]
