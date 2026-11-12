@@ -4,6 +4,7 @@ mod app;
 mod aurora;
 mod chat;
 mod claude_config;
+mod diagnostics;
 mod editor;
 mod elsewhere;
 mod ext_host;
