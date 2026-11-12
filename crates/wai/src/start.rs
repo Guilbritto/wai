@@ -99,17 +99,18 @@ impl Workspace {
         let (repo, worktree, branch) = (d.repo.clone(), d.worktree, d.branch.clone());
         if !folder.is_dir() {
             let error = format!("The folder {} no longer exists.", shown(&folder));
-            return draft.update(cx, |d, cx| d.fail(Some(error), String::new(), window, cx));
+            return draft.update(cx, |d, cx| {
+                d.fail(Some(error), Default::default(), window, cx)
+            });
         }
         let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
             let error = format!("No agent named {agent} in the settings or extensions.");
-            return draft.update(cx, |d, cx| d.fail(Some(error), String::new(), window, cx));
+            return draft.update(cx, |d, cx| {
+                d.fail(Some(error), Default::default(), window, cx)
+            });
         };
         let job = match (repo, worktree, branch) {
-            (None, true, _) => {
-                let error = "Still reading the repository. Try again in a moment.".to_string();
-                return draft.update(cx, |d, cx| d.fail(Some(error), String::new(), window, cx));
-            }
+            (None, true, _) => return,
             (Some(repo), true, base) => {
                 let base = base.unwrap_or_else(|| repo.default.clone());
                 Some(GitJob::Worktree {
@@ -120,8 +121,9 @@ impl Workspace {
             }
             (Some(repo), false, Some(branch)) if Some(&branch) != repo.current.as_ref() => {
                 if let Some(error) = self.shared_folder(&draft, &repo.root, &branch, cx) {
-                    return draft
-                        .update(cx, |d, cx| d.fail(Some(error), String::new(), window, cx));
+                    return draft.update(cx, |d, cx| {
+                        d.fail(Some(error), Default::default(), window, cx)
+                    });
                 }
                 Some(GitJob::Checkout { branch })
             }
@@ -161,6 +163,7 @@ impl Workspace {
         .detach();
         draft.update(cx, |d, cx| {
             d.starting = Some(chat.clone());
+            d.creating = matches!(job, Some(GitJob::Worktree { .. }));
             d.notice = None;
             cx.emit(DraftEvent::Changed);
             cx.notify();
@@ -209,6 +212,7 @@ impl Workspace {
                 let done = run.await;
                 let next = this
                     .update_in(cx, |this, window, cx| {
+                        draft.update(cx, |d, _| d.creating = false);
                         let current = draft.read(cx).starting.as_ref() == Some(&chat);
                         let ix = git_step.unwrap_or_default();
                         let cwd = match done {
@@ -434,7 +438,7 @@ mod tests {
     use gpui_kit::{ElementId, Entity, TestAppContext, VisualTestContext};
     use wai_settings::Settings;
 
-    use crate::chat::{ChatItem, ChatSession, DraftView, TurnState, signed_out};
+    use crate::chat::{Attachment, ChatItem, ChatSession, DraftView, TurnState, signed_out};
     use crate::git::tests::{cloned, git, repo_with};
     use crate::git::{self, SUBMODULE_HINT};
     use crate::sidebar::canonical;
@@ -1126,6 +1130,76 @@ mod tests {
         let session = one_session(&workspace, cx);
         session.read_with(cx, |s, _| assert_eq!(canonical(&s.cwd), wt));
         assert_eq!(worktrees(&root), 1);
+        leave(&workspace, cx);
+    }
+
+    #[gpui_kit::test]
+    fn pending_chat_send_is_off_while_starting(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let tmp = tempfile::tempdir().unwrap();
+        let (settings, gate) = gated("", tmp.path());
+        let (workspace, cx) = open(cx, settings);
+        send_text(&workspace, cx);
+        cx.simulate_input("more");
+        let disabled = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find("send").disabled()
+        });
+        assert_eq!(disabled, Some(true));
+        std::fs::write(&gate, "").unwrap();
+        one_session(&workspace, cx);
+    }
+
+    #[gpui_kit::test]
+    fn attachments_added_while_starting_go_back_to_the_draft(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let tmp = tempfile::tempdir().unwrap();
+        let (own, added) = (tmp.path().join("draft.txt"), tmp.path().join("chat.txt"));
+        let (settings, gate) = gated("", tmp.path());
+        let (workspace, cx) = open(cx, settings);
+        let draft = new_draft(&workspace, cx);
+        draft.update(cx, |d, _| d.attachments.push(Attachment::new(&own)));
+        type_and_send(cx, "build it");
+        let chat = draft.read_with(cx, |d, _| d.starting.clone().expect("starting"));
+        chat.update(cx, |c, _| c.attachments.push(Attachment::new(&added)));
+        cx.simulate_keystrokes("escape");
+        draft.read_with(cx, |d, _| {
+            let names: Vec<_> = d.attachments.iter().map(|a| a.name.as_str()).collect();
+            assert_eq!(names, ["draft.txt", "chat.txt"]);
+        });
+        std::fs::write(&gate, "").unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn worktree_send_waits_for_the_repository(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let draft = new_draft(&workspace, cx);
+        cx.simulate_input("build it");
+        draft.update(cx, |d, _| {
+            d.worktree = true;
+            d.repo = None;
+        });
+        draft.read_with(cx, |d, cx| assert!(!d.can_send(cx)));
+    }
+
+    #[gpui_kit::test]
+    fn send_waits_while_a_worktree_is_created(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let root = repo_with(&dir.path().join("r"), &[]);
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let draft = repo_draft(&workspace, cx, &root);
+        cx.simulate_input("Fix it");
+        draft.read_with(cx, |d, cx| assert!(d.can_send(cx)));
+        draft.update(cx, |d, _| d.creating = true);
+        draft.read_with(cx, |d, cx| assert!(!d.can_send(cx)));
+        draft.update(cx, |d, cx| {
+            d.creating = false;
+            d.set_worktree(true, cx)
+        });
+        cx.simulate_keystrokes("enter");
+        one_session(&workspace, cx);
+        draft.read_with(cx, |d, _| assert!(!d.creating));
         leave(&workspace, cx);
     }
 

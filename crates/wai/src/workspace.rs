@@ -1787,7 +1787,7 @@ impl Workspace {
                         this.land(session.clone(), early, None, window, cx);
                         if let Some(text) = prompt {
                             session.update(cx, |s, cx| {
-                                if !(send && s.send_text(&text, cx)) {
+                                if !(send && s.send_settled(&text, cx)) {
                                     s.prefill(&text, window, cx)
                                 }
                             });

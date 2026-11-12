@@ -238,9 +238,7 @@ mod tests {
         assert!(found.contains(&id));
     }
 
-    use crate::workspace::tests::{
-        click, history_settings, load_history, open, wait_until,
-    };
+    use crate::workspace::tests::{click, history_settings, load_history, open, wait_until};
     use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
     use gpui_kit::{TestAppContext, VisualTestContext};
     use wai_settings::Settings;
@@ -267,11 +265,7 @@ mod tests {
     fn setup(
         cx: &mut TestAppContext,
         n: usize,
-    ) -> (
-        Entity<Workspace>,
-        &mut VisualTestContext,
-        tempfile::TempDir,
-    ) {
+    ) -> (Entity<Workspace>, &mut VisualTestContext, tempfile::TempDir) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let tmp = tempfile::tempdir().unwrap();
         let (workspace, cx) = open(cx, claude_history(n));

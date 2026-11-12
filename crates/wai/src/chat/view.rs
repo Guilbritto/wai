@@ -125,7 +125,7 @@ pub struct ChatSession {
     pub model: ChatModel,
     pub(super) handle: AgentHandle,
     pub(super) input: Entity<TextareaState>,
-    pub(super) attachments: Vec<Attachment>,
+    pub(crate) attachments: Vec<Attachment>,
     /// Sent during a turn to an agent that cannot steer: they go out when it ends.
     pub(super) queued: Vec<Message>,
     /// The message of a session that is starting; it goes out once the session exists.
@@ -340,16 +340,38 @@ impl ChatSession {
         }
     }
 
-    /// What the user typed here while the session started, and the messages queued: it goes back
-    /// to the draft.
-    pub fn leftover(&self, cx: &App) -> String {
+    /// What the user typed here while the session started, and the messages queued, with the
+    /// attachments of the chat and then of the queued messages: it goes back to the draft.
+    pub fn leftover(&self, cx: &App) -> (String, Vec<Attachment>) {
         let typed = self.input.read(cx).value().trim().to_string();
         let queued = self.queued.iter().map(|m| m.text.clone());
         let parts: Vec<String> = std::iter::once(typed)
             .chain(queued)
             .filter(|t| !t.is_empty())
             .collect();
-        parts.join("\n\n")
+        let files = (self.attachments.iter())
+            .chain(self.queued.iter().flat_map(|m| &m.attachments))
+            .cloned()
+            .collect();
+        (parts.join("\n\n"), files)
+    }
+
+    /// Sends `text` as a prompt once the picked model and mode are in place (an extension's
+    /// `sessions/open` with `send`). `false` when the session is not idle or `text` is empty.
+    pub fn send_settled(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        let text = text.trim();
+        if self.model.state != TurnState::Idle || text.is_empty() {
+            return false;
+        }
+        let ix = self.update_model(cx, |m| m.push_user(text));
+        self.first = Some(Message {
+            text: text.into(),
+            attachments: Vec::new(),
+        });
+        self.sync_rows(Some(ix), cx);
+        self.send_first(cx);
+        cx.notify();
+        true
     }
 
     /// Takes what a started or loaded session reports, unless the pane already has it (a
@@ -3056,6 +3078,22 @@ mod tests {
         });
         let second = workspace.read_with(cx, |w, _| w.sessions.last().cloned().unwrap());
         assert_eq!(reply(&second, cx), "model:fake-small");
+    }
+
+    #[gpui_kit::test]
+    fn extension_prompt_waits_for_the_default_model(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, models_settings(Some("fake-large")));
+        workspace.update_in(cx, |w, window, cx| {
+            w.start_session("fake".into(), Some("hi".into()), true, None, window, cx)
+        });
+        wait_until(cx, "the session", |cx| {
+            workspace.read_with(cx, |w, _| w.sessions.len() == 1)
+        });
+        let session = workspace.read_with(cx, |w, _| w.sessions[0].clone());
+        wait_until(cx, "the reply", |cx| {
+            last_agent_text(&session, cx).as_deref() == Some("model:fake-large")
+        });
     }
 
     #[gpui_kit::test]
