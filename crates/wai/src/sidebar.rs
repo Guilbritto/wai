@@ -1,14 +1,16 @@
-//! The sidebar: tabs for the open sessions with their status and the agent's history, the
-//! project's files, search, the agents, then each running extension's panels.
+//! The sidebar: the activity bar's panels (the open sessions with their status and the agent's
+//! history, the project's files, search, the agents, then each running extension's panels).
 
 use std::ops::Range;
 use std::time::Duration;
 
+use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::SessionSummary;
@@ -20,6 +22,7 @@ use crate::agents::AgentStatus;
 use crate::app::NewSession;
 use crate::aurora;
 use crate::chat::{ChatItem, ChatModel, ChatSession, DraftView, TurnState};
+use crate::settings_view::Section;
 use crate::workspace::{Dragged, DraggedSession, MAX_PANES, Renamed, Workspace};
 
 pub(crate) const ROW_HEIGHT: f32 = 28.;
@@ -28,7 +31,6 @@ pub(crate) const ROW_HEIGHT: f32 = 28.;
 pub enum SidebarTab {
     #[default]
     Sessions,
-    History,
     Files,
     Search,
     Agents,
@@ -40,13 +42,29 @@ pub enum SidebarTab {
 const PANEL_TITLE_CHARS: usize = 24;
 
 /// Each tab with its element id and label.
-const TABS: [(SidebarTab, &str, &str); 5] = [
-    (SidebarTab::Sessions, "tab-sessions", "Sessions"),
-    (SidebarTab::History, "tab-history", "History"),
-    (SidebarTab::Files, "tab-files", "Files"),
-    (SidebarTab::Search, "tab-search", "Search"),
-    (SidebarTab::Agents, "tab-agents", "Agents"),
+const TABS: [(SidebarTab, &str, &str, Lucide); 4] = [
+    (
+        SidebarTab::Sessions,
+        "tab-sessions",
+        "Sessions",
+        Lucide::MessageSquare,
+    ),
+    (SidebarTab::Files, "tab-files", "Files", Lucide::Folder),
+    (SidebarTab::Search, "tab-search", "Search", Lucide::Search),
+    (SidebarTab::Agents, "tab-agents", "Agents", Lucide::Sparkles),
 ];
+
+/// An extension panel's mark on the rail: the first letters of its first two words, else of its
+/// one word.
+pub(crate) fn initials(title: &str) -> String {
+    let mut words = title.split_whitespace();
+    let letters: String = match (words.next(), words.next()) {
+        (Some(a), Some(b)) => a.chars().take(1).chain(b.chars().take(1)).collect(),
+        (Some(a), None) => a.chars().take(2).collect(),
+        _ => return "?".into(),
+    };
+    letters.to_uppercase()
+}
 
 /// The status dot's colour, shared by the open list and the agent cards.
 pub(crate) fn status_color(state: &TurnState, theme: &gpui_kit::component::Theme) -> Hsla {
@@ -163,8 +181,8 @@ impl Workspace {
         }));
     }
 
+    /// The selected panel; the activity bar (`render_rail`) switches them.
     pub(crate) fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme();
         let panels = self.ext_host.read(cx).panels();
         let shown = panels
             .iter()
@@ -175,85 +193,187 @@ impl Workspace {
                 .children(shown.map(|p| p.view.clone()))
                 .into_any_element(),
             SidebarTab::Sessions => self.render_sessions(cx).into_any_element(),
-            SidebarTab::History => self.render_history(cx).into_any_element(),
             SidebarTab::Files => self.files.clone().into_any_element(),
             SidebarTab::Search => self.search.clone().into_any_element(),
             SidebarTab::Agents => self.render_agents(cx).into_any_element(),
         };
-        let built_in = TABS.map(|(tab, id, label)| (tab, ElementId::from(id), label.into()));
-        // On the right, Agents has no tab.
-        let hidden = usize::from(self.agents_right);
-        let built_in = (built_in.into_iter())
-            .filter(|(tab, ..)| !(self.agents_right && *tab == SidebarTab::Agents));
-        let extension = panels.iter().enumerate().map(|(ix, p)| {
-            let title = clamp(&p.title, PANEL_TITLE_CHARS);
-            let tab = SidebarTab::Panel(p.view.entity_id());
-            (
-                tab,
-                ElementId::from(("tab-panel", ix)),
-                SharedString::from(title),
-            )
-        });
-        let ring = theme.ring;
-        let mut tabs: Vec<_> = built_in
-            .chain(extension)
-            .map(|(tab, id, label)| {
-                aurora::tab(self.sidebar_tab == tab, cx)
-                    .id(id)
-                    .role(Role::Tab)
-                    .aria_label(label.clone())
-                    .aria_selected(self.sidebar_tab == tab)
-                    .focus_visible(move |el| el.border_color(ring))
-                    // Focusable, and Enter or Space clicks it.
-                    .tab_index(0)
-                    .h(px(26.))
-                    .px(px(3.))
-                    .rounded(px(9.))
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(label)
-                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                        this.sidebar_tab = tab;
-                        if tab == SidebarTab::Search {
-                            let focus = this.search.read(cx).query_focus(cx);
-                            window.focus(&focus, cx);
-                        }
-                        // A double click on Sessions starts a new session.
-                        if tab == SidebarTab::Sessions && event.click_count() > 1 {
-                            this.new_session(&NewSession, window, cx);
-                        }
-                        cx.notify();
-                    }))
-                    // Registers the id so tests can find and click it (a Button does it itself).
-                    .test_support()
-            })
-            .collect();
-        // The built-in tabs share one line: wrapped one by one, the last breaks off even where
-        // it fits. The extensions' tabs wrap after them.
-        let panel_tabs = tabs.split_off(TABS.len() - hidden);
         v_flex()
             .size_full()
             .py_2()
-            .text_color(theme.sidebar_foreground)
-            .child(
-                h_flex()
-                    .mx_1()
-                    .p(px(2.))
-                    .gap(px(2.))
-                    .flex_wrap()
-                    .rounded(px(12.))
-                    .border_1()
-                    .map(|el| {
-                        if theme.is_dark() {
-                            el.bg(aurora::vidro()).border_color(aurora::borda())
-                        } else {
-                            el.border_color(theme.border)
-                        }
-                    })
-                    .child(h_flex().gap(px(2.)).children(tabs))
-                    .children(panel_tabs),
-            )
+            .text_color(cx.theme().sidebar_foreground)
             .child(v_flex().flex_1().min_h_0().child(content))
+    }
+
+    /// The activity bar: one icon per panel, the sessions' badge counting those that need the
+    /// user, then Extensions and Settings at the foot.
+    pub(crate) fn render_rail(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        let panels = self.ext_host.read(cx).panels();
+        let needs_you = (self.sessions.iter())
+            .filter(|s| matches!(s.read(cx).status(), TurnState::NeedsYou))
+            .count();
+        let ring = theme.ring;
+        let (idle, selected) = (theme.muted_foreground, theme.foreground);
+        let (fill, border, hover) = (
+            theme.list_active,
+            theme.list_active_border,
+            theme.list_hover,
+        );
+        let item = |id: ElementId, label: SharedString, on: bool| {
+            div()
+                .id(id)
+                .relative()
+                .flex_none()
+                .size(px(32.))
+                .rounded(px(9.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .border_1()
+                .border_color(gpui_kit::transparent_black())
+                .text_size(px(10.5))
+                .font_weight(FontWeight::EXTRA_BOLD)
+                .aria_label(label.clone())
+                .focus_visible(move |el| el.border_color(ring))
+                // Focusable, and Enter or Space clicks it.
+                .tab_index(0)
+                .tooltip({
+                    let label = label.clone();
+                    move |window, cx| Tooltip::new(label.clone()).build(window, cx)
+                })
+                .map(|el| match on {
+                    true => el.bg(fill).border_color(border).text_color(selected).child(
+                        div()
+                            .absolute()
+                            .left(px(-7.))
+                            .top(px(7.))
+                            .bottom(px(7.))
+                            .w(px(2.))
+                            .rounded(px(2.))
+                            .bg(aurora::lilas()),
+                    ),
+                    false => el.text_color(idle).hover(move |el| el.bg(hover)),
+                })
+        };
+        let icon = |name: Lucide| Icon::new(name).size(px(17.));
+        let tab_item = |tab: SidebarTab, id: ElementId, label: SharedString, body: AnyElement| {
+            let on = self.sidebar_tab == tab;
+            item(id, label, on)
+                .role(Role::Tab)
+                .aria_selected(on)
+                .child(body)
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    this.sidebar_tab = tab;
+                    if tab == SidebarTab::Search {
+                        let focus = this.search.read(cx).query_focus(cx);
+                        window.focus(&focus, cx);
+                    }
+                    // A double click on Sessions starts a new session.
+                    if tab == SidebarTab::Sessions && event.click_count() > 1 {
+                        this.new_session(&NewSession, window, cx);
+                    }
+                    cx.notify();
+                }))
+                // Registers the id so tests can find and click it (a Button does it itself).
+                .test_support()
+        };
+        let built_in = TABS
+            .into_iter()
+            // On the right, Agents has no icon.
+            .filter(|(tab, ..)| !(self.agents_right && *tab == SidebarTab::Agents))
+            .map(|(tab, id, label, name)| {
+                let mut el = tab_item(tab, id.into(), label.into(), icon(name).into_any_element());
+                if tab == SidebarTab::Sessions && needs_you > 0 {
+                    let count = needs_you.to_string();
+                    el = el.child(
+                        div()
+                            .id("sessions-badge")
+                            .aria_label(count.clone())
+                            .absolute()
+                            .top(px(-3.))
+                            .right(px(-4.))
+                            .min_w(px(14.))
+                            .h(px(14.))
+                            .px(px(3.))
+                            .rounded(px(7.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(theme.warning)
+                            .text_color(aurora::noite())
+                            .text_size(px(9.5))
+                            .font_weight(FontWeight::EXTRA_BOLD)
+                            .child(count)
+                            .test_support(),
+                    );
+                }
+                el
+            });
+        let extension = panels.iter().enumerate().map(|(ix, p)| {
+            let title = clamp(&p.title, PANEL_TITLE_CHARS);
+            let mark = div()
+                .size(px(20.))
+                .rounded(px(6.))
+                .border(px(1.5))
+                .border_color(
+                    if self.sidebar_tab == SidebarTab::Panel(p.view.entity_id()) {
+                        selected
+                    } else {
+                        idle
+                    },
+                )
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(9.))
+                .child(initials(&title));
+            tab_item(
+                SidebarTab::Panel(p.view.entity_id()),
+                ("tab-panel", ix).into(),
+                title.into(),
+                mark.into_any_element(),
+            )
+        });
+        let foot = |id: &'static str, label: &'static str, name: Lucide, open: Option<Section>| {
+            item(id.into(), label.into(), false)
+                .role(Role::Button)
+                .child(icon(name))
+                .on_click(
+                    cx.listener(move |this, _: &ClickEvent, window, cx| match open {
+                        Some(section) => this.open_settings(section, None, window, cx),
+                        None => {
+                            this.show_extensions(window, cx);
+                        }
+                    }),
+                )
+                .test_support()
+        };
+        v_flex()
+            .debug_selector(|| "rail".into())
+            .flex_none()
+            .w(px(44.))
+            .h_full()
+            .items_center()
+            .gap(px(6.))
+            .py(px(8.))
+            .border_r_1()
+            .border_color(theme.border)
+            .children(built_in)
+            .children(extension)
+            .child(div().flex_1())
+            .child(foot(
+                "sidebar-extensions",
+                "Extensions",
+                Lucide::Puzzle,
+                None,
+            ))
+            .child(foot(
+                "topbar-settings",
+                "Settings",
+                Lucide::Settings,
+                Some(Section::Ai),
+            ))
     }
 
     /// The open sessions outside any group, then each group under its header. A row keeps its
@@ -307,6 +427,8 @@ impl Workspace {
                     .test_support(),
             )
             .children(groups)
+            // Until the History section replaces it, today's list sits under the open ones.
+            .child(div().flex_1().min_h_0().child(self.render_history(cx)))
     }
 
     /// The group holding session `id`.
@@ -882,6 +1004,21 @@ impl Workspace {
     }
 }
 
+/// A panel's title row (the mockup's `.ptitle`); the caller appends its buttons. GPUI has no
+/// letter spacing, so the mockup's 0.07 em tracking is left out.
+pub(crate) fn panel_title(label: &str, cx: &App) -> Div {
+    h_flex()
+        .items_center()
+        .gap_1()
+        .px(px(6.))
+        .pt(px(4.))
+        .pb(px(6.))
+        .text_size(px(11.))
+        .font_weight(FontWeight::BOLD)
+        .text_color(cx.theme().muted_foreground)
+        .child(div().flex_1().child(label.to_uppercase()))
+}
+
 fn heading(text: &str, cx: &App) -> Div {
     let theme = cx.theme();
     let color = if theme.is_dark() {
@@ -959,13 +1096,13 @@ mod tests {
 
     use std::time::Duration;
 
-    use super::{Detail, TurnState, detail, short_age, status_color};
+    use super::{Detail, TurnState, detail, initials, short_age, status_color};
     use crate::agents::RegistryEvent;
     use crate::chat::ChatModel;
     use crate::workspace::Workspace;
     use crate::workspace::tests::{
         click, drag_to_pane, fake_settings, history_settings, launch, load_history, menu_item,
-        open, open_at, question, start_now,
+        open, open_at, question, start_now, wait_until,
     };
     use crate::{app, aurora};
     use wai_agent::{ChoiceKind, PermissionChoice, PermissionRequest};
@@ -1024,10 +1161,9 @@ mod tests {
         });
     }
 
-    /// The History tab holds the history rows and the "All projects" switch; the Sessions tab
-    /// lists only the open sessions.
+    /// History is no tab: its rows and the "All projects" switch sit under the open list.
     #[gpui_kit::test]
-    fn history_has_its_own_tab(cx: &mut TestAppContext) {
+    fn history_is_a_section_of_sessions(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, history_settings(3));
         load_history(&workspace, 3, cx);
@@ -1037,15 +1173,51 @@ mod tests {
                 window.try_find(id).is_some()
             })
         };
-        let row = || ElementId::from(("history-side", 0usize));
-        assert!(!shown(row(), cx), "no history rows");
-        assert!(!shown("all-projects".into(), cx));
-        let tab = cx.update(|window, _| window.find("tab-history"));
-        assert_eq!(tab.label(), Some("History"));
-
-        cx.update(|window, cx| window.click("tab-history", cx));
-        assert!(shown(row(), cx));
+        assert!(!shown("tab-history".into(), cx));
         assert!(shown("all-projects".into(), cx));
+        assert!(shown(("history-side", 0usize).into(), cx));
+        press("tab-files", cx);
+        assert!(!shown("all-projects".into(), cx));
+    }
+
+    #[gpui_kit::test]
+    fn initials_by_characters(_cx: &mut TestAppContext) {
+        let words = ["My cards", "Routines", "Rotinas", "日本語", "", "a b c"];
+        let got = words.map(initials);
+        assert_eq!(got, ["MC", "RO", "RO", "日本", "?", "AB"]);
+    }
+
+    /// The Sessions icon's badge counts the sessions that wait for the user.
+    #[gpui_kit::test]
+    fn rail_badge_counts_needs_you(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--ask-permission"));
+        assert_eq!(label("sessions-badge", cx), None);
+        start_now(&workspace, cx);
+        let session = workspace.read_with(cx, |w, _| w.sessions[0].clone());
+        assert_eq!(label("sessions-badge", cx), None);
+        cx.simulate_input("edit");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "needs you", |cx| {
+            session.read_with(cx, |s, _| s.model.state == TurnState::NeedsYou)
+        });
+        cx.run_until_parked();
+        assert_eq!(label("sessions-badge", cx).as_deref(), Some("1"));
+    }
+
+    /// The rail's foot opens Settings, on Extensions for the puzzle.
+    #[gpui_kit::test]
+    fn rail_foot_opens_settings(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, Settings::default());
+        let shown = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, _| w.settings_view().is_some())
+        };
+        for id in ["topbar-settings", "sidebar-extensions"] {
+            assert!(!shown(cx));
+            press(id, cx);
+            assert!(shown(cx), "{id}");
+            cx.simulate_keystrokes("escape");
+        }
     }
 
     #[gpui_kit::test]
@@ -1055,7 +1227,6 @@ mod tests {
             ..Default::default()
         };
         let (_workspace, cx) = open(cx, settings);
-        cx.update(|window, cx| window.click("tab-history", cx));
         let hint = cx.update(|window, cx| {
             window.render_frame(cx);
             window.try_find("history-hint")
@@ -1359,7 +1530,6 @@ mod tests {
             [named("A", &[]), named("B", &[&ids[1]])]
         );
 
-        press("tab-history", cx);
         assert!(label(("history", 0usize), cx).is_some());
         assert!(
             label(("history-fork", 0usize), cx).is_none(),

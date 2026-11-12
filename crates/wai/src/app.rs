@@ -11,7 +11,18 @@ use wai_settings::{Settings, Template, ThemeChoice, unapproved};
 use crate::settings_view::Section;
 use crate::workspace::{CHOOSE_AI, Workspace};
 
-gpui_kit::assets::icon_assets!(ExtraIcons, [Monitor, GitFork, GitBranch, Shield]);
+gpui_kit::assets::icon_assets!(
+    ExtraIcons,
+    [
+        Monitor,
+        GitFork,
+        GitBranch,
+        Shield,
+        MessageSquare,
+        Sparkles,
+        Puzzle
+    ]
+);
 
 /// The component icons plus the few wai draws itself (the draft's Local and worktree chips).
 struct AppAssets;

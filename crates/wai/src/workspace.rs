@@ -2765,6 +2765,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let top_bar = self.render_top_bar(window, cx);
         let sidebar = self.render_sidebar(cx);
+        let rail = self.render_rail(cx);
         let theme = cx.theme();
         let split = self.panes.len() > 1;
         let dragging = cx.has_active_drag();
@@ -2842,44 +2843,46 @@ impl Render for Workspace {
             .children(aurora::backdrop(cx))
             .child(
                 v_flex().size_full().child(top_bar).child(
-                    div().flex_1().min_h_0().p_1().child(
-                        h_resizable("workspace")
-                            .with_handle_appearance(aurora::handle())
-                            .child(
-                                resizable_panel()
-                                    .size(px(SIDEBAR_WIDTH))
-                                    .fixed()
-                                    .child(sidebar),
-                            )
-                            .child(
-                                resizable_panel().child(
-                                    v_resizable("center")
-                                        .with_handle_appearance(aurora::handle())
-                                        .child(
-                                            resizable_panel().child(
-                                                // Keyed by count: each split starts with equal
-                                                // widths.
-                                                h_resizable(("panes", self.panes.len()))
-                                                    .with_handle_appearance(aurora::handle())
-                                                    .children(panes),
+                    h_flex().flex_1().min_h_0().child(rail).child(
+                        div().flex_1().min_w_0().h_full().p_1().child(
+                            h_resizable("workspace")
+                                .with_handle_appearance(aurora::handle())
+                                .child(
+                                    resizable_panel()
+                                        .size(px(SIDEBAR_WIDTH))
+                                        .fixed()
+                                        .child(sidebar),
+                                )
+                                .child(
+                                    resizable_panel().child(
+                                        v_resizable("center")
+                                            .with_handle_appearance(aurora::handle())
+                                            .child(
+                                                resizable_panel().child(
+                                                    // Keyed by count: each split starts with equal
+                                                    // widths.
+                                                    h_resizable(("panes", self.panes.len()))
+                                                        .with_handle_appearance(aurora::handle())
+                                                        .children(panes),
+                                                ),
+                                            )
+                                            .child(
+                                                resizable_panel()
+                                                    .size(px(TERMINAL_HEIGHT))
+                                                    .fixed()
+                                                    .visible(self.terminal_visible)
+                                                    .child(terminal),
                                             ),
-                                        )
-                                        .child(
-                                            resizable_panel()
-                                                .size(px(TERMINAL_HEIGHT))
-                                                .fixed()
-                                                .visible(self.terminal_visible)
-                                                .child(terminal),
-                                        ),
+                                    ),
+                                )
+                                .child(
+                                    resizable_panel()
+                                        .size(px(SIDEBAR_WIDTH))
+                                        .fixed()
+                                        .visible(agents.is_some())
+                                        .child(div().size_full().children(agents)),
                                 ),
-                            )
-                            .child(
-                                resizable_panel()
-                                    .size(px(SIDEBAR_WIDTH))
-                                    .fixed()
-                                    .visible(agents.is_some())
-                                    .child(div().size_full().children(agents)),
-                            ),
+                        ),
                     ),
                 ),
             )
@@ -3735,7 +3738,6 @@ pub(crate) mod tests {
         let rows = load_history(&workspace, 2, cx);
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
         let first = pane_session(&workspace, 0, cx);
-        cx.update(|window, cx| window.click("tab-history", cx));
 
         let from = center_of(("history", 1usize), cx);
         drag_to_pane(from, 0, 0.5, cx);
@@ -3935,7 +3937,6 @@ pub(crate) mod tests {
         });
         assert_eq!(history_rows(&workspace, cx), 0);
 
-        cx.update(|window, cx| window.click("tab-history", cx));
         cx.update(|window, cx| window.click("all-projects", cx));
         assert_eq!(history_rows(&workspace, cx), 25);
     }
@@ -3991,7 +3992,6 @@ pub(crate) mod tests {
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
 
         // A history row's menu offers Fork, and so does an open session's row.
-        cx.update(|window, cx| window.click("tab-history", cx));
         menu_item(("history", 1usize), "Fork", cx);
         wait_until(cx, "the fork", |cx| {
             workspace.read_with(cx, |w, _| w.panes.len() == 2)
@@ -4042,7 +4042,6 @@ pub(crate) mod tests {
         let (workspace, cx) = open(cx, fake_settings(&flags));
         load_history(&workspace, 2, cx);
 
-        cx.update(|window, cx| window.click("tab-history", cx));
         menu_item(("history", 0usize), "Fork", cx);
         wait_until(cx, "the notice", |cx| {
             cx.update(|window, cx| !window.notifications(cx).is_empty())

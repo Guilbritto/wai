@@ -8,9 +8,9 @@ use gpui_kit::*;
 use wai_agent::{PlanEntry, SubagentState};
 
 use crate::app::ToggleAgents;
-use crate::aurora::{self, DISPLAY_FONT};
+use crate::aurora;
 use crate::chat::{ChatSession, TurnState};
-use crate::sidebar::SidebarTab;
+use crate::sidebar::{SidebarTab, panel_title};
 use crate::workspace::{Dragged, DraggedSession, Workspace};
 
 /// A card was clicked: show this session in the focused pane.
@@ -259,17 +259,9 @@ impl Workspace {
                 .tooltip(tip)
                 .accessibility_label(tip)
         };
-        let title = div()
-            .flex_1()
-            .font_family(DISPLAY_FONT)
-            .text_size(px(14.))
-            .font_weight(FontWeight::BOLD)
-            .child("Agents");
         let header = bar
-            .px_3()
-            .py_1()
             .gap_1()
-            .child(title)
+            .child(panel_title("Agents", cx).flex_1())
             .child(
                 button("agents-move", icon, tip)
                     .on_click(cx.listener(|this, _, _, cx| this.move_agents(cx))),

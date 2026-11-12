@@ -14,7 +14,6 @@ use wai_ext::panel::clamp;
 use crate::app::{NewSession, OpenPalette, ToggleAgents, ToggleTerminal};
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::chat::TurnState;
-use crate::settings_view::Section;
 use crate::workspace::{Workspace, folder_name};
 
 pub(crate) static BRAND: LazyLock<Arc<Image>> = LazyLock::new(|| {
@@ -122,15 +121,6 @@ impl Workspace {
             .child(project)
             .child(status);
 
-        let extensions = Button::new("sidebar-extensions")
-            .ghost()
-            .small()
-            .icon(IconName::LayoutDashboard)
-            .tooltip("Extensions")
-            .accessibility_label("Extensions")
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.show_extensions(window, cx);
-            }));
         let palette = Button::new("topbar-palette")
             .ghost()
             .small()
@@ -140,17 +130,6 @@ impl Workspace {
             .on_click(
                 cx.listener(|this, _, window, cx| this.open_palette(&OpenPalette, window, cx)),
             );
-        let settings =
-            Button::new("topbar-settings")
-                .ghost()
-                .small()
-                .icon(IconName::Settings)
-                .tooltip("Settings")
-                .accessibility_label("Settings")
-                .selected(self.settings_view().is_some())
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_settings(Section::Ai, None, window, cx)
-                }));
         let terminal =
             Button::new("topbar-terminal")
                 .ghost()
@@ -198,9 +177,7 @@ impl Workspace {
             .flex_none()
             .gap_1()
             .children(self.templates_menu(cx))
-            .child(extensions)
             .child(palette)
-            .child(settings)
             .child(terminal)
             .children(agents)
             .child(new);
