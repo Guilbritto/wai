@@ -6050,4 +6050,23 @@ pub(crate) mod tests {
             assert_eq!(w.update, crate::update::UpdateStatus::Idle);
         });
     }
+
+    #[gpui_kit::test]
+    fn no_newer_adapter_once_the_pin_catches_up(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.agents.insert(
+            "npx".into(),
+            AgentConfig {
+                command: "npx -y @a/b@1.2.0".into(),
+            },
+        );
+        let (workspace, cx) = open(cx, settings);
+        let registry = workspace.read_with(cx, |w, _| w.registry.clone());
+        registry.update(cx, |r, _| r.set_latest("@a/b".into(), Some("1.1.0".into())));
+        registry.read_with(cx, |r, _| assert_eq!(r.newer_adapter("npx"), None));
+        registry.update(cx, |r, _| r.set_latest("@a/b".into(), Some("1.3.0".into())));
+        registry.read_with(cx, |r, _| {
+            assert_eq!(r.newer_adapter("npx"), Some("1.3.0".into()))
+        });
+    }
 }

@@ -121,7 +121,8 @@ const SECRET_KEYS: [&str; 5] = ["key", "token", "secret", "password", "authoriza
 
 fn is_secret_key(key: &str) -> bool {
     let key = key.trim_matches(|c: char| c == '"' || c == '\'');
-    SECRET_KEYS.iter().any(|k| key.eq_ignore_ascii_case(k))
+    let key = key.to_ascii_lowercase();
+    SECRET_KEYS.iter().any(|k| key.contains(k))
 }
 
 fn is_long_secret(word: &str) -> bool {
@@ -159,27 +160,33 @@ pub fn scrub(text: &str, home: Option<&Path>) -> String {
     for line in text.split('\n') {
         let mut mask_next = false;
         let words: Vec<String> = line
+            .replace('\t', " ")
             .split(' ')
             .map(|word| {
+                let bearer = word.eq_ignore_ascii_case("bearer");
                 if std::mem::take(&mut mask_next) && !word.is_empty() {
+                    if bearer {
+                        mask_next = true; // `Authorization: Bearer abc`
+                        return word.to_string();
+                    }
                     return "***".to_string();
                 }
-                if word.eq_ignore_ascii_case("bearer") {
+                if bearer {
                     mask_next = true;
                     return word.to_string();
                 }
-                if let Some(i) = word.find(['=', ':']) {
-                    let (key, rest) = word.split_at(i);
-                    let key = key.trim_start_matches('-');
-                    if is_secret_key(key) {
-                        if rest.len() == 1 {
+                for (i, _) in word.match_indices(['=', ':']) {
+                    // the key is what follows the last `?`, `&` or `/` (a URL query)
+                    let key = word[..i].rsplit(['?', '&', '/']).next().unwrap_or("");
+                    if is_secret_key(key.trim_start_matches('-')) {
+                        if i + 1 == word.len() {
                             mask_next = true; // `token: abc`
                             return word.to_string();
                         }
-                        return format!("{}{}***", &word[..i], &rest[..1]);
+                        return format!("{}***", &word[..=i]);
                     }
                 }
-                if is_long_secret(word) {
+                if is_long_secret(word.trim_matches(|c| "\"'()[],;".contains(c))) {
                     return "***".to_string();
                 }
                 word.to_string()
@@ -303,6 +310,18 @@ mod tests {
         assert_eq!(scrub("Bearer abc123", None), "Bearer ***");
         assert_eq!(scrub("token=abcdef", None), "token=***");
         assert_eq!(scrub("Password: hunter2", None), "Password: ***");
+        assert_eq!(
+            scrub("Authorization: Bearer abc123", None),
+            "Authorization: Bearer ***"
+        );
+        assert_eq!(scrub("--api-key=sk-abc", None), "--api-key=***");
+        assert_eq!(scrub("ACCESS_TOKEN=x", None), "ACCESS_TOKEN=***");
+        assert_eq!(
+            scrub("https://h/p?access_token=abc", None),
+            "https://h/p?access_token=***"
+        );
+        let quoted = format!("(\"{}\")", "a".repeat(40));
+        assert_eq!(scrub(&quoted, None), "***");
         let long = "a".repeat(40);
         assert_eq!(scrub(&format!("k {long} z"), None), "k *** z");
         let plain = "ordinary words in /usr/local/lib/x/y";

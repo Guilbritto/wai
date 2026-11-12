@@ -30,7 +30,9 @@ pub fn rotate(path: &Path, max: u64) -> std::io::Result<()> {
 pub fn init(dir: &Path) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        let path = redirect(dir).ok()?;
+        let path = redirect(dir)
+            .inspect_err(|e| eprintln!("wai: no log file: {e}"))
+            .ok()?;
         PATH.set(path.clone()).ok();
         Some(path)
     }

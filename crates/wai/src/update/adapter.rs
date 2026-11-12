@@ -16,6 +16,11 @@ pub fn pinned(command: &str) -> Option<(String, String)> {
     })
 }
 
+/// Whether `latest` is newer than `current` (the update module's comparison).
+pub fn is_newer(current: &str, latest: &str) -> bool {
+    newer(current, latest)
+}
+
 fn valid_pkg(pkg: &str) -> bool {
     let name = pkg.strip_prefix('@').unwrap_or(pkg);
     !name.is_empty()

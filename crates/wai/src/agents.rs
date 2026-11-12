@@ -208,8 +208,9 @@ impl AgentRegistry {
 
     /// The newer version of `id`'s pinned adapter, when one is known.
     pub fn newer_adapter(&self, id: &str) -> Option<String> {
-        let (pkg, _) = crate::update::adapter::pinned(self.command(id)?)?;
-        self.latest.get(&pkg).cloned()
+        let (pkg, pinned) = crate::update::adapter::pinned(self.command(id)?)?;
+        let latest = self.latest.get(&pkg)?;
+        crate::update::adapter::is_newer(&pinned, latest).then(|| latest.clone())
     }
 
     pub fn status(&self, name: &str) -> Option<&AgentStatus> {
