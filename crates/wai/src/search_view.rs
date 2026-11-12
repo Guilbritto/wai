@@ -256,12 +256,16 @@ impl SearchView {
                         h_flex()
                             .flex_1()
                             .min_w_0()
+                            .overflow_hidden()
                             .gap_2()
                             .child(
                                 div()
-                                    .flex_none()
+                                    .id(("search-name", ix))
+                                    .min_w_0()
+                                    .truncate()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(name),
+                                    .child(name)
+                                    .test_support(),
                             )
                             .children(dir.map(|dir| {
                                 div()
@@ -277,13 +281,15 @@ impl SearchView {
                     )
                     .child(
                         div()
+                            .id(("search-count", ix))
                             .flex_none()
                             .px_1p5()
                             .rounded_full()
                             .bg(muted.opacity(0.15))
                             .text_size(px(10.))
                             .text_color(muted)
-                            .child(count.to_string()),
+                            .child(count.to_string())
+                            .test_support(),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| this.fold(ix, cx)))
                     .test_support()
@@ -575,6 +581,33 @@ mod tests {
         });
         assert!(folder.size.width > px(0.));
         assert!(folder.top() >= header.top() && folder.bottom() <= header.bottom());
+    }
+
+    #[gpui_kit::test]
+    fn long_names_keep_the_count_in_the_row(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the search runs on a real thread
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonical(dir.path());
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("x".repeat(240) + ".txt"), "needle\n").unwrap();
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.set_project(root.clone(), window, cx))
+        });
+        cx.run_until_parked();
+        click("tab-search", cx);
+        cx.update(|window, cx| window.input("needle", cx));
+        wait_until(cx, "the match", |cx| match_count(&workspace, cx) == 1);
+        let (name, count) = cx.update(|window, cx| {
+            window.render_frame(cx);
+            (
+                window.find(("search-name", 0usize)).bounds(),
+                window.find(("search-count", 0usize)).bounds(),
+            )
+        });
+        // The long name gave way: it ends before the count starts.
+        assert!(name.size.width > px(0.));
+        assert!(name.right() <= count.left(), "{name:?} {count:?}");
     }
 
     #[gpui_kit::test]
