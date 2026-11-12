@@ -196,7 +196,9 @@ impl Workspace {
                         None => Vec::new(),
                     };
                     let found = match &claude {
-                        Some((home, quiet, _)) => crate::elsewhere::open_elsewhere(home, &ids, quiet),
+                        Some((home, quiet, _)) => {
+                            crate::elsewhere::open_elsewhere(home, &ids, quiet)
+                        }
                         None => Default::default(),
                     };
                     let rows = sessions.into_iter().map(|s| (canonical(&s.cwd), s));
@@ -1261,7 +1263,9 @@ impl Workspace {
                                 .flex_none()
                                 .text_color(amber)
                                 .aria_label("Open elsewhere")
-                                .tooltip(|window, cx| Tooltip::new("Open elsewhere").build(window, cx))
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Open elsewhere").build(window, cx)
+                                })
                                 .child(Icon::new(Lucide::Monitor).size(px(11.)))
                                 .test_support(),
                         )
@@ -1273,12 +1277,10 @@ impl Workspace {
                             .text_color(faint)
                             .child(date)
                     }))
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.resume(&open, false, window, cx)
-                        }),
-                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.resume(&open, false, window, cx)
+                    }))
                     .on_drag(dragged, DraggedSession::preview)
                     // Registers the id so tests can find and drag it.
                     .test_support(),

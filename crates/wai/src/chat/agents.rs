@@ -4,15 +4,15 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Enter, MoveDown, MoveUp};
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::SubagentState;
 
-use super::model::{elapsed, ChatItem, Said, Subagent};
+use super::model::{ChatItem, Said, Subagent, elapsed};
 use super::render::{output_box, tokens};
-use super::view::{sync_markdown, ChatSession};
-use crate::agents_view::{plan_row, MAX_PLAN_ROWS};
+use super::view::{ChatSession, sync_markdown};
+use crate::agents_view::{MAX_PLAN_ROWS, plan_row};
 use crate::aurora;
 
 /// A row's height and the gap between rows: the list shows `ROWS` rows and scrolls past them.
@@ -494,17 +494,14 @@ impl ChatSession {
             true => panel
                 .border_color(theme.list_active_border)
                 .bg(aurora::noite_2().alpha(0.95))
-                .shadow(vec![BoxShadow::new(
-                    px(0.),
-                    px(-10.),
-                    hsla(0., 0., 0., 0.5),
-                )
-                .blur_radius(px(20.))]),
+                .shadow(vec![
+                    BoxShadow::new(px(0.), px(-10.), hsla(0., 0., 0., 0.5)).blur_radius(px(20.)),
+                ]),
             false => panel
                 .border_color(theme.list_active_border)
                 .bg(theme.background.opacity(0.95))
                 .shadow(vec![
-                    BoxShadow::new(px(0.), px(-6.), hsla(0., 0., 0., 0.2)).blur_radius(px(12.))
+                    BoxShadow::new(px(0.), px(-6.), hsla(0., 0., 0., 0.2)).blur_radius(px(12.)),
                 ]),
         };
         // 46 % of the transcript above the waiting cards, shrunk to the room left there when a

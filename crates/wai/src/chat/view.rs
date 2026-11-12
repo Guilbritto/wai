@@ -1638,11 +1638,7 @@ mod tests {
         });
     }
 
-    fn silent_subagent(
-        session: &Entity<ChatSession>,
-        reply: bool,
-        cx: &mut VisualTestContext,
-    ) {
+    fn silent_subagent(session: &Entity<ChatSession>, reply: bool, cx: &mut VisualTestContext) {
         session.update(cx, |s, cx| {
             let patch = SubagentPatch {
                 id: "c".into(),
@@ -1653,7 +1649,13 @@ mod tests {
             s.handle_event(&SessionEvent::Subagent(patch), cx);
             if reply {
                 let text = "found it".to_string();
-                s.handle_event(&SessionEvent::SubagentReply { id: "c".into(), text }, cx);
+                s.handle_event(
+                    &SessionEvent::SubagentReply {
+                        id: "c".into(),
+                        text,
+                    },
+                    cx,
+                );
             }
         });
     }
