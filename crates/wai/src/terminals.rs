@@ -1,11 +1,10 @@
-use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{IconName, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::*;
 
-use crate::aurora;
 use crate::app::{CloseTerminal, NewTerminal, NextTerminal, PrevTerminal, ToggleTerminal};
-use crate::terminal_view::{TerminalChanged, TerminalView};
+use crate::terminal_view::{TerminalChanged, TerminalView, color};
+use wai_terminal::DEFAULT_FG;
 use crate::workspace::Workspace;
 
 pub(crate) const MAX_TERMINALS: usize = 8;
@@ -15,6 +14,19 @@ pub(crate) struct TerminalTab {
     pub(crate) view: Entity<TerminalView>,
     pub(crate) number: u32,
     _changed: Subscription,
+}
+
+/// A small clickable icon in the terminal's foreground colour.
+fn strip_icon(id: impl Into<ElementId>, icon: IconName, fg: Hsla) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .p_1()
+        .rounded(px(6.))
+        .cursor_pointer()
+        .text_color(fg.alpha(0.7))
+        .hover(|el| el.text_color(fg).bg(fg.alpha(0.1)))
+        .child(Icon::new(icon).xsmall())
 }
 
 /// The tab's text: the shell's title without control characters, cut to 24 characters, else
@@ -41,9 +53,12 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        // The card is navy in both themes, so the strip uses the terminal's own colours.
+        let fg = color(DEFAULT_FG);
         let tabs = self.terminals.iter().enumerate().map(|(ix, tab)| {
             let label = tab_label(tab.number, tab.view.read(cx).title());
-            aurora::tab(ix == self.active_terminal, cx)
+            let active = ix == self.active_terminal;
+            let mut chip = h_flex()
                 .id(("terminal-tab", ix))
                 .role(Role::Tab)
                 .aria_label(label.clone())
@@ -53,20 +68,24 @@ impl Workspace {
                 .gap_1()
                 .rounded(px(8.))
                 .text_xs()
+                .cursor_pointer()
+                .text_color(if active { fg } else { fg.alpha(0.6) })
+                .hover(|el| el.bg(fg.alpha(0.08)))
                 .child(div().whitespace_nowrap().child(label))
                 .child(
-                    Button::new(("terminal-tab-close", ix))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
+                    strip_icon(("terminal-tab-close", ix), IconName::Close, fg)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             this.close_terminal(ix, window, cx);
-                        })),
+                        }))
+                        .test_support(),
                 )
-                .on_click(cx.listener(move |this, _, window, cx| this.select_terminal(ix, window, cx)))
-                // Registers the id so tests can find and click it (a Button does it itself).
-                .test_support()
+                .on_click(cx.listener(move |this, _, window, cx| this.select_terminal(ix, window, cx)));
+            if active {
+                chip = chip.bg(fg.alpha(0.14));
+            }
+            // Registers the id so tests can find and click it (a Button does it itself).
+            chip.test_support()
         });
         v_flex()
             .size_full()
@@ -78,13 +97,11 @@ impl Workspace {
                     .overflow_x_hidden()
                     .children(tabs)
                     .child(
-                        Button::new("new-terminal")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Plus)
+                        strip_icon("new-terminal", IconName::Plus, fg)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_terminal(window, cx);
-                            })),
+                            }))
+                            .test_support(),
                     ),
             )
             .child(
