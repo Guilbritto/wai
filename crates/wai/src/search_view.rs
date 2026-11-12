@@ -253,14 +253,27 @@ impl SearchView {
                             .child(text),
                     )
                     .child(
-                        div().flex_1().min_w_0().truncate().child(
-                            div().font_weight(FontWeight::SEMIBOLD).child(name).child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .child(
                                 div()
+                                    .flex_none()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(name),
+                            )
+                            .children(dir.map(|dir| {
+                                div()
+                                    .id(("search-dir", ix))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
                                     .text_xs()
                                     .text_color(muted)
-                                    .children(dir.map(|dir| format!("  {dir}"))),
-                            ),
-                        ),
+                                    .child(dir.to_string())
+                                    .test_support()
+                            })),
                     )
                     .child(
                         div()
@@ -456,13 +469,14 @@ mod tests {
     use std::fs;
 
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{Entity, TestAppContext, VisualTestContext};
+    use gpui_kit::{Entity, TestAppContext, VisualTestContext, px};
     use wai_settings::Settings;
 
     use super::{highlights, summary};
     use crate::sidebar::canonical;
     use crate::workspace::tests::{open, wait_until};
     use crate::workspace::{Pane, Workspace};
+    use wai_project::Match;
 
     #[test]
     fn status_counts_in_singular_and_plural() {
@@ -490,7 +504,8 @@ mod tests {
         let root = canonical(dir.path());
         fs::create_dir(root.join(".git")).unwrap();
         fs::write(root.join("a.txt"), "one\nneedle\n").unwrap();
-        fs::write(root.join("b.txt"), "needle\n").unwrap();
+        fs::create_dir(root.join("sub")).unwrap();
+        fs::write(root.join("sub").join("b.txt"), "needle\n").unwrap();
         let (workspace, cx) = open(cx, Settings::default());
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| w.set_project(root.clone(), window, cx))
@@ -520,6 +535,46 @@ mod tests {
             match_count(&workspace, cx) == 2
         });
         assert_eq!(shown(&workspace, cx), 4);
+    }
+
+    #[gpui_kit::test]
+    fn fold_survives_new_batches(cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = two_files(cx);
+        let path = canonical(dir.path()).join("sub").join("b.txt");
+        click(("search-file", 2usize), cx);
+        assert_eq!(shown(&workspace, cx), 3);
+        // More matches of the same query arrive for the folded file.
+        cx.update(|_, cx| {
+            workspace.update(cx, |w, cx| {
+                w.search.update(cx, |s, cx| {
+                    let m = Match {
+                        path,
+                        line: 9,
+                        text: "needle again".into(),
+                    };
+                    s.push(vec![m], cx)
+                })
+            })
+        });
+        assert_eq!(match_count(&workspace, cx), 3);
+        assert_eq!(shown(&workspace, cx), 3);
+        click("search-case", cx);
+        wait_until(cx, "the new search", |cx| match_count(&workspace, cx) == 2);
+        assert_eq!(shown(&workspace, cx), 4);
+    }
+
+    #[gpui_kit::test]
+    fn folder_shares_the_header_line(cx: &mut TestAppContext) {
+        let (_workspace, cx, _dir) = two_files(cx);
+        let (header, folder) = cx.update(|window, cx| {
+            window.render_frame(cx);
+            (
+                window.find(("search-file", 2usize)).bounds(),
+                window.find(("search-dir", 2usize)).bounds(),
+            )
+        });
+        assert!(folder.size.width > px(0.));
+        assert!(folder.top() >= header.top() && folder.bottom() <= header.bottom());
     }
 
     #[gpui_kit::test]
