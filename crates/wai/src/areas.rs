@@ -157,13 +157,23 @@ impl Workspace {
     ) -> usize {
         self.hide_area(cx);
         let area = self.work_areas[ix].clone();
-        let open: Vec<Entity<ChatSession>> = area
+        let mut open: Vec<Entity<ChatSession>> = area
             .panes
             .iter()
             .filter_map(|id| self.sessions.iter().find(|s| s.read(cx).id == *id))
             .take(MAX_PANES)
             .cloned()
             .collect();
+        // The editor pane takes the last slot (`replace_panes`): keep the focus on screen.
+        let has_editor = self.panes.iter().any(|p| matches!(p, Pane::Editor(_)));
+        if let Some(ix) = focus
+            .filter(|_| has_editor)
+            .and_then(|f| open.iter().position(|s| s == f))
+        {
+            if ix >= MAX_PANES - 1 {
+                open.swap(ix, MAX_PANES - 2);
+            }
+        }
         let main = area
             .panes
             .get(area.focused)
@@ -536,6 +546,24 @@ mod tests {
         want.push(None);
         assert_eq!(on_screen(&w, cx), want);
         kept(cx);
+    }
+
+    #[gpui_kit::test]
+    fn the_focus_stays_on_screen_beside_the_editor_pane(cx: &mut TestAppContext) {
+        let (w, cx, s) = with_areas(4, &[&[0, 1, 2, 3]], cx);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "a").unwrap();
+        show_area(&w, 0, cx);
+        cx.update(|window, cx| w.update(cx, |w, cx| w.open_file(path, None, window, cx)));
+        cx.run_until_parked();
+        let last = s[3].clone();
+        cx.update(|window, cx| w.update(cx, |w, cx| w.show_area(0, Some(&last), window, cx)));
+        cx.run_until_parked();
+        w.read_with(cx, |w, _| {
+            assert_eq!(w.panes[w.focused_pane].session(), Some(&s[3]));
+        });
+        assert_eq!(on_screen(&w, cx).len(), crate::workspace::MAX_PANES);
     }
 
     #[gpui_kit::test]
