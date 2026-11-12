@@ -231,6 +231,8 @@ pub struct DraftView {
     pub starting: Option<Entity<ChatSession>>,
     pub(super) input: Entity<TextareaState>,
     pub(crate) attachments: Vec<Attachment>,
+    /// A worktree is being created for this draft: the next send waits for it to be recorded.
+    pub(crate) creating: bool,
     pub(crate) data: DraftData,
     /// Agent id -> its program is on PATH; empty until the check ends.
     installed: HashMap<String, bool>,
@@ -347,6 +349,7 @@ impl DraftView {
             starting: None,
             input,
             attachments: Vec::new(),
+            creating: false,
             data,
             installed: HashMap::new(),
             show_install: false,
@@ -660,6 +663,51 @@ impl DraftView {
         });
     }
 
+    /// The branch menu's rows for `repo`.
+    fn branch_picks(&self, repo: &Repo) -> Vec<Pick> {
+        let worktree = self.worktree;
+        let pick = |branch: &str| Pick {
+            chip: worktree.then(|| format!("from {branch}").into()),
+            ..Pick::new(branch, branch.to_string())
+        };
+        let mut items = Vec::new();
+        if !worktree {
+            let title = repo
+                .current
+                .clone()
+                .unwrap_or_else(|| "Detached HEAD".into());
+            let detail = match repo.dirty {
+                0 => "Current".to_string(),
+                1 => "Current · 1 uncommitted file".to_string(),
+                n => format!("Current · {n} uncommitted files"),
+            };
+            items.push(Pick {
+                detail: Some(detail.into()),
+                count: (repo.dirty > 0).then_some(repo.dirty),
+                ..Pick::new(CURRENT, title)
+            });
+        }
+        if worktree || repo.current.as_ref() != Some(&repo.default) {
+            items.push(Pick::section("Default branch"));
+            items.push(pick(&repo.default));
+        }
+        let rest: Vec<_> = (repo.branches.iter())
+            .filter(|b| **b != repo.default && (worktree || Some(*b) != repo.current.as_ref()))
+            .collect();
+        if !rest.is_empty() {
+            items.push(Pick::section("Branches"));
+            items.extend(rest.into_iter().map(|b| pick(b)));
+        }
+        items.push(Pick::footer(
+            match worktree {
+                true => "The new worktree starts from this branch.",
+                false => "Picking another branch checks it out when the session starts.",
+            }
+            .into(),
+        ));
+        items
+    }
+
     fn sync_git_menus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(repo) = self.repo.clone() else {
             return;
@@ -691,44 +739,8 @@ impl DraftView {
             select.set_selected_value(&current.to_string(), window, cx);
         });
 
+        let items = self.branch_picks(&repo);
         let worktree = self.worktree;
-        let pick = |branch: &str| Pick {
-            chip: worktree.then(|| format!("from {branch}").into()),
-            ..Pick::new(branch, branch.to_string())
-        };
-        let mut items = Vec::new();
-        if !worktree {
-            let title = repo
-                .current
-                .clone()
-                .unwrap_or_else(|| "Detached HEAD".into());
-            let detail = match repo.dirty {
-                0 => "Current".to_string(),
-                1 => "Current · 1 uncommitted file".to_string(),
-                n => format!("Current · {n} uncommitted files"),
-            };
-            items.push(Pick {
-                detail: Some(detail.into()),
-                count: (repo.dirty > 0).then_some(repo.dirty),
-                ..Pick::new(CURRENT, title)
-            });
-        }
-        items.push(Pick::section("Default branch"));
-        items.push(pick(&repo.default));
-        let rest: Vec<_> = (repo.branches.iter())
-            .filter(|b| **b != repo.default && (worktree || Some(*b) != repo.current.as_ref()))
-            .collect();
-        if !rest.is_empty() {
-            items.push(Pick::section("Branches"));
-            items.extend(rest.into_iter().map(|b| pick(b)));
-        }
-        items.push(Pick::footer(
-            match worktree {
-                true => "The new worktree starts from this branch.",
-                false => "Picking another branch checks it out when the session starts.",
-            }
-            .into(),
-        ));
         let selected = match (&self.branch, worktree) {
             (Some(branch), _) => branch.clone(),
             (None, true) => repo.default.clone(),
@@ -754,6 +766,8 @@ impl DraftView {
 
     pub fn can_send(&self, cx: &App) -> bool {
         self.starting.is_none()
+            && !self.creating
+            && !(self.worktree && self.repo.is_none())
             && self.cloning.is_none()
             && self.installed() != Some(false)
             && !self.text(cx).is_empty()
@@ -769,11 +783,13 @@ impl DraftView {
     pub fn fail(
         &mut self,
         error: Option<String>,
-        leftover: String,
+        leftover: (String, Vec<Attachment>),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let (leftover, files) = leftover;
         self.starting = None;
+        self.attachments.extend(files);
         if !leftover.is_empty() {
             let text = [self.text(cx), leftover];
             let text = text.iter().filter(|t| !t.is_empty());
@@ -1118,6 +1134,7 @@ mod tests {
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{TestAppContext, VisualTestContext, px, size};
 
+    use super::DraftView;
     use crate::app::NewSession;
     use crate::git::Repo;
     use crate::workspace::tests::{fake_settings, open};
@@ -1126,6 +1143,35 @@ mod tests {
     #[gpui_kit::test]
     fn chips_stay_inside_the_composer_in_a_narrow_pane(cx: &mut TestAppContext) {
         narrow_pane(cx);
+    }
+
+    #[gpui_kit::test]
+    fn current_default_branch_is_listed_once(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.new_session(&NewSession, window, cx))
+        });
+        let draft = workspace.read_with(cx, |w, _| w.panes[0].draft().cloned());
+        let draft = draft.expect("the draft");
+        let repo = Repo {
+            root: draft.read_with(cx, |d, _| d.folder.clone()),
+            current: Some("main".into()),
+            default: "main".into(),
+            branches: vec!["main".into(), "dev".into()],
+            dirty: 0,
+            submodules: false,
+            origin: false,
+        };
+        let mains = |d: &DraftView| {
+            d.branch_picks(&repo)
+                .iter()
+                .filter(|p| p.value == "main")
+                .count()
+        };
+        assert_eq!(draft.read_with(cx, |d, _| mains(d)), 0);
+        draft.update(cx, |d, _| d.worktree = true);
+        assert_eq!(draft.read_with(cx, |d, _| mains(d)), 1);
     }
 
     fn narrow_pane(cx: &mut TestAppContext) {

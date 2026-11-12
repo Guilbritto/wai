@@ -16,6 +16,10 @@ pub(crate) struct Repo {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Head {
+    /// `--show-toplevel` of the folder: a linked worktree's own root.
+    pub root: PathBuf,
+    /// The repository's main working tree.
+    pub folder: PathBuf,
     pub branch: Option<String>,
     pub worktree: bool,
 }
@@ -125,22 +129,46 @@ pub(crate) fn repo(folder: &Path) -> Option<Repo> {
 }
 
 pub(crate) fn head(folder: &Path) -> Option<Head> {
-    let dirs = run(
+    let out = run(
         folder,
         &[
             "rev-parse",
             "--path-format=absolute",
+            "--show-toplevel",
             "--git-dir",
             "--git-common-dir",
         ],
     )
     .ok()?;
-    let mut lines = dirs.lines();
-    let (git_dir, common) = (lines.next()?, lines.next()?);
+    let mut lines = out.lines();
+    let (top, git_dir, common) = (lines.next()?, lines.next()?, lines.next()?);
+    let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
+    let root = canon(top);
+    let worktree = git_dir != common;
+    let main_dir = if worktree {
+        main_folder(folder, common)
+    } else {
+        None
+    };
+    let main = main_dir.map_or_else(|| root.clone(), |m| canon(&m));
     Some(Head {
-        branch: current_branch(folder),
-        worktree: git_dir != common,
+        branch: current_branch(&root),
+        root,
+        folder: main,
+        worktree,
     })
+}
+
+/// The first entry of `worktree list` is the main working tree; for a submodule it names
+/// the git dir itself, whose `core.worktree` gives the real folder.
+fn main_folder(dir: &Path, common: &str) -> Option<String> {
+    let list = run(dir, &["worktree", "list", "--porcelain"]).ok()?;
+    let first = list.lines().find_map(|l| l.strip_prefix("worktree "))?;
+    if Path::new(first) == Path::new(common) {
+        run(dir, &["--git-dir", common, "rev-parse", "--show-toplevel"]).ok()
+    } else {
+        Some(first.to_string())
+    }
 }
 
 pub(crate) fn worktree_blocked(repo: &Repo) -> Option<&'static str> {
@@ -165,22 +193,22 @@ pub(crate) fn slug(text: &str) -> String {
 
 pub(crate) fn create_worktree(repo: &Repo, slug: &str, base: &str) -> Result<Worktree, String> {
     let root = &repo.root;
-    let fetch_failed = if repo.origin {
+    let remote = format!("origin/{base}");
+    let pushed = ok(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/{remote}"),
+        ],
+    );
+    let fetch_failed = if repo.origin && pushed {
         run(root, &["fetch", "origin", base]).err()
     } else {
         None
     };
-    let remote = format!("origin/{base}");
-    let from = if fetch_failed.is_none()
-        && ok(
-            root,
-            &[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("refs/remotes/{remote}"),
-            ],
-        ) {
+    let from = if fetch_failed.is_none() && pushed {
         remote
     } else {
         base.to_string()
@@ -316,19 +344,73 @@ pub(crate) mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// Commit number `n` of a fixture, one second after the one before it.
+    fn dated_commit(dir: &Path, n: usize, message: &str) {
+        let date = format!("@{} +0000", 1_700_000_000 + n);
+        let out = command(dir)
+            .args([
+                "-c",
+                "user.name=wai",
+                "-c",
+                "user.email=wai@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                message,
+            ])
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     pub(crate) fn repo_with(dir: &Path, branches: &[&str]) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
         git(dir, &["init", "-b", "main"]);
         std::fs::write(dir.join("a.txt"), "a").unwrap();
         git(dir, &["add", "."]);
-        git(dir, &["commit", "-m", "first"]);
-        for b in branches {
+        dated_commit(dir, 0, "first");
+        for (n, b) in branches.iter().enumerate() {
             git(dir, &["checkout", "-b", b]);
             std::fs::write(dir.join(format!("{b}.txt")), b).unwrap();
             git(dir, &["add", "."]);
-            git(dir, &["commit", "-m", b]);
+            dated_commit(dir, n + 1, b);
         }
         std::fs::canonicalize(dir).unwrap()
+    }
+
+    /// A superproject with the submodule `inventories` and a linked worktree of that submodule.
+    pub(crate) fn submodule_worktree(tmp: &Path) -> (PathBuf, PathBuf) {
+        let src = repo_with(&tmp.join("inv-src"), &[]);
+        let sup = repo_with(&tmp.join("super"), &[]);
+        git(
+            &sup,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                src.to_str().unwrap(),
+                "inventories",
+            ],
+        );
+        git(&sup, &["commit", "-m", "add submodule"]);
+        let sub = sup.join("inventories");
+        git(
+            &sub,
+            &["worktree", "add", "-b", "feat-x", ".claude/worktrees/x"],
+        );
+        (
+            std::fs::canonicalize(&sup).unwrap(),
+            std::fs::canonicalize(sub.join(".claude/worktrees/x")).unwrap(),
+        )
     }
 
     /// A bare origin (HEAD main) and a clone of it.
@@ -536,12 +618,44 @@ pub(crate) mod tests {
             &clone,
             &["remote", "set-url", "origin", missing.to_str().unwrap()],
         );
-        git(&clone, &["update-ref", "-d", "refs/remotes/origin/main"]);
         let r = repo(&clone).unwrap();
         let w = create_worktree(&r, "x", "main").unwrap();
         assert!(w.fetch_failed.is_some());
         assert_eq!(w.from, "main");
         assert!(w.path.is_dir());
+    }
+
+    #[test]
+    fn never_pushed_base_does_not_report_a_fetch_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, clone) = cloned(tmp.path());
+        git(&clone, &["checkout", "-b", "local-only"]);
+        std::fs::write(clone.join("l.txt"), "l").unwrap();
+        git(&clone, &["add", "."]);
+        git(&clone, &["commit", "-m", "local"]);
+        let w = create_worktree(&repo(&clone).unwrap(), "x", "local-only").unwrap();
+        assert_eq!(w.fetch_failed, None);
+        assert_eq!(w.from, "local-only");
+    }
+
+    #[test]
+    fn worktree_branch_tracks_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, clone) = cloned(tmp.path());
+        let w = create_worktree(&repo(&clone).unwrap(), "x", "main").unwrap();
+        assert_eq!(w.from, "origin/main");
+        let out = command(&clone)
+            .args(["rev-parse", "--abbrev-ref", "wai/x@{upstream}"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+    }
+
+    #[test]
+    fn repo_with_orders_branches_by_creation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = repo_with(&tmp.path().join("r"), &["x", "y"]);
+        assert_eq!(repo(&root).unwrap().branches, ["y", "x", "main"]);
     }
 
     #[test]
@@ -576,17 +690,48 @@ pub(crate) mod tests {
         assert_eq!(
             head(&root),
             Some(Head {
+                root: root.clone(),
+                folder: root.clone(),
                 branch: Some("main".into()),
                 worktree: false
             })
         );
         let w = create_worktree(&repo(&root).unwrap(), "x", "main").unwrap();
+        let h = head(&w.path).unwrap();
+        assert_eq!(h.root, std::fs::canonicalize(&w.path).unwrap());
+        assert_eq!(h.folder, root);
+        assert_eq!(h.branch.as_deref(), Some("wai/x"));
+        assert!(h.worktree);
+    }
+
+    #[test]
+    fn head_names_the_submodule_of_a_submodule_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sup, wt) = submodule_worktree(tmp.path());
+        let sub = std::fs::canonicalize(sup.join("inventories")).unwrap();
         assert_eq!(
-            head(&w.path),
+            head(&wt),
             Some(Head {
-                branch: Some("wai/x".into()),
+                root: wt.clone(),
+                folder: sub.clone(),
+                branch: Some("feat-x".into()),
                 worktree: true
             })
         );
+        let h = head(&sub).unwrap();
+        assert_eq!(h.root, sub);
+        assert_eq!(h.folder, sub);
+        assert!(!h.worktree);
+    }
+
+    #[test]
+    fn detached_submodule_has_no_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sup, _wt) = submodule_worktree(tmp.path());
+        let sub = std::fs::canonicalize(sup.join("inventories")).unwrap();
+        git(&sub, &["checkout", "--detach"]);
+        let h = head(&sub).unwrap();
+        assert_eq!(h.branch, None);
+        assert_eq!(h.folder, sub);
     }
 }

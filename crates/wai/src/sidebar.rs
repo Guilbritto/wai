@@ -356,7 +356,7 @@ impl Workspace {
     fn rename(&mut self, what: Renamed, window: &mut Window, cx: &mut Context<Self>) {
         let value = match &what {
             Renamed::Session(session) => {
-                let title = session.read(cx).model.shown_title();
+                let title = session.read(cx).model.named_title();
                 title.unwrap_or_default().to_string()
             }
             Renamed::Group(ix) => self.groups[*ix].name.clone(),

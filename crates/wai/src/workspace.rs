@@ -162,7 +162,6 @@ pub(crate) fn still_working(n: usize) -> String {
     }
 }
 
-/// Whether the batch names `path`, or lost track of what changed.
 /// What the terminal runs to open Claude Code session `id` again; the shell may be anywhere.
 pub(crate) fn resume_command(cwd: &Path, id: &str) -> String {
     format!(
@@ -172,6 +171,7 @@ pub(crate) fn resume_command(cwd: &Path, id: &str) -> String {
     )
 }
 
+/// Whether the batch names `path`, or lost track of what changed.
 fn touches(batch: &[FsChange], path: &Path) -> bool {
     batch.iter().any(|change| match change {
         FsChange::Rescan => true,
@@ -199,6 +199,8 @@ pub struct Workspace {
     pub user_dir: PathBuf,
     /// Whose `~/.claude` the Claude pages of Settings read.
     pub(crate) claude_home: PathBuf,
+    /// Ids this wai ended, and when: their transcript's fresh write is ours.
+    pub(crate) ended: HashMap<String, std::time::Instant>,
     pub(crate) claude_task: Option<Task<()>>,
     /// The `claude` that `mcp list` runs; none means the one on PATH.
     pub(crate) claude_program: Option<PathBuf>,
@@ -406,6 +408,7 @@ impl Workspace {
             templates: Vec::new(),
             user_dir: config_dir(),
             claude_home: wai_settings::claude::claude_home(),
+            ended: HashMap::new(),
             claude_task: None,
             claude_program: None,
             registry,
@@ -909,14 +912,36 @@ impl Workspace {
         }
     }
 
-    fn session(&self, agent: &str, id: &str, cx: &App) -> Option<Entity<ChatSession>> {
+    /// The open session the agent bound to `id` last.
+    pub(crate) fn session(&self, agent: &str, id: &str, cx: &App) -> Option<Entity<ChatSession>> {
         self.sessions
             .iter()
-            .find(|session| {
+            .filter(|session| {
                 let session = session.read(cx);
                 session.agent == agent && session.id == id
             })
+            .max_by_key(|session| session.read(cx).bound)
             .cloned()
+    }
+
+    /// Every other open session with `session`'s agent and id loses the id to it.
+    fn claim(&self, session: &Entity<ChatSession>, cx: &mut Context<Self>) {
+        let (agent, id) = {
+            let s = session.read(cx);
+            (s.agent.clone(), s.id.clone())
+        };
+        if id.is_empty() {
+            return;
+        }
+        for other in &self.sessions {
+            let same = {
+                let o = other.read(cx);
+                o.agent == agent && o.id == id
+            };
+            if same && other != session {
+                other.update(cx, |o, cx| o.lose_id(cx));
+            }
+        }
     }
 
     fn route(&mut self, event: &RegistryEvent, cx: &mut Context<Self>) {
@@ -1047,6 +1072,7 @@ impl Workspace {
                     this.sync_agents(cx);
                     this.save_state(cx);
                 }
+                ChatEvent::Bound => return this.claim(session, cx),
                 ChatEvent::OpenFile { path, line } => {
                     return this.open_file(path.clone(), Some(*line), window, cx);
                 }
@@ -1092,12 +1118,13 @@ impl Workspace {
             cx.spawn(async move |_, cx| {
                 let head = head.await;
                 target.update(cx, |s, cx| {
-                    s.head = head;
+                    s.set_home(head, cx);
                     cx.notify();
                 });
             })
             .detach();
         }
+        self.claim(&session, cx);
         self.sessions.push(session);
         self.sync_agents(cx);
         self.sync_drafts(cx);
@@ -1298,8 +1325,25 @@ impl Workspace {
         })
     }
 
-    /// Opens a history row: the open session with that id, else a new one that loads it.
+    /// Opens a history row, after asking when a Claude conversation is open elsewhere.
     pub fn resume(
+        &mut self,
+        summary: &SessionSummary,
+        side: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let row = summary.clone();
+        self.check_elsewhere(
+            summary,
+            move |w, window, cx| w.resume_now(&row, side, window, cx),
+            window,
+            cx,
+        );
+    }
+
+    /// Opens a history row: the open session with that id, else a new one that loads it.
+    fn resume_now(
         &mut self,
         summary: &SessionSummary,
         side: bool,
@@ -1427,8 +1471,17 @@ impl Workspace {
         };
         let zone = |zone: Zone| {
             div().h_full().drag_over(light(false)).on_drop(cx.listener(
-                move |this, dragged: &DraggedSession, window, cx| {
-                    this.drop_session(dragged, ix, zone, window, cx)
+                move |this, dragged: &DraggedSession, window, cx| match &dragged.source {
+                    Dragged::History(row) => {
+                        let dragged = dragged.clone();
+                        this.check_elsewhere(
+                            row,
+                            move |w, window, cx| w.drop_session(&dragged, ix, zone, window, cx),
+                            window,
+                            cx,
+                        )
+                    }
+                    _ => this.drop_session(dragged, ix, zone, window, cx),
                 },
             ))
         };
@@ -1603,7 +1656,7 @@ impl Workspace {
                     json!({
                         "agent": s.agent,
                         "session": s.id,
-                        "title": s.model.shown_title(),
+                        "title": s.model.named_title(),
                         "state": state_name(s.status()),
                     })
                 });
@@ -1734,7 +1787,7 @@ impl Workspace {
                         this.land(session.clone(), early, None, window, cx);
                         if let Some(text) = prompt {
                             session.update(cx, |s, cx| {
-                                if !(send && s.send_text(&text, cx)) {
+                                if !(send && s.send_settled(&text, cx)) {
                                     s.prefill(&text, window, cx)
                                 }
                             });
@@ -1838,8 +1891,6 @@ impl Workspace {
         self.follow_session(window, cx);
     }
 
-    /// An Open row's ×: drops `session` from the open list and from its pane, if one shows it
-    /// (the agent keeps it in its history).
     /// Frees session `id` in its agent, when the agent can.
     pub(crate) fn close_in_agent(&mut self, agent: String, id: String, cx: &mut Context<Self>) {
         let closable = matches!(
@@ -1856,6 +1907,8 @@ impl Workspace {
         }
     }
 
+    /// An Open row's ×: drops `session` from the open list and from its pane, if one shows it
+    /// (the agent keeps it in its history).
     pub(crate) fn end_session(
         &mut self,
         session: &Entity<ChatSession>,
@@ -1867,6 +1920,7 @@ impl Workspace {
             let s = session.read(cx);
             (s.agent.clone(), s.id.clone())
         };
+        self.ended.insert(id.clone(), std::time::Instant::now());
         self.close_in_agent(agent, id, cx);
         self.sessions.retain(|s| s != session);
         self.ungroup(&session.read(cx).id);
