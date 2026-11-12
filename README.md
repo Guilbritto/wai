@@ -72,7 +72,7 @@ To build the app bundle and DMG yourself, see [docs/building.md](docs/building.m
 - **Signing:** builds are unsigned, and the Windows build is verified only by CI.
 - **Extensions are not sandboxed:** they run with your user's rights. Install only those you trust.
 - **What reopens:** editor tabs do not reopen at launch, though unsaved edits are recovered.
-- **Revert:** it refuses tab-indented and CRLF files.
+- **Revert:** it refuses only files that mix CRLF and LF line ends.
 - **`.gitignore`:** the file tree and search honour it only inside git repositories.
 - **Terminal:** the mouse wheel does not scroll inside full-screen programs such as `less` or `vim`.
 - **One instance:** run one wai at a time. Two instances share the state and recovery files.

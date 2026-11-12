@@ -201,6 +201,10 @@ fn undo(now: &str, diff: &FileDiff, created: bool) -> Result<Undo, RevertError> 
         (None, true) if now == new => return Ok(Undo::Delete),
         (None, true) => "",
     };
+    // Tabs or CRLF: `old` is Claude's rendering, so it goes back in the file's own form.
+    if let Some(undo) = as_shown(now, old, new) {
+        return Ok(undo);
+    }
     if now == new {
         return Ok(Undo::Whole(old.to_string()));
     }
@@ -738,6 +742,33 @@ mod tests {
         assert_eq!(
             undo_snippet("a\r\nb3\r\nc\r\n", Some("a\nb\nc"), "a\nb2\nc"),
             Err(RevertError::Changed)
+        );
+    }
+
+    /// Column-0 context matches exactly, yet `old` still goes back with the file's tabs / CRLF.
+    #[test]
+    fn exact_match_still_retabs_and_keeps_crlf() {
+        assert_eq!(
+            undo_snippet(
+                "package a\nfunc f() {\n}\n",
+                Some("func f() {\n  x()\n}"),
+                "func f() {\n}"
+            ),
+            Ok("package a\nfunc f() {\n  x()\n}\n".into()),
+            "no tabs in the file: written as is"
+        );
+        assert_eq!(
+            undo_snippet(
+                "package a\n\tkeep()\nfunc f() {\n}\n",
+                Some("func f() {\n  x()\n}"),
+                "func f() {\n}"
+            ),
+            Ok("package a\n\tkeep()\nfunc f() {\n\tx()\n}\n".into())
+        );
+        // CRLF, no final newline, single-line hunk at the end.
+        assert_eq!(
+            undo_snippet("a\r\nb2", Some("b\nc"), "b2"),
+            Ok("a\r\nb\r\nc".into())
         );
     }
 

@@ -804,6 +804,7 @@ impl ChatSession {
         self.model.items.clear();
         self.model.waiting.clear();
         self.model.steering.clear();
+        self.model.usage = None;
         self.texts.clear();
         self.diffs.clear();
         self.card_diffs.clear();
@@ -895,7 +896,10 @@ mod tests {
     use super::{tick_period, until_next_tick};
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{ElementId, Entity, Modifiers, TestAppContext, VisualTestContext, point, px};
+    use gpui_kit::{
+        ElementId, Entity, InputEvent, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
+        TestAppContext, VisualTestContext, point, px,
+    };
     use wai_agent::{
         ChoiceKind, PermissionChoice, PermissionRequest, SessionEvent, StopReason, SubagentState,
         ToolStatus,
@@ -2088,10 +2092,34 @@ mod tests {
         for message in ["first", "second", "third"] {
             send(message, cx);
         }
+        // Both clicks land in one frame: `window.click` redraws between them, so send raw events.
         cx.update(|window, cx| {
             window.render_frame(cx);
-            window.click(("queued-remove", 0usize), cx);
-            window.click(("queued-remove", 1usize), cx);
+            let centres: Vec<_> = (0usize..2)
+                .map(|i| window.find(("queued-remove", i)).bounds().center())
+                .collect();
+            for position in centres {
+                let none = Modifiers::none();
+                for event in [
+                    MouseDownEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers: none,
+                        click_count: 1,
+                        first_mouse: false,
+                    }
+                    .to_platform_input(),
+                    MouseUpEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers: none,
+                        click_count: 1,
+                    }
+                    .to_platform_input(),
+                ] {
+                    window.dispatch_event(event, cx);
+                }
+            }
         });
         cx.update(|window, cx| window.render_frame(cx));
         let queued = session.read_with(cx, |s, _| {
