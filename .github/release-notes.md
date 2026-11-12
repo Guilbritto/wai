@@ -9,7 +9,7 @@ The binaries are not signed, so both systems warn on the first launch. The steps
 
 1. Download `wai_<version>_aarch64.dmg` and open it.
 2. Copy `wai.app` to `~/Applications` (the `Applications` folder inside your home folder; create it if it does not exist). Do not use `/Applications`: only an administrator can write there, so wai could not update itself.
-3. The first time, right-click the app and choose **Open**. Double-clicking shows "cannot be opened because it is from an unidentified developer" with no way to continue.
+3. The first time, open the app once (macOS will refuse), then go to System Settings → Privacy & Security and click **Open Anyway**. Or run `xattr -dr com.apple.quarantine ~/Applications/wai.app` and open it normally.
 
 ### Windows
 

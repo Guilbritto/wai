@@ -280,7 +280,7 @@ Every push to the `main` branch of `Guilbritto/wai` publishes a release on GitHu
 - When wai cannot update itself where it is installed (a folder your account cannot write to, such as `/Applications` for a standard user), it notifies you instead, and Settings → Updates shows **Open release page**. On macOS install wai into `~/Applications`.
 - Failures (offline, rate-limited, a bad answer) go to wai's log and show nothing.
 
-The releases are unsigned. On the first launch macOS needs right-click then **Open**, and Windows SmartScreen needs **More info** then **Run anyway**. Without a Developer ID, macOS may also ask again for access to folders such as Documents after each update.
+The releases are unsigned. On the first launch macOS refuses to open the app: open it once, then use System Settings → Privacy & Security → **Open Anyway** (or run `xattr -dr com.apple.quarantine ~/Applications/wai.app`), and Windows SmartScreen needs **More info** then **Run anyway**. Without a Developer ID, macOS may also ask again for access to folders such as Documents after each update.
 
 ```toml
 [updates]

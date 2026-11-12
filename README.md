@@ -29,14 +29,14 @@ A native, AI-first IDE for macOS and Windows, written in Rust with GPUI.
 
 ### From the DMG
 
-Open `wai_<version>_aarch64.dmg` and drag **wai** to Applications.
+Open `wai_<version>_aarch64.dmg` and drag **wai** to `~/Applications` (the `Applications` folder inside your home folder), so it can update itself.
 
 Until the project has signing certificates, the app is not signed or notarized, so macOS blocks the first launch of a downloaded copy. Either:
 - try to open it once, then choose **Open Anyway** in System Settings → Privacy & Security; or
 - remove the quarantine flag:
 
   ```sh
-  xattr -dr com.apple.quarantine /Applications/wai.app
+  xattr -dr com.apple.quarantine ~/Applications/wai.app
   ```
 
 The Windows installer (`wai_<version>_x64-setup.exe`) is built by the release workflow only (CI-verified only).

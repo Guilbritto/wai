@@ -49,31 +49,36 @@ Windows download, the installer, and wai updating itself. Design:
     - the extensions still start (Extensions panel);
     - **Add or remove programs** shows `B`, still only one entry;
     - the Start menu entry opens `B`.
-13. Settings → Updates → **Check for updates** says wai is up to date.
+13. Settings → Updates → **Check now** says wai is up to date. The update cache
+    (`%LOCALAPPDATA%\wai-updates`) is now gone: an up-to-date check empties it.
+14. The Desktop shortcut was not recreated by the update: delete it before step 11 and check it is
+    still absent now (the Start menu entry from the first install stays).
 
 ## 3. The cycle repeats (release `C`)
 
-14. Once release `C` is published, open wai `B`. It is offered `C`, and **Restart now** brings it
-    to `C` as in step 11.
-15. Old installers do not pile up in the update cache: only the latest one, or none, is there.
+15. Once release `C` is published, open wai `B`. It is offered `C`, and **Restart now** brings it
+    to `C` as in step 11, but first open a second wai window (start `wai.exe` again) and click
+    **Restart now** in one: that window closes, nothing is killed, and the other window keeps its
+    state. The install runs only after the other window is closed; close it, and wai reopens at `C`.
+16. Old installers do not pile up in the update cache: only the latest one, or none, is there.
 
 ## 4. When it must not install
 
-16. **Switch off:** turn the Updates switch off and restart wai. No notification appears, and the
+17. **Switch off:** turn the Updates switch off and restart wai. No notification appears, and the
     log shows no update request. Turn it back on.
-17. **Other repository:** set the Repository field to another `owner/repo` that has a newer release,
+18. **Other repository:** set the Repository field to another `owner/repo` that has a newer release,
     for example `Guilbritto/wai-test` if the owner provides one; otherwise skip and say so. Restart
-    wai: at most a notification with **Open release page**, never **Restart now**, and nothing in
-    the update cache. Put `Guilbritto/wai` back.
-18. **Offline:** disconnect the network and open wai. It opens normally with no error notification
-    at launch; the log may record the failure. **Check for updates** in Settings shows the error.
+    wai: at most a notification with **Open release page**, never **Restart now**. Nothing new is staged: the cache holds no installer. Put `Guilbritto/wai` back.
+19. **Offline:** disconnect the network and open wai. It opens normally with no error notification
+    at launch; the log may record the failure. **Check now** in Settings shows the error.
     Reconnect.
-19. **Tampered download:** while a **Restart now** notification is showing, change one byte of the
+20. **Tampered download:** while a **Restart now** notification is showing, change one byte of the
     staged installer, then click **Restart now**. wai must refuse to run it, say why, and stay at
     its current version.
-20. **Not an installed copy:** copy `wai.exe` to another folder, for example the Desktop, and run
+21. **Not an installed copy:** copy `wai.exe` to another folder, for example the Desktop, and run
     it from there. It must not offer **Restart now**. Settings → Updates says in one sentence why
-    this copy cannot update itself, and the notification offers only **Open release page**.
+    this copy cannot update itself, also while it shows "Up to date" (the sentence is there with
+    **Check now** next to **Open release page** when a newer release exists), and the notification offers only **Open release page**.
 
 ## Report
 
