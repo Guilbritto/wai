@@ -6,10 +6,6 @@
 //! rights, and a configurable repository is a configurable source of that code, so any other
 //! repository is only announced. Every failure is only logged.
 
-// ponytail: `run`, `Outcome`, `verify`, `cache_dir` and the download have no caller until the UI
-// wiring (check_on_launch replaced); remove this allow then.
-#![allow(dead_code)]
-
 mod download;
 #[cfg(target_os = "macos")]
 pub mod macos;
@@ -20,10 +16,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow, bail, ensure};
-use gpui_kit::component::WindowExt as _;
-use gpui_kit::component::button::Button;
-use gpui_kit::component::notification::Notification;
-use gpui_kit::{AnyWindowHandle, App, AppContext as _};
 use http_body_util::{BodyExt as _, Limited};
 use hyper::header::{ACCEPT, USER_AGENT};
 use hyper_util::client::legacy::Client;
@@ -81,36 +73,6 @@ impl Release {
     }
 }
 
-/// Once per launch (`app::run`), off the main thread: a newer release shows a notice whose button
-/// opens its page. A failure is only logged.
-pub fn check_on_launch(settings: UpdateSettings, window: AnyWindowHandle, cx: &mut App) {
-    let current = env!("CARGO_PKG_VERSION");
-    let found = cx.background_spawn(async move {
-        // A panic in a background task aborts wai: whatever the network sends, it stops here.
-        let checked = std::panic::catch_unwind(|| check(&settings, current, fetch));
-        checked.unwrap_or_else(|_| Err(anyhow!("panicked")))
-    });
-    cx.spawn(async move |cx| {
-        let release = match found.await {
-            Ok(Some(release)) => release,
-            Ok(None) => return,
-            Err(e) => return eprintln!("wai: update check failed: {}", logged(&e)),
-        };
-        let notice = Notification::info(release.text()).action(move |_, _, cx| {
-            let (page, notice) = (release.page.clone(), cx.entity());
-            Button::new("update-open")
-                .label("Open release page")
-                .on_click(move |_, window, cx| {
-                    cx.open_url(&page);
-                    notice.update(cx, |n, cx| n.dismiss(window, cx));
-                })
-        });
-        let shown = window.update(cx, |_, window, cx| window.push_notification(notice, cx));
-        shown.ok();
-    })
-    .detach();
-}
-
 /// `Ok(None)`: off, no repository set, or no newer release. `fetch` is called only when the check
 /// is on and the repository is valid. `Err` is what to log.
 pub fn check(
@@ -164,7 +126,91 @@ pub enum Outcome {
     Ready(Staged),
 }
 
-/// Where builds are staged: wiped and refilled by each `run` that stages one.
+/// What the workspace knows about updates: Settings shows it, the launch notice follows from it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateStatus {
+    Idle,
+    Checking,
+    UpToDate,
+    Ready(Staged),
+    Available {
+        release: Release,
+        why: Option<String>,
+    },
+    Failed(String),
+}
+
+impl UpdateStatus {
+    /// What Settings says under the version; nothing before the first check.
+    pub fn line(&self) -> Option<String> {
+        Some(match self {
+            Self::Idle => return None,
+            Self::Checking => "Checking…".into(),
+            Self::UpToDate => "Up to date".into(),
+            Self::Ready(staged) => staged.text(),
+            Self::Available { release, why } => match why {
+                Some(why) => format!("{}. {why}", release.text()),
+                None => release.text(),
+            },
+            Self::Failed(e) => e.clone(),
+        })
+    }
+}
+
+/// `run` with the real network and cache, for the app's own settings. A panic in a background task
+/// aborts wai: whatever the network sends, it stops here.
+pub fn check_and_stage(settings: &UpdateSettings) -> anyhow::Result<Outcome> {
+    let current = env!("CARGO_PKG_VERSION");
+    let (cache, blocker) = (cache_dir(), blocker());
+    let run = || {
+        run(
+            settings,
+            current,
+            blocker,
+            &cache,
+            fetch,
+            download::download,
+        )
+    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
+        .unwrap_or_else(|_| Err(anyhow!("panicked")))
+}
+
+/// Installs the staged build and arranges for wai to start again once the caller has quit; the
+/// caller quits only on `Ok`. The file is hashed again first, so one changed since staging is
+/// never installed.
+pub fn install(staged: &Staged) -> anyhow::Result<()> {
+    verify(staged)?;
+    #[cfg(target_os = "macos")]
+    {
+        let exe = std::env::current_exe()?;
+        let bundle = macos::bundle_root(&exe).map_err(|e| anyhow!(e))?;
+        macos::install(&staged.file, &bundle)?;
+        macos::relaunch_after_exit(&bundle, std::process::id())?;
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        windows::install_after_exit(&staged.file, std::process::id())?;
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    bail!("wai updates itself only on macOS and Windows.")
+}
+
+/// Why this copy cannot install an update, when it cannot (R1).
+pub fn blocker() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    return macos::blocker();
+    #[cfg(windows)]
+    return std::env::current_exe()
+        .map_err(|e| format!("cannot find wai's own file: {e}"))
+        .map_or_else(Some, |exe| windows::blocker(&exe));
+    #[cfg(not(any(target_os = "macos", windows)))]
+    Some("wai updates itself only on macOS and Windows.".into())
+}
+
+/// Where builds are staged: kept while the release's checksum still matches, else and refilled by each `run` that stages one.
 pub fn cache_dir() -> PathBuf {
     let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
     base.join("wai-updates")
@@ -225,8 +271,8 @@ pub fn run(
     Ok(Outcome::Ready(staged))
 }
 
-/// Empties `cache`, downloads the sums and the build into it, and keeps the build only when its
-/// hash is the one listed.
+/// Downloads the sums into `cache`; a build already there whose hash is the listed one is reused,
+/// else the cache is emptied and the build downloaded, kept only when its hash is the listed one.
 fn stage(
     tag: &str,
     build: &Asset,
@@ -234,11 +280,8 @@ fn stage(
     cache: &Path,
     download: &impl Fn(&str, &Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<Staged> {
-    match std::fs::remove_dir_all(cache) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-        _ => {}
-    }
     std::fs::create_dir_all(cache)?;
+    // The sums always come fresh: they say whether the staged build is still this release's (R5).
     let sums_file = cache.join(SUMS_ASSET);
     download(&sums.url, &sums_file).context("downloading the checksums")?;
     ensure!(
@@ -247,10 +290,26 @@ fn stage(
     );
     let listed = std::fs::read_to_string(&sums_file).context("reading the checksums")?;
     let file = cache.join(&build.name);
+    let want = download::expected_sum(&listed, &build.name);
+    if let Ok(sha256) = download::sha256_file(&file)
+        && want.as_deref() == Some(&sha256)
+    {
+        return Ok(Staged {
+            tag: tag.to_string(),
+            file,
+            sha256,
+        });
+    }
+    // Whatever else is there is an older build.
+    for entry in std::fs::read_dir(cache)? {
+        let path = entry?.path();
+        if path != sums_file {
+            std::fs::remove_dir_all(&path).or_else(|_| std::fs::remove_file(&path))?;
+        }
+    }
     let staged = (|| {
         download(&build.url, &file).context("downloading the update")?;
         let sha256 = download::sha256_file(&file)?;
-        let want = download::expected_sum(&listed, &build.name);
         ensure!(
             want.as_deref() == Some(&sha256),
             "the downloaded update does not match its checksum"
@@ -283,6 +342,7 @@ pub fn verify(staged: &Staged) -> anyhow::Result<()> {
 /// The PowerShell one-liner that waits for wai (`pid`) to exit, then runs the NSIS installer
 /// silently (`/S`) and relaunches wai (`/R`). Waiting lets wai quit cleanly (state saved, agents
 /// stopped) instead of being killed by the installer. Pure so it is tested on every OS.
+#[cfg(any(windows, test))]
 pub(crate) fn installer_script(setup: &Path, pid: u32) -> String {
     // PowerShell also reads the curly quotes U+2018..U+201B as single quotes; double each as itself.
     let setup: String = setup
@@ -407,7 +467,7 @@ fn newer(current: &str, latest: &str) -> bool {
 const MAX_LOGGED: usize = 200;
 
 /// What a failed check logs: the error with its causes, clamped (serde quotes what it got).
-fn logged(error: &anyhow::Error) -> String {
+pub(crate) fn logged(error: &anyhow::Error) -> String {
     cut(&format!("{error:#}"), MAX_LOGGED)
 }
 
@@ -896,6 +956,44 @@ mod tests {
         assert_eq!(staged.text(), "wai 9.0.0 is ready");
         assert!(!cache.path().join("old.zip").exists());
         verify(&staged).unwrap();
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", windows))]
+    fn reuses_a_staged_build() {
+        let cache = tempfile::tempdir().unwrap();
+        let sums = format!("{ABC}  {}\n", asset_name());
+        let first = stage(cache.path(), b"abc", &sums).unwrap();
+        let names = [asset_name(), SUMS.to_string()];
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let seen = RefCell::new(vec![]);
+        let again = run(
+            &on(DEFAULT_REPO),
+            "0.1.0",
+            None,
+            cache.path(),
+            latest(&names),
+            serve(b"abc", &sums, &seen),
+        )
+        .unwrap();
+        assert_eq!(again, first);
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 1, "only the sums are fetched: {seen:?}");
+        assert!(seen[0].ends_with(SUMS));
+        // A file changed since, or a different release's sums, downloads the build again.
+        std::fs::write(cache.path().join(asset_name()), b"abd").unwrap();
+        let seen = RefCell::new(vec![]);
+        let out = run(
+            &on(DEFAULT_REPO),
+            "0.1.0",
+            None,
+            cache.path(),
+            latest(&names),
+            serve(b"abc", &sums, &seen),
+        )
+        .unwrap();
+        assert_eq!(out, first);
+        assert_eq!(seen.borrow().len(), 2);
     }
 
     #[test]

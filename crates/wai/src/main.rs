@@ -32,7 +32,16 @@ use anyhow::Context as _;
 use wai_settings::{AppState, Settings, config_dir, load_templates};
 
 fn main() -> anyhow::Result<()> {
-    // First: it may set PATH, which is sound only while no other thread exists.
+    // Very first: it removes an environment variable, sound only while no other thread exists, and
+    // may hand over to the copy moved out of /Applications.
+    #[cfg(target_os = "macos")]
+    let update_notice = match update::macos::on_start() {
+        update::macos::Start::Exit => return Ok(()),
+        update::macos::Start::Continue(notice) => notice,
+    };
+    #[cfg(not(target_os = "macos"))]
+    let update_notice = None;
+    // Then: it may set PATH, which is sound only while no other thread exists.
     #[cfg(target_os = "macos")]
     shell_path::import();
     // `WAI_STATE_PATH=<file>` keeps a manual run away from the real state.
@@ -61,6 +70,7 @@ fn main() -> anyhow::Result<()> {
         template_notices,
         settings_error,
         state_path,
+        update_notice,
     );
     Ok(())
 }
