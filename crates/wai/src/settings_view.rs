@@ -1440,7 +1440,10 @@ mod tests {
         });
         cx.update(|window, cx| window.render_frame(cx));
         let version = env!("CARGO_PKG_VERSION");
-        cx.update(|window, _| window.find_by_label(&format!("Adapter wai-fake-agent {version}")));
+        assert_eq!(
+            row(&workspace, "fake", cx).adapter.as_deref(),
+            Some(format!("wai-fake-agent {version}").as_str())
+        );
         assert!(cx.debug_bounds("settings-adapter-fake").is_some());
     }
 

@@ -133,7 +133,9 @@ mod tests {
             .spawn()
             .unwrap();
         drop(held);
-        let again = acquire(&p, Duration::ZERO);
+        // Another test's concurrent fork can hold a copy of the fd until its exec; the
+        // 2s child outlives this wait, so a real leak still fails.
+        let again = acquire(&p, Duration::from_millis(1500));
         child.kill().ok();
         child.wait().ok();
         assert!(matches!(again, Acquired::Held(_)));
