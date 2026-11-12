@@ -4,8 +4,6 @@ For an agent running **on a real Windows machine**. It checks what cannot be tes
 Windows download, the installer, and wai updating itself. Design:
 `docs/superpowers/specs/2026-11-12-wai-release-and-auto-update-design.md`.
 
-Paths marked *(confirm)* are what the design expects. The implementation updates them if they differ.
-
 ## Before you start
 
 - Two published releases on https://github.com/Guilbritto/wai/releases: an **older** one (`A`, e.g.
@@ -14,8 +12,7 @@ Paths marked *(confirm)* are what the design expects. The implementation updates
 - No administrator rights are needed for anything below. If Windows asks for them (UAC), that is a
   failure: write it down.
 - To read wai's log, start it from PowerShell with stderr redirected:
-  `Start-Process "$env:LOCALAPPDATA\wai\wai.exe" -RedirectStandardError "$env:TEMP\wai-err.txt"`
-  *(confirm the install path with `(Get-Process wai).Path` once it is running)*.
+  `Start-Process "$env:LOCALAPPDATA\wai\wai.exe" -RedirectStandardError "$env:TEMP\wai-err.txt"`.
 - Do not delete `~\AppData\Roaming\wai`: the tests check that settings survive the update.
 - For every item, record **PASS/FAIL** and the evidence: the version shown in the top bar, the
   paths, the log lines, how long it took, and a screenshot when something on screen is the result.
@@ -36,7 +33,7 @@ Paths marked *(confirm)* are what the design expects. The implementation updates
    touched it, and the repository is `Guilbritto/wai`.
 7. Quit wai and open it again (release `B` is already the latest). Within about a minute, with no
    clicks, a notification says wai `B` is ready, with **Restart now**.
-8. The downloaded installer is staged in wai's cache *(confirm: `%LOCALAPPDATA%\wai-updates`)*. Its
+8. The downloaded installer is staged in wai's cache (`%LOCALAPPDATA%\wai-updates`). Its
    SHA-256 matches `SHA256SUMS.txt` of release `B`.
 9. Open a file in wai's editor and type something without saving. Click **Restart now**: wai must
    ask about the unsaved edit. **Cancel** keeps wai open at `A` and installs nothing.

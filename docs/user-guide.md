@@ -1,10 +1,10 @@
 # wai user guide
 
-This guide describes wai 0.6.2. On Windows, read **ctrl** where it says **⌘**, except where the shortcut table says otherwise.
+This guide describes the latest wai release. On Windows, read **ctrl** where it says **⌘**, except where the shortcut table says otherwise.
 
 ## The window
 
-- **Top bar.** It shows wai's version and the commit it was built from (`0.6.2 · 01dd232`), the project's name and how many agents are working or need you, and holds the buttons **New from template** (shown when templates exist), **Extensions**, the command palette, **Settings** (⚙), the terminal, the Agents panel (only while it is on the right) and **New session**. On macOS it is the title bar: drag it to move the window, double-click it to zoom.
+- **Top bar.** It shows wai's version and the commit it was built from (`1.2.3 · 01dd232`), the project's name and how many agents are working or need you, and holds the buttons **New from template** (shown when templates exist), **Extensions**, the command palette, **Settings** (⚙), the terminal, the Agents panel (only while it is on the right) and **New session**. On macOS it is the title bar: drag it to move the window, double-click it to zoom.
 - **Sidebar.** The tabs **Sessions**, **History**, **Files**, **Search** and **Agents**, plus one tab per extension panel.
 - **Agents panel.** Agents can leave the sidebar for its own panel right of the panes, which collapses with **⌘⌥B** (see [The Agents tab](#the-agents-tab)).
 - **Panes.** Up to four sit side by side. Each holds a chat session or the editor (one editor pane at most). **⌘⌥→** moves the focus to the next pane.
@@ -269,21 +269,26 @@ Extensions with the `notify` permission can send their own, at most one every tw
 - install errors;
 - the update notice.
 
-## The update check
+## Updates
 
-It is **off by default**. When you turn it on:
-- once per launch, with no timer, it reads `https://api.github.com/repos/<repo>/releases/latest` for the repository in `updates.repo`;
-- if that release is newer, it shows `wai <version> is available` with **Open release page**.
+Every push to the `main` branch of `Guilbritto/wai` publishes a release on GitHub, and an installed wai updates itself from it.
 
-It never downloads or installs anything. When it fails (offline, rate-limited, a bad answer), the error goes to wai's log and nothing is shown.
+- **Automatic updates** is on by default. On each launch wai asks GitHub for the latest release, downloads it in the background, checks its SHA-256 against the release's `SHA256SUMS.txt`, and shows `wai <version> is ready` with **Restart now**. If you have unsaved edits, wai asks before restarting.
+- On macOS the new `wai.app` replaces the old one in place and the previous version stays next to it as `wai.app.old`. On Windows the installer runs for your user only, with no administrator rights, into `%LOCALAPPDATA%\wai`.
+- Downloads are kept in `~/Library/Caches/wai-updates` (macOS) or `%LOCALAPPDATA%\wai-updates` (Windows).
+- Only releases of `Guilbritto/wai` are installed. Pointing **Repository** at another repository only notifies you of its newer release, with **Open release page**; nothing is downloaded.
+- When wai cannot update itself where it is installed (a folder your account cannot write to, such as `/Applications` for a standard user), it notifies you instead, and Settings → Updates shows **Open release page**. On macOS install wai into `~/Applications`.
+- Failures (offline, rate-limited, a bad answer) go to wai's log and show nothing.
+
+The releases are unsigned. On the first launch macOS needs right-click then **Open**, and Windows SmartScreen needs **More info** then **Run anyway**. Without a Developer ID, macOS may also ask again for access to folders such as Documents after each update.
 
 ```toml
 [updates]
 check = true
-repo = "owner/wai"
+repo = "Guilbritto/wai"
 ```
 
-Only your own settings file can turn it on; a project's `.wai/settings.toml` cannot.
+Only your own settings file can change these; a project's `.wai/settings.toml` cannot.
 
 ## Settings
 
@@ -325,7 +330,7 @@ Settings is a modal over the window, not a pane.
 - **Appearance:** **Theme**, Dark or Light, applies at once.
 - **Conversation:** **Processing**, how a chat shows the agent's steps: Step by step, Grouped or Hidden (see [Chatting](#chatting)). It applies at once to every open session. Permission cards, questions and file edits always show.
 - **Terminal:** **Shell**, a path; empty is the system default. It applies to terminals opened afterwards, and changing it asks `Run a new command?`.
-- **Updates:** wai checks GitHub releases once a day, only when you turn it on: the **Check for updates** switch and **Repository**.
+- **Updates:** **Automatic updates** (switch), **Version** (the installed version, its status and one button: **Check now**, **Restart now** or **Open release page**) and **Repository** (see [Updates](#updates)).
 - **Extensions:** extensions add panels, commands, agents and MCP servers to wai. They run with your permissions. Install from a folder or a git URL. The **Installed** group lists each one with its version badge, permissions, any problem, the Claude plugins it suggests (**Install in terminal**), an **Enabled** switch and **Uninstall** (see [Extensions](#extensions)).
 
 The search filters the current page's rows by label (agents by name). A broken `settings.toml` shows its error banner on every wai page and makes them read-only.

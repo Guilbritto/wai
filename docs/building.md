@@ -90,12 +90,22 @@ cargo packager --release
 It writes `target\release\wai_<version>_x64-setup.exe` and downloads NSIS on first use. The
 installer uses `assets/icon/icon.ico`; `wai.exe` itself has no embedded icon yet.
 
-## Release signing secrets
+## Releases
 
-Pushing a tag `v<version>` runs `.github/workflows/release.yml`. The tag must equal the workspace
-version, else the run stops. The workflow packages both platforms and creates a **draft** release
-with `SHA256SUMS.txt`. Each signing step runs only when its secrets exist; without them, the packages
-are unsigned. The repository secrets are:
+Every push to `main` runs `.github/workflows/release.yml`: it runs CI, computes the next version with
+semantic-release from the conventional commits since the last tag (`feat:` is minor, `fix:` patch,
+`!` or `BREAKING CHANGE:` major; only `fix:`, `feat:`, `perf:`, `revert:` and breaking changes publish; `docs:`, `ci:` and the like do not), builds both platforms
+with that version stamped into `Cargo.toml`, and publishes a release `v<version>` with these assets:
+
+- `wai_<version>_aarch64.dmg` (download) and `wai_<version>_aarch64.app.zip` (what the in-app updater
+  installs);
+- `wai_<version>_x64-setup.exe`;
+- `SHA256SUMS.txt`, in `sha256sum` format, covering every asset.
+
+The repository's `Cargo.toml` keeps a placeholder version; the real one exists only in the build and
+the tag. To release, merge into `development`, fast-forward `main` and push both. The install notes in
+`.github/release-notes.md` are appended to every release. Each signing step runs only when its secrets
+exist; without them, the packages are unsigned. The repository secrets are:
 
 - **`APPLE_CERTIFICATE`:** a *Developer ID Application* `.p12`, base64 (`base64 -i cert.p12`). If
   codesign reports a certificate chain error, re-export the `.p12` with its chain.
