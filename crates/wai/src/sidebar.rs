@@ -172,19 +172,40 @@ impl Workspace {
         let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
             return;
         };
+        let claude = (agent == "claude").then(|| {
+            let open: std::collections::HashSet<String> = (self.sessions.iter())
+                .map(|s| s.read(cx))
+                .filter(|s| s.agent == "claude")
+                .map(|s| s.id.clone())
+                .collect();
+            (self.claude_home.clone(), self.quiet(), open)
+        });
         self.history_task = Some(cx.spawn(async move |this, cx| {
             let sessions = match handle.list_sessions().await {
                 Ok(sessions) => sessions,
                 Err(e) => return eprintln!("wai: could not list {agent} sessions: {e}"),
             };
-            let rows = cx
+            // ponytail: stats ids × project dirs and runs ps once per refresh; read each projects dir once if it shows.
+            let (rows, elsewhere) = cx
                 .background_spawn(async move {
+                    let ids: Vec<String> = match &claude {
+                        Some((_, _, open)) => (sessions.iter())
+                            .filter(|s| !open.contains(&s.id))
+                            .map(|s| s.id.clone())
+                            .collect(),
+                        None => Vec::new(),
+                    };
+                    let found = match &claude {
+                        Some((home, quiet, _)) => crate::elsewhere::open_elsewhere(home, &ids, quiet),
+                        None => Default::default(),
+                    };
                     let rows = sessions.into_iter().map(|s| (canonical(&s.cwd), s));
-                    rows.collect()
+                    (rows.collect(), found)
                 })
                 .await;
             this.update(cx, |this, cx| {
                 this.history = rows;
+                this.elsewhere = elsewhere;
                 this.sync_drafts(cx);
                 // R14: the saved state keeps no titles, so an untitled open session takes its
                 // history title; a title the agent sends later still replaces it.
@@ -1201,6 +1222,12 @@ impl Workspace {
             .default_agent()
             .is_some_and(|agent| self.can_fork(&agent, cx));
         let (muted, faint) = (cx.theme().muted_foreground, faint(cx));
+        let elsewhere = self.elsewhere.contains(&summary.id)
+            && self.session("claude", &summary.id, cx).is_none();
+        let amber = match cx.theme().is_dark() {
+            true => aurora::ambar(),
+            false => cx.theme().warning,
+        };
         aurora::tab(false, cx)
             .id(("history-row", ix))
             .group(ROW_GROUP)
@@ -1227,6 +1254,18 @@ impl Workspace {
                             .text_color(muted)
                             .child(title),
                     )
+                    .when(elsewhere, |el| {
+                        el.child(
+                            div()
+                                .id(("history-elsewhere", ix))
+                                .flex_none()
+                                .text_color(amber)
+                                .aria_label("Open elsewhere")
+                                .tooltip(|window, cx| Tooltip::new("Open elsewhere").build(window, cx))
+                                .child(Icon::new(Lucide::Monitor).size(px(11.)))
+                                .test_support(),
+                        )
+                    })
                     .children(date.map(|date| {
                         div()
                             .flex_none()
