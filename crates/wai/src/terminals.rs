@@ -235,7 +235,9 @@ impl Workspace {
             self.save_state(cx);
             self.focus_pane(self.focused_pane, window, cx);
         } else {
-            self.active_terminal = ix.min(self.terminals.len() - 1);
+            if ix < self.active_terminal || self.active_terminal == self.terminals.len() {
+                self.active_terminal -= 1;
+            }
             self.save_state(cx);
             self.select_terminal(self.active_terminal, window, cx);
         }
@@ -362,6 +364,24 @@ mod tests {
         cx.simulate_keystrokes("secondary-w");
         assert_eq!(numbers(&workspace, cx), [1, 2]);
         assert_eq!(workspace.read_with(cx, |w, _| w.panes.len()), panes);
+    }
+
+    #[gpui_kit::test]
+    fn closing_an_inactive_tab_keeps_the_active_one(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        cx.dispatch_action(NewTerminal);
+        cx.dispatch_action(NewTerminal);
+        let current = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, _| w.terminals[w.active_terminal].number)
+        };
+        assert_eq!(current(cx), 3);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.close_terminal(0, window, cx)));
+        assert_eq!(current(cx), 3);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.select_terminal(0, window, cx)));
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.close_terminal(1, window, cx)));
+        assert_eq!(current(cx), 2);
     }
 
     #[gpui_kit::test]
