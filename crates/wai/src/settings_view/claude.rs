@@ -88,6 +88,7 @@ pub(crate) enum Control {
     Mcp {
         ix: usize,
         on: bool,
+        toggleable: bool,
     },
     Open {
         kind: &'static str,
@@ -149,7 +150,11 @@ pub(crate) fn mcp_groups(data: &ClaudeData, check: &McpCheck) -> Vec<Group> {
             path: None,
             summary: Some(s.transport.to_string()),
             status: Some(status_line(check, &s.name, s.enabled)),
-            control: Control::Mcp { ix, on: s.enabled },
+            control: Control::Mcp {
+                ix,
+                on: s.enabled,
+                toggleable: s.source != McpSource::Project,
+            },
         });
     }
     let connectors = Group {
@@ -244,6 +249,11 @@ pub(crate) fn default_open(total_rows: usize, ix: usize) -> bool {
 impl SettingsView {
     pub fn set_claude(&mut self, data: ClaudeData, cx: &mut Context<Self>) {
         self.claude = Some(data);
+        cx.notify();
+    }
+
+    /// A write ended; only now do the switches come back, so a read that lands mid-write cannot.
+    pub fn write_done(&mut self, cx: &mut Context<Self>) {
         self.busy = false;
         cx.notify();
     }
@@ -256,6 +266,10 @@ impl SettingsView {
     #[cfg(test)]
     pub fn mcp_check(&self) -> &McpCheck {
         &self.mcp_check
+    }
+
+    pub fn project_key(&self) -> Option<String> {
+        self.claude.as_ref()?.project_key.clone()
     }
 
     #[cfg(test)]
@@ -275,6 +289,23 @@ impl SettingsView {
             id: plugin.id.clone(),
             on,
             seen: data.settings_stamp,
+        };
+        self.busy = true;
+        cx.emit(event);
+        cx.notify();
+    }
+
+    /// Says the user flipped an MCP server; the switches wait for the write.
+    fn toggle_mcp(&mut self, ix: usize, on: bool, cx: &mut Context<Self>) {
+        let Some(data) = self.claude.as_ref().filter(|_| !self.busy) else {
+            return;
+        };
+        let Some(server) = data.mcp.get(ix).filter(|s| s.source != McpSource::Project) else {
+            return;
+        };
+        let event = SettingsEvent::ToggleMcp {
+            name: server.name.clone(),
+            on,
         };
         self.busy = true;
         cx.emit(event);
@@ -470,11 +501,20 @@ impl SettingsView {
                             .disabled(true),
                     )
             }
-            Control::Mcp { ix, on } => h_flex()
-                .gap_2()
-                .items_center()
-                .child(Switch::new(("mcp-toggle", *ix)).checked(*on).disabled(true))
-                .child(aurora::soon(cx)),
+            Control::Mcp { ix, on, toggleable } => {
+                let ix = *ix;
+                let switch = Switch::new(("mcp-toggle", ix))
+                    .checked(*on)
+                    .disabled(!*toggleable || self.busy || self.claude.is_none())
+                    .on_click(
+                        cx.listener(move |this, on: &bool, _, cx| this.toggle_mcp(ix, *on, cx)),
+                    );
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(switch)
+                    .children((!*toggleable).then(|| aurora::soon(cx)))
+            }
             Control::Open {
                 kind,
                 ix,
@@ -681,8 +721,10 @@ mod tests {
         );
         assert_eq!(rows[1].status, Some((Tone::Muted, "Not checked".into())));
         let controls: Vec<_> = rows.iter().map(|r| &r.control).collect();
-        assert_eq!(controls[0], &Control::Mcp { ix: 0, on: false });
-        assert_eq!(controls[4], &Control::Mcp { ix: 4, on: true });
+        let mcp = |ix, on, toggleable| Control::Mcp { ix, on, toggleable };
+        assert_eq!(controls[0], &mcp(0, false, true));
+        assert_eq!(controls[3], &mcp(3, true, true));
+        assert_eq!(controls[4], &mcp(4, true, false));
         let connectors = &groups[3];
         assert!(!connectors.add_soon);
         assert_eq!(connectors.rows.len(), 1);

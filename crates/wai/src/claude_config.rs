@@ -7,7 +7,10 @@ use std::time::Duration;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
-use wai_settings::claude::{Stamp, WriteError, parse_mcp_list, read_claude, set_plugin_enabled};
+use wai_settings::claude::{
+    Stamp, WriteError, parse_mcp_list, project_key_for, read_claude, set_mcp_enabled,
+    set_plugin_enabled,
+};
 
 use crate::settings_view::claude::McpCheck;
 use crate::workspace::Workspace;
@@ -119,11 +122,57 @@ impl Workspace {
                     )),
                 };
                 window.push_notification(notice, cx);
+                this.write_done(cx);
                 this.refresh_claude(cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Adds or removes `name` in this project's `disabledMcpServers`, then shows what is on disk.
+    pub(crate) fn toggle_mcp(
+        &mut self,
+        name: String,
+        on: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let home = self.claude_home.clone();
+        let key = (self.settings_view())
+            .and_then(|v| v.read(cx).project_key())
+            .unwrap_or_else(|| project_key_for(&self.project));
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    match set_mcp_enabled(&home, &key, &name, on) {
+                        Err(WriteError::Changed | WriteError::Busy) => {
+                            set_mcp_enabled(&home, &key, &name, on)
+                        }
+                        r => r,
+                    }
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                let notice = match result {
+                    Ok(()) => Notification::success("Applies to new Claude sessions"),
+                    Err(e) => {
+                        Notification::warning(format!("Could not change ~/.claude.json: {e}"))
+                    }
+                };
+                window.push_notification(notice, cx);
+                this.write_done(cx);
+                this.refresh_claude(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn write_done(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = self.settings_view() {
+            view.update(cx, |v, cx| v.write_done(cx));
+        }
     }
 }
 
@@ -448,26 +497,123 @@ mod tests {
         assert_eq!(groups.iter().map(|g| g.rows.len()).sum::<usize>(), 5);
     }
 
+    fn claude_json(tmp: &tempfile::TempDir) -> Vec<u8> {
+        std::fs::read(tmp.path().join("home/.claude.json")).unwrap()
+    }
+
+    fn mcp_ix(workspace: &Entity<Workspace>, name: &str, cx: &mut VisualTestContext) -> usize {
+        let view = workspace.read_with(cx, |w, _| w.settings_view()).unwrap();
+        view.read_with(cx, |v, _| {
+            v.claude().unwrap().mcp.iter().position(|s| s.name == name)
+        })
+        .unwrap()
+    }
+
+    fn disabled_servers(tmp: &tempfile::TempDir) -> Vec<String> {
+        let json: serde_json::Value = serde_json::from_slice(&claude_json(tmp)).unwrap();
+        let project = tmp.path().join("project");
+        let key = wai_settings::claude::project_key_for(&project);
+        json["projects"][key.as_str()]["disabledMcpServers"]
+            .as_array()
+            .map(|a| a.iter().map(|v| v.as_str().unwrap().to_string()).collect())
+            .unwrap_or_default()
+    }
+
     #[gpui_kit::test]
-    fn mcp_toggle_is_coming_soon(cx: &mut TestAppContext) {
+    fn mcp_toggle_writes_disabled_list(cx: &mut TestAppContext) {
         let (workspace, cx, tmp) = claude_ws(cx);
-        workspace.update_in(cx, |w, window, cx| {
-            w.open_settings(Section::Mcp, None, window, cx)
-        });
-        cx.run_until_parked();
-        let before = std::fs::read(tmp.path().join("home/.claude.json")).unwrap();
+        open_mcp(&workspace, cx);
+        let ix = mcp_ix(&workspace, "plugin:alpha:db", cx);
+        let rest = |tmp: &tempfile::TempDir| {
+            let mut json: serde_json::Value = serde_json::from_slice(&claude_json(tmp)).unwrap();
+            let key = wai_settings::claude::project_key_for(&tmp.path().join("project"));
+            json["projects"][key.as_str()]
+                .as_object_mut()
+                .unwrap()
+                .remove("disabledMcpServers");
+            json
+        };
+        let (before, settings) = (rest(&tmp), settings_json(&tmp));
+        click(("mcp-toggle", ix), cx);
+        assert!(disabled_servers(&tmp).is_empty());
+        assert_eq!(cx.update(|window, cx| window.notifications(cx).len()), 1);
+        click(("mcp-toggle", ix), cx);
+        assert_eq!(disabled_servers(&tmp), ["plugin:alpha:db"]);
+        assert_eq!(rest(&tmp), before);
+        assert_eq!(settings_json(&tmp), settings);
+    }
+
+    #[gpui_kit::test]
+    fn mcp_project_servers_stay_coming_soon(cx: &mut TestAppContext) {
+        let (workspace, cx, tmp) = claude_ws(cx);
+        open_mcp(&workspace, cx);
+        let p = mcp_ix(&workspace, "p", cx);
+        let before = claude_json(&tmp);
         cx.update(|window, cx| {
             window.render_frame(cx);
-            assert_eq!(window.find(("mcp-toggle", 0usize)).disabled(), Some(true));
+            assert_eq!(window.find(("mcp-toggle", p)).disabled(), Some(true));
             assert_eq!(window.find("soon-add-server").disabled(), Some(true));
-            window.click(("mcp-toggle", 0usize), cx);
+            window.click(("mcp-toggle", p), cx);
         });
         cx.run_until_parked();
-        assert_eq!(
-            std::fs::read(tmp.path().join("home/.claude.json")).unwrap(),
-            before
-        );
+        assert_eq!(claude_json(&tmp), before);
         assert_eq!(cx.update(|window, cx| window.notifications(cx).len()), 0);
+        let view = workspace.read_with(cx, |w, _| w.settings_view()).unwrap();
+        let soon = view.read_with(cx, |v, _| {
+            let groups =
+                crate::settings_view::claude::mcp_groups(v.claude().unwrap(), v.mcp_check());
+            groups.last().unwrap().rows[0].control == crate::settings_view::claude::Control::Soon
+        });
+        assert!(soon);
+    }
+
+    #[gpui_kit::test]
+    fn mcp_toggles_wait_for_the_write(cx: &mut TestAppContext) {
+        let (workspace, cx, tmp) = claude_ws(cx);
+        open_mcp(&workspace, cx);
+        let (db, u) = (
+            mcp_ix(&workspace, "plugin:alpha:db", cx),
+            mcp_ix(&workspace, "u", cx),
+        );
+        let view = workspace.read_with(cx, |w, _| w.settings_view()).unwrap();
+        let disabled = |ix: usize, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.find(("mcp-toggle", ix)).disabled()
+            })
+        };
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.click(("mcp-toggle", db), cx);
+        });
+        assert_eq!(disabled(u, cx), Some(true));
+        // A read that lands mid-write must not bring the switches back.
+        let data = view.read_with(cx, |v, _| v.claude().unwrap().clone());
+        view.update(cx, |v, cx| v.set_claude(data, cx));
+        assert_eq!(disabled(u, cx), Some(true));
+        cx.update(|window, cx| window.click(("mcp-toggle", u), cx));
+        cx.run_until_parked();
+        assert!(disabled_servers(&tmp).is_empty());
+        assert_eq!(disabled(u, cx), Some(false));
+    }
+
+    #[gpui_kit::test]
+    fn mcp_toggle_reports_invalid_file(cx: &mut TestAppContext) {
+        let (workspace, cx, tmp) = claude_ws(cx);
+        open_mcp(&workspace, cx);
+        let db = mcp_ix(&workspace, "plugin:alpha:db", cx);
+        put(tmp.path().join("home/.claude.json"), r#"{"projects":"x"}"#);
+        let before = claude_json(&tmp);
+        click(("mcp-toggle", db), cx);
+        assert_eq!(claude_json(&tmp), before);
+        assert_eq!(cx.update(|window, cx| window.notifications(cx).len()), 1);
+        let view = workspace.read_with(cx, |w, _| w.settings_view()).unwrap();
+        let idle = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find(("plugin-toggle", 0usize)).disabled()
+        });
+        assert_eq!(idle, Some(false));
+        drop(view);
     }
 
     #[gpui_kit::test]
