@@ -18,6 +18,10 @@ Mergeado na `development` (`6427cfc`), sem versão nova ainda: **0.1** (worktree
 
 Ainda abertos na Onda 0/1: 0.2, 0.3 e 0.9 (dono), 0.6 e 0.7 (precisam do app na tela/parado), 1.4 (semana de uso), toggle de servidor MCP (gravar `~/.claude.json`, aguarda o dono) e a pergunta 4 (submodules; hoje "New worktree" fica desligado com dica).
 
+## Andamento (2026-11-12)
+
+Versões 0.6.0 (Onda 1), 0.6.1 (redesenho do chat) e 0.6.2 (pílulas na caixa de texto). **0.2** feito: remoto `origin` = `Guilbritto/wai`. Perguntas 1, 2 e 4 e o toggle MCP respondidos pelo dono. O que falta, na ordem de execução, está em `2026-11-12-wai-execucao-pendencias.md`. A atualização automática está com outro agente (spec `2026-11-12-wai-release-and-auto-update-design.md`); por isso a **3.7** sai deste plano.
+
 ## Restrições globais
 
 - CPU parado < 0,5% (medido 0,12–0,20%). Nada animado ou com polling no núcleo.
@@ -87,7 +91,7 @@ Ainda abertos na Onda 0/1: 0.2, 0.3 e 0.9 (dono), 0.6 e 0.7 (precisam do app na 
 | 3.4 | Abas do editor voltam ao reabrir | `RELATORIO-final.md`; `AppState` em `wai-settings/src/lib.rs:466` | P |
 | 3.5 | Terminal: roda do mouse dentro de `less`/`vim` | `terminal_view.rs:17` | P |
 | 3.6 | Revert aceitar arquivos com tab/CRLF | `chat/edits.rs` | P |
-| 3.7 | Checagem de atualização com proxy e redirecionamento | `update.rs:224,237` | P |
+| 3.7 | ~~Checagem de atualização com proxy e redirecionamento~~ (saiu: coberta pela atualização automática, outro agente) | `update.rs:224,237` | — |
 | 3.8 | Atalhos customizáveis (ESTUDO §6) | keymap fixo em `app.rs:61-87` | M |
 | 3.9 | **Projeto 3:** servidor MCP `wai` + "Configure with AI" (a IA mexe em configuração, painéis, arquivos e sessões; o que muda o que roda pede confirmação) — precisa de spec própria antes | spec `2026-11-10-wai-settings-and-agents-design.md` | G |
 
@@ -133,10 +137,10 @@ Licença e dono do código; remoto e CI (0.2); publicar ou não o `wai-waycarbon
 
 ## Perguntas em aberto (mudam a ordem)
 
-1. No terminal da Central (50 aberturas em 7 dias), o que você faz: conversa com o Claude no TUI, roda `/mcp`/`/plugin`, ou comandos seus? → decide se 3.3 sobe para a Onda 1.
-2. Primeiros colegas usam Mac ou Windows? → decide se 2.8 entra.
+1. ~~No terminal da Central, o que você faz?~~ Respondida em 12/11: os três (TUI do Claude, `/mcp`/`/plugin`, comandos próprios). A 3.3 sobe.
+2. ~~Primeiros colegas usam Mac ou Windows?~~ Respondida em 12/11: Mac; o dono testa no Windows também. 2.8 e 3.15 no fim da fila.
 3. Vai continuar em `bypassPermissions`? → se sim, 0.4 importa mais para colegas e pode ir para a Onda 2.
-4. Rascunho de nova sessão: em pasta com submodules (o `waycarbon-ecosystem-local` tem 36), New worktree deve baixar os submodules, deixá-los vazios ou sumir (você escolhe a pasta do submodule)? → fecha a spec da 1.5.
+4. ~~Submodules no New worktree?~~ Respondida em 12/11: continua desligado. O worktree serve para mostrar onde a IA está trabalhando; quem decide é a IA. Vira o item 1.10 (pílulas seguem a IA) em `2026-11-12-wai-execucao-pendencias.md`.
 5. ~~Settings em modal (1.9): só formato ou completo?~~ Respondida em 11/11: completo, com "Coming soon" no que o wai ainda não faz.
 
 ## Diário de tropeços
