@@ -92,7 +92,9 @@ impl Section {
                 "What a conversation shows while the agent works. Permission cards, questions and file edits always show."
             }
             Section::Terminal => "The terminal under the panes.",
-            Section::Updates => "wai checks GitHub releases once a day, only when you turn it on.",
+            Section::Updates => {
+                "wai checks for a new release each time it opens, downloads it in the background and installs it when you click Restart now."
+            }
             Section::Extensions => {
                 "Extensions add panels, commands, agents and MCP servers to wai. They run with your permissions."
             }

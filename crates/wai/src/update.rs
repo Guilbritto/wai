@@ -434,10 +434,7 @@ mod tests {
             check: false,
             repo: repo.map(Into::into),
         };
-        assert_eq!(
-            check(&UpdateSettings::default(), "0.1.0", never).unwrap(),
-            None
-        );
+        assert_eq!(check(&off(None), "0.1.0", never).unwrap(), None);
         assert_eq!(
             check(&off(Some("owner/wai")), "0.1.0", never).unwrap(),
             None
