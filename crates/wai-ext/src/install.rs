@@ -59,8 +59,10 @@ pub enum InstallError {
     Git(String),
     #[error("no wai-extension.toml in the extension folder")]
     NoManifest,
-    #[error("{0} is already installed; uninstall it first")]
+    #[error("{0} is already installed; install it again to update it")]
     AlreadyInstalled(String),
+    #[error("{0} is not installed")]
+    NotInstalled(String),
     #[error("an extension is installed only with every permission it asks for")]
     Consent,
 }
@@ -95,6 +97,11 @@ impl Drop for Staged {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.root).ok();
     }
+}
+
+/// Each extension's own folder, `<root>/<id>`; nothing here touches it.
+pub(crate) fn data_root(config_dir: &Path) -> PathBuf {
+    config_dir.join("extension-data")
 }
 
 pub(crate) fn extensions_dir(config_dir: &Path) -> PathBuf {

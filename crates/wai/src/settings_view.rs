@@ -122,7 +122,7 @@ impl Section {
                 "Plugins, MCP servers, skills, instructions, agents and hooks of Antigravity, like the Claude ones."
             }
             Section::Mcp => {
-                "Servers that give Claude more tools. Turning one off applies to this project, in new Claude sessions, and keeps its configuration."
+                "Servers that give Claude more tools. Turning one off applies to this project, in new Claude sessions, and keeps its configuration. Servers from a .mcp.json file and your claude.ai connectors cannot be turned off here yet."
             }
         }
     }
@@ -290,6 +290,10 @@ pub enum SettingsEvent {
         on: bool,
         seen: Stamp,
     },
+    ToggleMcp {
+        name: String,
+        on: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -391,7 +395,7 @@ pub struct SettingsView {
     /// The running `claude mcp list`; dropping the view kills it.
     pub(crate) mcp_task: Option<Task<()>>,
     /// Groups the user flipped from their default (open or closed), per page.
-    toggled: HashSet<(Section, usize)>,
+    toggled: HashSet<(Section, String)>,
     _subscriptions: Vec<Subscription>,
 }
 

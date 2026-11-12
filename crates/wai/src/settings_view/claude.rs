@@ -88,6 +88,7 @@ pub(crate) enum Control {
     Mcp {
         ix: usize,
         on: bool,
+        toggleable: bool,
     },
     Open {
         kind: &'static str,
@@ -149,7 +150,11 @@ pub(crate) fn mcp_groups(data: &ClaudeData, check: &McpCheck) -> Vec<Group> {
             path: None,
             summary: Some(s.transport.to_string()),
             status: Some(status_line(check, &s.name, s.enabled)),
-            control: Control::Mcp { ix, on: s.enabled },
+            control: Control::Mcp {
+                ix,
+                on: s.enabled,
+                toggleable: s.source != McpSource::Project,
+            },
         });
     }
     let connectors = Group {
@@ -241,9 +246,26 @@ pub(crate) fn default_open(total_rows: usize, ix: usize) -> bool {
     total_rows <= 20 || ix == 0
 }
 
+/// Open state of a group; a click flips it, keyed by the group's title, not its place on screen.
+pub(crate) fn group_open(
+    toggled: &std::collections::HashSet<(Section, String)>,
+    section: Section,
+    order: &[String],
+    title: &str,
+    total: usize,
+) -> bool {
+    let ix = order.iter().position(|t| t == title).unwrap_or(0);
+    default_open(total, ix) != toggled.contains(&(section, title.to_string()))
+}
+
 impl SettingsView {
     pub fn set_claude(&mut self, data: ClaudeData, cx: &mut Context<Self>) {
         self.claude = Some(data);
+        cx.notify();
+    }
+
+    /// A write ended; only now do the switches come back, so a read that lands mid-write cannot.
+    pub fn write_done(&mut self, cx: &mut Context<Self>) {
         self.busy = false;
         cx.notify();
     }
@@ -256,6 +278,10 @@ impl SettingsView {
     #[cfg(test)]
     pub fn mcp_check(&self) -> &McpCheck {
         &self.mcp_check
+    }
+
+    pub fn project_key(&self) -> Option<String> {
+        self.claude.as_ref()?.project_key.clone()
     }
 
     #[cfg(test)]
@@ -275,6 +301,23 @@ impl SettingsView {
             id: plugin.id.clone(),
             on,
             seen: data.settings_stamp,
+        };
+        self.busy = true;
+        cx.emit(event);
+        cx.notify();
+    }
+
+    /// Says the user flipped an MCP server; the switches wait for the write.
+    fn toggle_mcp(&mut self, ix: usize, on: bool, cx: &mut Context<Self>) {
+        let Some(data) = self.claude.as_ref().filter(|_| !self.busy) else {
+            return;
+        };
+        let Some(server) = data.mcp.get(ix).filter(|s| s.source != McpSource::Project) else {
+            return;
+        };
+        let event = SettingsEvent::ToggleMcp {
+            name: server.name.clone(),
+            on,
         };
         self.busy = true;
         cx.emit(event);
@@ -361,6 +404,7 @@ impl SettingsView {
         };
         let total: usize = all.iter().map(|g| g.rows.len()).sum();
         let searching = !query.is_empty();
+        let order: Vec<String> = all.iter().map(|g| g.title.clone()).collect();
         let groups = filter(all, query);
         v_flex()
             .gap_3()
@@ -368,7 +412,7 @@ impl SettingsView {
             .children(problems)
             .children(groups.into_iter().enumerate().map(|(ix, group)| {
                 let open =
-                    searching || default_open(total, ix) != self.toggled.contains(&(section, ix));
+                    searching || group_open(&self.toggled, section, &order, &group.title, total);
                 self.group(section, ix, group, open, cx)
             }))
     }
@@ -382,6 +426,7 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Div {
         let (muted, faint) = (cx.theme().muted_foreground, aurora::nevoa_2());
+        let title = group.title.clone();
         let header = h_flex()
             .gap_2()
             .items_center()
@@ -412,8 +457,9 @@ impl SettingsView {
                             .child(group.rows.len().to_string()),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.toggled.remove(&(section, ix)) {
-                            this.toggled.insert((section, ix));
+                        let key = (section, title.clone());
+                        if !this.toggled.remove(&key) {
+                            this.toggled.insert(key);
                         }
                         cx.notify();
                     }))
@@ -470,11 +516,20 @@ impl SettingsView {
                             .disabled(true),
                     )
             }
-            Control::Mcp { ix, on } => h_flex()
-                .gap_2()
-                .items_center()
-                .child(Switch::new(("mcp-toggle", *ix)).checked(*on).disabled(true))
-                .child(aurora::soon(cx)),
+            Control::Mcp { ix, on, toggleable } => {
+                let ix = *ix;
+                let switch = Switch::new(("mcp-toggle", ix))
+                    .checked(*on)
+                    .disabled(!*toggleable || self.busy || self.claude.is_none())
+                    .on_click(
+                        cx.listener(move |this, on: &bool, _, cx| this.toggle_mcp(ix, *on, cx)),
+                    );
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(switch)
+                    .children((!*toggleable).then(|| aurora::soon(cx)))
+            }
             Control::Open {
                 kind,
                 ix,
@@ -545,7 +600,8 @@ mod tests {
     use wai_settings::claude::{ClaudeData, McpServer, McpSource, Plugin};
 
     use super::{
-        Control, McpCheck, Tone, default_open, filter, mcp_groups, plugin_groups, status_line,
+        Control, McpCheck, Tone, default_open, filter, group_open, mcp_groups, plugin_groups,
+        status_line,
     };
     use wai_settings::claude::McpStatus;
 
@@ -681,8 +737,10 @@ mod tests {
         );
         assert_eq!(rows[1].status, Some((Tone::Muted, "Not checked".into())));
         let controls: Vec<_> = rows.iter().map(|r| &r.control).collect();
-        assert_eq!(controls[0], &Control::Mcp { ix: 0, on: false });
-        assert_eq!(controls[4], &Control::Mcp { ix: 4, on: true });
+        let mcp = |ix, on, toggleable| Control::Mcp { ix, on, toggleable };
+        assert_eq!(controls[0], &mcp(0, false, true));
+        assert_eq!(controls[3], &mcp(3, true, true));
+        assert_eq!(controls[4], &mcp(4, true, false));
         let connectors = &groups[3];
         assert!(!connectors.add_soon);
         assert_eq!(connectors.rows.len(), 1);
@@ -801,5 +859,19 @@ mod tests {
         assert!(default_open(10, 1));
         assert!(default_open(21, 0));
         assert!(!default_open(21, 1));
+    }
+
+    #[test]
+    fn collapsed_state_follows_the_group_not_its_position() {
+        use crate::settings_view::Section;
+        let order: Vec<String> = ["a", "b", "c"].map(String::from).into();
+        let mut toggled = std::collections::HashSet::new();
+        // 25 rows: only "a" is open; the user opens "b".
+        toggled.insert((Section::Skills, "b".to_string()));
+        assert!(group_open(&toggled, Section::Skills, &order, "b", 25));
+        assert!(!group_open(&toggled, Section::Skills, &order, "c", 25));
+        // A filter drops "a"; "b" keeps its state, "c" stays closed.
+        assert!(group_open(&toggled, Section::Skills, &order, "b", 25));
+        assert!(!group_open(&toggled, Section::Plugins, &order, "b", 25));
     }
 }

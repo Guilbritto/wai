@@ -2571,6 +2571,9 @@ impl Workspace {
                 SettingsEvent::TogglePlugin { id, on, seen } => {
                     this.toggle_plugin(id.clone(), *on, *seen, window, cx)
                 }
+                SettingsEvent::ToggleMcp { name, on } => {
+                    this.toggle_mcp(name.clone(), *on, window, cx)
+                }
             },
         )
         .detach();

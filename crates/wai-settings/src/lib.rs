@@ -574,6 +574,10 @@ impl AppState {
     }
 }
 
+/// Tests that set or read the process-wide current dir take this.
+#[cfg(test)]
+pub(crate) static CWD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1088,6 +1092,7 @@ mod tests {
         tool(&dir("plain"), 0o644);
         tool(&dir("exe"), 0o755);
         std::fs::create_dir_all(dir("folder").join("tool")).unwrap();
+        let _cwd = crate::CWD.lock().unwrap_or_else(|e| e.into_inner());
         // `relative` as a relative entry: up from the current dir to `/`, then down to it.
         let up = "../".repeat(std::env::current_dir().unwrap().components().count());
         let relative = Path::new(&up).join(dir("relative").strip_prefix("/").unwrap());

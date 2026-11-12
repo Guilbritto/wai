@@ -353,6 +353,7 @@ struct Ext {
     program: PathBuf,
     args: Vec<String>,
     dir: PathBuf,
+    data: PathBuf,
     granted: Vec<Permission>,
     panels: Vec<String>,
     init: Value,
@@ -368,21 +369,26 @@ impl Ext {
         let program = installed.program(&spec.command);
         let program = wai_settings::find_program(&program)
             .ok_or_else(|| format!("{} is not on PATH", program.display()))?;
+        std::fs::create_dir_all(&installed.data)
+            .map_err(|e| format!("cannot create its data folder: {e}"))?;
         let granted: Vec<String> = installed.granted.iter().map(ToString::to_string).collect();
         Ok(Ext {
             id: m.id.clone(),
             program,
             args: spec.args.clone(),
             dir: installed.dir.clone(),
+            data: installed.data.clone(),
             granted: installed.granted.clone(),
             panels: m.contributes.panels.iter().map(|p| p.id.clone()).collect(),
             init: json!({
                 "protocol": 1,
+                "api": "1.1",
                 "wai_version": env!("CARGO_PKG_VERSION"),
                 "ext_id": m.id.as_str(),
                 "granted": granted,
                 "project": dunce::simplified(project).to_string_lossy(),
                 "ext_dir": dunce::simplified(&installed.dir).to_string_lossy(),
+                "data_dir": dunce::simplified(&installed.data).to_string_lossy(),
             }),
         })
     }
@@ -398,6 +404,7 @@ impl Ext {
         command
             .args(&self.args)
             .env("WAI_EXT_DIR", &self.dir)
+            .env("WAI_EXT_DATA", &self.data)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

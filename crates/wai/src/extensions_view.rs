@@ -119,7 +119,7 @@ impl ExtensionsView {
     }
 
     /// Stages `source` off the main thread, then asks for consent. `expect`: the id a project
-    /// suggested; an extension with another id is refused, and so is one already installed.
+    /// suggested; an extension with another id is refused. One already installed is an update.
     pub fn review(
         &mut self,
         source: Source,
@@ -143,25 +143,20 @@ impl ExtensionsView {
                     Err(e) => return refused(e.to_string(), window, cx),
                 };
                 let id = staged.manifest().id.clone();
-                let installed = this.store.list().iter().any(|i| i.manifest.id == id);
-                let refusal = match &expect {
-                    Some(want) if *want != id => Some(format!(
-                        "the extension there is {}, not {}",
-                        id.as_str(),
-                        want.as_str()
-                    )),
-                    _ if installed => Some(format!(
-                        "{} is already installed; uninstall it first",
-                        id.as_str()
-                    )),
-                    _ => None,
-                };
-                match refusal {
-                    None => this.consent(staged, window, cx),
-                    Some(e) => {
+                let old = (this.store.list().into_iter())
+                    .find(|i| i.manifest.id == id)
+                    .map(|i| i.manifest.version);
+                match &expect {
+                    Some(want) if *want != id => {
                         discard(staged, cx);
+                        let e = format!(
+                            "the extension there is {}, not {}",
+                            id.as_str(),
+                            want.as_str()
+                        );
                         refused(e, window, cx)
                     }
+                    _ => this.consent(staged, old, window, cx),
                 }
             })
             .ok();
@@ -171,9 +166,22 @@ impl ExtensionsView {
 
     /// Install or Cancel. The permissions and the v1 limitation come right after the name and
     /// version, before anything long the manifest says (its description goes last, clamped).
-    fn consent(&mut self, staged: Staged, window: &mut Window, cx: &mut Context<Self>) {
+    /// `old`: the installed version when this replaces it.
+    fn consent(
+        &mut self,
+        staged: Staged,
+        old: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let updating = old.is_some();
         let m = staged.manifest().clone();
         let (name, version) = (clamp(&m.name, NAME_CHARS), clamp(&m.version, NAME_CHARS));
+        let version = match old {
+            Some(old) => format!("{} → {version}", clamp(&old, NAME_CHARS)),
+            None => version,
+        };
+        let verb = if updating { "Update" } else { "Install" };
         let description = (m.description.as_deref()).map(|d| clamp(d, DESCRIPTION_CHARS));
         let source = format!("From {}", clamp(&staged.source().to_string(), 300));
         let lines = permissions_text(&m.permissions);
@@ -208,7 +216,7 @@ impl ExtensionsView {
                         .child(d)
                 }));
             let (install, this) = (pending.clone(), this.clone());
-            dialog.title(format!("Install {name}?")).child(body).footer(
+            dialog.title(format!("{verb} {name}?")).child(body).footer(
                 DialogFooter::new()
                     .child(
                         Button::new("consent-cancel")
@@ -218,14 +226,16 @@ impl ExtensionsView {
                     .child(
                         Button::new("consent-install")
                             .primary()
-                            .label("Install")
+                            .label(verb)
                             .on_click(move |_, window, cx| {
                                 window.close_dialog(cx);
                                 let Some(staged) = install.borrow_mut().0.take() else {
                                     return;
                                 };
-                                this.update(cx, |this, cx| this.install(staged, window, cx))
-                                    .ok();
+                                this.update(cx, |this, cx| {
+                                    this.install(staged, updating, window, cx)
+                                })
+                                .ok();
                             }),
                     ),
             )
@@ -233,15 +243,37 @@ impl ExtensionsView {
     }
 
     /// v1 consent is all or nothing: everything the manifest asks for is granted.
-    fn install(&mut self, staged: Staged, window: &mut Window, cx: &mut Context<Self>) {
+    /// An update stops the running process first; the host starts it again from the new folder.
+    fn install(
+        &mut self,
+        staged: Staged,
+        updating: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let name = clamp(&staged.manifest().name, NAME_CHARS);
         let granted = staged.manifest().permissions.clone();
-        let notice = match self.store.commit(staged, granted) {
-            Ok(_) => {
-                self.sync_host(cx);
-                Notification::success(format!("Installed {name}"))
+        let result = if updating {
+            let id = staged.manifest().id.clone();
+            self.host.update(cx, |host, cx| host.stop(&id, cx));
+            self.store.update(staged, granted).map(|(_, trash)| {
+                cx.background_spawn(async move { std::fs::remove_dir_all(trash).ok() })
+                    .detach()
+            })
+        } else {
+            self.store.commit(staged, granted).map(|_| ())
+        };
+        // A failed update has put the old folder back; restart what `stop` dropped.
+        self.sync_host(cx);
+        let notice = match result {
+            Ok(()) => {
+                let did = if updating { "Updated" } else { "Installed" };
+                Notification::success(format!("{did} {name}"))
             }
-            Err(e) => Notification::error(format!("Could not install {name}: {e}")).autohide(false),
+            Err(e) => {
+                let did = if updating { "update" } else { "install" };
+                Notification::error(format!("Could not {did} {name}: {e}")).autohide(false)
+            }
         };
         window.push_notification(notice, cx);
         cx.notify();
@@ -752,6 +784,99 @@ pub(crate) mod tests {
         click(("ext-uninstall", 0usize), cx);
         wait_gone(&second);
         assert_eq!(host.read_with(cx, |h, _| h.status(&id).cloned()), None);
+    }
+
+    /// Installing the same id again stops the running process, swaps the folder and starts
+    /// the new one; the version and `enabled` carry over.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn update_stops_then_restarts(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the extension is a real process
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, pid_file) = (tmp.path().join("config"), tmp.path().join("ext.pid"));
+        let src = running_sample(&tmp.path().join("src"), &pid_file, "");
+        let manifest = "id = \"sample\"\nname = \"Sample\"\nversion = \"0.2.0\"\n\
+            permissions = [\"process\"]\n[process]\ncommand = \"bin/run\"\n";
+        let new = running_sample_with(&tmp.path().join("new"), manifest, &pid_file, "");
+        let (workspace, cx) = workspace(&config, cx);
+        let view =
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.show_extensions(window, cx)));
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        let id = ExtId::new("sample").unwrap();
+
+        review(&view, &src, cx);
+        click("consent-install", cx);
+        let first = started(&pid_file, cx);
+        std::fs::remove_file(&pid_file).unwrap();
+
+        review(&view, &new, cx);
+        click("consent-install", cx);
+        wait_gone(&first);
+        let second = started(&pid_file, cx);
+        assert_ne!(first, second);
+        wait_until(cx, "Ready", |cx| {
+            host.read_with(cx, |h, _| h.status(&id) == Some(&ExtStatus::Ready))
+        });
+        let list = installed(&view, cx);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].manifest.version, "0.2.0");
+        assert!(list[0].enabled);
+        assert!(list[0].dir.starts_with(config.join("extensions")));
+        assert_eq!(staged(&config), 0, "the old folder is deleted");
+    }
+
+    /// A failed update puts the old folder back, and the old extension runs again.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn failed_update_restarts_the_old_extension(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the extension is a real process
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, pid_file) = (tmp.path().join("config"), tmp.path().join("ext.pid"));
+        let src = running_sample(&tmp.path().join("src"), &pid_file, "");
+        let manifest = "id = \"sample\"\nname = \"Sample\"\nversion = \"0.2.0\"\n\
+            permissions = [\"process\"]\n[process]\ncommand = \"bin/run\"\n";
+        let new = running_sample_with(&tmp.path().join("new"), manifest, &pid_file, "");
+        let (workspace, cx) = workspace(&config, cx);
+        let view =
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.show_extensions(window, cx)));
+
+        review(&view, &src, cx);
+        click("consent-install", cx);
+        let first = started(&pid_file, cx);
+        std::fs::remove_file(&pid_file).unwrap();
+
+        // `save` cannot replace a non-empty folder at this name, so the update fails.
+        std::fs::create_dir_all(config.join("extensions.json.tmp/x")).unwrap();
+        review(&view, &new, cx);
+        click("consent-install", cx);
+        wait_gone(&first);
+        let second = started(&pid_file, cx);
+        assert_ne!(first, second);
+        assert_eq!(installed(&view, cx)[0].manifest.version, "1.0.0");
+    }
+
+    /// The dialog for an installed id is an update: `old → new`, Cancel changes nothing.
+    #[gpui_kit::test]
+    fn update_shows_old_and_new_version(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let old = MANIFEST.replace("1.2.0", "0.1.0");
+        let new = MANIFEST.replace("1.2.0", "0.2.0");
+        let old = sample_with(&tmp.path().join("old"), &old);
+        let new = sample_with(&tmp.path().join("new"), &new);
+        let (workspace, cx) = workspace(&config, cx);
+        let view =
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.show_extensions(window, cx)));
+
+        review(&view, &old, cx);
+        click("consent-install", cx);
+        review(&view, &new, cx);
+        assert!(consent(cx), "no update dialog");
+        cx.update(|window, cx| window.render_frame(cx));
+        assert!(cx.debug_bounds("consent: 0.1.0 → 0.2.0").is_some());
+        click("consent-cancel", cx);
+        assert_eq!(installed(&view, cx)[0].manifest.version, "0.1.0");
+        assert_eq!(staged(&config), 0, "Cancel drops the stage");
     }
 
     /// Enabled before launch, it starts once the window is open; quitting kills it.
