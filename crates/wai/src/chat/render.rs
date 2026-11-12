@@ -66,7 +66,7 @@ pub(super) fn pinned_message(
 }
 
 /// `43k`, `1M`, `1.5M`.
-fn tokens(n: u64) -> String {
+pub(super) fn tokens(n: u64) -> String {
     match n {
         0..1_000 => n.to_string(),
         1_000..1_000_000 => format!("{}k", n / 1_000),
@@ -889,6 +889,7 @@ impl Render for ChatSession {
             .child(self.render_header(cx))
             .child(messages.children(waiting))
             .child(self.render_prompt(window, cx))
+            .children(self.render_agents(cx))
     }
 }
 

@@ -393,7 +393,17 @@ impl ChatSession {
         self.input.read(cx).value().to_string()
     }
 
-    pub(super) fn cancel(&mut self, _: &CancelTurn, _: &mut Window, cx: &mut Context<Self>) {
+    /// Esc: out of the agent list and its drawer first, keeping the turn; else Stop.
+    pub(super) fn cancel(&mut self, _: &CancelTurn, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drawer.is_none() && self.agent_cursor.is_none() {
+            return self.stop_turn(cx);
+        }
+        (self.drawer, self.agent_cursor) = (None, None);
+        self.focus(window, cx);
+        cx.notify();
+    }
+
+    fn stop_turn(&mut self, cx: &mut Context<Self>) {
         if self.is_starting() {
             return cx.emit(ChatEvent::StopStart);
         }
@@ -466,7 +476,7 @@ impl ChatSession {
                 .icon(IconName::Square)
                 .tooltip("Stop")
                 .accessibility_label("Stop")
-                .on_click(cx.listener(|this, _, window, cx| this.cancel(&CancelTurn, window, cx)));
+                .on_click(cx.listener(|this, _, _, cx| this.stop_turn(cx)));
             match dark {
                 true => aurora::filled(
                     stop,
@@ -586,7 +596,7 @@ impl ChatSession {
                 )
                 .children(self.render_menu(cx)),
         );
-        self.menu_keys(prompt, cx)
+        self.agent_keys(self.menu_keys(prompt, cx), cx)
     }
 
     /// The folder, branch and agent, as read-only chips on the box's top edge.

@@ -142,6 +142,11 @@ pub struct ChatSession {
     /// The header's pickers of the model, effort and mode options, in that order.
     pub(super) pickers: Vec<(String, Entity<SelectState<Vec<Choice>>>)>,
     pickers_stale: bool,
+    /// The subagent whose drawer is open; `None`: `main`.
+    pub(super) drawer: Option<String>,
+    /// The agent list's keyboard row (0 is `main`) while it has the keys; `None`: the prompt.
+    pub(super) agent_cursor: Option<usize>,
+    pub(super) agent_scroll: ScrollHandle,
     /// Pending while streamed text waits for `STREAM_FLUSH`.
     flush: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -176,6 +181,8 @@ impl ChatSession {
                         // The `/` menu opens again, at its top.
                         InputEvent::Change => {
                             (this.menu_ix, this.menu_closed) = (0, false);
+                            // Typing is back in the prompt, out of the agent list.
+                            this.agent_cursor = None;
                             cx.notify();
                         }
                         _ => {}
@@ -215,6 +222,9 @@ impl ChatSession {
             modes: None,
             pickers: Vec::new(),
             pickers_stale: false,
+            drawer: None,
+            agent_cursor: None,
+            agent_scroll: ScrollHandle::new(),
             flush: None,
             _subscriptions: subscriptions,
         };
@@ -902,7 +912,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::rc::Rc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::{tick_period, until_next_tick};
     use gpui_kit::component::WindowExt as _;
@@ -916,7 +926,9 @@ mod tests {
     use super::ChatSession;
     use crate::agents::RegistryEvent;
     use crate::chat::input::{Attachment, Message};
-    use crate::chat::model::{ChatItem, EditedFile, NoticeKind, TurnState, UNSUPPORTED_QUESTION};
+    use crate::chat::model::{
+        ChatItem, EditedFile, NoticeKind, Subagent, TurnState, UNSUPPORTED_QUESTION,
+    };
     use crate::git::tests::repo_with;
     use crate::notify;
     use crate::sidebar::canonical;
@@ -1348,6 +1360,150 @@ mod tests {
             last_agent_text(&session, cx).as_deref(),
             Some("Hello from fake agent")
         );
+    }
+
+    /// The agent list under the prompt: not drawn until a subagent shows, then `main` and a row
+    /// per subagent, named by its kind, with its title as the task.
+    #[gpui_kit::test]
+    fn agent_list_shows_main_and_subagents(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--subagent"));
+        let session = start_session(&workspace, cx);
+        assert!(!shows("agent-list", cx));
+
+        turn(&session, cx);
+        assert!(shows("agent-main", cx));
+        assert!(!shows("agent-hint", cx));
+        let label = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window
+                .find(("agent-row", 0usize))
+                .label()
+                .map(str::to_owned)
+        });
+        let label = label.unwrap_or_default();
+        assert!(
+            label.starts_with("Explore") && label.contains("Explore the code"),
+            "{label}"
+        );
+    }
+
+    /// Review focus 2: past six rows the list keeps six rows' height and scrolls.
+    #[gpui_kit::test]
+    fn agent_list_caps_at_six_rows(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        session.update(cx, |s, cx| {
+            for i in 0..8 {
+                s.model.subagents.push(Subagent {
+                    id: format!("s{i}"),
+                    title: format!("Task {i}"),
+                    kind: Some("Explore".into()),
+                    state: SubagentState::Running,
+                    used: None,
+                    started: Instant::now(),
+                    ended: None,
+                    turn: 0,
+                });
+            }
+            cx.notify();
+        });
+        let bounds = |id: ElementId, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.find(id).bounds()
+            })
+        };
+        let list = bounds("agent-list".into(), cx);
+        let (first, sixth) = (
+            bounds("agent-main".into(), cx),
+            bounds(("agent-row", 4usize).into(), cx),
+        );
+        assert!(
+            (list.top() - first.top()).abs() < px(0.5),
+            "{list:?} {first:?}"
+        );
+        assert!(
+            (list.bottom() - sixth.bottom()).abs() < px(0.5),
+            "{list:?} {sixth:?}"
+        );
+        let last = ElementId::from(("agent-row", 7usize));
+        assert!(bounds(last.clone(), cx).top() >= list.bottom());
+        cx.update(|window, cx| {
+            let delta = gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-400.)));
+            window.scroll("agent-list", delta, cx);
+        });
+        let row = bounds(last, cx);
+        assert!(
+            row.bottom() <= list.bottom() + px(0.5) && row.top() >= list.top(),
+            "the list did not scroll: {row:?} {list:?}"
+        );
+    }
+
+    fn agents_at(
+        session: &Entity<ChatSession>,
+        cx: &mut VisualTestContext,
+    ) -> (Option<usize>, Option<String>) {
+        session.read_with(cx, |s, _| (s.agent_cursor, s.drawer.clone()))
+    }
+
+    /// From an empty prompt ↓ enters the list at `main`, ↓/↑ move, Enter opens the row's drawer
+    /// without sending, ↑ from `main` goes back to the prompt and Esc leaves the list; with text
+    /// in the prompt ↓ stays in it.
+    #[gpui_kit::test]
+    fn arrow_down_enters_the_list(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--subagent"));
+        let session = start_session(&workspace, cx);
+        let sub = session.read_with(cx, |s, _| format!("{}-sub", s.id));
+        turn(&session, cx);
+
+        cx.simulate_keystrokes("down");
+        assert_eq!(agents_at(&session, cx), (Some(0), None));
+        assert!(shows("agent-hint", cx));
+        cx.simulate_keystrokes("down down");
+        assert_eq!(
+            agents_at(&session, cx),
+            (Some(1), None),
+            "past the last row"
+        );
+        cx.simulate_keystrokes("enter");
+        assert_eq!(agents_at(&session, cx), (Some(1), Some(sub.clone())));
+        assert_eq!(user_texts(&session, cx), ["go"], "Enter sent a prompt");
+        cx.simulate_keystrokes("up up");
+        assert_eq!(agents_at(&session, cx), (None, Some(sub)));
+        assert!(!shows("agent-hint", cx));
+        cx.simulate_keystrokes("escape");
+        assert_eq!(agents_at(&session, cx), (None, None));
+
+        cx.simulate_input("x");
+        cx.simulate_keystrokes("down");
+        assert_eq!(agents_at(&session, cx), (None, None));
+        assert_eq!(typed(&session, cx), "x");
+    }
+
+    /// Esc in the agent list only leaves it: the turn runs on to its end.
+    #[gpui_kit::test]
+    fn escape_leaves_the_agent_list_before_stopping(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let flags = format!("--subagent {}", slow_reply(20, 50));
+        let (workspace, cx) = open(cx, fake_settings(&flags));
+        let session = start_session(&workspace, cx);
+
+        send("go", cx);
+        wait_until(cx, "the first chunk", |cx| {
+            last_agent_text(&session, cx).is_some()
+        });
+        cx.simulate_keystrokes("down");
+        assert_eq!(agents_at(&session, cx), (Some(0), None));
+        cx.simulate_keystrokes("escape");
+        assert_eq!(agents_at(&session, cx), (None, None));
+        wait_until(cx, "the turn's end", |cx| {
+            state(&session, cx) == TurnState::Idle
+        });
+        let words: Vec<String> = (0..20).map(|i| format!("w{i}")).collect();
+        assert_eq!(last_agent_text(&session, cx), Some(words.join(" ")));
     }
 
     #[gpui_kit::test]
