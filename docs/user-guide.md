@@ -46,12 +46,10 @@ While the agent prepares the session, its pane shows `Preparing <agent>…`. **�
   - PNG, JPEG, GIF and WebP files up to 5 MB go as images; any other file, of any kind, goes as a reference to its path, which the agent reads with its own tools.
   - A pasted image is saved in the system's temporary folder as `wai-pasted/<id>.<ext>`. A TIFF, BMP, ICO or PNM image, which agents do not take, is saved as a PNG; an SVG goes as a file.
   - An agent that does not take images gets each image as a reference to its file instead.
-- **The header** shows:
-  - the session's title;
-  - a picker for each of the agent's `model` and `thought_level` options, when it offers them;
-  - the agent's mode picker, when the agent has modes (Claude Code's include default, plan and accept-edits modes);
-  - the context used, as `used / size`.
-- **Model pickers:** a change applies to that session only, from then on, and wai does not keep it across relaunches. A new session starts with the **Default model** from Settings, if you set one; if the agent no longer offers it, the session says `<agent> no longer offers the model <model>; using <current>.` and keeps the agent's own choice. Resumed, forked and restored sessions keep what the agent restores. An agent that offers no such option shows no picker.
+- **The header** shows the session's title (drag it to move the pane), the context used as `used / size`, and the close button.
+- **The strip on the prompt box:** a tab on the box's top edge, 18 px in from its left, with the session's folder, its branch (a fork icon for a worktree; only when known) and the agent (`✳ Claude Code`). They are fixed once the session runs, so they are labels, not menus. In a narrow pane the branch and folder names shrink and truncate first.
+- **The bar under the prompt:** inside the box, under the text: **+** to attach, then the agent's mode picker (Claude Code's include default, plan and accept-edits), a gap, then a picker for each of the agent's `model` and `thought_level` options, when it offers them, then Stop (during a turn) and Send. An agent with no modes and no model options shows only **+** and Send.
+- **Model and mode pickers:** a change applies to that session only, from then on, and wai does not keep it across relaunches. A new session starts with the **Default model** from Settings, if you set one; if the agent no longer offers it, the session says `<agent> no longer offers the model <model>; using <current>.` and keeps the agent's own choice. Resumed, forked and restored sessions keep what the agent restores. An agent that offers no such option shows no picker.
 - **The transcript:**
   - Replies stream in as Markdown.
   - Each turn of the agent is one card headed `✦ <agent>`, holding its steps and its replies in order; your prompts are balloons on the right; a closed permission card or a notice between them splits the card.

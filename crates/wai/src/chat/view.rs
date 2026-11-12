@@ -160,7 +160,7 @@ impl ChatSession {
         let input = cx.new(|cx| {
             let mut input = TextareaState::new(window, cx)
                 .auto_grow(1, 8)
-                .placeholder(format!("Message {agent}…"));
+                .placeholder(format!("Message {}…", wai_settings::agent_label(&agent)));
             input.set_submit_on_enter(true, cx);
             input
         });
@@ -2738,7 +2738,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn header_shows_model_and_effort_pickers(cx: &mut TestAppContext) {
+    fn bar_shows_model_effort_and_mode_pickers(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, models_settings(None));
         let session = start_session(&workspace, cx);
@@ -2750,6 +2750,11 @@ mod tests {
         });
         assert_eq!(pickers, ["model", "effort"]);
         assert!(session.read_with(cx, |s, _| s.legacy_mode_picker().is_some()));
+        let ids = cx.update(|window, cx| {
+            window.render_frame(cx);
+            ["bar-model", "bar-effort", "bar-mode"].map(|id| window.try_find(id).is_some())
+        });
+        assert_eq!(ids, [true; 3]);
     }
 
     #[gpui_kit::test]
@@ -2846,7 +2851,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn header_pills_show_folder_branch_and_agent_model(cx: &mut TestAppContext) {
+    fn strip_shows_folder_branch_and_agent(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let dir = tempfile::tempdir().unwrap();
         let root = repo_with(&dir.path().join("r"), &["feature"]);
@@ -2861,12 +2866,15 @@ mod tests {
         let name = root.file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(pill("pill-folder", cx), Some(name));
         assert_eq!(pill("pill-branch", cx).as_deref(), Some("feature"));
-        assert_eq!(pill("pill-agent", cx).as_deref(), Some("fake · Fake Small"));
+        assert_eq!(pill("pill-agent", cx).as_deref(), Some("fake"));
+        let placeholder =
+            cx.update(|window, _| window.find("input-state").placeholder().map(str::to_owned));
+        assert_eq!(placeholder.as_deref(), Some("Message fake…"));
         leave(&workspace, cx);
     }
 
     #[gpui_kit::test]
-    fn restored_session_shows_its_pills(cx: &mut TestAppContext) {
+    fn restored_session_shows_its_strip(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let dir = tempfile::tempdir().unwrap();
         let root = repo_with(&dir.path().join("r"), &[]);
@@ -2908,5 +2916,122 @@ mod tests {
         assert!(session.read_with(cx, |s, _| s.head.is_none()));
         assert!(pill("pill-folder", cx).is_some());
         assert_eq!(pill("pill-branch", cx), None);
+    }
+
+    /// The strip sits on the prompt box's top edge, not in the header, and stays inside it.
+    #[gpui_kit::test]
+    fn composer_strip_sits_on_the_prompt_box(cx: &mut TestAppContext) {
+        strip_on_box(cx, false);
+    }
+
+    #[gpui_kit::test]
+    fn composer_strip_stays_in_a_narrow_pane(cx: &mut TestAppContext) {
+        strip_on_box(cx, true);
+    }
+
+    fn strip_on_box(cx: &mut TestAppContext, narrow: bool) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let long = "chore-ec-9688-energy-dashboard-with-a-very-long-name";
+        let root = repo_with(&dir.path().join("a-long-project-folder-name"), &[long]);
+        let (workspace, cx, _user) = fake_live(cx, "--models");
+        if narrow {
+            cx.simulate_resize(gpui_kit::size(px(860.), px(700.)));
+        }
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.set_project(root.clone(), window, cx))
+        });
+        let session = start_session(&workspace, cx);
+        wait_until(cx, "the branch", |cx| {
+            session.read_with(cx, |s, _| s.head.is_some())
+        });
+        send("hello", cx);
+        wait_until(cx, "the reply", |cx| state(&session, cx) == TurnState::Idle);
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            let bounds = |id: &'static str| window.find(id).bounds();
+            let (strip, field, list) = (
+                bounds("composer-strip"),
+                bounds("prompt-box"),
+                bounds("transcript"),
+            );
+            assert!(
+                (strip.bottom() - field.top()).abs() < px(0.5),
+                "{strip:?} {field:?}"
+            );
+            assert!(((strip.left() - field.left()) - px(18.)).abs() < px(0.5));
+            assert!(
+                strip.right() <= field.right() + px(0.5),
+                "{strip:?} {field:?}"
+            );
+            // Wide, the tab is as wide as its chips; narrow, the chips shrank to fill the box
+            // and stay inside the tab.
+            let gap = field.right() - strip.right();
+            match narrow {
+                true => assert!(
+                    gap < px(1.),
+                    "the chips did not shrink: {strip:?} {field:?}"
+                ),
+                false => assert!(gap > px(100.), "{strip:?} {field:?}"),
+            }
+            for id in ["pill-folder", "pill-branch", "pill-agent"] {
+                let chip = bounds(id);
+                assert!(chip.bottom() <= field.top() + px(0.5), "{id} {chip:?}");
+                assert!(
+                    chip.top() > list.bottom() - px(0.5),
+                    "{id} is in the header"
+                );
+                assert!(chip.right() <= strip.right() + px(0.5), "{id} {chip:?}");
+            }
+        });
+        leave(&workspace, cx);
+    }
+
+    /// An agent with no modes and no model options: the bar holds only attach and send.
+    #[gpui_kit::test]
+    fn bar_has_no_empty_chips_without_pickers(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        cx.run_until_parked();
+        assert!(session.read_with(cx, |s, _| s.pickers.is_empty()));
+        // The fake agent always reports modes, so its legacy mode chip is the only one.
+        let legacy = session.read_with(cx, |s, _| s.legacy_mode_picker().is_some());
+        let found = cx.update(|window, cx| {
+            window.render_frame(cx);
+            ["bar-model", "bar-effort", "bar-mode"].map(|id| window.try_find(id).is_some())
+        });
+        assert_eq!(found, [false, false, legacy]);
+    }
+
+    /// With a card waiting, a digit typed while a bar picker (not the prompt) has focus does
+    /// not answer it.
+    #[gpui_kit::test]
+    fn digits_do_not_answer_a_card_from_outside_the_prompt(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--models"));
+        let session = start_session(&workspace, cx);
+        session.update(cx, |s, cx| {
+            let id = s.id.clone();
+            let request = PermissionRequest {
+                id: 100,
+                session: id,
+                tool_call_id: "t".into(),
+                title: "Run".into(),
+                diff: None,
+                subagent: None,
+                options: vec![PermissionChoice {
+                    id: "y".into(),
+                    name: "Yes".into(),
+                    kind: ChoiceKind::AllowOnce,
+                }],
+            };
+            s.handle_permission(request, cx);
+        });
+        let waiting =
+            |cx: &mut VisualTestContext| session.read_with(cx, |s, _| !s.model.waiting.is_empty());
+        cx.update(|window, cx| window.blur(cx));
+        cx.simulate_keystrokes("1");
+        assert!(waiting(cx), "a digit outside the prompt answered the card");
     }
 }

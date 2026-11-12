@@ -13,6 +13,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_settings::{SeenModel, SeenModes, agent_label, builtin, canonical, shown};
 
+use super::composer;
 use super::input::{Attachment, attach_button, paste_into, pick_paths, send_button};
 use super::view::ChatSession;
 use crate::aurora::{self, DISPLAY_FONT};
@@ -932,8 +933,6 @@ impl Render for DraftView {
         let attach = attach_button()
             .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx)));
         let max_h = window.viewport_size().height * 0.5;
-        // `.chip`: no box at rest, a vidro fill on hover. `bar`: the composer bar's smaller,
-        // fainter chips (`.cbar .chip`).
         let chip = |id: &'static str,
                     menu: &Menu,
                     width: f32,
@@ -946,44 +945,11 @@ impl Render for DraftView {
                 .menu_width(px(width + 80.))
                 .menu_max_h(max_h)
                 .when_some(search, |select, text| select.search_placeholder(text));
-            let (text, hover) = match (dark, bar) {
-                (true, true) => (aurora::nevoa(), aurora::nevoa()),
-                (true, false) => (aurora::tinta_2(), aurora::tinta()),
-                (false, _) => (theme.muted_foreground, theme.foreground),
-            };
-            h_flex()
-                .id(id)
-                .when(shrink == 0., |el| el.flex_none())
-                // A chip that may shrink gives up its width (and truncates) before the
-                // strip leaves the composer.
-                .when(shrink > 0., |el| {
-                    el.flex_shrink(shrink).min_w(px(48.)).overflow_hidden()
-                })
-                .h(px(if bar { 28. } else { 30. }))
-                .px(px(4.))
-                .rounded_full()
-                .text_size(px(if bar { 13. } else { 13.5 }))
-                .text_color(text)
-                .hover(move |el| {
-                    let fill = match dark {
-                        true => aurora::vidro(),
-                        false => theme.muted,
-                    };
-                    el.bg(fill).text_color(hover)
-                })
-                .child(select)
+            composer::chip(id, select, bar, shrink, cx)
                 // Registers the id so tests can find it.
                 .test_support()
         };
-        // `.strip`: one tab sitting on the composer's top edge, 18 px in from its left.
-        let strip = h_flex()
-            .min_w_0()
-            .gap(px(2.))
-            .px(px(6.))
-            .py(px(5.))
-            .rounded_t(px(14.))
-            .border_1()
-            .border_b_0()
+        let strip = composer::strip("draft-strip", cx)
             .child(chip(
                 "draft-folder",
                 &self.folders,
@@ -1005,14 +971,7 @@ impl Render for DraftView {
                 el.child(places).child(branches)
             })
             .child(chip("draft-agent", &self.agents, 130., None, false, 0.));
-        let strip = match dark {
-            true => strip
-                .bg(hsla(0., 0., 1., 0.035))
-                .border_color(aurora::borda()),
-            false => strip.border_color(theme.border),
-        };
-        // The tab starts 18 px in from the composer's edge and never runs past the other one.
-        let strip = h_flex().w_full().pl(px(18.)).child(strip);
+        let strip = composer::strip_row(strip);
         let model = (!self
             .data
             .models
@@ -1062,10 +1021,10 @@ impl Render for DraftView {
             (false, false) => prompt.bg(theme.background).border_color(theme.input),
         }
         .children(notice)
-        .child(textarea)
         .when(!self.attachments.is_empty(), |el| {
             el.child(h_flex().gap_2().flex_wrap().children(chips))
         })
+        .child(textarea)
         .child(
             h_flex()
                 .gap_2()

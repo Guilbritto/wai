@@ -1,4 +1,5 @@
 mod commands;
+mod composer;
 mod draft;
 mod edits;
 mod input;

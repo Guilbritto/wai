@@ -5,19 +5,19 @@ use std::rc::Rc;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::message_scroller::MessageScroller;
-use gpui_kit::component::select::{Select, SelectState};
+use gpui_kit::component::select::SelectState;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use wai_agent::{ConfigCategory, PermissionChoice, ToolStatus};
+use wai_agent::{PermissionChoice, ToolStatus};
 use wai_settings::Processing;
 
 use super::model::{ChatItem, NoticeKind, ToolItem, TurnState, UsageInfo, show_label};
 use super::view::{ChatEvent, ChatSession, Mode};
 use super::{permission, question};
 use crate::aurora::{self, DISPLAY_FONT};
-use crate::workspace::{Dragged, DraggedSession, folder_name};
+use crate::workspace::{Dragged, DraggedSession};
 
 /// The balloon of a message you sent (`.me`).
 fn user_bubble(cx: &App) -> Div {
@@ -309,45 +309,8 @@ impl ChatSession {
                     // Registers the id so tests can find and drag it.
                     .test_support(),
             )
-            .child(self.pill(
-                "pill-folder",
-                Some(Icon::new(IconName::Folder).xsmall().into_any_element()),
-                folder_name(&self.cwd),
-                cx,
-            ))
-            .children(self.head.as_ref().and_then(|head| {
-                let icon = if head.worktree {
-                    Icon::new(gpui_kit::assets::IconName::GitFork)
-                } else {
-                    Icon::new(gpui_kit::assets::IconName::GitBranch)
-                };
-                let icon = Some(icon.xsmall().into_any_element());
-                (head.branch.clone()).map(|branch| self.pill("pill-branch", icon, branch, cx))
-            }))
-            .child(self.pill(
-                "pill-agent",
-                // Claude's mark, as the mockup's agent pill shows it.
-                (self.agent == "claude").then(|| {
-                    div()
-                        .text_color(aurora::brasa())
-                        .child("✳")
-                        .into_any_element()
-                }),
-                self.agent_model(),
-                cx,
-            ))
-            // The pills sit by the title; the rest goes to the right.
+            // The title takes the room; the rest goes to the right.
             .child(div().flex_1())
-            .children(
-                self.pickers
-                    .iter()
-                    .map(|(_, select)| div().w(px(140.)).child(Select::new(select).small())),
-            )
-            .children(
-                self.legacy_mode_picker()
-                    // The select's own view is `size_full`: the box sets its width.
-                    .map(|modes| div().w(px(140.)).child(Select::new(modes).small())),
-            )
             .children(
                 (self.model.usage.as_ref())
                     .map(|usage| aurora::pill(cx).flex_none().child(usage_label(usage))),
@@ -361,35 +324,6 @@ impl ChatSession {
                     .accessibility_label("Close pane")
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(ChatEvent::Hide))),
             )
-    }
-
-    fn pill(
-        &self,
-        id: &'static str,
-        mark: Option<AnyElement>,
-        text: String,
-        cx: &Context<Self>,
-    ) -> impl IntoElement + use<> {
-        aurora::pill(cx)
-            .id(id)
-            .min_w_0()
-            .truncate()
-            .aria_label(text.clone())
-            .children(mark)
-            .child(text)
-            .test_support()
-    }
-
-    /// The agent's name, then the model it works with once it reports one.
-    fn agent_model(&self) -> String {
-        let agent = wai_settings::agent_label(&self.agent);
-        let model = (self.model.config.iter())
-            .find(|o| o.category == ConfigCategory::Model)
-            .and_then(|o| o.values.iter().find(|v| v.id == o.current));
-        match model {
-            Some(model) => format!("{agent} · {}", model.name),
-            None => agent,
-        }
     }
 
     /// Whether row `ix` draws anything under the processing mode: Step by step, every row;
