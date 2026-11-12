@@ -412,7 +412,7 @@ mod tests {
         cx.executor().allow_parking(); // the shell is a real process
         let (workspace, cx) = open(cx, Settings::default());
         cx.simulate_keystrokes("ctrl-`");
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
         cx.simulate_input("seq 1 200");
         cx.simulate_keystrokes("enter");
         // Not "200": the typed command shows it at once.
@@ -438,7 +438,7 @@ mod tests {
         cx.executor().allow_parking(); // the shell is a real process
         let (workspace, cx) = open(cx, Settings::default());
         cx.simulate_keystrokes("ctrl-`");
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
         cx.simulate_input("seq 1 200");
         cx.simulate_keystrokes("enter");
         wait_until(cx, "the output", |cx| find(&terminal, "199", cx).is_some());
@@ -472,7 +472,7 @@ mod tests {
         cx.executor().allow_parking(); // the shell is a real process
         let (workspace, cx) = open(cx, Settings::default());
         cx.simulate_keystrokes("ctrl-`");
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
         cx.simulate_input("printf wai-%s sel");
         cx.simulate_keystrokes("enter");
         wait_until(cx, "the output", |cx| {
@@ -514,7 +514,7 @@ mod tests {
         cx.simulate_input("printf wai-%s ok");
         cx.simulate_keystrokes("enter");
 
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
         wait_until(cx, "the shell output", |cx| {
             terminal.read_with(cx, |t, _| {
                 t.snapshot.rows.iter().any(|row| {
@@ -530,7 +530,7 @@ mod tests {
         cx.executor().allow_parking(); // the shell is a real process
         let (workspace, cx) = open(cx, Settings::default());
         cx.simulate_keystrokes("ctrl-`");
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
 
         cx.write_to_clipboard(ClipboardItem::new_string("printf wai-%s pasted".into()));
         let paste = if cfg!(target_os = "macos") {
@@ -556,7 +556,7 @@ mod tests {
         cx.executor().allow_parking(); // the shell is a real process
         let (workspace, cx) = open(cx, Settings::default());
         cx.simulate_keystrokes("ctrl-`");
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
         let changes = Rc::new(Cell::new(0));
         let seen = changes.clone();
         cx.update(|_, cx| {
@@ -579,7 +579,7 @@ mod tests {
         cx.executor().allow_parking(); // the shell is a real process
         let (workspace, cx) = open(cx, Settings::default());
         cx.simulate_keystrokes("ctrl-`");
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
         let project = std::env::temp_dir().join(format!("wai-cwd-{}", std::process::id()));
         std::fs::create_dir_all(&project).unwrap();
         cx.update(|window, cx| {

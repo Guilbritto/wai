@@ -21,6 +21,7 @@ mod shell_path;
 mod sidebar;
 mod start;
 mod terminal_view;
+mod terminals;
 mod topbar;
 mod update;
 #[cfg(all(test, unix))]

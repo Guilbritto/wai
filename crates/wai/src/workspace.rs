@@ -48,7 +48,8 @@ use crate::settings_view::{
     AgentRow, RowStatus, Section, SettingsData, SettingsEvent, SettingsView, open_modal,
 };
 use crate::sidebar::{SidebarTab, canonical};
-use crate::terminal_view::{self, TerminalView};
+use crate::terminal_view;
+use crate::terminals::TerminalTab;
 use crate::topbar::BRAND;
 use crate::update::{self, Outcome, UpdateStatus};
 
@@ -211,7 +212,9 @@ pub struct Workspace {
     pub focused_pane: usize,
     pub terminal_visible: bool,
     /// Created on the first toggle, in the project folder.
-    pub terminal: Option<Entity<TerminalView>>,
+    pub(crate) terminals: Vec<TerminalTab>,
+    pub(crate) active_terminal: usize,
+    pub(crate) next_terminal: u32,
     /// The default agent's sessions, each with its cwd canonicalized for the project filter.
     pub history: Vec<(PathBuf, SessionSummary)>,
     pub all_projects: bool,
@@ -327,8 +330,8 @@ impl Workspace {
                 tab.read(cx).keep_edits(cx).ok();
             }
             this.save_state(cx);
-            if let Some(terminal) = &this.terminal {
-                terminal.update(cx, |t, _| t.stop());
+            for tab in &this.terminals {
+                tab.view.update(cx, |t, _| t.stop());
             }
             agents
         });
@@ -419,7 +422,9 @@ impl Workspace {
             panes: vec![Pane::Empty(None)],
             focused_pane: 0,
             terminal_visible: false,
-            terminal: None,
+            terminals: Vec::new(),
+            active_terminal: 0,
+            next_terminal: 1,
             history: Vec::new(),
             all_projects: false,
             history_task: None,
@@ -643,9 +648,9 @@ impl Workspace {
         if shell.as_ref().is_none_or(|s| self.approved.contains(s)) {
             self.shell = shell.clone();
         }
-        if let Some(terminal) = &self.terminal {
+        for tab in &self.terminals {
             let shell = self.shell.clone();
-            terminal.update(cx, |t, _| t.shell = shell);
+            tab.view.update(cx, |t, _| t.shell = shell);
         }
     }
 
@@ -1829,51 +1834,6 @@ impl Workspace {
         .detach();
     }
 
-    /// Shows the terminal, created on the first toggle in the project folder (a shell that exited
-    /// starts again), and focuses it. Hiding it hands the focus back to the focused pane.
-    pub(crate) fn toggle_terminal(
-        &mut self,
-        _: &ToggleTerminal,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.terminal_visible = !self.terminal_visible;
-        self.save_state(cx);
-        if !self.terminal_visible {
-            return self.focus_pane(self.focused_pane, window, cx);
-        }
-        let terminal = match &self.terminal {
-            Some(terminal) => terminal.clone(),
-            None => {
-                let (shell, cwd) = (self.shell.clone(), self.project.clone());
-                let terminal = cx.new(|cx| TerminalView::new(shell, cwd, cx));
-                self.terminal = Some(terminal.clone());
-                terminal
-            }
-        };
-        terminal.update(cx, |t, cx| t.activate(window, cx));
-        cx.notify();
-    }
-
-    /// Shows the terminal and types `text` at its prompt without Enter: the user reads it and
-    /// presses Enter (an extension's suggested Claude Code plugin).
-    pub(crate) fn type_in_terminal(
-        &mut self,
-        text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.terminal_visible {
-            self.toggle_terminal(&ToggleTerminal, window, cx);
-        }
-        if let Some(terminal) = self.terminal.clone() {
-            terminal.update(cx, |t, cx| {
-                t.activate(window, cx);
-                t.type_text(text, cx);
-            });
-        }
-    }
-
     /// ⌘W: `close_pane` on the focused pane.
     fn close_focused_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
         self.close_pane(self.focused_pane, window, cx);
@@ -2700,8 +2660,8 @@ impl Workspace {
         window.set_window_title(&title(&project));
         self.project = canonical(&project);
         // The next shell starts there; a running one stays where it is.
-        if let Some(terminal) = &self.terminal {
-            terminal.update(cx, |t, _| t.cwd = self.project.clone());
+        for tab in &self.terminals {
+            tab.view.update(cx, |t, _| t.cwd = self.project.clone());
         }
         let root = self.project.clone();
         self.search
@@ -2963,6 +2923,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let top_bar = self.render_top_bar(window, cx);
         let sidebar = self.render_sidebar(cx);
+        let terminal_panel = self.render_terminal_panel(window, cx);
         let theme = cx.theme();
         let split = self.panes.len() > 1;
         let dragging = cx.has_active_drag();
@@ -3010,7 +2971,7 @@ impl Render for Workspace {
             .p(px(5.));
         let terminal = on_card(
             terminal_card,
-            div().size_full().children(self.terminal.clone()),
+            terminal_panel,
         )
         .debug_selector(|| "terminal".into());
         // ponytail: fixed at the sidebar's width, which does not resize either.
@@ -3024,6 +2985,10 @@ impl Render for Workspace {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::new_session))
             .on_action(cx.listener(Self::toggle_terminal))
+            .on_action(cx.listener(Self::new_terminal))
+            .on_action(cx.listener(Self::close_terminal_action))
+            .on_action(cx.listener(Self::next_terminal_action))
+            .on_action(cx.listener(Self::prev_terminal_action))
             .on_action(cx.listener(Self::toggle_agents))
             .on_action(cx.listener(Self::close_focused_pane))
             .on_action(cx.listener(Self::save))
@@ -4523,7 +4488,7 @@ pub(crate) mod tests {
             seen.display()
         ));
         cx.simulate_keystrokes("enter");
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().unwrap());
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().unwrap());
         wait_until(cx, "the watch", |cx| {
             terminal.read_with(cx, |t, _| {
                 t.snapshot.rows.iter().any(|row| {
@@ -4717,7 +4682,7 @@ pub(crate) mod tests {
         });
         assert_eq!(ids, ["abc", "def"]);
         assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 3);
-        assert!(workspace.read_with(cx, |w, _| w.terminal_visible && w.terminal.is_some()));
+        assert!(workspace.read_with(cx, |w, _| w.terminal_visible && !w.terminals.is_empty()));
         // The ghost's stays for a launch whose settings have its agent.
         let kept = AppState::load(&path).open_sessions;
         let hidden = saved("fake", "ghi", super::MAX_PANES);
@@ -5066,7 +5031,7 @@ pub(crate) mod tests {
         });
         let shell = |cx: &mut VisualTestContext| {
             workspace.read_with(cx, |w, cx| {
-                w.terminal.as_ref().unwrap().read(cx).shell.clone()
+                w.terminal().unwrap().read(cx).shell.clone()
             })
         };
         let before = shell(cx);
@@ -5440,7 +5405,7 @@ pub(crate) mod tests {
         assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
         wait_until(cx, "the close", |_| closed(&file));
         assert!(workspace.read_with(cx, |w, _| w.terminal_visible));
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().unwrap());
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().unwrap());
         wait_until(cx, "the typed command", |cx| {
             terminal.read_with(cx, |t, _| {
                 t.snapshot.rows.iter().any(|row| {
@@ -5767,7 +5732,7 @@ pub(crate) mod tests {
             workspace.update(cx, |w, cx| w.toggle_terminal(&ToggleTerminal, window, cx));
         });
         let shell = workspace.read_with(cx, |w, cx| {
-            w.terminal.as_ref().unwrap().read(cx).shell.clone()
+            w.terminal().unwrap().read(cx).shell.clone()
         });
         assert_eq!(shell, Some(before));
     }

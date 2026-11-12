@@ -1100,7 +1100,7 @@ pub(crate) mod tests {
         click(ElementId::Name("ext-plugin:sample:0".into()), cx);
         assert!(workspace.read_with(cx, |w, _| w.settings_view().is_none()));
         assert!(workspace.read_with(cx, |w, _| w.terminal_visible));
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().unwrap());
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().unwrap());
         let typed = "claude plugin install sample-plugin";
         let at_prompt = |cx: &mut VisualTestContext| {
             terminal.read_with(cx, |t, _| {
