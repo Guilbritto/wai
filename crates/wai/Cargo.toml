@@ -55,7 +55,7 @@ dirs.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Already in the tree (wai-ext): the login shell's own session, killed as a group (shell_path.rs).
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["fs", "process"] }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

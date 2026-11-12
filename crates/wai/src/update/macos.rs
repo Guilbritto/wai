@@ -54,7 +54,19 @@ fn current_bundle() -> Result<PathBuf, String> {
 /// answers for the real user with ACLs applied, and it is only run when Settings looks.
 fn writable(dir: &Path) -> bool {
     let probe = dir.join(format!(".wai-write-check-{}", std::process::id()));
-    std::fs::write(&probe, b"").is_ok() && std::fs::remove_file(&probe).is_ok()
+    if std::fs::write(&probe, b"").is_err() {
+        return false;
+    }
+    // Written but not removable (a delete-denying ACL) is not writable; retry once, then ignore.
+    std::fs::remove_file(&probe).is_ok() || std::fs::remove_file(&probe).is_ok()
+}
+
+/// Whether this account can modify `bundle` itself: a cross-folder move rewrites its `..`, and an
+/// immutable flag fails the swap's rename.
+// ponytail: access(2) W_OK catches the immutable flag and a read-only bundle, not an ACL denying
+// only delete (DevHub used _DELETE_OK); `install` restores `.old` if that rename then fails.
+fn bundle_writable(bundle: &Path) -> bool {
+    rustix::fs::access(bundle, rustix::fs::Access::WRITE_OK).is_ok()
 }
 
 fn home_apps() -> Option<PathBuf> {
@@ -67,11 +79,13 @@ pub fn blocker() -> Option<String> {
         Ok(b) => b,
         Err(e) => return Some(e),
     };
-    let dir = bundle.parent()?;
-    if writable(dir) {
+    let (Some(dir), Some(name)) = (bundle.parent(), bundle.file_name()) else {
+        return Some("this build is not running from an installed wai.app".into());
+    };
+    let name = name.to_string_lossy();
+    if writable(dir) && bundle_writable(&bundle) {
         return None;
     }
-    let name = bundle.file_name()?.to_string_lossy();
     // Already in ~/Applications: telling the reader to move it there would be circular.
     if home_apps().and_then(|h| h.canonicalize().ok()).as_deref() == Some(dir) {
         return Some(format!(
@@ -141,12 +155,30 @@ fn swap(zip: &Path, bundle: &Path, stage: &Path) -> anyhow::Result<()> {
         );
     };
     let old = old_of(bundle);
-    if old.exists() {
-        std::fs::remove_dir_all(&old).context("could not clear the previous build")?;
+    // The existing `.old` is only moved aside (into `stage`, removed by the caller), and deleted
+    // once the swap has worked: a swap that fails must not cost the rollback copy.
+    let aside = stage.join("prev");
+    let had_old = old.symlink_metadata().is_ok();
+    if had_old {
+        std::fs::rename(&old, &aside).context("could not clear the previous build")?;
     }
-    std::fs::rename(bundle, &old).context("could not set aside the running build")?;
+    let restore_old = || {
+        if had_old {
+            let _ = std::fs::rename(&aside, &old);
+        }
+    };
+    if let Err(e) = std::fs::rename(bundle, &old) {
+        restore_old();
+        return Err(e).context("could not set aside the running build");
+    }
     if let Err(e) = std::fs::rename(new, bundle) {
-        let _ = std::fs::rename(&old, bundle);
+        if std::fs::rename(&old, bundle).is_err() {
+            return Err(e).context(format!(
+                "could not move the new build into place, and could not put the old one back; the previous version is in {}",
+                old.display()
+            ));
+        }
+        restore_old();
         return Err(e).context("could not move the new build into place");
     }
     Ok(())
@@ -159,7 +191,7 @@ pub fn relaunch_after_exit(bundle: &Path, pid: u32) -> std::io::Result<()> {
     Command::new("/bin/sh")
         .args([
             "-c",
-            r#"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; exec open -n "$2""#,
+            r#"n=0; while kill -0 "$1" 2>/dev/null && [ $n -lt 300 ]; do sleep 0.2; n=$((n+1)); done; exec open -n "$2""#,
             "sh",
         ])
         .arg(pid.to_string())
@@ -195,7 +227,11 @@ pub fn relocate(
     system_apps: &Path,
     home_apps: &Path,
 ) -> anyhow::Result<Option<PathBuf>> {
-    if bundle.parent() != Some(system_apps) || !old_of(bundle).exists() || !writable(system_apps) {
+    if bundle.parent() != Some(system_apps)
+        || !old_of(bundle).exists()
+        || !writable(system_apps)
+        || !bundle_writable(bundle)
+    {
         return Ok(None);
     }
     let name = bundle.file_name().context("bundle has no name")?;
@@ -216,8 +252,12 @@ pub fn relocate(
                 system_apps.display()
             ),
         }
-        std::fs::remove_dir_all(&dest_old)
-            .with_context(|| format!("could not clear {}", dest_old.display()))?;
+        // Missing is fine (an earlier manual install has no `.old`); Go's RemoveAll said so too.
+        match std::fs::remove_dir_all(&dest_old) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+        .with_context(|| format!("could not clear {}", dest_old.display()))?;
         std::fs::rename(&dest, &dest_old).with_context(|| {
             format!(
                 "could not set aside the copy already in {}",
@@ -433,6 +473,20 @@ mod tests {
         assert_eq!(marker(&home.join("wai.app")), "new");
         assert_eq!(marker(&home.join("wai.app.old")), "old");
         assert_eq!(fs::read_dir(&sys).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn relocate_sets_aside_a_manual_install_without_old() {
+        let t = tempfile::tempdir().unwrap();
+        let (sys, home) = (t.path().join("sys"), t.path().join("home"));
+        fs::create_dir_all(&sys).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        let bundle = fake_bundle(&sys, "wai.app", "com.wai", "new");
+        fake_bundle(&sys, "wai.app.old", "com.wai", "rollback");
+        fake_bundle(&home, "wai.app", "com.wai", "manual");
+        relocate(&bundle, &sys, &home).unwrap().unwrap();
+        assert_eq!(marker(&home.join("wai.app")), "new");
+        assert_eq!(marker(&home.join("wai.app.old")), "rollback");
     }
 
     #[test]
