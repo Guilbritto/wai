@@ -2,6 +2,7 @@
 //! project's files, search, the agents, then each running extension's panels.
 
 use std::ops::Range;
+use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
@@ -18,7 +19,7 @@ pub use wai_settings::canonical;
 use crate::agents::AgentStatus;
 use crate::app::NewSession;
 use crate::aurora;
-use crate::chat::{ChatSession, DraftView, TurnState};
+use crate::chat::{ChatItem, ChatModel, ChatSession, DraftView, TurnState};
 use crate::workspace::{Dragged, DraggedSession, MAX_PANES, Renamed, Workspace};
 
 pub(crate) const ROW_HEIGHT: f32 = 28.;
@@ -54,6 +55,51 @@ pub(crate) fn status_color(state: &TurnState, theme: &gpui_kit::component::Theme
         TurnState::NeedsYou => theme.warning,
         TurnState::Idle => theme.muted_foreground,
         TurnState::Error(_) => theme.danger,
+    }
+}
+
+/// What a session row says on its second line.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Detail {
+    Doing(String),
+    Permission(String),
+    Question(String),
+    Done,
+    Idle,
+    Exited,
+    Draft,
+}
+
+pub(crate) fn detail(m: &ChatModel) -> Detail {
+    match &m.state {
+        TurnState::Working => Detail::Doing(m.activity().unwrap_or_else(|| "Thinking…".into())),
+        TurnState::NeedsYou => match m.waiting.first() {
+            Some(ChatItem::Permission { request, .. }) => Detail::Permission(request.title.clone()),
+            Some(ChatItem::Question { request, .. }) => Detail::Question(request.message.clone()),
+            _ => Detail::Idle,
+        },
+        TurnState::Idle if m.done => Detail::Done,
+        TurnState::Idle => Detail::Idle,
+        TurnState::Error(_) => Detail::Exited,
+    }
+}
+
+pub(crate) fn live_subagents(m: &ChatModel) -> usize {
+    use wai_agent::SubagentState::{NeedsYou, Running};
+    m.subagents
+        .iter()
+        .filter(|a| matches!(a.state, Running | NeedsYou))
+        .count()
+}
+
+/// Whole units, rounded down: `45s`, `3m`, `2h`, `5d`.
+pub(crate) fn short_age(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m", s / 60),
+        3600..86_400 => format!("{}h", s / 3600),
+        _ => format!("{}d", s / 86_400),
     }
 }
 
@@ -911,14 +957,63 @@ mod tests {
 
     use gpui_kit::component::ActiveTheme as _;
 
-    use super::{TurnState, status_color};
+    use std::time::Duration;
+
+    use super::{Detail, TurnState, detail, short_age, status_color};
     use crate::agents::RegistryEvent;
+    use crate::chat::ChatModel;
     use crate::workspace::Workspace;
     use crate::workspace::tests::{
         click, drag_to_pane, fake_settings, history_settings, launch, load_history, menu_item,
         open, open_at, question, start_now,
     };
     use crate::{app, aurora};
+    use wai_agent::{ChoiceKind, PermissionChoice, PermissionRequest};
+
+    #[test]
+    fn short_ages_round_down() {
+        let s = Duration::from_secs;
+        assert_eq!(
+            [
+                s(0),
+                s(59),
+                s(60),
+                s(3599),
+                s(3600),
+                s(86_399),
+                s(86_400),
+                s(200_000)
+            ]
+            .map(short_age),
+            ["0s", "59s", "1m", "59m", "1h", "23h", "1d", "2d"]
+        );
+    }
+
+    #[test]
+    fn detail_says_what_the_session_does() {
+        let mut m = ChatModel::default();
+        assert_eq!(detail(&m), Detail::Idle);
+        m.done = true;
+        assert_eq!(detail(&m), Detail::Done);
+        m.state = TurnState::Working;
+        assert_eq!(detail(&m), Detail::Doing("Thinking…".into()));
+        m.on_permission(PermissionRequest {
+            id: 1,
+            session: "s".into(),
+            tool_call_id: "t".into(),
+            title: "Write notes.md".into(),
+            diff: None,
+            options: vec![PermissionChoice {
+                id: "y".into(),
+                name: "Yes".into(),
+                kind: ChoiceKind::AllowOnce,
+            }],
+            subagent: None,
+        });
+        assert_eq!(detail(&m), Detail::Permission("Write notes.md".into()));
+        m.state = TurnState::Error("exit 1".into());
+        assert_eq!(detail(&m), Detail::Exited);
+    }
 
     #[gpui_kit::test]
     fn working_dot_is_boreal(cx: &mut TestAppContext) {
