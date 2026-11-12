@@ -263,13 +263,17 @@ impl ExtensionsView {
         } else {
             self.store.commit(staged, granted).map(|_| ())
         };
+        // A failed update has put the old folder back; restart what `stop` dropped.
+        self.sync_host(cx);
         let notice = match result {
             Ok(()) => {
-                self.sync_host(cx);
                 let did = if updating { "Updated" } else { "Installed" };
                 Notification::success(format!("{did} {name}"))
             }
-            Err(e) => Notification::error(format!("Could not install {name}: {e}")).autohide(false),
+            Err(e) => {
+                let did = if updating { "update" } else { "install" };
+                Notification::error(format!("Could not {did} {name}: {e}")).autohide(false)
+            }
         };
         window.push_notification(notice, cx);
         cx.notify();
@@ -819,6 +823,36 @@ pub(crate) mod tests {
         assert!(list[0].enabled);
         assert!(list[0].dir.starts_with(config.join("extensions")));
         assert_eq!(staged(&config), 0, "the old folder is deleted");
+    }
+
+    /// A failed update puts the old folder back, and the old extension runs again.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn failed_update_restarts_the_old_extension(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the extension is a real process
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, pid_file) = (tmp.path().join("config"), tmp.path().join("ext.pid"));
+        let src = running_sample(&tmp.path().join("src"), &pid_file, "");
+        let manifest = "id = \"sample\"\nname = \"Sample\"\nversion = \"0.2.0\"\n\
+            permissions = [\"process\"]\n[process]\ncommand = \"bin/run\"\n";
+        let new = running_sample_with(&tmp.path().join("new"), manifest, &pid_file, "");
+        let (workspace, cx) = workspace(&config, cx);
+        let view =
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.show_extensions(window, cx)));
+
+        review(&view, &src, cx);
+        click("consent-install", cx);
+        let first = started(&pid_file, cx);
+        std::fs::remove_file(&pid_file).unwrap();
+
+        // `save` cannot replace a non-empty folder at this name, so the update fails.
+        std::fs::create_dir_all(config.join("extensions.json.tmp/x")).unwrap();
+        review(&view, &new, cx);
+        click("consent-install", cx);
+        wait_gone(&first);
+        let second = started(&pid_file, cx);
+        assert_ne!(first, second);
+        assert_eq!(installed(&view, cx)[0].manifest.version, "1.0.0");
     }
 
     /// The dialog for an installed id is an update: `old → new`, Cancel changes nothing.
