@@ -1003,16 +1003,12 @@ impl Workspace {
                         )))
                     })
                     .child(
-                        Button::new(("open-close", ix))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Close)
-                            .tooltip("End session")
-                            .accessibility_label("End session")
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                        chip_button(("open-close", ix), IconName::Close, "End session").on_click(
+                            cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.close_session(&end, window, cx)
-                            })),
+                            }),
+                        ),
                     ),
             )
             .context_menu(move |menu, _, cx| {
@@ -1096,20 +1092,14 @@ impl Workspace {
                     // Registers the id so tests can find and drag it.
                     .test_support(),
             )
-            .child(
-                hover_chip(cx).child(
-                    Button::new(("draft-close", ix))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
-                        .tooltip("Discard draft")
-                        .accessibility_label("Discard draft")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.close_draft(&end, window, cx)
-                        })),
+            .child(hover_chip(cx).child(
+                chip_button(("draft-close", ix), IconName::Close, "Discard draft").on_click(
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.close_draft(&end, window, cx)
+                    }),
                 ),
-            )
+            ))
     }
 
     /// An open session's menu: rename, fork, and moving it between groups.
@@ -1382,9 +1372,9 @@ fn two_line_row(active: bool, grouped: bool, cx: &App) -> Div {
         .text_size(px(13.))
 }
 
-/// A row's buttons on a small glass chip at its top right, shown while the row is hovered.
-/// Transparent otherwise, they stay in place for the keyboard and the screen reader. The chip
-/// lies over the row's own click: its buttons stop theirs.
+/// A row's buttons (`chip_button`) on a small glass chip at its top right, shown while the row
+/// is hovered. Transparent otherwise, they stay in place for the screen reader. The chip lies
+/// over the row's own click: its buttons stop theirs.
 fn hover_chip(cx: &App) -> Div {
     let theme = cx.theme();
     let (fill, border) = match theme.is_dark() {
@@ -1396,11 +1386,22 @@ fn hover_chip(cx: &App) -> Div {
         .top(px(2.))
         .right(px(4.))
         .rounded(px(7.))
-        .bg(fill)
         .border_1()
-        .border_color(border)
+        .border_color(gpui_kit::transparent_black())
+        .group_hover(ROW_GROUP, |style| style.bg(fill).border_color(border))
+}
+
+/// A hover chip's button: invisible until its row is hovered, or the keyboard focuses it.
+fn chip_button(id: impl Into<ElementId>, icon: IconName, tip: &'static str) -> Button {
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .icon(icon)
+        .tooltip(tip)
+        .accessibility_label(tip)
         .opacity(0.)
         .group_hover(ROW_GROUP, |style| style.opacity(1.))
+        .focus_visible(|style| style.opacity(1.))
 }
 
 /// A row's second line (11 px, muted): what the session does, its lead word coloured by state,
@@ -1496,11 +1497,7 @@ fn item(
 }
 
 fn side_button(id: impl Into<ElementId>) -> Button {
-    Button::new(id)
-        .ghost()
-        .xsmall()
-        .icon(IconName::PanelRightOpen)
-        .tooltip("Open to the side")
+    chip_button(id, IconName::PanelRightOpen, "Open to the side")
 }
 
 #[cfg(test)]
@@ -1524,7 +1521,7 @@ mod tests {
     use crate::workspace::Workspace;
     use crate::workspace::tests::{
         click, drag_to_pane, fake_settings, history_settings, launch, load_history, menu_item,
-        open, open_at, question, start_now, wait_until,
+        open, open_at, question, reveal, start_now, wait_until,
     };
     use crate::{app, aurora};
     use wai_agent::{ChoiceKind, PermissionChoice, PermissionRequest};
@@ -1703,17 +1700,20 @@ mod tests {
         press(("draft", 0usize), cx);
         workspace.read_with(cx, |w, _| assert!(w.panes[0].draft().is_some()));
 
+        reveal(("draft-close", 0usize), cx);
         press(("draft-close", 0usize), cx);
         workspace.read_with(cx, |w, _| assert!(w.drafts.is_empty()));
         assert!(!dialog(cx));
 
         cx.simulate_keystrokes("secondary-n");
         cx.simulate_input("x");
+        reveal(("draft-close", 0usize), cx);
         press(("draft-close", 0usize), cx);
         cx.update(|window, _| window.find_by_label("Discard this draft?"));
         press("cancel", cx);
         workspace.read_with(cx, |w, _| assert_eq!(w.drafts.len(), 1));
 
+        reveal(("draft-close", 0usize), cx);
         press(("draft-close", 0usize), cx);
         press("confirm", cx);
         workspace.read_with(cx, |w, _| {
@@ -2022,6 +2022,7 @@ mod tests {
             [named("A", &[]), named("B", &[&ids[1]])]
         );
 
+        reveal(("open-close", 1usize), cx);
         press(("open-close", 1usize), cx);
         assert_eq!(workspace.read_with(cx, |w, _| w.sessions.len()), 1);
         assert_eq!(groups(&workspace, cx), [named("A", &[]), named("B", &[])]);
@@ -2267,6 +2268,7 @@ mod tests {
             cx.notify();
         });
         let sidebar = cx.debug_bounds("sidebar").unwrap();
+        reveal(("history-side", 0usize), cx);
         let (side, short) = cx.update(|window, cx| {
             window.render_frame(cx);
             let side = window.find(("history-side", 0usize));
@@ -2306,6 +2308,36 @@ mod tests {
                 "the last history row is not drawn until scrolled to"
             );
         });
+    }
+
+    /// A row's hover buttons stay invisible until the row is hovered, and one reached with Tab
+    /// shows: the keyboard never lands on a button it cannot see.
+    #[gpui_kit::test]
+    fn hover_buttons_show_on_hover_and_keyboard_focus(cx: &mut TestAppContext) {
+        let (_workspace, cx) = with_sessions(1, cx);
+        let close = ElementId::from(("open-close", 0usize));
+        let button = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.find(close.clone())
+            })
+        };
+        assert!(!button(cx).visible(), "hidden until hovered");
+        cx.update(|window, cx| window.hover(open_row(0), cx));
+        assert!(button(cx).visible(), "shown on hover");
+        cx.simulate_mouse_move(point(px(0.), px(0.)), None, Modifiers::none());
+        assert!(!button(cx).visible());
+
+        cx.simulate_keystrokes("secondary-k");
+        for _ in 0..100 {
+            if button(cx).focused() == Some(true) {
+                break;
+            }
+            cx.simulate_keystrokes("tab");
+        }
+        let focused = button(cx);
+        assert_eq!(focused.focused(), Some(true), "Tab reaches End session");
+        assert!(focused.visible(), "shown while focused: {focused:?}");
     }
 
     #[gpui_kit::test]

@@ -3768,6 +3768,7 @@ pub(crate) mod tests {
         }
         let close = |session: &Entity<crate::chat::ChatSession>, cx: &mut VisualTestContext| {
             let ix = workspace.read_with(cx, |w, _| w.sessions.iter().position(|s| s == session));
+            reveal(("open-close", ix.unwrap()), cx);
             cx.update(|window, cx| {
                 window.render_frame(cx);
                 window.click(("open-close", ix.unwrap()), cx);
@@ -5180,6 +5181,16 @@ pub(crate) mod tests {
         cx.run_until_parked();
     }
 
+    /// Moves the mouse onto a row's hover button, which shows it, as before a click.
+    pub(crate) fn reveal(id: impl Into<ElementId>, cx: &mut VisualTestContext) {
+        let id = id.into();
+        let at = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find(id).bounds().center()
+        });
+        cx.simulate_mouse_move(at, None, Modifiers::none());
+    }
+
     /// The approval dialog's text while it is open.
     pub(crate) fn question(
         workspace: &Entity<Workspace>,
@@ -5512,6 +5523,7 @@ pub(crate) mod tests {
     }
 
     fn click_close(cx: &mut VisualTestContext) {
+        reveal(("open-close", 0usize), cx);
         cx.update(|window, cx| {
             window.render_frame(cx);
             window.click(("open-close", 0usize), cx);

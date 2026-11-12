@@ -1134,7 +1134,7 @@ mod tests {
     use crate::sidebar::canonical;
     use crate::workspace::tests::{
         click, fake_live, fake_settings, history_settings, launch, live, load_history, open,
-        open_at, start_now, wait_until,
+        open_at, reveal, start_now, wait_until,
     };
     use crate::workspace::{Pane, Workspace};
 
@@ -1640,6 +1640,7 @@ mod tests {
         assert_eq!(agents_at(&session, cx), (None, None));
 
         let ix = workspace.read_with(cx, |w, _| w.sessions.iter().position(|s| s == &session));
+        reveal(("open-close", ix.unwrap()), cx);
         cx.update(|window, cx| {
             window.render_frame(cx);
             window.click(("open-close", ix.unwrap()), cx);
@@ -3266,6 +3267,7 @@ mod tests {
         wait_until(cx, "the permission card", |cx| {
             state(&side, cx) == TurnState::NeedsYou
         });
+        reveal(("open-close", 1usize), cx);
         cx.update(|window, cx| {
             window.render_frame(cx);
             window.click(("open-close", 1usize), cx);
