@@ -199,6 +199,8 @@ pub struct Workspace {
     pub user_dir: PathBuf,
     /// Whose `~/.claude` the Claude pages of Settings read.
     pub(crate) claude_home: PathBuf,
+    /// Ids this wai ended, and when: their transcript's fresh write is ours.
+    pub(crate) ended: HashMap<String, std::time::Instant>,
     pub(crate) claude_task: Option<Task<()>>,
     /// The `claude` that `mcp list` runs; none means the one on PATH.
     pub(crate) claude_program: Option<PathBuf>,
@@ -406,6 +408,7 @@ impl Workspace {
             templates: Vec::new(),
             user_dir: config_dir(),
             claude_home: wai_settings::claude::claude_home(),
+            ended: HashMap::new(),
             claude_task: None,
             claude_program: None,
             registry,
@@ -1322,8 +1325,25 @@ impl Workspace {
         })
     }
 
-    /// Opens a history row: the open session with that id, else a new one that loads it.
+    /// Opens a history row, after asking when a Claude conversation is open elsewhere.
     pub fn resume(
+        &mut self,
+        summary: &SessionSummary,
+        side: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let row = summary.clone();
+        self.check_elsewhere(
+            summary,
+            move |w, window, cx| w.resume_now(&row, side, window, cx),
+            window,
+            cx,
+        );
+    }
+
+    /// Opens a history row: the open session with that id, else a new one that loads it.
+    fn resume_now(
         &mut self,
         summary: &SessionSummary,
         side: bool,
@@ -1451,8 +1471,17 @@ impl Workspace {
         };
         let zone = |zone: Zone| {
             div().h_full().drag_over(light(false)).on_drop(cx.listener(
-                move |this, dragged: &DraggedSession, window, cx| {
-                    this.drop_session(dragged, ix, zone, window, cx)
+                move |this, dragged: &DraggedSession, window, cx| match &dragged.source {
+                    Dragged::History(row) => {
+                        let dragged = dragged.clone();
+                        this.check_elsewhere(
+                            row,
+                            move |w, window, cx| w.drop_session(&dragged, ix, zone, window, cx),
+                            window,
+                            cx,
+                        )
+                    }
+                    _ => this.drop_session(dragged, ix, zone, window, cx),
                 },
             ))
         };
@@ -1891,6 +1920,7 @@ impl Workspace {
             let s = session.read(cx);
             (s.agent.clone(), s.id.clone())
         };
+        self.ended.insert(id.clone(), std::time::Instant::now());
         self.close_in_agent(agent, id, cx);
         self.sessions.retain(|s| s != session);
         self.ungroup(&session.read(cx).id);
