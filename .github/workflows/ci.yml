@@ -36,6 +36,13 @@ jobs:
       # The UI and agent tests start it.
       - run: cargo build -p wai-agent --bin wai-fake-agent
       - run: cargo test --workspace
+        if: runner.os != 'Windows'
+      # Windows runs everything except the failures it already had when CI first ran there, listed in
+      # windows-known-failures.txt; --no-fail-fast so one failing crate does not hide the others.
+      - name: cargo test --workspace (known Windows failures skipped)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cargo test --workspace --no-fail-fast -- $(grep -v -e '^#' -e '^$' .github/windows-known-failures.txt | sed 's/^/--skip /')
       - run: go vet ./...
         working-directory: extensions/wai-waycarbon
       # Its tests put a sh-script `jira` on a `:`-joined PATH: unix only.
