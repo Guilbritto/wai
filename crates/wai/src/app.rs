@@ -11,7 +11,20 @@ use wai_settings::{Settings, Template, ThemeChoice, unapproved};
 use crate::settings_view::Section;
 use crate::workspace::{CHOOSE_AI, Workspace};
 
-gpui_kit::assets::icon_assets!(ExtraIcons, [Monitor, GitFork, GitBranch, Shield]);
+gpui_kit::assets::icon_assets!(
+    ExtraIcons,
+    [
+        Monitor,
+        GitFork,
+        GitBranch,
+        Shield,
+        MessageSquare,
+        Sparkles,
+        Puzzle,
+        FolderPlus,
+        ChevronsDownUp
+    ]
+);
 
 /// The component icons plus the few wai draws itself (the draft's Local and worktree chips).
 struct AppAssets;
@@ -52,7 +65,8 @@ actions!(
         Save,
         OpenPalette,
         OpenSettings,
-        ToggleAgents
+        ToggleAgents,
+        FilterSessions
     ]
 );
 
@@ -101,6 +115,7 @@ fn bind_keys(cx: &mut App) {
         ("secondary-o", Box::new(OpenFolder), workspace),
         ("secondary-shift-p", Box::new(OpenPalette), workspace),
         ("secondary-,", Box::new(OpenSettings), workspace),
+        ("secondary-k", Box::new(FilterSessions), workspace),
         // The prompt box lets Escape through (it has nothing to clear).
         ("escape", Box::new(CancelTurn), Some("ChatSession")),
         (paste, Box::new(Paste), Some("Terminal")),
@@ -122,9 +137,9 @@ fn bind_keys(cx: &mut App) {
 }
 
 /// Off macOS (Windows, and Linux alike), in the Terminal context: `NoAction` hides the app's
-/// ctrl-c/v/n/w/t/o/q (`secondary-` is ctrl there), so they reach the shell, and the app's actions
-/// move to ctrl-shift.
-fn terminal_ctrl_keymap() -> [(&'static str, Box<dyn Action>); 12] {
+/// ctrl-c/v/n/w/t/o/q/k (`secondary-` is ctrl there), so they reach the shell, and the app's
+/// actions move to ctrl-shift.
+fn terminal_ctrl_keymap() -> [(&'static str, Box<dyn Action>); 14] {
     [
         ("ctrl-c", Box::new(NoAction)),
         ("ctrl-v", Box::new(NoAction)),
@@ -133,11 +148,13 @@ fn terminal_ctrl_keymap() -> [(&'static str, Box<dyn Action>); 12] {
         ("ctrl-t", Box::new(NoAction)),
         ("ctrl-o", Box::new(NoAction)),
         ("ctrl-q", Box::new(NoAction)),
+        ("ctrl-k", Box::new(NoAction)),
         ("ctrl-shift-n", Box::new(NewSession)),
         ("ctrl-shift-t", Box::new(NewTerminal)),
         ("ctrl-shift-w", Box::new(CloseTerminal)),
         ("ctrl-shift-o", Box::new(OpenFolder)),
         ("ctrl-shift-q", Box::new(Quit)),
+        ("ctrl-shift-k", Box::new(FilterSessions)),
     ]
 }
 
@@ -620,11 +637,13 @@ mod tests {
             ("ctrl-t", shell),
             ("ctrl-o", shell),
             ("ctrl-q", shell),
+            ("ctrl-k", shell),
             ("ctrl-shift-n", "wai::NewSession"),
             ("ctrl-shift-t", "wai::NewTerminal"),
             ("ctrl-shift-w", "wai::CloseTerminal"),
             ("ctrl-shift-o", "wai::OpenFolder"),
             ("ctrl-shift-q", "wai::Quit"),
+            ("ctrl-shift-k", "wai::FilterSessions"),
         ];
         assert_eq!(table, expected);
     }

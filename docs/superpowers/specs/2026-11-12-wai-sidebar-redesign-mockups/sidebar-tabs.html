@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>wai sidebar redesign: sidebar-tabs</title>
+<style>body{background:#05070f;color:#dfe3f5;font-family:-apple-system,system-ui,sans-serif;padding:24px;max-width:1600px;margin:0 auto}h2{margin:0 0 4px}.subtitle{opacity:.7;margin:0 0 16px}.card{border:1px solid #ffffff22;border-radius:14px;padding:8px}.card.selected{outline:2px solid #36e2c0}.card-body h3{margin:8px 0 4px}.card-body p{margin:0;opacity:.8;font-size:13px}</style></head><body>
+<style>
+  .wz { --bg:#070a18; --fg:#eceffe; --fg2:#c4cbeb; --mut:#8f99c2; --dim:#626c98; --bd:#ffffff1a;
+        --glass:#ffffff0b; --act:#8d72ff29; --actbd:#8d72ff73; --cyan:#36e2c0; --amber:#ffc15a;
+        --red:#ff6b8b; --green:#46e39a; --violet:#8d72ff; --blue:#5bb8ff; --mono:"SF Mono", ui-monospace, Menlo, monospace;
+        color:var(--fg); font:13px/1.35 -apple-system, "SF Pro Text", system-ui, sans-serif; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:1400px){ .grid{ grid-template-columns:1fr; } }
+  .win { background:radial-gradient(120% 60% at 0% 0%, #1b1450 0%, transparent 60%), radial-gradient(90% 50% at 100% 100%, #0b3a3a55 0%, transparent 60%), var(--bg);
+         border-radius:14px; border:1px solid var(--bd); overflow:hidden; display:flex; flex-direction:column; height:540px; }
+  .topbar { height:32px; flex:none; display:flex; align-items:center; gap:8px; padding:0 10px 0 70px; font-size:11.5px; color:var(--fg2); position:relative; }
+  .topbar::before { content:"● ● ●"; position:absolute; left:12px; letter-spacing:2px; color:#ffffff30; font-size:9px; }
+  .chip { border:1px solid var(--bd); background:var(--glass); border-radius:8px; padding:1px 7px; }
+  .topbar .sp { flex:1; }
+  .topbar .new { background:var(--cyan); color:#0b1024; font-weight:700; border-radius:8px; padding:2px 8px; }
+  .body { flex:1; display:flex; min-height:0; }
+  .rail { width:44px; flex:none; display:flex; flex-direction:column; align-items:center; gap:6px; padding:8px 0; border-right:1px solid var(--bd); background:#ffffff05; }
+  .rail .i { width:32px; height:32px; border-radius:9px; display:flex; align-items:center; justify-content:center; color:var(--mut); position:relative; font-size:10.5px; font-weight:800; }
+  .rail .i.on { background:var(--act); color:var(--fg); box-shadow:inset 0 0 0 1px var(--actbd); }
+  .rail .i.on::before { content:""; position:absolute; left:-7px; top:7px; bottom:7px; width:2px; border-radius:2px; background:var(--violet); }
+  .rail .badge { position:absolute; top:-3px; right:-4px; min-width:14px; height:14px; border-radius:7px; background:var(--amber); color:#1b1300; font-size:9.5px; font-weight:800; display:flex; align-items:center; justify-content:center; padding:0 3px; }
+  .rail .mono { width:20px; height:20px; border-radius:6px; border:1.5px solid currentColor; display:flex; align-items:center; justify-content:center; font-size:9px; }
+  .rail .sp { flex:1; }
+  .rail svg { width:17px; height:17px; stroke:currentColor; fill:none; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
+  .side { width:262px; flex:none; display:flex; flex-direction:column; border-right:1px solid var(--bd); padding:6px; gap:2px; min-height:0; }
+  .ptitle { display:flex; align-items:center; padding:4px 6px 6px; font-size:11px; font-weight:700; letter-spacing:.07em; color:var(--mut); text-transform:uppercase; }
+  .ptitle .sp { flex:1; }
+  .ptitle .a { color:var(--mut); font-size:13px; margin-left:9px; font-weight:500; letter-spacing:0; }
+  .ptitle .cnt { margin-left:6px; text-transform:none; letter-spacing:0; font-weight:600; font-size:10.5px; border:1px solid var(--bd); border-radius:6px; padding:0 5px; color:var(--fg2); }
+  .search { margin:0 2px 4px; height:26px; border-radius:8px; border:1px solid var(--bd); background:#ffffff08; display:flex; align-items:center; gap:6px; padding:0 8px; color:var(--dim); font-size:12px; }
+  .search.focus { border-color:var(--cyan); color:var(--fg); }
+  .search .k { margin-left:auto; font-size:10px; border:1px solid var(--bd); border-radius:5px; padding:0 4px; }
+  .search .opt { font-size:10.5px; padding:0 4px; border-radius:5px; color:var(--mut); }
+  .search .opt.on { background:var(--act); color:var(--fg); box-shadow:inset 0 0 0 1px var(--actbd); }
+  .sec { display:flex; align-items:center; gap:5px; padding:6px 4px 3px; font-size:10.5px; font-weight:700; letter-spacing:.06em; color:var(--mut); text-transform:uppercase; }
+  .chev { color:var(--dim); font-size:9px; width:10px; flex:none; }
+  .sec .n { color:var(--dim); font-weight:600; }
+  .grp { display:flex; align-items:center; gap:6px; padding:7px 6px 3px 10px; font-size:11.5px; font-weight:600; color:var(--fg2); }
+  .grp .sw { width:8px; height:8px; border-radius:2px; }
+  .grp .n { color:var(--dim); font-weight:500; }
+  .grp .warn { margin-left:auto; color:var(--amber); font-size:10.5px; }
+  .r2 { display:flex; gap:9px; padding:5px 8px; margin-left:4px; border-radius:9px; border:1px solid transparent; position:relative; }
+  .r2.in { margin-left:14px; }
+  .r2.on { background:var(--act); border-color:var(--actbd); }
+  .r2 .dot { margin-top:5px; }
+  .r2 .b { flex:1; min-width:0; }
+  .r2 .l1 { display:flex; gap:6px; align-items:baseline; }
+  .r2 .t { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .r2 .tm { font-size:10.5px; color:var(--dim); }
+  .r2 .l2 { font-size:11px; color:var(--mut); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .r1 { display:flex; align-items:center; gap:7px; height:23px; padding:0 8px; margin-left:4px; border-radius:7px; color:var(--fg2); font-size:12px; white-space:nowrap; }
+  .r1.on { background:var(--act); box-shadow:inset 0 0 0 1px var(--actbd); color:var(--fg); }
+  .r1 .t { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  .r1 .tm { font-size:10.5px; color:var(--dim); }
+  .dot { width:8px; height:8px; border-radius:50%; flex:none; }
+  .d-work { background:var(--cyan); box-shadow:0 0 6px var(--cyan); }
+  .d-need { background:var(--amber); box-shadow:0 0 6px var(--amber); }
+  .d-idle { background:var(--mut); }
+  .d-err  { background:var(--red); box-shadow:0 0 6px var(--red); }
+  .d-draft{ border:1px dashed var(--dim); }
+  .c-need{ color:var(--amber);} .c-work{ color:var(--cyan);} .c-err{ color:var(--red);} .c-mut{ color:var(--mut);} .c-dim{ color:var(--dim);} .c-ok{ color:var(--green);} .c-blue{ color:var(--blue);}
+  /* tree */
+  .tree { font-size:12.5px; }
+  .tree .r1 { height:22px; }
+  .ind1 { padding-left:20px !important; } .ind2 { padding-left:34px !important; }
+  .fi { width:12px; text-align:center; font-size:10px; flex:none; }
+  /* search results */
+  .sres .file { display:flex; align-items:center; gap:6px; padding:4px 6px 2px; font-size:12px; color:var(--fg); }
+  .sres .file .p { color:var(--dim); font-size:11px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sres .file .c { font-size:10px; border-radius:7px; background:#ffffff14; padding:0 5px; color:var(--fg2); }
+  .sres .m { font-family:var(--mono); font-size:11px; color:var(--mut); padding:2px 8px 2px 24px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; border-radius:6px; }
+  .sres .m.on { background:var(--act); color:var(--fg2); }
+  .sres .m .ln { color:var(--dim); margin-right:6px; }
+  .hl { background:#ffc15a40; color:var(--fg); border-radius:3px; padding:0 1px; }
+  .muted-line { font-size:11px; color:var(--dim); padding:2px 8px 4px; }
+  /* agents cards */
+  .card2 { margin:3px 2px; padding:8px 10px; border-radius:12px; border:1px solid var(--bd); background:var(--glass); }
+  .card2.on { border-color:var(--actbd); background:var(--act); }
+  .card2.need { border-color:#ffc15a66; box-shadow:0 0 18px #ffc15a14; }
+  .card2 .l1 { display:flex; align-items:center; gap:7px; }
+  .card2 .l1 .t { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-weight:600; }
+  .card2 .row { font-size:11.5px; color:var(--fg2); margin:3px 0 0 15px; display:flex; gap:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card2 .bar { height:3px; border-radius:2px; background:#ffffff14; margin:7px 0 0 15px; overflow:hidden; }
+  .card2 .bar i { display:block; height:100%; background:linear-gradient(90deg, var(--cyan), var(--violet)); }
+  .card2 .foot { font-size:10.5px; color:var(--dim); margin:3px 0 0 15px; }
+  /* ext list */
+  .xl { padding:5px 8px; margin:0 2px; border-radius:9px; }
+  .xl .t { font-size:12.5px; color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .xl .s { font-size:11px; color:var(--mut); }
+  .xl.on { background:var(--act); box-shadow:inset 0 0 0 1px var(--actbd); }
+  .xbtn { margin:auto 4px 2px; height:28px; border:1px solid var(--bd); border-radius:9px; display:flex; align-items:center; justify-content:center; font-size:12px; color:var(--fg2); background:var(--glass); }
+  /* pane */
+  .pane { flex:1; min-width:0; display:flex; flex-direction:column; padding:8px 10px; gap:7px; position:relative; }
+  .tabsbar { display:flex; gap:4px; border-bottom:1px solid var(--bd); padding-bottom:5px; font-size:12px; }
+  .etab { padding:3px 9px; border-radius:8px; color:var(--mut); }
+  .etab.on { background:var(--act); color:var(--fg); box-shadow:inset 0 0 0 1px var(--actbd); }
+  .code { font-family:var(--mono); font-size:11.5px; line-height:1.65; color:var(--fg2); white-space:pre; overflow:hidden; }
+  .code .ln { color:var(--dim); display:inline-block; width:22px; text-align:right; margin-right:12px; }
+  .code .kw { color:#b49cff; } .code .s { color:var(--cyan); } .code .n { color:var(--amber); } .code .cm { color:var(--dim); }
+  .code .cur { background:#ffffff0e; display:block; }
+  .phead { display:flex; align-items:center; gap:8px; padding:2px 4px 6px; border-bottom:1px solid var(--bd); font-size:13px; }
+  .phead .sp { flex:1; } .phead .ctx { font-size:11px; color:var(--dim); }
+  .tx { flex:1; min-height:0; overflow:hidden; display:flex; flex-direction:column; gap:7px; }
+  .user { align-self:flex-end; background:#8d72ff33; border:1px solid var(--actbd); border-radius:12px; padding:5px 10px; max-width:75%; font-size:12.5px; }
+  .acard { border:1px solid var(--bd); background:var(--glass); border-radius:12px; padding:7px 10px; font-size:12px; }
+  .acard .who { font-size:11px; color:var(--amber); font-weight:600; margin-bottom:3px; }
+  .step { color:var(--fg2); display:flex; gap:7px; padding:1px 0; }
+  .composer { border:1px solid #36e2c0aa; border-radius:16px; background:#0b1030; padding:14px 12px 7px; position:relative; }
+  .composer .strip { position:absolute; top:-10px; left:18px; display:flex; gap:8px; font-size:10.5px; color:var(--mut); background:#0b1030; border:1px solid var(--bd); border-radius:7px; padding:1px 7px; }
+  .composer .ph { color:var(--dim); font-size:12.5px; margin-bottom:8px; }
+  .composer .bar { display:flex; align-items:center; gap:8px; font-size:11px; color:var(--mut); }
+  .composer .bar .sp { flex:1; }
+  .composer .send { width:22px; height:22px; border-radius:50%; background:var(--cyan); }
+  .agents { font-family:var(--mono); font-size:11.5px; padding:0 4px; display:flex; flex-direction:column; gap:1px; }
+  .ag { display:flex; align-items:center; gap:8px; padding:2px 8px; border-radius:7px; color:var(--fg2); white-space:nowrap; }
+  .ag.sel { background:var(--act); box-shadow:inset 0 0 0 1px var(--actbd); color:var(--fg); }
+  .ag .name { min-width:104px; }
+  .ag.main .name { font-weight:700; color:var(--fg); }
+  .ag .what { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; color:var(--mut); }
+  .ag .stat { color:var(--dim); font-size:11px; }
+  .empty { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; color:var(--mut); }
+  .empty .logo { width:38px; height:38px; border-radius:10px; background:#141a3a; border:1px solid var(--bd); display:flex; align-items:center; justify-content:center; color:var(--cyan); font-weight:900; }
+  .empty b { color:var(--fg); font-size:16px; }
+  .empty .btn { background:var(--cyan); color:#0b1024; border-radius:9px; padding:4px 12px; font-weight:600; font-size:12px; }
+  .lbl { font-size:11px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; margin:2px 0 6px; opacity:.75; }
+  .note { font-size:12.5px; line-height:1.5; margin-top:7px; opacity:.85; }
+</style>
+
+<h2>Todas as abas da barra lateral</h2>
+<p class="subtitle">A mesma janela com cada ícone da barra selecionado. History virou uma seção dentro de Sessões; Extensions e Settings ficam no pé da barra e abrem o Settings, como hoje.</p>
+
+<div class="wz grid">
+
+<!-- ======================= 1. SESSÕES ======================= -->
+<div>
+<div class="lbl">1 · Sessões</div>
+<div class="win">
+  <div class="topbar"><b style="color:var(--fg)">wai</b><span class="chip">▢ acme-api</span><span class="chip">● 2 working · <span class="c-need">1 needs you</span></span><span class="sp"></span><span class="c-dim">⌘⇧P</span><span class="c-dim">▭</span><span class="new">+ New session</span></div>
+  <div class="body">
+    <div class="rail">
+      <div class="i on"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg><span class="badge">1</span></div>
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg></div>
+      <div class="i"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg></div>
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M12 3l2.2 6.3L20.5 12l-6.3 2.2L12 20.5l-2.2-6.3L3.5 12l6.3-2.7z"/></svg></div>
+      <div class="i"><span class="mono">MC</span></div>
+      <div class="sp"></div>
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M10 4h4v3a2 2 0 1 0 4 0V7h2v4h-1a2 2 0 1 0 0 4h1v5H4v-5h1a2 2 0 1 0 0-4H4V7h6z"/></svg></div>
+      <div class="i"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg></div>
+    </div>
+    <div class="side">
+      <div class="ptitle">Sessões<span class="sp"></span><span class="a">+</span><span class="a">⊞</span><span class="a">⊟</span></div>
+      <div class="search">⌕ Filtrar sessões <span class="k">⌘K</span></div>
+      <div class="sec"><span class="chev">▾</span>Abertas <span class="n">7</span></div>
+      <div class="r2 on"><span class="dot d-need"></span><div class="b"><div class="l1"><span class="t">Lower send limit to 20</span><span class="tm">2m</span></div><div class="l2"><span class="c-need">Permissão:</span> Write notes.md · 2 subagentes</div></div></div>
+      <div class="r2"><span class="dot d-work"></span><div class="b"><div class="l1"><span class="t">Refactor sidebar groups</span><span class="tm">4m</span></div><div class="l2">cargo test -p wai…</div></div></div>
+      <div class="r2"><span class="dot d-draft"></span><div class="b"><div class="l1"><span class="t c-mut">New session</span></div><div class="l2">Rascunho</div></div></div>
+      <div class="grp"><span class="chev">▾</span><span class="sw" style="background:#8d72ff"></span>Release <span class="n">2</span></div>
+      <div class="r2 in"><span class="dot d-work"></span><div class="b"><div class="l1"><span class="t">Bump version to 0.6.3</span><span class="tm">30s</span></div><div class="l2">Reading Cargo.toml…</div></div></div>
+      <div class="r2 in"><span class="dot d-err"></span><div class="b"><div class="l1"><span class="t">Package DMG</span><span class="tm">12m</span></div><div class="l2"><span class="c-err">Agent exited</span> · Restart</div></div></div>
+      <div class="grp"><span class="chev">▸</span><span class="sw" style="background:#36e2c0"></span>EC-5081 filtros <span class="n">2</span><span class="warn">● 1</span></div>
+      <div class="sec" style="margin-top:4px"><span class="chev">▾</span>Histórico <span class="n">· este projeto</span><span style="flex:1"></span><span class="c-dim" style="text-transform:none;letter-spacing:0;font-weight:500">Todos ○</span></div>
+      <div class="r1"><span class="c-dim">↺</span><span class="t c-mut">Add composer chips</span><span class="tm">ontem</span></div>
+      <div class="r1"><span class="c-dim">↺</span><span class="t c-mut">Release 0.6.2</span><span class="tm">ontem</span></div>
+    </div>
+    <div class="pane">
+      <div class="phead"><b>Lower send limit to 20</b><span class="sp"></span><span class="ctx">82k / 200k</span></div>
+      <div class="tx">
+        <div class="user">lower the send limit to 20, and list my open PRs</div>
+        <div class="acard"><div class="who">✦ Claude</div>
+          <div class="step"><span class="c-ok">✓</span> Read src/limits.rs</div>
+          <div class="step"><span class="c-work">◌</span> general-purpose · List my open GitHub PRs</div>
+          <div class="step"><span class="c-need">…</span> Write notes.md · aguardando você</div>
+        </div>
+      </div>
+      <div class="composer"><div class="strip"><span>▢ acme-api</span><span>⑂ main</span><span>✳ Claude Code</span></div><div class="ph">Message Claude…</div><div class="bar"><span>＋</span><span>Default ▾</span><span class="sp"></span><span>Opus ▾</span><span class="send"></span></div></div>
+      <div class="agents">
+        <div class="ag main sel"><span>●</span><span class="name">main</span><span class="what"></span><span class="stat">1m 12s</span></div>
+        <div class="ag"><span class="c-work">○</span><span class="name">general-purpose</span><span class="what">List my open GitHub PRs</span><span class="stat">9s</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+<p class="note">Painel com as abertas (sua ordem, seus grupos) e o histórico recolhível embaixo; o "Todos" substitui o switch <i>All projects</i>.</p>
+</div>
+
+<!-- ======================= 2. FILES ======================= -->
+<div>
+<div class="lbl">2 · Files</div>
+<div class="win">
+  <div class="topbar"><b style="color:var(--fg)">wai</b><span class="chip">▢ acme-api</span><span class="chip">● 2 working · <span class="c-need">1 needs you</span></span><span class="sp"></span><span class="c-dim">⌘⇧P</span><span class="c-dim">▭</span><span class="new">+ New session</span></div>
+  <div class="body">
+    <div class="rail">
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg><span class="badge">1</span></div>
+      <div class="i on"><svg viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg></div>
+      <div class="i"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg></div>
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M12 3l2.2 6.3L20.5 12l-6.3 2.2L12 20.5l-2.2-6.3L3.5 12l6.3-2.7z"/></svg></div>
+      <div class="i"><span class="mono">MC</span></div>
+      <div class="sp"></div>
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M10 4h4v3a2 2 0 1 0 4 0V7h2v4h-1a2 2 0 1 0 0 4h1v5H4v-5h1a2 2 0 1 0 0-4H4V7h6z"/></svg></div>
+      <div class="i"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg></div>
+    </div>
+    <div class="side">
+      <div class="ptitle">Files<span class="sp"></span><span class="a">⊟</span></div>
+      <div class="sec"><span class="chev">▾</span>acme-api</div>
+      <div class="tree">
+        <div class="r1 ind1"><span class="chev">▸</span><span class="fi c-blue">▢</span><span class="t">.github</span></div>
+        <div class="r1 ind1"><span class="chev">▾</span><span class="fi c-blue">▢</span><span class="t">src</span></div>
+        <div class="r1 ind2"><span class="chev"></span><span class="fi" style="color:#ff9a5a">rs</span><span class="t">main.rs</span></div>
+        <div class="r1 ind2 on"><span class="chev"></span><span class="fi" style="color:#ff9a5a">rs</span><span class="t">limits.rs</span></div>
+        <div class="r1 ind2"><span class="chev"></span><span class="fi" style="color:#ff9a5a">rs</span><span class="t">routes.rs</span></div>
+        <div class="r1 ind1"><span class="chev">▸</span><span class="fi c-blue">▢</span><span class="t">tests</span></div>
+        <div class="r1 ind1"><span class="chev"></span><span class="fi c-dim">≡</span><span class="t">Cargo.toml</span></div>
+        <div class="r1 ind1"><span class="chev"></span><span class="fi c-dim">≡</span><span class="t">Cargo.lock</span></div>
+        <div class="r1 ind1"><span class="chev"></span><span class="fi c-blue">M↓</span><span class="t">README.md</span></div>
+        <div class="r1 ind1"><span class="chev"></span><span class="fi c-blue">M↓</span><span class="t">notes.md</span></div>
+      </div>
+    </div>
+    <div class="pane">
+      <div class="tabsbar"><span class="etab">main.rs ✕</span><span class="etab on">limits.rs ✕</span></div>
+<div class="code"><span class="ln">1</span><span class="kw">use</span> std::collections::HashMap;
+<span class="ln">2</span>
+<span class="ln">3</span><span class="cm">/// Requests per minute, per route.</span>
+<span class="ln">4</span><span class="kw">pub struct</span> Limits {
+<span class="ln">5</span>    per_route: HashMap&lt;&amp;'static str, u32&gt;,
+<span class="ln">6</span>    fallback: u32,
+<span class="ln">7</span>}
+<span class="ln">8</span>
+<span class="ln">9</span><span class="kw">impl</span> Default <span class="kw">for</span> Limits {
+<span class="cur"><span class="ln">10</span>    <span class="kw">fn</span> default() -&gt; Self {</span><span class="ln">11</span>        <span class="kw">let</span> per_route = HashMap::from([(<span class="s">"/api/key"</span>, <span class="n">180</span>), (<span class="s">"/api/send"</span>, <span class="n">30</span>)]);
+<span class="ln">12</span>        Self { per_route, fallback: <span class="n">60</span> }
+<span class="ln">13</span>    }
+<span class="ln">14</span>}</div>
+    </div>
+  </div>
+</div>
+<p class="note">A árvore do projeto como hoje, com o nome da pasta como seção. ⊟ recolhe tudo. O arquivo aberto no editor fica marcado.</p>
+</div>
+
+<!-- ======================= 3. SEARCH ======================= -->
+<div>
+<div class="lbl">3 · Search</div>
+<div class="win">
+  <div class="topbar"><b style="color:var(--fg)">wai</b><span class="chip">▢ acme-api</span><span class="chip">● 2 working · <span class="c-need">1 needs you</span></span><span class="sp"></span><span class="c-dim">⌘⇧P</span><span class="c-dim">▭</span><span class="new">+ New session</span></div>
+  <div class="body">
+    <div class="rail">
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg><span class="badge">1</span></div>
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg></div>
+      <div class="i on"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg></div>
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M12 3l2.2 6.3L20.5 12l-6.3 2.2L12 20.5l-2.2-6.3L3.5 12l6.3-2.7z"/></svg></div>
+      <div class="i"><span class="mono">MC</span></div>
+      <div class="sp"></div>
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M10 4h4v3a2 2 0 1 0 4 0V7h2v4h-1a2 2 0 1 0 0 4h1v5H4v-5h1a2 2 0 1 0 0-4H4V7h6z"/></svg></div>
+      <div class="i"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg></div>
+    </div>
+    <div class="side">
+      <div class="ptitle">Search<span class="sp"></span><span class="a">⊟</span></div>
+      <div class="search focus">⌕ per_route<span style="flex:1"></span><span class="opt">Aa</span><span class="opt on">.*</span></div>
+      <div class="muted-line">9 resultados em 3 arquivos</div>
+      <div class="sres">
+        <div class="file"><span class="chev">▾</span><span class="fi" style="color:#ff9a5a">rs</span>limits.rs<span class="p">src</span><span class="c">5</span></div>
+        <div class="m"><span class="ln">5</span><span class="hl">per_route</span>: HashMap&lt;&amp;'static str, u32&gt;,</div>
+        <div class="m on"><span class="ln">11</span>let <span class="hl">per_route</span> = HashMap::from([(…</div>
+        <div class="m"><span class="ln">12</span>Self { <span class="hl">per_route</span>, fallback: 60 }</div>
+        <div class="m"><span class="ln">18</span>self.<span class="hl">per_route</span>.get(path).copied()</div>
+        <div class="m"><span class="ln">31</span>assert!(l.<span class="hl">per_route</span>.len() == 2)</div>
+        <div class="file"><span class="chev">▾</span><span class="fi" style="color:#ff9a5a">rs</span>routes.rs<span class="p">src</span><span class="c">3</span></div>
+        <div class="m"><span class="ln">22</span>limits.<span class="hl">per_route</span>.insert(route, n);</div>
+        <div class="m"><span class="ln">40</span>for (r, n) in &amp;limits.<span class="hl">per_route</span> {</div>
+        <div class="m"><span class="ln">57</span>// <span class="hl">per_route</span> wins over fallback</div>
+        <div class="file"><span class="chev">▸</span><span class="fi c-blue">M↓</span>notes.md<span class="p"></span><span class="c">1</span></div>
+      </div>
+    </div>
+    <div class="pane">
+      <div class="tabsbar"><span class="etab on">limits.rs ✕</span></div>
+<div class="code"><span class="ln">9</span><span class="kw">impl</span> Default <span class="kw">for</span> Limits {
+<span class="ln">10</span>    <span class="kw">fn</span> default() -&gt; Self {
+<span class="cur"><span class="ln">11</span>        <span class="kw">let</span> <span class="hl">per_route</span> = HashMap::from([(<span class="s">"/api/key"</span>, <span class="n">180</span>), (<span class="s">"/api/send"</span>, <span class="n">30</span>)]);</span><span class="ln">12</span>        Self { per_route, fallback: <span class="n">60</span> }
+<span class="ln">13</span>    }
+<span class="ln">14</span>}</div>
+    </div>
+  </div>
+</div>
+<p class="note">Busca no projeto como hoje (Aa, .*, agrupado por arquivo). Cada arquivo vira uma seção recolhível com a contagem; o resultado clicado fica marcado.</p>
+</div>
+
+<!-- ======================= 4. AGENTS ======================= -->
+<div>
+<div class="lbl">4 · Agents</div>
+<div class="win">
+  <div class="topbar"><b style="color:var(--fg)">wai</b><span class="chip">▢ acme-api</span><span class="chip">● 2 working · <span class="c-need">1 needs you</span></span><span class="sp"></span><span class="c-dim">⌘⇧P</span><span class="c-dim">▭</span><span class="new">+ New session</span></div>
+  <div class="body">
+    <div class="rail">
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg><span class="badge">1</span></div>
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg></div>
+      <div class="i"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg></div>
+      <div class="i on"><svg viewBox="0 0 24 24"><path d="M12 3l2.2 6.3L20.5 12l-6.3 2.2L12 20.5l-2.2-6.3L3.5 12l6.3-2.7z"/></svg></div>
+      <div class="i"><span class="mono">MC</span></div>
+      <div class="sp"></div>
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M10 4h4v3a2 2 0 1 0 4 0V7h2v4h-1a2 2 0 1 0 0 4h1v5H4v-5h1a2 2 0 1 0 0-4H4V7h6z"/></svg></div>
+      <div class="i"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg></div>
+    </div>
+    <div class="side">
+      <div class="ptitle">Agents<span class="sp"></span><span class="a" title="Mover para a direita">⇥</span></div>
+      <div class="card2 on need">
+        <div class="l1"><span class="dot d-need"></span><span class="t">Lower send limit to 20</span><span class="c-need" style="font-size:10.5px">Needs you</span></div>
+        <div class="row"><span class="c-ok">✓</span> Read the code</div>
+        <div class="row"><span class="c-work">◌</span> Lower the limit</div>
+        <div class="row c-dim">–&nbsp; Run the tests</div>
+        <div class="row"><span class="c-work">○</span> general-purpose · Working</div>
+        <div class="bar"><i style="width:41%"></i></div>
+        <div class="foot">82k / 200k (41%)</div>
+      </div>
+      <div class="card2">
+        <div class="l1"><span class="dot d-work"></span><span class="t">Refactor sidebar groups</span><span class="c-work" style="font-size:10.5px">Working</span></div>
+        <div class="row c-mut">cargo test -p wai</div>
+        <div class="bar"><i style="width:63%"></i></div>
+        <div class="foot">126k / 200k (63%)</div>
+      </div>
+      <div class="card2">
+        <div class="l1"><span class="dot d-work"></span><span class="t">Bump version to 0.6.3</span><span class="c-work" style="font-size:10.5px">Working</span></div>
+        <div class="row c-mut">Read Cargo.toml</div>
+      </div>
+      <div class="card2">
+        <div class="l1"><span class="dot d-err"></span><span class="t">Package DMG</span><span class="c-err" style="font-size:10.5px">Error</span></div>
+      </div>
+      <div class="card2">
+        <div class="l1"><span class="dot d-idle"></span><span class="t">Investigate PATH on launch</span><span class="c-ok" style="font-size:10.5px">Done</span></div>
+      </div>
+    </div>
+    <div class="pane">
+      <div class="phead"><b>Lower send limit to 20</b><span class="sp"></span><span class="ctx">82k / 200k</span></div>
+      <div class="tx">
+        <div class="user">lower the send limit to 20, and list my open PRs</div>
+        <div class="acard"><div class="who">✦ Claude</div><div class="step"><span class="c-ok">✓</span> Read src/limits.rs</div><div class="step"><span class="c-work">◌</span> general-purpose · List my open GitHub PRs</div></div>
+      </div>
+      <div class="composer"><div class="strip"><span>▢ acme-api</span><span>⑂ main</span><span>✳ Claude Code</span></div><div class="ph">Message Claude…</div><div class="bar"><span>＋</span><span>Default ▾</span><span class="sp"></span><span>Opus ▾</span><span class="send"></span></div></div>
+      <div class="agents"><div class="ag main sel"><span>●</span><span class="name">main</span><span class="what"></span><span class="stat">1m 12s</span></div><div class="ag"><span class="c-work">○</span><span class="name">general-purpose</span><span class="what">List my open GitHub PRs</span><span class="stat">9s</span></div></div>
+    </div>
+  </div>
+</div>
+<p class="note">O painel de visão geral de hoje (um card por sessão: plano, subagentes, contexto) no novo visual. ⇥ continua levando-o para a direita.</p>
+</div>
+
+<!-- ======================= 5. EXTENSÃO ======================= -->
+<div>
+<div class="lbl">5 · Painel de extensão (wai-waycarbon · My cards)</div>
+<div class="win">
+  <div class="topbar"><b style="color:var(--fg)">wai</b><span class="chip">▢ acme-api</span><span class="chip">● No agent working</span><span class="sp"></span><span class="c-dim">⌘⇧P</span><span class="c-dim">▭</span><span class="new">+ New session</span></div>
+  <div class="body">
+    <div class="rail">
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg></div>
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg></div>
+      <div class="i"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg></div>
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M12 3l2.2 6.3L20.5 12l-6.3 2.2L12 20.5l-2.2-6.3L3.5 12l6.3-2.7z"/></svg></div>
+      <div class="i on"><span class="mono">MC</span></div>
+      <div class="sp"></div>
+      <div class="i"><svg viewBox="0 0 24 24"><path d="M10 4h4v3a2 2 0 1 0 4 0V7h2v4h-1a2 2 0 1 0 0 4h1v5H4v-5h1a2 2 0 1 0 0-4H4V7h6z"/></svg></div>
+      <div class="i"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg></div>
+    </div>
+    <div class="side">
+      <div class="ptitle">My cards<span class="cnt">4 open</span><span class="sp"></span></div>
+      <div class="xl on"><div class="t">Fix knowledge base search ranking</div><div class="s">In Progress</div></div>
+      <div class="xl"><div class="t">Add export to inventories table</div><div class="s">To Do</div></div>
+      <div class="xl"><div class="t">Review emissions factor import</div><div class="s">In Review</div></div>
+      <div class="xl"><div class="t">Tidy onboarding copy</div><div class="s">To Do</div></div>
+      <div class="xbtn">Refresh</div>
+    </div>
+    <div class="pane">
+      <div class="empty"><div class="logo">w</div><b>Start a session</b><span class="chip">⌘N</span><span class="btn">New session</span></div>
+    </div>
+  </div>
+</div>
+<p class="note">Cada painel de extensão ganha um ícone na barra. Como o manifesto não tem ícone, uso as iniciais do título (<b>MC</b> = My cards), com o título completo no tooltip. O conteúdo é o que a extensão desenha, sem mudanças.</p>
+</div>
+
+</div>
+
+<script>function toggleSelect(){}</script></body></html>

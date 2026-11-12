@@ -101,7 +101,12 @@ pub(crate) fn subagent_patch(u: acp::SubagentUpdate) -> SubagentPatch {
             MaybeUndefined::Value(title) => Some(title),
             _ => None,
         },
+        description: match u.description {
+            MaybeUndefined::Value(description) => Some(description),
+            _ => None,
+        },
         state,
+        used: None,
     }
 }
 
@@ -460,6 +465,16 @@ pub(crate) fn content_block(block: PromptBlock) -> acp::ContentBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subagent_patch_reads_the_description() {
+        let update = acp::SubagentUpdate::new("c")
+            .title("List my open GitHub PRs".to_string())
+            .description("general-purpose".to_string());
+        let patch = subagent_patch(update);
+        assert_eq!(patch.description.as_deref(), Some("general-purpose"));
+        assert_eq!(patch.title.as_deref(), Some("List my open GitHub PRs"));
+    }
 
     /// Claude Code opens a subagent's summary with the tools it used, in its own markup; the
     /// card shows only the answer.

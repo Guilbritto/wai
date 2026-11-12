@@ -8,9 +8,9 @@ use gpui_kit::*;
 use wai_agent::{PlanEntry, SubagentState};
 
 use crate::app::ToggleAgents;
-use crate::aurora::{self, DISPLAY_FONT};
+use crate::aurora;
 use crate::chat::{ChatSession, TurnState};
-use crate::sidebar::SidebarTab;
+use crate::sidebar::{SidebarTab, panel_title};
 use crate::workspace::{Dragged, DraggedSession, Workspace};
 
 /// A card was clicked: show this session in the focused pane.
@@ -83,6 +83,14 @@ pub fn usage_text(used: u64, size: u64) -> String {
     };
     let pct = (used * 100).checked_div(size).unwrap_or(0);
     format!("{} / {} ({pct}%)", k(used), k(size))
+}
+
+/// The share of the context window in use, `0..=1`.
+pub fn context_fraction(used: u64, size: u64) -> f32 {
+    match size {
+        0 => 0.,
+        _ => (used as f64 / size as f64).clamp(0., 1.) as f32,
+    }
 }
 
 impl AgentsView {
@@ -183,6 +191,25 @@ impl AgentsView {
                     .text_color(theme.foreground)
                     .child(t.to_string())
             }))
+            .children(m.usage.as_ref().map(|u| {
+                div()
+                    .id(("agent-context", ix))
+                    .w_full()
+                    .h(px(3.))
+                    .rounded(px(2.))
+                    .bg(rgba(0xffffff14))
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative(context_fraction(u.used, u.size)))
+                            .rounded(px(2.))
+                            .bg(linear_gradient(
+                                90.,
+                                linear_color_stop(aurora::boreal(), 0.),
+                                linear_color_stop(aurora::lilas(), 1.),
+                            )),
+                    )
+            }))
             .child(
                 h_flex()
                     .gap_2()
@@ -259,17 +286,8 @@ impl Workspace {
                 .tooltip(tip)
                 .accessibility_label(tip)
         };
-        let title = div()
+        let title = panel_title("Agents", cx)
             .flex_1()
-            .font_family(DISPLAY_FONT)
-            .text_size(px(14.))
-            .font_weight(FontWeight::BOLD)
-            .child("Agents");
-        let header = bar
-            .px_3()
-            .py_1()
-            .gap_1()
-            .child(title)
             .child(
                 button("agents-move", icon, tip)
                     .on_click(cx.listener(|this, _, _, cx| this.move_agents(cx))),
@@ -281,6 +299,7 @@ impl Workspace {
                     }),
                 )
             }));
+        let header = bar.px_1().py_1().items_center().child(title);
         v_flex()
             .size_full()
             .child(header)
@@ -340,7 +359,7 @@ mod tests {
     use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
     use wai_settings::{AppState, Settings};
 
-    use super::{PlanEntry, status_label, subagent_line, summary, usage_text};
+    use super::{PlanEntry, context_fraction, status_label, subagent_line, summary, usage_text};
     use crate::chat::TurnState;
     use crate::sidebar::SidebarTab;
     use wai_agent::SubagentState;
@@ -400,6 +419,13 @@ mod tests {
         assert_eq!(status_label(&err, true), Some("Error"));
         assert_eq!(usage_text(12_300, 200_000), "12.3k / 200k (6%)");
         assert_eq!(usage_text(0, 0), "0 / 0 (0%)");
+    }
+
+    #[test]
+    fn context_fraction_clamps() {
+        assert_eq!(context_fraction(82_000, 200_000), 0.41);
+        assert_eq!(context_fraction(300, 200), 1.0);
+        assert_eq!(context_fraction(5, 0), 0.0);
     }
 
     fn new_session(workspace: &Entity<Workspace>, n: usize, cx: &mut VisualTestContext) {

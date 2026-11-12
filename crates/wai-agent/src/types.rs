@@ -170,11 +170,14 @@ pub enum SubagentState {
 }
 
 /// `None` means unchanged. ponytail: a `null` clear also reads as unchanged.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SubagentPatch {
     pub id: SessionId,
     pub title: Option<String>,
+    /// ACP's `description`: Claude sends the subagent type here.
+    pub description: Option<String>,
     pub state: Option<SubagentState>,
+    pub used: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

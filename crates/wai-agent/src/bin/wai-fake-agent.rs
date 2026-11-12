@@ -440,6 +440,7 @@ impl Fake {
         let child = acp::SessionId::new(format!("{session}-sub"));
         let announce = acp::SubagentUpdate::new(child.clone())
             .title("Explore the code".to_string())
+            .description("Explore".to_string())
             .state(acp::StateUpdate::Running(acp::RunningStateUpdate::new()));
         send(cx, session, acp::SessionUpdate::SubagentUpdate(announce))?;
         let call = acp::ToolCall::new("sub-read", "Read lib.rs")

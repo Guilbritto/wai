@@ -8145,6 +8145,7 @@ version = "0.6.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "chrono",
  "dirs 6.0.0",
  "gpui-kit",
  "http-body-util",
@@ -8153,6 +8154,7 @@ dependencies = [
  "hyper-util",
  "image",
  "notify-rust",
+ "regex",
  "rustix",
  "serde",
  "serde_json",

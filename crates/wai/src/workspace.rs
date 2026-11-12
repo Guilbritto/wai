@@ -47,7 +47,7 @@ use crate::search_view::{OpenMatch, SearchView};
 use crate::settings_view::{
     AgentRow, RowStatus, Section, SettingsData, SettingsEvent, SettingsView, open_modal,
 };
-use crate::sidebar::{SidebarTab, canonical};
+use crate::sidebar::{GROUP_COLORS, SidebarTab, canonical};
 use crate::terminal_view;
 use crate::terminals::TerminalTab;
 use crate::topbar::BRAND;
@@ -271,6 +271,11 @@ pub struct Workspace {
     pub groups: Vec<SessionGroup>,
     /// The Open row or group being renamed, with its input.
     pub(crate) renaming: Option<(Renamed, Entity<InputState>, Subscription)>,
+    /// The Sessions panel's filter; its text narrows Open and History.
+    pub(crate) sessions_filter: Entity<InputState>,
+    /// The Sessions panel's sections are folded; kept in `state.json`.
+    pub(crate) open_folded: bool,
+    pub(crate) history_folded: bool,
     /// The agent commands and shells the user allowed; kept in `state.json`, never in
     /// `settings.toml`.
     pub approved: BTreeSet<String>,
@@ -405,6 +410,8 @@ impl Workspace {
                 this.show(session.clone(), false, window, cx)
             },
         );
+        // Every pane change notifies: a session it hid closes its drawer.
+        let drawers = cx.observe_self(|this, cx| this.close_hidden_drawers(cx));
         Self {
             project,
             settings,
@@ -460,6 +467,13 @@ impl Workspace {
             drafts: Vec::new(),
             groups: Vec::new(),
             renaming: None,
+            sessions_filter: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Filter sessions")
+                    .clean_on_escape()
+            }),
+            open_folded: false,
+            history_folded: false,
             approved,
             shell,
             asking: Vec::new(),
@@ -479,6 +493,7 @@ impl Workspace {
                 open_session,
                 panels,
                 calls,
+                drawers,
             ],
         }
     }
@@ -813,6 +828,12 @@ impl Workspace {
         };
         let state = AppState::load(path);
         self.groups = state.groups;
+        // Groups saved before swatches all load as colour 0: spread them over the cycle once.
+        if self.groups.len() > 1 && self.groups.iter().all(|g| g.color == 0) {
+            for (ix, group) in self.groups.iter_mut().enumerate() {
+                group.color = (ix % GROUP_COLORS.len()) as u8;
+            }
+        }
         let mut panes: [Option<Entity<ChatSession>>; MAX_PANES] = Default::default();
         for saved in state.open_sessions {
             let (agent, id, cwd) = (&saved.agent, &saved.session_id, &saved.cwd);
@@ -838,6 +859,8 @@ impl Workspace {
         }
         self.agents_right = state.agents_right;
         self.agents_collapsed = state.agents_collapsed;
+        self.open_folded = state.open_folded;
+        self.history_folded = state.history_folded;
         self.focus_pane(0, window, cx);
         self.save_state(cx);
         let (files, active) = match state.project.as_deref() == Some(self.project.as_path()) {
@@ -984,6 +1007,8 @@ impl Workspace {
             modes_seen: self.modes_seen.clone(),
             open_files: open_files.collect(),
             active_file,
+            open_folded: self.open_folded,
+            history_folded: self.history_folded,
         };
         // ponytail: a few hundred bytes on the UI thread; move to the background executor if
         // it ever shows in a frame.
@@ -1263,6 +1288,15 @@ impl Workspace {
         let cwd = session.read(cx).cwd.clone();
         if cwd.is_dir() {
             self.leave(Leave::Open(cwd), window, cx);
+        }
+    }
+
+    /// A session in no pane closes its subagent drawer.
+    fn close_hidden_drawers(&self, cx: &mut Context<Self>) {
+        for session in &self.sessions {
+            if !self.panes.iter().any(|p| p.session() == Some(session)) {
+                session.update(cx, |s, cx| s.open_drawer(None, cx));
+            }
         }
     }
 
@@ -2489,7 +2523,21 @@ impl Workspace {
             return pane;
         }
         let pane = cx.new(|_| EditorPane::new());
+        // Any change of the tabs (open, switch, close) tells the tree which file is open.
+        cx.observe(&pane, |this, pane, cx| {
+            let path = {
+                let pane = pane.read(cx);
+                pane.tabs
+                    .get(pane.active)
+                    .map(|tab| tab.read(cx).path.clone())
+            };
+            this.files
+                .update(cx, |files, cx| files.set_active(path, cx));
+        })
+        .detach();
         cx.subscribe_in(&pane, window, |this, pane, _: &Emptied, window, cx| {
+            this.files
+                .update(cx, |files, cx| files.set_active(None, cx));
             let ix = (this.panes.iter()).position(|p| matches!(p, Pane::Editor(e) if e == pane));
             if let Some(ix) = ix {
                 this.drop_pane(ix, window, cx);
@@ -3013,6 +3061,7 @@ impl Render for Workspace {
         let top_bar = self.render_top_bar(window, cx);
         let sidebar = self.render_sidebar(cx);
         let terminal_panel = self.render_terminal_panel(window, cx);
+        let rail = self.render_rail(cx);
         let theme = cx.theme();
         let split = self.panes.len() > 1;
         let dragging = cx.has_active_drag();
@@ -3080,6 +3129,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::focus_next_pane))
             .on_action(cx.listener(Self::open_folder))
             .on_action(cx.listener(Self::open_palette))
+            .on_action(cx.listener(Self::filter_sessions))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_settings(Section::Ai, None, window, cx)
             }))
@@ -3090,44 +3140,46 @@ impl Render for Workspace {
             .children(aurora::backdrop(cx))
             .child(
                 v_flex().size_full().child(top_bar).child(
-                    div().flex_1().min_h_0().p_1().child(
-                        h_resizable("workspace")
-                            .with_handle_appearance(aurora::handle())
-                            .child(
-                                resizable_panel()
-                                    .size(px(SIDEBAR_WIDTH))
-                                    .fixed()
-                                    .child(sidebar),
-                            )
-                            .child(
-                                resizable_panel().child(
-                                    v_resizable("center")
-                                        .with_handle_appearance(aurora::handle())
-                                        .child(
-                                            resizable_panel().child(
-                                                // Keyed by count: each split starts with equal
-                                                // widths.
-                                                h_resizable(("panes", self.panes.len()))
-                                                    .with_handle_appearance(aurora::handle())
-                                                    .children(panes),
+                    h_flex().flex_1().min_h_0().child(rail).child(
+                        div().flex_1().min_w_0().h_full().p_1().child(
+                            h_resizable("workspace")
+                                .with_handle_appearance(aurora::handle())
+                                .child(
+                                    resizable_panel()
+                                        .size(px(SIDEBAR_WIDTH))
+                                        .fixed()
+                                        .child(sidebar),
+                                )
+                                .child(
+                                    resizable_panel().child(
+                                        v_resizable("center")
+                                            .with_handle_appearance(aurora::handle())
+                                            .child(
+                                                resizable_panel().child(
+                                                    // Keyed by count: each split starts with equal
+                                                    // widths.
+                                                    h_resizable(("panes", self.panes.len()))
+                                                        .with_handle_appearance(aurora::handle())
+                                                        .children(panes),
+                                                ),
+                                            )
+                                            .child(
+                                                resizable_panel()
+                                                    .size(px(TERMINAL_HEIGHT))
+                                                    .fixed()
+                                                    .visible(self.terminal_visible)
+                                                    .child(terminal),
                                             ),
-                                        )
-                                        .child(
-                                            resizable_panel()
-                                                .size(px(TERMINAL_HEIGHT))
-                                                .fixed()
-                                                .visible(self.terminal_visible)
-                                                .child(terminal),
-                                        ),
+                                    ),
+                                )
+                                .child(
+                                    resizable_panel()
+                                        .size(px(SIDEBAR_WIDTH))
+                                        .fixed()
+                                        .visible(agents.is_some())
+                                        .child(div().size_full().children(agents)),
                                 ),
-                            )
-                            .child(
-                                resizable_panel()
-                                    .size(px(SIDEBAR_WIDTH))
-                                    .fixed()
-                                    .visible(agents.is_some())
-                                    .child(div().size_full().children(agents)),
-                            ),
+                        ),
                     ),
                 ),
             )
@@ -3775,6 +3827,7 @@ pub(crate) mod tests {
         }
         let close = |session: &Entity<crate::chat::ChatSession>, cx: &mut VisualTestContext| {
             let ix = workspace.read_with(cx, |w, _| w.sessions.iter().position(|s| s == session));
+            reveal(("open-close", ix.unwrap()), cx);
             cx.update(|window, cx| {
                 window.render_frame(cx);
                 window.click(("open-close", ix.unwrap()), cx);
@@ -3983,7 +4036,6 @@ pub(crate) mod tests {
         let rows = load_history(&workspace, 2, cx);
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
         let first = pane_session(&workspace, 0, cx);
-        cx.update(|window, cx| window.click("tab-history", cx));
 
         let from = center_of(("history", 1usize), cx);
         drag_to_pane(from, 0, 0.5, cx);
@@ -4183,7 +4235,6 @@ pub(crate) mod tests {
         });
         assert_eq!(history_rows(&workspace, cx), 0);
 
-        cx.update(|window, cx| window.click("tab-history", cx));
         cx.update(|window, cx| window.click("all-projects", cx));
         assert_eq!(history_rows(&workspace, cx), 25);
     }
@@ -4239,7 +4290,6 @@ pub(crate) mod tests {
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
 
         // A history row's menu offers Fork, and so does an open session's row.
-        cx.update(|window, cx| window.click("tab-history", cx));
         menu_item(("history", 1usize), "Fork", cx);
         wait_until(cx, "the fork", |cx| {
             workspace.read_with(cx, |w, _| w.panes.len() == 2)
@@ -4290,7 +4340,6 @@ pub(crate) mod tests {
         let (workspace, cx) = open(cx, fake_settings(&flags));
         load_history(&workspace, 2, cx);
 
-        cx.update(|window, cx| window.click("tab-history", cx));
         menu_item(("history", 0usize), "Fork", cx);
         wait_until(cx, "the notice", |cx| {
             cx.update(|window, cx| !window.notifications(cx).is_empty())
@@ -5189,6 +5238,16 @@ pub(crate) mod tests {
         cx.run_until_parked();
     }
 
+    /// Moves the mouse onto a row's hover button, which shows it, as before a click.
+    pub(crate) fn reveal(id: impl Into<ElementId>, cx: &mut VisualTestContext) {
+        let id = id.into();
+        let at = cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find(id).bounds().center()
+        });
+        cx.simulate_mouse_move(at, None, Modifiers::none());
+    }
+
     /// The approval dialog's text while it is open.
     pub(crate) fn question(
         workspace: &Entity<Workspace>,
@@ -5521,6 +5580,7 @@ pub(crate) mod tests {
     }
 
     fn click_close(cx: &mut VisualTestContext) {
+        reveal(("open-close", 0usize), cx);
         cx.update(|window, cx| {
             window.render_frame(cx);
             window.click(("open-close", 0usize), cx);

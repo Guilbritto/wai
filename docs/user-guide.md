@@ -4,8 +4,9 @@ This guide describes the latest wai release. On Windows, read **ctrl** where it 
 
 ## The window
 
-- **Top bar.** It shows wai's version and the commit it was built from (`1.2.3 · 01dd232`), the project's name and how many agents are working or need you, and holds the buttons **New from template** (shown when templates exist), **Extensions**, the command palette, **Settings** (⚙), the terminal, the Agents panel (only while it is on the right) and **New session**. On macOS it is the title bar: drag it to move the window, double-click it to zoom.
-- **Sidebar.** The tabs **Sessions**, **History**, **Files**, **Search** and **Agents**, plus one tab per extension panel.
+- **Top bar.** It shows wai's version and the commit it was built from (`1.2.3 · 01dd232`), the project's name and how many agents are working or need you, and holds the buttons **New from template** (shown when templates exist), the command palette, the terminal, the Agents panel (only while it is on the right) and **New session**. On macOS it is the title bar: drag it to move the window, double-click it to zoom.
+- **Activity bar.** A narrow column of icons at the window's left edge picks what the sidebar shows. Top group: **Sessions** (an amber badge counts the sessions that need you; a double click starts a new session), **Files**, **Search**, **Agents** (hidden while Agents is on the right), then one icon per extension panel, drawn as the initials of its title (`My cards` is `MC`; the tooltip has the full title). Foot group: **Extensions** and **Settings**, which open Settings (Extensions on its own page). The selected icon is highlighted with a violet bar on its left.
+- **Sidebar.** It shows the panel of the selected icon. Each panel opens with a title row (`SESSIONS`, `FILES`, `SEARCH`, `AGENTS`) holding that panel's buttons; an extension's panel has none, as it draws its own heading.
 - **Agents panel.** Agents can leave the sidebar for its own panel right of the panes, which collapses with **⌘⌥B** (see [The Agents tab](#the-agents-tab)).
 - **Panes.** Up to four sit side by side. Each holds a chat session or the editor (one editor pane at most). **⌘⌥→** moves the focus to the next pane.
 - **Terminal.** It sits at the bottom, toggled with **ctrl-`**.
@@ -24,15 +25,15 @@ There are four ways to start a session:
 - **⌘N**, the **+** button or a double click on the **Sessions** tab starts one with the default agent (`default_agent`, which you choose in [Settings](#the-settings-screen); until you do, these open Settings instead).
 - **New from template** (the file icon in the top bar) starts one from a template.
 - The palette's **New session with &lt;agent&gt;** picks the agent.
-- A row in the **History** tab reopens a past session.
+- A row in the **History** section of the Sessions panel reopens a past session.
 
 While the agent prepares the session, its pane shows `Preparing <agent>…`. **⌘W** there takes the pane off the screen; the session still opens, in the sidebar.
 
-**The default agent** starts with wai, so its history is listed without waiting. With none chosen, no agent starts, the **History** tab says `Choose an AI in Settings to see its history.` and Settings says `Choose an AI to start a session.`
+**The default agent** starts with wai, so its history is listed without waiting. With none chosen, no agent starts, the **History** section says `Choose an AI in Settings to see its history.` and Settings says `Choose an AI to start a session.`
 
 ### Chatting
 
-- **Sending:** **Enter** sends the prompt and **Shift+Enter** adds a new line. While the agent works, **Stop** stands beside **Send**, and **Esc** in a session also stops the turn.
+- **Sending:** **Enter** sends the prompt and **Shift+Enter** adds a new line. While the agent works, **Stop** stands beside **Send**, and **Esc** in a session also stops the turn (with the agent list or a subagent's drawer open, the first **Esc** only closes it, and the next one stops the turn). **Stop** always stops the turn.
 - **Sending during a turn:** you can keep typing and sending while the agent works.
   - An agent that can be steered (Claude Code) gets the message inside the running turn. It waits above the prompt box as a `Sent` balloon until the agent reads it, then joins the transcript there. wai takes the agent's next reply, thought or tool call as the sign that it read the message; while a card waits, the one after you answer it. A message still unread when the turn ends joins the transcript then. If the turn ended meanwhile, it goes as a new prompt. If steering fails, the message is queued instead, and the transcript says so.
   - Any other agent (Codex, Copilot) gets it after the turn: it waits above the prompt box as a `Queued` balloon, with a **×** that puts it back in the prompt box. When the turn ends, the queued messages go out together as one prompt. If you stop the turn, or it ends any other way, they go back into the prompt box, before anything typed since, and their attachments back to chips, unsent.
@@ -62,19 +63,34 @@ While the agent prepares the session, its pane shows `Preparing <agent>…`. **�
     | **Grouped** | The steps between two replies fold into one block, such as `3 steps · Read README.md, Run git status`; the head names every step. A click lists the step lines, each still folded |
     | **Hidden** | No steps |
 
-  - **Subagents.** Each subagent the agent runs (Claude Code's Agent tool) shows as a step card with its title, its status and, once it answers, its answer. Its tool calls stay in the transcript, as steps. Its own text and checklist are not shown.
+  - **Subagents.** Each subagent the agent runs (Claude Code's Agent tool) shows as one card with a state mark, its kind, its task and a `Running`, `Done` or `Failed` pill. The card follows the **Processing** setting like any step (**Step by step** shows it, **Grouped** folds it into the step group, **Hidden** does not show it); the agent list under the prompt opens a subagent's drawer in every mode. Its tool calls are not in the transcript: they show in its drawer (see below), which a click on the card opens. Its own text and checklist are not shown.
   - **Always shown,** whatever the setting: your prompts, the replies, permission cards and questions, notices, and file edits. An edit that was written reads `Edited <file>` (a click shows its diff), and the turn still ends with its **Edits** block (see [Reviewing edits](#reviewing-edits)).
+  - **The agent list.** While a session has subagents (the current turn's, plus background ones still running), a list sits under its prompt box, in the mono font. The first row is `main`: the running turn's time and the context used (`↓ 82k tokens`, when the agent reports it). Each subagent has a row: a mark (`○` cyan while running, amber while it needs you, `✓` done, `✗` stopped or failed), its kind, its task, then its time (`9s`, `done · 32s`) and its tokens when the agent reports them. Finished subagents of earlier turns leave the list when a new turn starts. Without subagents the list is not drawn.
+    - **Mouse:** click a subagent to open its drawer; click `main`, or the same subagent again, to close it.
+    - **Keyboard:** with the prompt box empty, **↓** moves into the list; **↑**/**↓** move; **Enter** opens the selected row (`main` closes the drawer); **Esc** closes the drawer and goes back to the prompt. While the list has focus, `↑↓ navigate · Enter open · Esc back to main` shows under it.
+  - **The subagent drawer.** Opening a subagent lays a drawer over the bottom of the transcript, just above the prompt box. The header has its mark, kind, task, time and tokens, and **×**. The body lists its tool calls one per line (a click unfolds the output), then its answer as Markdown. The prompt box stays live for `main`, and permission cards and questions stay visible above the drawer. The drawer does not close by itself when the subagent finishes; **×**, **Esc**, or switching the pane to another session closes it.
   - An unfolded tool call shows its output, up to 2,000 lines, with **Show all**.
   - A very large output offers **Open full output in editor**. That opens a read-only copy kept under `<config>/scratch/`, which is cleared at each launch.
 
 ### Status
 
-Each open session has a coloured dot in the sidebar:
+Each open session has a coloured dot in the Sessions panel, and a time at the right of its row: how long it has been in its state (`30s`, `4m`, `1h`, `2d`; a turn counts from when it started). A session restored at launch shows no time until its state changes. The row's second line says what it is doing:
+
+| Second line | Meaning |
+|---|---|
+| The running tool (`Reading Cargo.toml…`) or `Thinking…` | `Working` |
+| `Permission:` then the top card's title (`Question:` for a question) | `Needs you` |
+| `✓ Done` | Idle, the last turn ended normally |
+| `Idle` | Idle otherwise |
+| `Agent exited · Restart` | `Error` |
+| `Draft` | A draft |
+
+` · N subagents` is added while the session has live subagents. The dot's colours:
 
 | Dot | Meaning |
 |---|---|
 | Teal in Aurora, cyan in light mode | `Working` |
-| Amber, labelled `Needs you` | A permission card or a question waits for you |
+| Amber | A permission card or a question waits for you: the row's second line reads `Permission:` or `Question:` |
 | Grey | Idle |
 | Red | `Error`: the agent exited or failed |
 
@@ -107,11 +123,13 @@ In a tab-indented file, the lines Revert puts back are indented with tabs: Claud
 
 ### History, side by side, and forks
 
-- **The Sessions tab** lists the open sessions. **The History tab** lists the default agent's past sessions for this project; its **All projects** switch shows every project's history. Choosing another default agent lists that agent's history instead.
+- **The Sessions panel** has, from the top: a title row (**New session**, **New group**, **Collapse all**, which folds every group); a **Filter sessions** field (**⌘K** focuses it; it narrows **Open** and **History** to titles containing the text, shows groups expanded, and **Esc** clears it); the **Open** section; and the **History** section.
+- **Open** lists the sessions and drafts in the order and groups you set; nothing reorders them by state. A group's header has a colour swatch (the next of a fixed cycle, kept on relaunch), a chevron, its name and its count; a folded group with sessions that need you shows an amber `● N`. Hover a row to see **Open to the side** and **×**.
+- **History** (`History · this project`) lists the default agent's past sessions for this project, one line each: ↺, the title and a relative date (`yesterday`, `2d`). Its **All** toggle shows every project's history (`History · all projects`). Choosing another default agent lists that agent's history instead. Both sections fold with their chevron; this is kept on relaunch.
 - **Open elsewhere:** a Claude conversation that another process runs (`claude --resume` in a terminal, another wai) or that changed in the last 2 minutes asks first when you open it from History: **Fork** opens a copy beside, **Open anyway** opens it here.
 - **Right-click menus:** an **Open** row's menu has **Rename**, **Fork**, **Move to** each other group, **New group with this session** and, for a session in a group, **Remove from group**. A group header's menu has **Rename group** and **Delete group**, and a **History** row's has **Fork**. The rows themselves keep only **Open to the side** and, on **Open** rows, the **×** that ends the session.
 - **Renaming a session:** **Rename** in its **Open** row's menu, or a double click on the row, turns its title into a text box. **Enter**, or clicking elsewhere, keeps the name; **Esc** does not. The name shows wherever the session's title does, is kept on relaunch and is never sent to the agent, whose own titles no longer replace it. An empty name gives the agent's title back. Ending the session drops the name.
-- **Groups:** the **+** beside **Open** adds a group, ready for its name. Put a session in a group from its row's menu, or by dragging its **Open** row onto the group's header; take it out with **Remove from group**, or by dragging it onto the sessions above the groups (or the **Open** heading). A session is in one group at most. A group's header has a chevron that folds it, its name and how many sessions it holds; a double click on the name renames it. **Delete group** deletes the group only: its sessions stay open, in no group. A session that ends leaves its group, and an empty group stays until you delete it. Groups are kept on relaunch.
+- **Groups:** **New group** (the folder icon in the title row; its **+** starts a session) adds a group, ready for its name. Put a session in a group from its row's menu, or by dragging its **Open** row onto the group's header; take it out with **Remove from group**, or by dragging it onto the sessions above the groups (or the **Open** heading). A session is in one group at most. A group's header has a chevron that folds it, its name and how many sessions it holds; a double click on the name renames it. **Delete group** deletes the group only: its sessions stay open, in no group. A session that ends leaves its group, and an empty group stays until you delete it. Groups are kept on relaunch.
 - **Reordering:** drag an **Open** row onto another to take its place: dragged down, it lands after that row; dragged up, before it. A row dropped on a row of another group joins that group. The **Agents** cards follow the order, which is kept on relaunch.
 - **Opening a row:** a click shows the session in the focused pane. **Open to the side** adds a pane, while there are fewer than four.
 - **Following a session:** moving to a session from another folder (opening its row, clicking its pane, **⌘⌥→**, closing the pane beside it) opens that folder, as **⌘O** does: the editor pane closes, after asking about unsaved edits, and Files, Search, History and templates follow. Relaunching and sessions opened by extensions never move you; a session whose folder is gone just shows.
@@ -147,7 +165,7 @@ prompt = "Review the uncommitted changes in this repository."
 
 ### The Files tab
 
-- It shows the project tree, listed folder by folder.
+- It shows the project tree, listed folder by folder, under a header with the project folder's name that folds it. Each file has a small mark (`rs`, `M↓`, `≡`…) coloured by language, and the file open in the editor's active tab is highlighted. **Collapse all** in the title row folds every folder.
 - Inside a git repository it hides what `.gitignore` (and your global git ignores) exclude.
 - It updates when files change on disk.
 - A click opens the file in the editor pane, which has tabs.
@@ -197,7 +215,7 @@ wai keeps a backup of every tab with unsaved edits:
 The Search tab searches file contents across the project:
 - **Options:** **Aa** matches case and **.\*** reads the query as a regular expression.
 - **When it runs:** typing pauses briefly before it searches, and a new query cancels the old one.
-- **Results:** they arrive in batches, grouped by file. A click opens the file at the line.
+- **Results:** they arrive in batches, grouped by file, under a summary such as `9 matches in 3 files`. Each file's header (chevron, mark, name, its folder, a count) folds its matches; **Collapse all** in the title row folds every file. Matches show their line number, with the matched text highlighted; the last clicked one stays marked. A click opens the file at the line.
 - **What it skips:** it skips what `.gitignore` excludes inside a git repository.
 - **Limit:** it stops at 10,000 matches (`Showing first 10,000`).
 
@@ -208,7 +226,7 @@ The Agents tab has one live card per open session. Each card shows:
 - the agent's plan (8 rows, then `+N more`);
 - its running subagents, one line each: `title · Working` or `title · Needs you`, then the tool call in progress. A line goes away when its subagent finishes. A background subagent keeps its line after the turn ends, until it finishes;
 - the tool call in progress;
-- the context used (`used / size (pct%)`).
+- the context used: a thin bar, then `used / size (pct%)`.
 
 Clicking a card shows that session in the focused pane; dragging it onto a pane works as an **Open** row does.
 
@@ -228,7 +246,7 @@ Clicking a card shows that session in the focused pane; dragging it onto a pane 
 - **Shell:** `terminal.shell` from your settings, else `$SHELL`, else `/bin/sh`. On Windows the fallbacks are `%COMSPEC%`, then `powershell.exe`.
 - **Scrollback:** 10,000 lines.
 - **Copy and paste:** select with the mouse, then copy with **⌘C** and paste with **⌘V**. On Windows and Linux use **ctrl-shift-c** and **ctrl-shift-v**.
-- **Keys on Windows and Linux:** while the terminal has focus, **ctrl-c/v/n/t/w/o/q** go to the shell. wai's own actions move to **ctrl-shift-n/t/w/o/q**.
+- **Keys on Windows and Linux:** while the terminal has focus, **ctrl-c/v/n/t/w/o/q/k** go to the shell. wai's own actions move to **ctrl-shift-n/t/w/o/q/k**.
 
 ## The command palette
 
@@ -258,7 +276,11 @@ Clicking a card shows that session in the focused pane; dragging it onto a pane 
 | New terminal tab | ⌘T | ctrl-t (ctrl-shift-t in the terminal) | window |
 | Next / previous terminal tab | ⌘⇧] / ⌘⇧[ | ctrl-shift-] / ctrl-shift-[ | terminal |
 | Show or hide the Agents panel, while it is on the right | ⌘⌥B | ctrl-alt-b | window |
-| Stop the turn | Esc | Esc | chat session |
+| Filter the Sessions panel | ⌘K | ctrl-k (ctrl-shift-k in the terminal) | window |
+| Move from an empty prompt into the agent list | ↓ | ↓ | prompt box |
+| In the agent list: move / open / back to the prompt | ↑ ↓ / Enter / Esc | ↑ ↓ / Enter / Esc | agent list |
+| Close the subagent drawer | Esc | Esc | chat session, drawer open |
+| Stop the turn | Esc | Esc | chat session, no drawer or agent list |
 | Send the prompt / new line | Enter / Shift+Enter | Enter / Shift+Enter | prompt box |
 | Answer the top permission card | 1–9 | 1–9 | prompt box, while empty |
 | In the `/` menu: move / complete / close | ↑ ↓ / Enter or Tab / Esc | ↑ ↓ / Enter or Tab / Esc | prompt box |
@@ -316,7 +338,7 @@ Only your own settings file can change these; a project's `.wai/settings.toml` c
 
 Settings is a modal over the window, not a pane.
 
-- **Opening:** **⌘,** (ctrl-, on Windows and Linux), the ⚙ button in the top bar, or **Settings** in the command palette. It opens on the page you asked for. Opening it while it is open shows that page and refreshes its data.
+- **Opening:** **⌘,** (ctrl-, on Windows and Linux), the ⚙ button at the foot of the activity bar, or **Settings** in the command palette. It opens on the page you asked for. Opening it while it is open shows that page and refreshes its data.
 - **Closing:** **Esc**, a click outside it or its **×**. Closing drops the screen; it is not restored on relaunch.
 - **Size:** 88% of the window each way, centered. The maximize button in the header grows it to the window and back; the size is not kept.
 - **Header:** `Settings`, then the context in muted text: `(<default agent> · <project>)`, or `(<project>)` with no default agent.

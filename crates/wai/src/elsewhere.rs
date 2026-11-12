@@ -239,7 +239,9 @@ mod tests {
         assert!(found.contains(&id));
     }
 
-    use crate::workspace::tests::{click, history_settings, load_history, open, wait_until};
+    use crate::workspace::tests::{
+        click, history_settings, load_history, open, reveal, wait_until,
+    };
     use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
     use gpui_kit::{TestAppContext, VisualTestContext};
     use wai_settings::Settings;
@@ -273,7 +275,6 @@ mod tests {
         let home = tmp.path().join("home");
         workspace.update(cx, |w, _| w.claude_home = home);
         load_history(&workspace, n, cx);
-        click("tab-history", cx);
         (workspace, cx, tmp)
     }
 
@@ -325,11 +326,10 @@ mod tests {
         let (workspace, cx, tmp) = setup(cx, 2);
         click(("history", 1usize), cx);
         wait_until(cx, "the session", |cx| ids(&workspace, cx) == ["session-1"]);
-        click("tab-sessions", cx);
+        reveal(("open-close", 0usize), cx);
         click(("open-close", 0usize), cx);
         wait_until(cx, "it closed", |cx| ids(&workspace, cx).is_empty());
         fresh(&tmp.path().join("home"), "session-1");
-        click("tab-history", cx);
         click(("history", 1usize), cx);
         wait_until(cx, "the session", |cx| {
             assert!(!asking(cx), "it asked");
