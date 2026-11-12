@@ -141,8 +141,9 @@ impl Workspace {
 
     /// Hides the shown area, storing it as `area_now` gives it.
     fn hide_area(&mut self, cx: &App) {
-        if let Some(ix) = self.shown_area.take() {
+        if let Some(ix) = self.shown_area {
             self.work_areas[ix] = self.area_now(ix, cx);
+            self.shown_area = None;
         }
     }
 
@@ -169,10 +170,9 @@ impl Workspace {
         if let Some(ix) = focus
             .filter(|_| has_editor)
             .and_then(|f| open.iter().position(|s| s == f))
+            .filter(|ix| *ix >= MAX_PANES - 1)
         {
-            if ix >= MAX_PANES - 1 {
-                open.swap(ix, MAX_PANES - 2);
-            }
+            open.swap(ix, MAX_PANES - 2);
         }
         let main = area
             .panes

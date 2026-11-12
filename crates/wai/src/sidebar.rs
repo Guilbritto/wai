@@ -2168,7 +2168,7 @@ pub(crate) mod tests {
             name: "New work area".into(),
             ..Default::default()
         };
-        assert_eq!(areas(&workspace, cx), [new.clone()]);
+        assert_eq!(areas(&workspace, cx), std::slice::from_ref(&new));
         assert!(workspace.read_with(cx, |w, _| w.renaming.is_some()));
         assert_eq!(workspace.read_with(cx, |w, _| w.shown_area), None);
         assert_eq!(on_screen(&workspace, cx), before);
