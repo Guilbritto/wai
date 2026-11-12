@@ -597,10 +597,13 @@ impl Workspace {
         self.groups.iter().position(holds)
     }
 
-    /// Takes session `id` out of its group.
+    /// Takes session `id` out of its group and its work area.
     pub(crate) fn ungroup(&mut self, id: &str) {
         for group in &mut self.groups {
             group.sessions.retain(|s| s != id);
+        }
+        for area in &mut self.work_areas {
+            area.panes.retain(|s| s != id);
         }
     }
 

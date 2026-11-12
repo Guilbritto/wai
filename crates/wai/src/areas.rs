@@ -1,5 +1,7 @@
 //! Work areas: named sets of open sessions with their screen arrangement.
 
+use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::*;
 use wai_settings::WorkArea;
 
@@ -28,7 +30,59 @@ pub(crate) fn rearranged(area: &WorkArea, shown: &[&str], focused: Option<&str>)
     }
 }
 
+pub(crate) const AREA_FULL: &str = "A work area holds up to 4 sessions";
+
 impl Workspace {
+    /// A session dropped on area `ix`'s row joins it (D2, D3): leaving its group or other area, as a
+    /// new pane at the right while `ix` is shown and has room. A full area refuses with a warning
+    /// notification `AREA_FULL` and returns false.
+    pub(crate) fn add_to_area(
+        &mut self,
+        ix: usize,
+        session: &Entity<ChatSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let id = session.read(cx).id.clone();
+        if self.area_of(&id) == Some(ix) {
+            return true;
+        }
+        if self.work_areas[ix].panes.len() >= MAX_PANES {
+            window.push_notification(Notification::warning(AREA_FULL), cx);
+            return false;
+        }
+        if self.shown_area == Some(ix) {
+            self.work_areas[ix] = self.area_now(ix, cx);
+        }
+        self.join(ix, &id);
+        let in_pane = self.panes.iter().any(|p| p.session() == Some(session));
+        if self.shown_area == Some(ix) && !in_pane && self.panes.len() < MAX_PANES {
+            self.panes.push(Pane::Session(session.clone()));
+        }
+        self.save_state(cx);
+        cx.notify();
+        true
+    }
+
+    /// Session `id` leaves its group and area (`ungroup`), then joins area `ix` at the end.
+    fn join(&mut self, ix: usize, id: &str) {
+        self.ungroup(id);
+        self.work_areas[ix].panes.push(id.to_string());
+    }
+
+    /// D14: while an area is shown, `session`, in no area, which the user just put in a pane,
+    /// joins it when it holds fewer than `MAX_PANES`.
+    pub(crate) fn adopt(&mut self, session: &Entity<ChatSession>, cx: &App) {
+        let id = session.read(cx).id.clone();
+        if let Some(ix) = self.shown_area
+            && self.area_of(&id).is_none()
+            && self.work_areas[ix].panes.len() < MAX_PANES
+        {
+            self.work_areas[ix] = self.area_now(ix, cx);
+            self.join(ix, &id);
+        }
+    }
+
     /// The area holding session `id`.
     pub(crate) fn area_of(&self, id: &str) -> Option<usize> {
         self.work_areas
@@ -149,8 +203,10 @@ mod tests {
     use crate::chat::{ChatSession, TurnState};
     use crate::workspace::tests::{fake_settings, launch, open, open_at, start_now, wait_until};
     use crate::workspace::{Pane, Workspace};
+    use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{Entity, TestAppContext, VisualTestContext};
+    use gpui_kit::{ElementId, Entity, TestAppContext, VisualTestContext};
+    use wai_settings::SessionGroup;
     use wai_settings::WorkArea;
     use wai_settings::{AppState, OpenSession, Settings};
 
@@ -257,6 +313,133 @@ mod tests {
         let s = s.clone();
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.show(s, side, window, cx)));
         cx.run_until_parked();
+    }
+
+    fn add(
+        workspace: &Entity<Workspace>,
+        ix: usize,
+        s: &Entity<ChatSession>,
+        cx: &mut VisualTestContext,
+    ) -> bool {
+        let s = s.clone();
+        let added =
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.add_to_area(ix, &s, window, cx)));
+        cx.run_until_parked();
+        added
+    }
+
+    fn ids(s: &[&Entity<ChatSession>], cx: &mut VisualTestContext) -> Vec<String> {
+        s.iter()
+            .map(|s| s.read_with(cx, |s, _| s.id.clone()))
+            .collect()
+    }
+
+    fn area_panes(w: &Entity<Workspace>, ix: usize, cx: &mut VisualTestContext) -> Vec<String> {
+        w.read_with(cx, |w, cx| w.area_now(ix, cx).panes)
+    }
+
+    #[gpui_kit::test]
+    fn a_dropped_session_joins_at_the_right(cx: &mut TestAppContext) {
+        let (w, cx, s) = with_areas(3, &[&[0], &[]], cx);
+        show_area(&w, 0, cx);
+        assert!(add(&w, 0, &s[1], cx));
+        assert_eq!(on_screen(&w, cx), some(&[&s[0], &s[1]]));
+        assert_eq!(area_panes(&w, 0, cx), ids(&[&s[0], &s[1]], cx));
+        assert!(add(&w, 1, &s[2], cx));
+        assert_eq!(area_panes(&w, 1, cx), ids(&[&s[2]], cx));
+        assert_eq!(on_screen(&w, cx), some(&[&s[0], &s[1]]));
+    }
+
+    #[gpui_kit::test]
+    fn a_full_area_refuses(cx: &mut TestAppContext) {
+        let (w, cx, s) = with_areas(5, &[&[0, 1, 2, 3]], cx);
+        let before = area_panes(&w, 0, cx);
+        assert!(!add(&w, 0, &s[4], cx));
+        assert_eq!(area_panes(&w, 0, cx), before);
+        assert!(cx.update(|window, cx| !window.notifications(cx).is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn a_session_is_in_one_place_at_most(cx: &mut TestAppContext) {
+        let (w, cx, s) = with_areas(2, &[&[0], &[]], cx);
+        let id1 = ids(&[&s[1]], cx);
+        w.update(cx, |w, _| {
+            w.groups = vec![SessionGroup {
+                name: "G".into(),
+                collapsed: false,
+                sessions: id1.clone(),
+                color: 0,
+            }]
+        });
+        assert!(add(&w, 1, &s[0], cx));
+        assert!(area_panes(&w, 0, cx).is_empty());
+        assert_eq!(area_panes(&w, 1, cx), ids(&[&s[0]], cx));
+        assert!(add(&w, 0, &s[1], cx));
+        assert_eq!(area_panes(&w, 0, cx), id1);
+        assert!(w.read_with(cx, |w, _| w.groups[0].sessions.is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn closing_a_pane_takes_it_out_of_its_area(cx: &mut TestAppContext) {
+        let (w, cx, s) = with_areas(3, &[&[0, 1], &[2]], cx);
+        show_area(&w, 0, cx);
+        w.update(cx, |w, _| w.focused_pane = 1);
+        cx.simulate_keystrokes("secondary-w");
+        cx.run_until_parked();
+        assert_eq!(on_screen(&w, cx), some(&[&s[0]]));
+        assert_eq!(area_panes(&w, 0, cx), ids(&[&s[0]], cx));
+        assert!(w.read_with(cx, |w, _| w.sessions.contains(&s[1])));
+        let s2 = s[2].clone();
+        cx.update(|window, cx| w.update(cx, |w, cx| w.end_session(&s2, window, cx)));
+        cx.run_until_parked();
+        assert!(area_panes(&w, 1, cx).is_empty());
+        assert_eq!(area_panes(&w, 0, cx), ids(&[&s[0]], cx));
+    }
+
+    #[gpui_kit::test]
+    fn a_draft_does_not_push_a_session_out(cx: &mut TestAppContext) {
+        let (w, cx, s) = with_areas(3, &[&[0, 1], &[2]], cx);
+        show_area(&w, 0, cx);
+        w.update(cx, |w, _| w.focused_pane = 1);
+        cx.simulate_keystrokes("secondary-n");
+        cx.run_until_parked();
+        assert!(w.read_with(cx, |w, _| w.panes[1].draft().is_some()));
+        assert_eq!(area_panes(&w, 0, cx), ids(&[&s[0], &s[1]], cx));
+        show_area(&w, 1, cx);
+        show_area(&w, 0, cx);
+        assert_eq!(on_screen(&w, cx), some(&[&s[0], &s[1]]));
+    }
+
+    #[gpui_kit::test]
+    fn an_area_keeps_its_panes_as_moved(cx: &mut TestAppContext) {
+        let (w, cx, s) = with_areas(3, &[&[0, 1], &[2]], cx);
+        show_area(&w, 0, cx);
+        let s1 = s[1].clone();
+        let from = cx.update(|window, cx| {
+            window.render_frame(cx);
+            let header = window.within(ElementId::View(s1.entity_id()));
+            header.find("session-title").bounds().center()
+        });
+        crate::workspace::tests::drag_to_pane(from, 0, 0.5, cx);
+        assert_eq!(on_screen(&w, cx), some(&[&s[1], &s[0]]));
+        show_area(&w, 1, cx);
+        show_area(&w, 0, cx);
+        assert_eq!(on_screen(&w, cx), some(&[&s[1], &s[0]]));
+    }
+
+    #[gpui_kit::test]
+    fn open_to_the_side_joins_the_shown_area(cx: &mut TestAppContext) {
+        let (w, cx, s) = with_areas(3, &[&[0]], cx);
+        show_area(&w, 0, cx);
+        show(&w, &s[1], true, cx);
+        assert_eq!(on_screen(&w, cx), some(&[&s[0], &s[1]]));
+        assert_eq!(area_panes(&w, 0, cx), ids(&[&s[0], &s[1]], cx));
+        show(&w, &s[2], false, cx);
+        assert_eq!(on_screen(&w, cx), some(&[&s[2]]));
+        assert_eq!(
+            w.read_with(cx, |w, _| w.work_areas[0].panes.clone()),
+            ids(&[&s[0], &s[1]], cx)
+        );
     }
 
     #[gpui_kit::test]

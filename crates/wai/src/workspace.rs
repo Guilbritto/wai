@@ -1354,10 +1354,13 @@ impl Workspace {
                 } else {
                     self.session_pane()
                 };
-                self.panes[ix] = Pane::Session(session);
+                self.panes[ix] = Pane::Session(session.clone());
                 ix
             }
         };
+        if side {
+            self.adopt(&session, cx);
+        }
         self.focus_pane(ix, window, cx);
         self.follow_session(window, cx);
         self.save_state(cx);
@@ -1567,6 +1570,9 @@ impl Workspace {
                     },
                 })
                 .collect();
+            if let Some(session) = &session {
+                self.adopt(session, cx);
+            }
             self.save_state(cx);
         }
         let shown = self.panes.iter().position(holds);
@@ -1985,6 +1991,15 @@ impl Workspace {
     pub(crate) fn close_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Pane::Editor(pane) = &self.panes[ix] {
             return pane.update(cx, |p, cx| p.close(p.active, window, cx));
+        }
+        if let Some(session) = self.panes[ix].session() {
+            let id = session.read(cx).id.clone();
+            if let Some(area) = self.shown_area
+                && self.area_of(&id) == Some(area)
+            {
+                self.work_areas[area] = self.area_now(area, cx);
+                self.ungroup(&id);
+            }
         }
         self.drop_pane(ix, window, cx);
         self.follow_session(window, cx);
