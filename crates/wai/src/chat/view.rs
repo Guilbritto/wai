@@ -3460,6 +3460,7 @@ mod tests {
         (workspace, a, b, cx, dir)
     }
 
+    #[cfg(unix)]
     fn notices(session: &Entity<ChatSession>, text: &str, cx: &mut VisualTestContext) -> bool {
         session.read_with(cx, |s, _| {
             (s.model.items.iter())
