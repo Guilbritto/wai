@@ -1,7 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use ignore::WalkBuilder;
+use crate::walk;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -12,7 +12,7 @@ pub struct Entry {
 
 /// The children of `dir`, a folder inside the project `root`: dirs first, then by name ignoring
 /// case. `.gitignore` rules apply as git applies them (from `dir` and every folder above it, inside
-/// a git repo); hidden files show, `.git` does not. Only `dir` is read, never below it, so a huge
+/// the project); hidden files show, `.git` does not. Only `dir` is read, never below it, so a huge
 /// ignored or collapsed folder costs nothing. An entry that cannot be read is left out; `Err` means
 /// `dir` itself is gone or unreadable.
 ///
@@ -26,11 +26,9 @@ pub fn list_dir(root: &Path, dir: &Path, global_ignores: bool) -> io::Result<Vec
         dir.display()
     );
     std::fs::read_dir(dir)?;
-    let walk = WalkBuilder::new(dir)
+    let inherited = walk::inherited(root, dir);
+    let walk = walk::walker(dir, root, global_ignores)
         .max_depth(Some(1))
-        .hidden(false)
-        .git_global(global_ignores)
-        .current_dir(root)
         .filter_entry(|e| e.file_name() != ".git")
         .build();
     let mut entries: Vec<_> = walk
@@ -47,6 +45,7 @@ pub fn list_dir(root: &Path, dir: &Path, global_ignores: bool) -> io::Result<Vec
                 is_dir,
             }
         })
+        .filter(|e| !walk::hidden_by(&inherited, &e.path, e.is_dir))
         .collect();
     entries.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase()));
     Ok(entries)
@@ -106,6 +105,38 @@ mod tests {
             ["nested", ".gitignore", "main.rs"]
         );
         assert!(list_dir(root, &root.join("missing"), false).is_err());
+    }
+
+    #[test]
+    fn gitignore_applies_outside_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::create_dir_all(root.join("src/gen")).unwrap();
+        fs::write(root.join(".gitignore"), "target/\n*.log\n").unwrap();
+        fs::write(root.join("a.log"), "").unwrap();
+        fs::write(root.join("src/.gitignore"), "gen/\n!keep.log\n").unwrap();
+        for f in ["src/b.log", "src/keep.log", "src/m.rs"] {
+            fs::write(root.join(f), "").unwrap();
+        }
+        let names = |dir: &Path| -> Vec<String> {
+            let entries = list_dir(root, dir, false).unwrap();
+            entries.into_iter().map(|e| e.name).collect()
+        };
+        assert_eq!(names(root), ["src", ".gitignore"]);
+        assert_eq!(names(&root.join("src")), [".gitignore", "keep.log", "m.rs"]);
+    }
+
+    #[test]
+    fn ancestor_gitignore_is_ignored_outside_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(dir.path().join(".gitignore"), "*.txt\n").unwrap();
+        fs::write(root.join("a.txt"), "").unwrap();
+        let entries = list_dir(&root, &root, false).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "a.txt");
     }
 
     /// `ignore` finds the global excludes file only through git's config (`GIT_CONFIG_GLOBAL`,

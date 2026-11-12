@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::sinks::Lossy;
 use grep_searcher::{BinaryDetection, SearcherBuilder};
-use ignore::WalkBuilder;
+
+use crate::walk;
 
 pub const MAX_MATCHES: usize = 10_000;
 /// Larger files are skipped: they are rarely source, and they slow every search.
@@ -82,10 +83,7 @@ fn run(
         .line_number(true)
         .binary_detection(BinaryDetection::quit(0))
         .build();
-    let walk = WalkBuilder::new(root)
-        .hidden(false)
-        .git_global(global_ignores)
-        .current_dir(root)
+    let walk = walk::walker(root, root, global_ignores)
         .sort_by_file_name(|a, b| a.cmp(b))
         .filter_entry(|e| e.file_name() != ".git")
         .build();
@@ -177,6 +175,26 @@ mod tests {
         fs::write(root.join("b.txt"), "a.b\naxb\n").unwrap();
         assert_eq!(collect(root, query("a.b")).len(), 1);
         assert!(collect(root, query("")).is_empty());
+    }
+
+    #[test]
+    fn search_respects_gitignore_outside_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("target")).unwrap();
+        fs::write(root.join(".gitignore"), "target/\n").unwrap();
+        fs::write(root.join("a.rs"), "fn one() {}\n").unwrap();
+        fs::write(root.join("target/out.rs"), "fn ignored() {}\n").unwrap();
+        let found = collect(root, query("fn "));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, root.join("a.rs"));
+
+        let outer = tempfile::tempdir().unwrap();
+        let proj = outer.path().join("proj");
+        fs::create_dir(&proj).unwrap();
+        fs::write(outer.path().join(".gitignore"), "*.rs\n").unwrap();
+        fs::write(proj.join("a.rs"), "fn one() {}\n").unwrap();
+        assert_eq!(collect(&proj, query("fn ")).len(), 1);
     }
 
     #[test]
