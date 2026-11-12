@@ -284,7 +284,20 @@ pub fn verify(staged: &Staged) -> anyhow::Result<()> {
 /// silently (`/S`) and relaunches wai (`/R`). Waiting lets wai quit cleanly (state saved, agents
 /// stopped) instead of being killed by the installer. Pure so it is tested on every OS.
 pub(crate) fn installer_script(setup: &Path, pid: u32) -> String {
-    let setup = setup.display().to_string().replace('\'', "''");
+    // PowerShell also reads the curly quotes U+2018..U+201B as single quotes; double each as itself.
+    let setup: String = setup
+        .display()
+        .to_string()
+        .chars()
+        .flat_map(|c| {
+            let n = if matches!(c, '\'' | '\u{2018}'..='\u{201B}') {
+                2
+            } else {
+                1
+            };
+            std::iter::repeat_n(c, n)
+        })
+        .collect();
     format!(
         "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; \
          Start-Process -FilePath '{setup}' -ArgumentList '/S','/R'"
@@ -937,5 +950,7 @@ mod tests {
             installer_script(setup, 42),
             r"Wait-Process -Id 42 -ErrorAction SilentlyContinue; Start-Process -FilePath 'C:\Users\o''neil\AppData\Local\wai-updates\wai_1_x64-setup.exe' -ArgumentList '/S','/R'"
         );
+        let curly = Path::new("C:\\Users\\O\u{2019}Neil\\x\u{2018}\u{201A}\u{201B}.exe");
+        assert!(installer_script(curly, 1).contains("'C:\\Users\\O\u{2019}\u{2019}Neil\\x\u{2018}\u{2018}\u{201A}\u{201A}\u{201B}\u{201B}.exe'"));
     }
 }

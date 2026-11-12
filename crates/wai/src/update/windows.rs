@@ -3,10 +3,9 @@
 
 use std::os::windows::process::CommandExt as _;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const DETACHED_PROCESS: u32 = 0x0000_0008;
 
 /// Why this copy can't update itself, or `None` when the installer put it here (it writes
 /// `uninstall.exe` next to `wai.exe`; a portable or dev build has none).
@@ -21,10 +20,12 @@ pub fn blocker(exe: &Path) -> Option<String> {
     })
 }
 
-/// Starts the installer to run once process `pid` exits. Detached with no console so it outlives
-/// wai and shows no window.
+/// Starts the installer to run once process `pid` exits. No window; the child outlives wai (children
+/// are not killed with the parent) and holds none of its handles.
 pub fn install_after_exit(setup: &Path, pid: u32) -> std::io::Result<()> {
-    Command::new("powershell.exe")
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    let powershell = Path::new(&root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    Command::new(powershell)
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -33,7 +34,10 @@ pub fn install_after_exit(setup: &Path, pid: u32) -> std::io::Result<()> {
             "-Command",
             &super::installer_script(setup, pid),
         ])
-        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map(drop)
 }
