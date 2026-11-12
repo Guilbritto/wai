@@ -263,13 +263,14 @@ func (c *capped) Write(p []byte) (int, error) {
 
 // runScript runs path with no arguments and no shell, stdin empty, from wai's config dir. It
 // stays in the extension's process group (Windows: job), so it dies with the extension.
-// ponytail: a timeout kills the script, not what it started; those die with the extension. Give
-// each run its own group if that matters.
+// A timeout or stop kills the script and everything it started (killTree). The tree, not a
+// group of its own: a group of its own would outlive wai's SIGKILL of the extension's group.
 func runScript(ctx context.Context, path string, timeout time.Duration) outcome {
 	run, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	out := &capped{}
 	cmd := exec.CommandContext(run, path)
+	cmd.Cancel = func() error { return killTree(cmd.Process.Pid) }
 	cmd.Stdout, cmd.Stderr = out, out
 	// A grandchild holding the pipes cannot keep the run going after the script ends.
 	cmd.WaitDelay = 2 * time.Second
@@ -288,6 +289,22 @@ func runScript(ctx context.Context, path string, timeout time.Duration) outcome 
 		o.status = "Failed: " + err.Error()
 	}
 	return o
+}
+
+// descendants lists every process below root in rows of {pid, ppid}, breadth first, never root.
+func descendants(rows [][2]int, root int) []int {
+	seen := map[int]bool{root: true}
+	var out []int
+	for queue := []int{root}; len(queue) > 0; queue = queue[1:] {
+		for _, r := range rows {
+			if r[1] == queue[0] && !seen[r[0]] {
+				seen[r[0]] = true
+				out = append(out, r[0])
+				queue = append(queue, r[0])
+			}
+		}
+	}
+	return out
 }
 
 // record is what wai-rotinas remembers of a routine's last run, across restarts.

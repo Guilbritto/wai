@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -329,15 +330,15 @@ func TestOutputCapAndTimeout(t *testing.T) {
 		t.Errorf("summary of %d runes: %.80q…", utf8.RuneCountInString(s), s)
 	}
 
-	// `sleep` outlives the killed sh and holds the pipe: the run still ends about 2 s later.
+	// The tree dies with the script: `sleep` is killed too (sh may report it after "started").
 	// (1 s: macOS checks a new executable on its first run, which can take a while.)
 	slow := script(t, dir, "slow.sh", "echo started\nsleep 10\n")
 	begin := time.Now()
 	o = runScript(ctx, slow, time.Second)
-	if o.status != "Timed out" || string(o.output) != "started\n" {
+	if o.status != "Timed out" || !strings.HasPrefix(string(o.output), "started\n") {
 		t.Errorf("slow: status %q, output %q", o.status, o.output)
 	}
-	if took := time.Since(begin); took > 6*time.Second {
+	if took := time.Since(begin); took > 4*time.Second {
 		t.Errorf("the timeout took %v", took)
 	}
 
@@ -660,4 +661,87 @@ func textOf(n map[string]any) string {
 		s += " " + textOf(k.(map[string]any))
 	}
 	return s
+}
+
+func TestDescendants(t *testing.T) {
+	rows := [][2]int{{10, 1}, {11, 10}, {12, 11}, {13, 10}, {20, 1}}
+	got := descendants(rows, 10)
+	if len(got) != 3 {
+		t.Fatalf("got %v", got)
+	}
+	for _, want := range []int{11, 12, 13} {
+		if !slices.Contains(got, want) {
+			t.Errorf("missing %d in %v", want, got)
+		}
+	}
+	if got := descendants([][2]int{{2, 1}, {1, 2}, {3, 2}}, 1); len(got) != 2 {
+		t.Errorf("cycle: %v", got)
+	}
+}
+
+// gone polls up to 3 s for the pid in file to be dead.
+func gone(t *testing.T, file string) {
+	t.Helper()
+	b, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for end := time.Now().Add(3 * time.Second); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+		if syscall.Kill(pid, 0) == syscall.ESRCH {
+			return
+		}
+	}
+	syscall.Kill(pid, syscall.SIGKILL)
+	t.Errorf("process %d survived", pid)
+}
+
+func treeScript(t *testing.T) (path, pf1, pf2 string) {
+	dir := t.TempDir()
+	pf1, pf2 = filepath.Join(dir, "p1"), filepath.Join(dir, "p2")
+	path = script(t, dir, "tree.sh", "sleep 300 &\necho $! > "+pf1+"\n( sleep 300 & echo $! > "+pf2+" ; wait ) &\nwait\n")
+	return
+}
+
+func TestTimeoutKillsDescendants(t *testing.T) {
+	path, pf1, pf2 := treeScript(t)
+	if o := runScript(context.Background(), path, time.Second); o.status != "Timed out" {
+		t.Fatalf("status %q", o.status)
+	}
+	gone(t, pf1)
+	gone(t, pf2)
+}
+
+func TestStopKillsDescendants(t *testing.T) {
+	path, pf1, pf2 := treeScript(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(time.Second, cancel)
+	if o := runScript(ctx, path, time.Minute); o.status != "Stopped" {
+		t.Fatalf("status %q", o.status)
+	}
+	gone(t, pf1)
+	gone(t, pf2)
+}
+
+// R66: slots slept through run once; the run's record pushes the next due time past now.
+func TestSleptThroughSlotsRunOnce(t *testing.T) {
+	now := time.Now()
+	for _, r := range []Routine{{Name: "e", Every: time.Hour}, {Name: "a", At: 9*60 + 30}} {
+		s := newServer(io.Discard, t.TempDir())
+		s.routines = []Routine{r}
+		s.state[r.Name] = record{LastRun: now.Add(-72 * time.Hour)}
+		if got, _ := s.pick(now); got == nil || got.Name != r.Name {
+			t.Errorf("%s: not picked after sleeping through slots", r.Name)
+		}
+		s.state[r.Name] = record{LastRun: now}
+		if !s.due(r).After(now) {
+			t.Errorf("%s: due %v, not after now", r.Name, s.due(r))
+		}
+		if got, nap := s.pick(now); got != nil || nap <= 0 {
+			t.Errorf("%s: picked again (nap %v)", r.Name, nap)
+		}
+	}
 }
