@@ -885,7 +885,9 @@ impl Workspace {
                             }),
                         )
                         .flex_1()
-                        .min_h_0(),
+                        .min_h_0()
+                        // The rows' 4 px inset (the mockup's `.r1` margin).
+                        .pl(px(4.)),
                     ),
                 })
             })
@@ -1190,8 +1192,9 @@ impl Workspace {
             .id(("history-row", ix))
             .group(ROW_GROUP)
             .relative()
+            // A list's row is laid out on its own: without a width it takes its title's.
+            .w_full()
             .h(px(23.))
-            .ml(px(4.))
             .px(px(8.))
             .rounded(px(7.))
             .text_size(px(12.))
@@ -1507,7 +1510,7 @@ mod tests {
         ElementId, Entity, Modifiers, MouseButton, Pixels, Point, TestAppContext,
         VisualTestContext, point, px,
     };
-    use wai_agent::SessionEvent;
+    use wai_agent::{SessionEvent, SessionSummary};
     use wai_settings::{AppState, SessionGroup, Settings};
 
     use gpui_kit::component::ActiveTheme as _;
@@ -2238,6 +2241,41 @@ mod tests {
             label(("open-age", 0usize), cx),
             None,
             "a restored session has no time"
+        );
+    }
+
+    /// A History row spans the panel: a short title's row reaches its right edge, and a title
+    /// wider than the panel truncates, leaving Open to the side inside it.
+    #[gpui_kit::test]
+    fn history_rows_span_the_panel(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
+        workspace.update(cx, |w, cx| {
+            let summary = |id: &str, title: String| SessionSummary {
+                id: id.into(),
+                cwd: w.project.clone(),
+                title: Some(title),
+                updated_at: Some("2026-11-11T09:30:00Z".into()),
+            };
+            w.history = vec![
+                (
+                    w.project.clone(),
+                    summary("long", "a very long title ".repeat(20)),
+                ),
+                (w.project.clone(), summary("short", "Short".into())),
+            ];
+            cx.notify();
+        });
+        let sidebar = cx.debug_bounds("sidebar").unwrap();
+        let (side, short) = cx.update(|window, cx| {
+            window.render_frame(cx);
+            let side = window.find(("history-side", 0usize));
+            assert!(side.visible(), "Open to the side is drawn");
+            (side.bounds(), window.find(("history", 1usize)).bounds())
+        });
+        assert!(side.right() <= sidebar.right(), "{side:?} in {sidebar:?}");
+        assert!(
+            short.right() > sidebar.right() - px(24.),
+            "{short:?} in {sidebar:?}"
         );
     }
 
