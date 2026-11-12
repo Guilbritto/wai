@@ -190,7 +190,9 @@ impl FileTree {
                 true => IconName::ChevronDown,
                 false => IconName::ChevronRight,
             };
-            let chevron = Icon::new(chevron).xsmall().text_color(theme.muted_foreground);
+            let chevron = Icon::new(chevron)
+                .xsmall()
+                .text_color(theme.muted_foreground);
             let folder = Icon::new(Lucide::Folder).xsmall().text_color(theme.blue);
             (chevron.into_any_element(), folder.into_any_element())
         } else {
@@ -202,7 +204,10 @@ impl FileTree {
                 .text_size(px(10.))
                 .text_color(mark.color(cx))
                 .child(text);
-            (div().w(px(12.)).flex_none().into_any_element(), mark.into_any_element())
+            (
+                div().w(px(12.)).flex_none().into_any_element(),
+                mark.into_any_element(),
+            )
         };
         sidebar::row(open, cx)
             .id(("file", ix))

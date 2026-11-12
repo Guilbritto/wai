@@ -2281,13 +2281,17 @@ impl Workspace {
         cx.observe(&pane, |this, pane, cx| {
             let path = {
                 let pane = pane.read(cx);
-                pane.tabs.get(pane.active).map(|tab| tab.read(cx).path.clone())
+                pane.tabs
+                    .get(pane.active)
+                    .map(|tab| tab.read(cx).path.clone())
             };
-            this.files.update(cx, |files, cx| files.set_active(path, cx));
+            this.files
+                .update(cx, |files, cx| files.set_active(path, cx));
         })
         .detach();
         cx.subscribe_in(&pane, window, |this, pane, _: &Emptied, window, cx| {
-            this.files.update(cx, |files, cx| files.set_active(None, cx));
+            this.files
+                .update(cx, |files, cx| files.set_active(None, cx));
             let ix = (this.panes.iter()).position(|p| matches!(p, Pane::Editor(e) if e == pane));
             if let Some(ix) = ix {
                 this.drop_pane(ix, window, cx);
