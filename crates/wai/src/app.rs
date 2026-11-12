@@ -90,8 +90,9 @@ fn bind_keys(cx: &mut App) {
         ("ctrl-`", Box::new(ToggleTerminal), workspace),
         ("secondary-t", Box::new(NewTerminal), workspace),
         ("secondary-w", Box::new(CloseTerminal), Some("Terminal")),
-        ("secondary-shift-]", Box::new(NextTerminal), Some("Terminal")),
-        ("secondary-shift-[", Box::new(PrevTerminal), Some("Terminal")),
+        // GPUI reports a shifted symbol key as the symbol with `shift` cleared: cmd-shift-] is cmd-}.
+        ("secondary-}", Box::new(NextTerminal), Some("Terminal")),
+        ("secondary-{", Box::new(PrevTerminal), Some("Terminal")),
         ("secondary-alt-b", Box::new(ToggleAgents), workspace),
         // A session leaves the screen and stays open; R20: an editor closes its active tab.
         ("secondary-w", Box::new(ClosePane), workspace),
@@ -121,7 +122,7 @@ fn bind_keys(cx: &mut App) {
 }
 
 /// Off macOS (Windows, and Linux alike), in the Terminal context: `NoAction` hides the app's
-/// ctrl-c/v/n/w/o/q (`secondary-` is ctrl there), so they reach the shell, and the app's actions
+/// ctrl-c/v/n/w/t/o/q (`secondary-` is ctrl there), so they reach the shell, and the app's actions
 /// move to ctrl-shift.
 fn terminal_ctrl_keymap() -> [(&'static str, Box<dyn Action>); 12] {
     [
@@ -602,7 +603,7 @@ async fn drag_open_row(
 
 #[cfg(test)]
 mod tests {
-    /// Off macOS, terminal focused: the shell gets ctrl-c/v/n/w/o/q, the app's actions move to
+    /// Off macOS, terminal focused: the shell gets ctrl-c/v/n/w/t/o/q, the app's actions move to
     /// ctrl-shift (copy and paste are ctrl-shift-c/v off macOS already).
     #[test]
     fn windows_terminal_keymap_table() {

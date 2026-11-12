@@ -346,6 +346,25 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn terminal_shortcuts_cycle_and_close(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        cx.dispatch_action(NewTerminal);
+        cx.dispatch_action(NewTerminal);
+        let active = |cx: &mut VisualTestContext| workspace.read_with(cx, |w, _| w.active_terminal);
+        assert_eq!(active(cx), 2);
+        cx.simulate_keystrokes("secondary-}");
+        assert_eq!(active(cx), 0);
+        cx.simulate_keystrokes("secondary-{");
+        assert_eq!(active(cx), 2);
+        let panes = workspace.read_with(cx, |w, _| w.panes.len());
+        cx.simulate_keystrokes("secondary-w");
+        assert_eq!(numbers(&workspace, cx), [1, 2]);
+        assert_eq!(workspace.read_with(cx, |w, _| w.panes.len()), panes);
+    }
+
+    #[gpui_kit::test]
     fn ninth_terminal_is_refused(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let (workspace, cx) = open(cx, Settings::default());
