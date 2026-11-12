@@ -38,8 +38,8 @@ pub struct Recovered {
 /// Writes `entry` to `file` through a temp file renamed over it: a crash leaves the old entry or
 /// the new one. Buffers can hold secrets, so the folder is 0700 and the file 0600. Over 50 MB
 /// nothing is written (`FileTooLarge`); an older entry stays.
-/// ponytail: no fsync (a full flush on macOS costs tens of ms per write); the page cache outlives
-/// a crash of wai, and an entry a power loss empties is skipped at launch.
+/// The temp file is synced before the rename: a power loss must not leave an empty entry. The
+/// directory is not: losing the rename leaves the previous entry.
 pub fn write(file: &Path, entry: &Entry) -> io::Result<()> {
     let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else {
         return Err(io::ErrorKind::InvalidInput.into());
@@ -65,7 +65,9 @@ pub fn write(file: &Path, entry: &Entry) -> io::Result<()> {
             use std::os::unix::fs::OpenOptionsExt as _;
             options.mode(0o600);
         }
-        options.open(&tmp)?.write_all(&bytes)?;
+        let mut out = options.open(&tmp)?;
+        out.write_all(&bytes)?;
+        out.sync_all()?;
         fs::rename(&tmp, file)
     })();
     if written.is_err() {
@@ -75,7 +77,8 @@ pub fn write(file: &Path, entry: &Entry) -> io::Result<()> {
 }
 
 /// The entries kept in `dir`. One whose text is the file's (nothing to recover) is deleted; one
-/// over 50 MB or unreadable is left alone and logged.
+/// over 50 MB or that does not parse (an empty file included) is deleted and logged; one that
+/// cannot be read (an I/O error) is left alone and logged.
 pub fn load(dir: &Path) -> Vec<Recovered> {
     let Ok(read) = fs::read_dir(dir) else {
         return Vec::new();
@@ -88,18 +91,20 @@ pub fn load(dir: &Path) -> Vec<Recovered> {
 }
 
 fn read_entry(file: PathBuf) -> Option<Recovered> {
-    let bytes = fs::metadata(&file).ok()?.len();
-    if bytes > MAX_BYTES {
-        eprintln!(
-            "wai: skipped {} ({bytes} bytes, over 50 MB)",
-            file.display()
-        );
-        return None;
-    }
-    let entry: Entry = match fs::read(&file).map(|raw| serde_json::from_slice(&raw)) {
-        Ok(Ok(entry)) => entry,
-        Ok(Err(e)) => return skip(&file, &e.to_string()),
+    let bytes = match fs::metadata(&file) {
+        Ok(meta) => meta.len(),
         Err(e) => return skip(&file, &e.to_string()),
+    };
+    if bytes > MAX_BYTES {
+        return discard(&file, &format!("{bytes} bytes, over 50 MB"));
+    }
+    let raw = match fs::read(&file) {
+        Ok(raw) => raw,
+        Err(e) => return skip(&file, &e.to_string()),
+    };
+    let entry: Entry = match serde_json::from_slice(&raw) {
+        Ok(entry) => entry,
+        Err(e) => return discard(&file, &e.to_string()),
     };
     let now = file::stamp(&entry.path);
     let same = |disk: file::Loaded| disk.text == entry.text && disk.crlf == entry.crlf;
@@ -118,6 +123,12 @@ fn read_entry(file: PathBuf) -> Option<Recovered> {
 
 fn skip(file: &Path, why: &str) -> Option<Recovered> {
     eprintln!("wai: skipped {}: {why}", file.display());
+    None
+}
+
+fn discard(file: &Path, why: &str) -> Option<Recovered> {
+    eprintln!("wai: deleted {}: {why}", file.display());
+    fs::remove_file(file).ok();
     None
 }
 
@@ -178,8 +189,8 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "KEY=old\n");
     }
 
-    /// A recovery file over 50 MB is left where it is and not read (a sparse file: no disk
-    /// spent); the others still load.
+    /// A recovery file over 50 MB is deleted unread (a sparse file: no disk spent); the others
+    /// still load.
     #[test]
     fn oversized_recovery_is_ignored() {
         let dir = tempfile::tempdir().unwrap();
@@ -197,7 +208,66 @@ mod tests {
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].entry.text, "mine a");
-        assert!(huge.exists(), "left alone");
+        assert!(!huge.exists(), "deleted");
+    }
+
+    /// Entries that never parse or are too big to read are deleted; the valid one loads.
+    #[test]
+    fn corrupt_and_oversized_copies_are_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        fs::write(&path, "a").unwrap();
+        let recovery = dir.path().join("recovery");
+        write(&recovery.join("0.json"), &entry(&path, "mine a")).unwrap();
+        fs::write(recovery.join("1.json"), "").unwrap();
+        fs::write(recovery.join("2.json"), "{\"path\":").unwrap();
+        fs::File::create(recovery.join("3.json"))
+            .unwrap()
+            .set_len(51 * 1024 * 1024)
+            .unwrap();
+
+        let found = load(&recovery);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].entry.text, "mine a");
+        assert!(recovery.join("0.json").exists());
+        for n in 1..=3 {
+            assert!(!recovery.join(format!("{n}.json")).exists(), "{n}.json");
+        }
+    }
+
+    /// A copy that cannot be read is skipped and kept.
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_copy_is_left() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let recovery = dir.path();
+        let file = recovery.join("4.json");
+        fs::write(&file, "{}").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&file).is_ok() {
+            return;
+        }
+
+        assert!(load(recovery).is_empty());
+        assert!(file.exists());
+    }
+
+    /// The temp file the entry is synced through ends up as the whole entry.
+    #[test]
+    fn write_leaves_a_complete_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        fs::write(&path, "a").unwrap();
+        let file = dir.path().join("recovery").join("0.json");
+        let want = entry(&path, "mine a");
+
+        write(&file, &want).unwrap();
+
+        let back: Entry = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(back, want);
     }
 
     /// R61: an entry over 50 MB is not written (the launch would skip it).
