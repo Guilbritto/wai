@@ -259,9 +259,8 @@ impl Workspace {
                 .tooltip(tip)
                 .accessibility_label(tip)
         };
-        let header = bar
-            .gap_1()
-            .child(panel_title("Agents", cx).flex_1())
+        let title = panel_title("Agents", cx)
+            .flex_1()
             .child(
                 button("agents-move", icon, tip)
                     .on_click(cx.listener(|this, _, _, cx| this.move_agents(cx))),
@@ -273,6 +272,7 @@ impl Workspace {
                     }),
                 )
             }));
+        let header = bar.px_1().py_1().items_center().child(title);
         v_flex()
             .size_full()
             .child(header)

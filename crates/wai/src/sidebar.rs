@@ -14,7 +14,6 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::SessionSummary;
-use wai_ext::panel::clamp;
 use wai_settings::SessionGroup;
 pub use wai_settings::canonical;
 
@@ -37,9 +36,6 @@ pub enum SidebarTab {
     /// An extension's panel, by its view. When the panel goes, the sessions show again.
     Panel(EntityId),
 }
-
-/// A panel's tab title, one line: the manifest's words.
-const PANEL_TITLE_CHARS: usize = 24;
 
 /// Each tab with its element id and label.
 const TABS: [(SidebarTab, &str, &str, Lucide); 4] = [
@@ -311,7 +307,7 @@ impl Workspace {
                 el
             });
         let extension = panels.iter().enumerate().map(|(ix, p)| {
-            let title = clamp(&p.title, PANEL_TITLE_CHARS);
+            let title = p.title.clone();
             let mark = div()
                 .size(px(20.))
                 .rounded(px(6.))
