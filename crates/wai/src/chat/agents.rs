@@ -228,6 +228,9 @@ impl ChatSession {
 
     /// Opens the subagent `id`'s drawer; `None` closes it (back to `main`).
     pub(crate) fn open_drawer(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        if self.drawer == id {
+            return;
+        }
         self.drawer = id;
         cx.notify();
     }

@@ -1655,6 +1655,39 @@ mod tests {
         );
     }
 
+    /// A draft shown over a session closes that session's drawer, as another session does.
+    #[gpui_kit::test]
+    fn a_draft_shown_over_a_session_closes_its_drawer(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        cx.simulate_keystrokes("secondary-n");
+        let draft = workspace.read_with(cx, |w, _| w.drafts[0].clone());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.show(session.clone(), false, window, cx))
+        });
+        session.update(cx, |s, cx| {
+            let started = Instant::now();
+            s.model.subagents.push(Subagent {
+                id: "old".into(),
+                title: "Earlier task".into(),
+                kind: None,
+                state: SubagentState::Done,
+                used: None,
+                started,
+                ended: Some(started),
+                turn: s.model.turn,
+            });
+            s.open_drawer(Some("old".into()), cx);
+        });
+        assert!(shows("subagent-drawer", cx));
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.show_draft(draft, false, window, cx))
+        });
+        assert_eq!(agents_at(&session, cx), (None, None));
+    }
+
     /// The agent's exit parks a live subagent: its clock stops and it shows stopped, not running.
     /// A Restart starts over with no subagent, drawer or list cursor.
     #[gpui_kit::test]

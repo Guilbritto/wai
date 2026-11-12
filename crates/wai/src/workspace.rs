@@ -407,6 +407,8 @@ impl Workspace {
                 this.show(session.clone(), false, window, cx)
             },
         );
+        // Every pane change notifies: a session it hid closes its drawer.
+        let drawers = cx.observe_self(|this, cx| this.close_hidden_drawers(cx));
         Self {
             project,
             settings,
@@ -486,6 +488,7 @@ impl Workspace {
                 open_session,
                 panels,
                 calls,
+                drawers,
             ],
         }
     }
@@ -1202,10 +1205,12 @@ impl Workspace {
         }
     }
 
-    /// The session shown in pane `ix` is about to give way: its subagent drawer closes.
-    fn close_drawer_at(&self, ix: usize, cx: &mut Context<Self>) {
-        if let Some(shown) = self.panes[ix].session() {
-            shown.update(cx, |s, cx| s.open_drawer(None, cx));
+    /// A session in no pane closes its subagent drawer.
+    fn close_hidden_drawers(&self, cx: &mut Context<Self>) {
+        for session in &self.sessions {
+            if !self.panes.iter().any(|p| p.session() == Some(session)) {
+                session.update(cx, |s, cx| s.open_drawer(None, cx));
+            }
         }
     }
 
@@ -1233,7 +1238,6 @@ impl Workspace {
                 } else {
                     self.session_pane()
                 };
-                self.close_drawer_at(ix, cx);
                 self.panes[ix] = Pane::Session(session);
                 ix
             }
@@ -1771,7 +1775,6 @@ impl Workspace {
         let ticket = self.next_ticket;
         self.next_ticket += 1;
         if let Some(ix) = ix {
-            self.close_drawer_at(ix, cx);
             self.panes[ix] = Pane::Preparing {
                 agent: agent.clone(),
                 ticket,
