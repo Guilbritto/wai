@@ -14,7 +14,7 @@ A native, AI-first IDE for macOS and Windows, written in Rust with GPUI.
 | ![A session asking for permission](docs/screens/aurora-chat.png) | ![Two files in the editor and the terminal](docs/screens/aurora-editor.png) |
 | ![The command palette](docs/screens/aurora-palette.png) | ![An extension's panel](docs/screens/aurora-panel.png) |
 
-**Status:** 0.6.2.
+**Status:** see the [latest release](https://github.com/Guilbritto/wai/releases/latest).
 - macOS on Apple silicon is the primary platform.
 - Windows x86_64 builds only in CI, and CI runs once the repository has a remote.
 - Linux is best-effort.
