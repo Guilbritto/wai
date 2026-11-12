@@ -848,6 +848,7 @@ impl Workspace {
             .test_support();
         v_flex()
             .flex_1()
+            .min_h_0()
             .mt(px(4.))
             .child(
                 h_flex().pr(px(4.)).child(header).child(
@@ -1508,7 +1509,7 @@ mod tests {
     use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
     use gpui_kit::{
         ElementId, Entity, Modifiers, MouseButton, Pixels, Point, TestAppContext,
-        VisualTestContext, point, px,
+        VisualTestContext, point, px, size,
     };
     use wai_agent::{SessionEvent, SessionSummary};
     use wai_settings::{AppState, SessionGroup, Settings};
@@ -2277,6 +2278,34 @@ mod tests {
             short.right() > sidebar.right() - px(24.),
             "{short:?} in {sidebar:?}"
         );
+    }
+
+    /// History takes the room left under Open and scrolls on its own: a long history keeps the
+    /// open rows in view and draws only the rows that fit.
+    #[gpui_kit::test]
+    fn long_history_scrolls_under_open(cx: &mut TestAppContext) {
+        let (workspace, cx) = with_sessions(1, cx);
+        cx.simulate_resize(size(px(1000.), px(600.)));
+        workspace.update(cx, |w, cx| {
+            let row = |ix: usize| SessionSummary {
+                id: format!("h{ix}"),
+                cwd: w.project.clone(),
+                title: Some(format!("History {ix}")),
+                updated_at: None,
+            };
+            w.history = (0..80).map(|ix| (w.project.clone(), row(ix))).collect();
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            let open = window.find(open_row(0));
+            assert!(open.visible(), "the open row is in view: {open:?}");
+            assert!(window.try_find(("history-side", 0usize)).is_some());
+            assert!(
+                window.try_find(("history-side", 79usize)).is_none(),
+                "the last history row is not drawn until scrolled to"
+            );
+        });
     }
 
     #[gpui_kit::test]
