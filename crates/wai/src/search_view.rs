@@ -41,6 +41,8 @@ pub struct SearchView {
     input: Entity<InputState>,
     regex: bool,
     case_sensitive: bool,
+    /// The searched query, compiled once: the rows' highlights.
+    matcher: Option<regex::Regex>,
     rows: Vec<Row>,
     total: usize,
     searching: bool,
@@ -80,6 +82,7 @@ impl SearchView {
             input,
             regex: false,
             case_sensitive: false,
+            matcher: None,
             rows: Vec::new(),
             total: 0,
             searching: false,
@@ -122,6 +125,7 @@ impl SearchView {
         self.header = 0;
         self.clicked = None;
         let pattern = self.input.read(cx).value().to_string();
+        self.matcher = matcher(&pattern, self.regex, self.case_sensitive);
         self.searching = !pattern.is_empty();
         self.invalid = false;
         cx.notify();
@@ -297,12 +301,10 @@ impl SearchView {
             }
             Row::Match(m) => {
                 let (path, line) = (m.path.clone(), m.line);
-                let marks = highlights(
-                    &m.text,
-                    self.input.read(cx).value().as_ref(),
-                    self.regex,
-                    self.case_sensitive,
-                );
+                let marks = self
+                    .matcher
+                    .as_ref()
+                    .map_or_else(Vec::new, |re| highlights(&m.text, re));
                 let hl = HighlightStyle {
                     background_color: Some(theme.warning.opacity(0.25)),
                     ..Default::default()
@@ -371,24 +373,28 @@ fn summary(matches: usize, files: usize) -> String {
     )
 }
 
-/// The byte ranges of `query` in `text`, as the search matches it; none for an invalid regex.
-fn highlights(text: &str, query: &str, regex: bool, case: bool) -> Vec<Range<usize>> {
+/// `query` as the search matches it; none when empty or an invalid regex.
+fn matcher(query: &str, regex: bool, case: bool) -> Option<regex::Regex> {
+    if query.is_empty() {
+        return None;
+    }
     let pattern = if regex {
         query.into()
     } else {
         regex::escape(query)
     };
-    match regex::RegexBuilder::new(&pattern)
+    regex::RegexBuilder::new(&pattern)
         .case_insensitive(!case)
         .build()
-    {
-        Ok(re) if !query.is_empty() => re
-            .find_iter(text)
-            .filter(|m| !m.is_empty())
-            .map(|m| m.range())
-            .collect(),
-        _ => Vec::new(),
-    }
+        .ok()
+}
+
+/// The byte ranges `re` finds in `text`.
+fn highlights(text: &str, re: &regex::Regex) -> Vec<Range<usize>> {
+    re.find_iter(text)
+        .filter(|m| !m.is_empty())
+        .map(|m| m.range())
+        .collect()
 }
 
 fn thousands(n: usize) -> String {
@@ -478,7 +484,7 @@ mod tests {
     use gpui_kit::{Entity, TestAppContext, VisualTestContext, px};
     use wai_settings::Settings;
 
-    use super::{highlights, summary};
+    use super::{highlights, matcher, summary};
     use crate::sidebar::canonical;
     use crate::workspace::tests::{open, wait_until};
     use crate::workspace::{Pane, Workspace};
@@ -493,12 +499,16 @@ mod tests {
 
     #[test]
     fn highlights_find_every_match() {
+        let hl = |text: &str, query: &str, regex, case| {
+            highlights(text, &matcher(query, regex, case).unwrap())
+        };
         let text = "let per_route = per_route;";
-        assert_eq!(highlights(text, "per_route", false, true), [4..13, 16..25]);
-        assert_eq!(highlights(text, "PER", false, false), [4..7, 16..19]);
-        assert_eq!(highlights(text, r"per_\w+", true, true), [4..13, 16..25]);
-        assert_eq!(highlights("ação ação", "ção", false, true), [1..6, 8..13]);
-        assert!(highlights(text, "(", true, true).is_empty());
+        assert_eq!(hl(text, "per_route", false, true), [4..13, 16..25]);
+        assert_eq!(hl(text, "PER", false, false), [4..7, 16..19]);
+        assert_eq!(hl(text, r"per_\w+", true, true), [4..13, 16..25]);
+        assert_eq!(hl("ação ação", "ção", false, true), [1..6, 8..13]);
+        assert!(matcher("(", true, true).is_none());
+        assert!(matcher("", false, true).is_none());
     }
 
     /// Two files with one match each, searched: rows are file, match, file, match.
