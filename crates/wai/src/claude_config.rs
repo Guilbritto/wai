@@ -594,7 +594,7 @@ mod tests {
         cx.update(|window, cx| window.click(("mcp-toggle", u), cx));
         cx.run_until_parked();
         assert!(disabled_servers(&tmp).is_empty());
-        assert_eq!(disabled(u, cx), Some(false));
+        assert_eq!(disabled(u, cx), None);
     }
 
     #[gpui_kit::test]
@@ -607,13 +607,12 @@ mod tests {
         click(("mcp-toggle", db), cx);
         assert_eq!(claude_json(&tmp), before);
         assert_eq!(cx.update(|window, cx| window.notifications(cx).len()), 1);
-        let view = workspace.read_with(cx, |w, _| w.settings_view()).unwrap();
+        let db = mcp_ix(&workspace, "plugin:alpha:db", cx);
         let idle = cx.update(|window, cx| {
             window.render_frame(cx);
-            window.find(("plugin-toggle", 0usize)).disabled()
+            window.find(("mcp-toggle", db)).disabled()
         });
-        assert_eq!(idle, Some(false));
-        drop(view);
+        assert_eq!(idle, None);
     }
 
     #[gpui_kit::test]

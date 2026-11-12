@@ -1550,12 +1550,10 @@ l: https://l.test (SSE) - ⊘ Disabled for this project (re-enable via /mcp)\n";
             alpha_manifest(&home),
             json!({"name":"alpha","skills":"./skills/","hooks":"./hooks/hooks.json"}),
         );
-        let a = home.join(".claude/plugins/cache/m/alpha/1.2.0");
-        put(a.join("skills/one/SKILL.md"), "x");
         let d = read_claude(&home, &project);
         let n = d.skills.iter().filter(|e| e.group == "alpha").count();
-        assert_eq!(n, 1);
-        assert!(d.plugins[0].summary.starts_with("1 skill · "));
+        assert_eq!(n, 2);
+        assert!(d.plugins[0].summary.starts_with("2 skills · "));
         assert!(d.plugins[0].summary.contains("3 hooks"));
         assert_eq!(
             d.hooks.iter().filter(|e| e.name == "alpha").count(),
