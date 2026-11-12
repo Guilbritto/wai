@@ -452,6 +452,9 @@ mod tests {
             started,
             ended: None,
             turn: 0,
+            said: Vec::new(),
+            plan: Vec::new(),
+            can_stop: false,
         };
         assert_eq!(sub_stat(&sub), "9s · ↓ 46k tokens");
         (sub.ended, sub.used) = (Some(started + Duration::from_secs(32)), None);

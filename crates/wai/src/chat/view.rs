@@ -1013,6 +1013,7 @@ impl ChatSession {
         self.bound = next_binding();
         cx.emit(ChatEvent::Bound);
         self.model.items.clear();
+        self.model.subagents.clear();
         self.model.waiting.clear();
         self.model.steering.clear();
         self.model.usage = None;
@@ -1615,6 +1616,26 @@ mod tests {
         });
     }
 
+    /// Review focus 3: a restart clears the subagents, since the agent re-announces its own.
+    #[gpui_kit::test]
+    fn restart_clears_the_subagents(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--subagent"));
+        let session = start_session(&workspace, cx);
+        send("hi", cx);
+        wait_until(cx, "the subagent", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.state == TurnState::Idle && !s.model.subagents.is_empty()
+            })
+        });
+        cx.update(|window, cx| session.update(cx, |s, cx| s.load(false, window, cx)));
+        wait_until(cx, "the restart", |cx| {
+            session.read_with(cx, |s, _| {
+                s.model.state == TurnState::Idle && s.model.subagents.is_empty()
+            })
+        });
+    }
+
     /// Review focus 1: the drawer closes with its subject: another session shown in the pane,
     /// the subagent gone from the model, the session ended.
     #[gpui_kit::test]
@@ -1677,6 +1698,9 @@ mod tests {
                 started,
                 ended: Some(started),
                 turn: s.model.turn,
+                said: Vec::new(),
+                plan: Vec::new(),
+                can_stop: false,
             });
             s.open_drawer(Some("old".into()), cx);
         });
@@ -1827,6 +1851,9 @@ mod tests {
                     started: Instant::now(),
                     ended: None,
                     turn: 0,
+                    said: Vec::new(),
+                    plan: Vec::new(),
+                    can_stop: false,
                 });
             }
             cx.notify();
@@ -1944,6 +1971,9 @@ mod tests {
                 started,
                 ended: Some(started),
                 turn: s.model.turn,
+                said: Vec::new(),
+                plan: Vec::new(),
+                can_stop: false,
             });
             s.open_drawer(Some("old".into()), cx);
         });

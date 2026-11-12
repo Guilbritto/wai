@@ -207,6 +207,15 @@ fn grouped(n: usize) -> String {
     out
 }
 
+/// What a subagent said, and where its tool calls fell, in order.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Said {
+    Text(String),
+    Thought(String),
+    /// The `items` row of one of its tool calls.
+    Call(usize),
+}
+
 /// A subagent of the session, in the order announced; its card in the transcript has its id.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Subagent {
@@ -221,6 +230,11 @@ pub struct Subagent {
     pub ended: Option<Instant>,
     /// The `ChatModel::turn` it was announced in.
     pub turn: u32,
+    pub said: Vec<Said>,
+    /// Its checklist, replaced whole.
+    pub plan: Vec<PlanEntry>,
+    /// The agent lets wai stop it alone.
+    pub can_stop: bool,
 }
 
 fn is_terminal(state: SubagentState) -> bool {
@@ -474,7 +488,7 @@ impl ChatModel {
             }),
             SessionEvent::ToolCall(v) => {
                 let (text, diffs) = split_content(&v.content);
-                Some(self.push(ChatItem::Tool(ToolItem {
+                let ix = self.push(ChatItem::Tool(ToolItem {
                     id: v.id.clone(),
                     title: v.title.clone(),
                     kind: v.kind.clone(),
@@ -485,7 +499,12 @@ impl ChatModel {
                     first_sight: Vec::new(),
                     expanded: false,
                     subagent: v.subagent.clone(),
-                })))
+                }));
+                let line = v.subagent.as_deref().and_then(|id| self.subagent_mut(id));
+                if let Some(line) = line {
+                    line.said.push(Said::Call(ix));
+                }
+                Some(ix)
             }
             SessionEvent::ToolCallUpdate(p) => self.patch_tool(p),
             SessionEvent::Usage {
@@ -527,6 +546,24 @@ impl ChatModel {
                 None
             }
             SessionEvent::Subagent(patch) => Some(self.patch_subagent(patch)),
+            SessionEvent::SubagentSaid { id, thought, text } => {
+                if let Some(line) = self.subagent_mut(id) {
+                    match (line.said.last_mut(), thought) {
+                        (Some(Said::Thought(t)), true) | (Some(Said::Text(t)), false) => {
+                            t.push_str(text)
+                        }
+                        (_, true) => line.said.push(Said::Thought(text.clone())),
+                        (_, false) => line.said.push(Said::Text(text.clone())),
+                    }
+                }
+                None
+            }
+            SessionEvent::SubagentPlan { id, entries } => {
+                if let Some(line) = self.subagent_mut(id) {
+                    line.plan = entries.clone();
+                }
+                None
+            }
             SessionEvent::SubagentReply { id, text } => {
                 let ix = self.tool_index(id)?;
                 if let ChatItem::Tool(t) = &mut self.items[ix] {
@@ -535,6 +572,10 @@ impl ChatModel {
                 Some(ix)
             }
         }
+    }
+
+    fn subagent_mut(&mut self, id: &str) -> Option<&mut Subagent> {
+        self.subagents.iter_mut().find(|s| s.id == id)
     }
 
     fn tool_index(&self, id: &str) -> Option<usize> {
@@ -554,6 +595,7 @@ impl ChatModel {
                 line.state = patch.state.unwrap_or(line.state);
                 line.kind = patch.description.clone().or(line.kind.take());
                 line.used = patch.used.or(line.used);
+                line.can_stop = patch.can_stop.unwrap_or(line.can_stop);
                 if line.ended.is_none() && is_terminal(line.state) {
                     line.ended = Some(Instant::now());
                 }
@@ -570,6 +612,9 @@ impl ChatModel {
                     started: Instant::now(),
                     ended: is_terminal(state).then(Instant::now),
                     turn: self.turn,
+                    said: Vec::new(),
+                    plan: Vec::new(),
+                    can_stop: patch.can_stop.unwrap_or(false),
                 };
                 let seen = (line.title.clone(), line.state);
                 self.subagents.push(line);
@@ -607,6 +652,15 @@ impl ChatModel {
             .iter()
             .filter(|s| s.turn == self.turn || live(s))
             .collect()
+    }
+
+    /// Whether wai can stop subagent `id` now: Running or NeedsYou, and its agent allows it.
+    pub fn stoppable(&self, id: &str) -> bool {
+        self.subagents.iter().any(|s| {
+            s.id == id
+                && s.can_stop
+                && matches!(s.state, SubagentState::Running | SubagentState::NeedsYou)
+        })
     }
 
     /// `{subagent title}: ` for a request a known subagent made.
@@ -978,6 +1032,14 @@ mod tests {
             locations: vec![],
             subagent: subagent.map(str::to_string),
         })
+    }
+
+    fn said(id: &str, thought: bool, text: &str) -> SessionEvent {
+        SessionEvent::SubagentSaid {
+            id: id.into(),
+            thought,
+            text: text.into(),
+        }
     }
 
     fn subagent(id: &str, title: Option<&str>, state: Option<SubagentState>) -> SessionEvent {
@@ -1998,5 +2060,93 @@ mod tests {
         let mut m = ChatModel::default();
         m.apply(&SessionEvent::UserText("hi".into()));
         assert_eq!(m.items, vec![ChatItem::User { text: "hi".into() }]);
+    }
+
+    #[test]
+    fn a_subagent_keeps_what_it_said_in_order() {
+        let mut m = ChatModel::default();
+        m.apply(&subagent(
+            "c",
+            Some("Explore"),
+            Some(SubagentState::Running),
+        ));
+        m.apply(&said("c", true, "Look"));
+        m.apply(&said("c", true, "ing"));
+        let ix = m
+            .apply(&call(
+                "t1",
+                "Read lib.rs",
+                ToolStatus::InProgress,
+                Some("c"),
+            ))
+            .unwrap();
+        m.apply(&said("c", false, "Found "));
+        m.apply(&said("c", false, "it"));
+        let want = [
+            Said::Thought("Looking".into()),
+            Said::Call(ix),
+            Said::Text("Found it".into()),
+        ];
+        assert_eq!(m.subagents[0].said, want);
+        m.apply(&call("t2", "Run ls", ToolStatus::InProgress, None));
+        assert_eq!(m.apply(&said("x", false, "?")), None);
+        assert_eq!(
+            m.subagents[0].said, want,
+            "the session's call and a stranger's words"
+        );
+        assert!(
+            !m.items
+                .iter()
+                .any(|i| matches!(i, ChatItem::Agent { .. } | ChatItem::Thought { .. }))
+        );
+    }
+
+    #[test]
+    fn subagent_plan_and_stop_right_follow_the_agent() {
+        let mut m = ChatModel::default();
+        m.apply(&subagent(
+            "c",
+            Some("Explore"),
+            Some(SubagentState::Running),
+        ));
+        let entries = vec![PlanEntry {
+            content: "Sub step".into(),
+            status: "pending".into(),
+        }];
+        assert_eq!(
+            m.apply(&SessionEvent::SubagentPlan {
+                id: "c".into(),
+                entries: entries.clone()
+            }),
+            None
+        );
+        assert_eq!(m.subagents[0].plan, entries);
+        assert!(m.plan.is_empty());
+        assert!(!m.subagents[0].can_stop);
+        m.apply(&SessionEvent::Subagent(SubagentPatch {
+            can_stop: Some(true),
+            ..running("c")
+        }));
+        assert!(m.subagents[0].can_stop);
+    }
+
+    #[test]
+    fn stoppable_needs_a_live_subagent_that_allows_it() {
+        let mut m = ChatModel::default();
+        let patch = |id: &str, state, can_stop| {
+            SessionEvent::Subagent(SubagentPatch {
+                id: id.into(),
+                state: Some(state),
+                can_stop,
+                ..Default::default()
+            })
+        };
+        m.apply(&patch("a", SubagentState::Running, None));
+        m.apply(&patch("b", SubagentState::NeedsYou, Some(true)));
+        m.apply(&patch("d", SubagentState::Done, Some(true)));
+        assert!(!m.stoppable("a"));
+        assert!(m.stoppable("b"));
+        assert!(!m.stoppable("d"));
+        assert!(!m.stoppable("nobody"));
     }
 }
