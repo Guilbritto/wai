@@ -3909,7 +3909,7 @@ pub(crate) mod tests {
         cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, history_settings(3));
         let rows = load_history(&workspace, 3, cx);
-        for (row, side) in rows.iter().zip([false, true, false]) {
+        for (row, side) in rows.iter().zip([false, false, true]) {
             cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(row, side, window, cx)));
         }
         let close = |session: &Entity<crate::chat::ChatSession>, cx: &mut VisualTestContext| {
@@ -3924,7 +3924,7 @@ pub(crate) mod tests {
             pane_session(&workspace, 0, cx),
             pane_session(&workspace, 1, cx),
         );
-        // One row replaced another in its pane: that one is open, in no pane.
+        // A plain click shows the session alone (work areas D9): the first is open, in no pane.
         let hidden = workspace.read_with(cx, |w, _| {
             w.sessions
                 .iter()
