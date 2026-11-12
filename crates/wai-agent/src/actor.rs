@@ -774,8 +774,10 @@ async fn actor_loop(
                 request(&cx, broker, steer, reply, convert::steered)?
             }
             Command::Cancel { session } => {
+                // The notification goes first: the agent must know the turn is cancelled
+                // before the cancelled answers wake it, or it may end the turn normally.
+                cx.send_notification(acp::CancelNotification::new(session.clone()))?;
                 broker.cancel_pending(Some(&session));
-                cx.send_notification(acp::CancelNotification::new(session))?;
             }
         }
     }
