@@ -84,6 +84,11 @@ impl ChatItem {
         matches!(self, ChatItem::Tool(_) | ChatItem::Thought { .. }) && !self.is_edit()
     }
 
+    /// A subagent's own tool call: it shows only in that subagent's drawer.
+    pub fn is_subagent_call(&self) -> bool {
+        matches!(self, ChatItem::Tool(t) if t.subagent.is_some())
+    }
+
     /// A row drawn inside the agent turn's card: its text, its thinking and its tool calls.
     pub fn in_card(&self) -> bool {
         matches!(
@@ -850,14 +855,17 @@ impl ChatModel {
         ix - before..ix + after
     }
 
-    /// A run of steps as the grouped mode heads it: `3 steps · <each tool's title once>`.
+    /// A run of steps as the grouped mode heads it: `3 steps · <each tool's title once>`. A
+    /// subagent's calls, shown only in its drawer, are not counted.
     pub fn run_label(&self, run: Range<usize>) -> String {
-        let steps = match run.len() {
+        let items = self.items.get(run).unwrap_or_default();
+        let shown: Vec<&ChatItem> = items.iter().filter(|i| !i.is_subagent_call()).collect();
+        let steps = match shown.len() {
             1 => "1 step".to_string(),
             n => format!("{n} steps"),
         };
         let mut titles: Vec<&str> = Vec::new();
-        for item in self.items.get(run).unwrap_or_default() {
+        for item in shown {
             if let ChatItem::Tool(t) = item {
                 let title = t.title.lines().next().unwrap_or_default().trim_matches('`');
                 if !titles.contains(&title) {

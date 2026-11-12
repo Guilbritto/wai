@@ -350,8 +350,7 @@ impl ChatSession {
     /// Hidden, no step; Grouped, a step only when it heads its run or its group is open.
     pub(super) fn shown(&self, ix: usize) -> bool {
         match &self.model.items[ix] {
-            // A subagent's calls show only in its drawer.
-            ChatItem::Tool(t) if t.subagent.is_some() => return false,
+            item if item.is_subagent_call() => return false,
             item if !item.is_step() => return true,
             _ => {}
         }
@@ -360,13 +359,20 @@ impl ChatSession {
             Processing::Hidden => false,
             Processing::Grouped => {
                 let run = self.model.run(ix, ChatItem::is_step);
-                ix == run.start || self.open_groups.contains(&run.start)
+                Some(ix) == self.run_head(&run) || self.open_groups.contains(&run.start)
             }
         }
     }
 
+    /// The row that heads `run` in the grouped mode: its first that is no subagent's call
+    /// (those show only in the drawer). The run's `start` stays its key in `open_groups`.
+    fn run_head(&self, run: &std::ops::Range<usize>) -> Option<usize> {
+        run.clone()
+            .find(|&j| !self.model.items[j].is_subagent_call())
+    }
+
     /// Row `ix` as the processing mode shows it; none exactly when `!shown(ix)`. Grouped, a run
-    /// of steps is headed by its first row.
+    /// of steps is headed by `run_head`.
     fn render_item(&mut self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.shown(ix) {
             return None;
@@ -377,7 +383,7 @@ impl ChatSession {
         let run = self.model.run(ix, ChatItem::is_step);
         let open = self.open_groups.contains(&run.start);
         let row = open.then(|| self.render_row(ix, cx));
-        if ix != run.start {
+        if Some(ix) != self.run_head(&run) {
             return row;
         }
         let head = self.render_group(run, open, cx);
@@ -418,7 +424,9 @@ impl ChatSession {
         let head = run.start;
         let has = |status: ToolStatus| {
             let mut tools = self.model.items[run.clone()].iter();
-            tools.any(|item| matches!(item, ChatItem::Tool(t) if t.status == status))
+            tools.any(|item| {
+                matches!(item, ChatItem::Tool(t) if t.subagent.is_none() && t.status == status)
+            })
         };
         let status = if has(ToolStatus::Failed) {
             ToolStatus::Failed

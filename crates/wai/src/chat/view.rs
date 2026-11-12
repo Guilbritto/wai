@@ -2727,6 +2727,40 @@ mod tests {
         assert!(shows(("step-output", 2usize), cx));
     }
 
+    /// Grouped, a run that starts with a subagent's call (shown only in its drawer) is headed by
+    /// main's first step, and its label counts and names main's steps only.
+    #[gpui_kit::test]
+    fn grouped_run_led_by_a_subagent_call_heads_on_main(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, processing_settings("", Processing::Grouped));
+        let session = start_session(&workspace, cx);
+        let call = |id: &str, title: &str, subagent: Option<&str>| {
+            SessionEvent::ToolCall(ToolCallView {
+                id: id.into(),
+                title: title.into(),
+                kind: "read".into(),
+                status: ToolStatus::Completed,
+                content: vec![],
+                locations: vec![],
+                subagent: subagent.map(str::to_string),
+            })
+        };
+        session.update(cx, |s, cx| {
+            s.handle_event(&call("sub-read", "Read notes.md", Some("bg")), cx);
+            s.handle_event(&call("main-read", "Read README.md", None), cx);
+        });
+        assert!(shows(("group", 0usize), cx), "main's step heads the run");
+        let label = session.read_with(cx, |s, _| s.model.run_label(0..2));
+        assert_eq!(label, "1 step · Read README.md");
+        assert!(!shows(("step", 1usize), cx));
+        click_edits(None, ("group", 0usize), cx);
+        assert!(shows(("step", 1usize), cx));
+        assert!(
+            !shows(("step", 0usize), cx),
+            "the subagent's call stays out"
+        );
+    }
+
     /// Hidden: no step shows, but what needs the user and what changed their files does: the
     /// permission card, the edit's own line, and the Edits block, whose Revert still works.
     #[gpui_kit::test]
