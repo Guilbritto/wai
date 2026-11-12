@@ -193,22 +193,22 @@ pub(crate) fn slug(text: &str) -> String {
 
 pub(crate) fn create_worktree(repo: &Repo, slug: &str, base: &str) -> Result<Worktree, String> {
     let root = &repo.root;
-    let fetch_failed = if repo.origin {
+    let remote = format!("origin/{base}");
+    let pushed = ok(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/{remote}"),
+        ],
+    );
+    let fetch_failed = if repo.origin && pushed {
         run(root, &["fetch", "origin", base]).err()
     } else {
         None
     };
-    let remote = format!("origin/{base}");
-    let from = if fetch_failed.is_none()
-        && ok(
-            root,
-            &[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("refs/remotes/{remote}"),
-            ],
-        ) {
+    let from = if fetch_failed.is_none() && pushed {
         remote
     } else {
         base.to_string()
@@ -344,17 +344,43 @@ pub(crate) mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// Commit number `n` of a fixture, one second after the one before it.
+    fn dated_commit(dir: &Path, n: usize, message: &str) {
+        let date = format!("@{} +0000", 1_700_000_000 + n);
+        let out = command(dir)
+            .args([
+                "-c",
+                "user.name=wai",
+                "-c",
+                "user.email=wai@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                message,
+            ])
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     pub(crate) fn repo_with(dir: &Path, branches: &[&str]) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
         git(dir, &["init", "-b", "main"]);
         std::fs::write(dir.join("a.txt"), "a").unwrap();
         git(dir, &["add", "."]);
-        git(dir, &["commit", "-m", "first"]);
-        for b in branches {
+        dated_commit(dir, 0, "first");
+        for (n, b) in branches.iter().enumerate() {
             git(dir, &["checkout", "-b", b]);
             std::fs::write(dir.join(format!("{b}.txt")), b).unwrap();
             git(dir, &["add", "."]);
-            git(dir, &["commit", "-m", b]);
+            dated_commit(dir, n + 1, b);
         }
         std::fs::canonicalize(dir).unwrap()
     }
@@ -591,12 +617,44 @@ pub(crate) mod tests {
             &clone,
             &["remote", "set-url", "origin", missing.to_str().unwrap()],
         );
-        git(&clone, &["update-ref", "-d", "refs/remotes/origin/main"]);
         let r = repo(&clone).unwrap();
         let w = create_worktree(&r, "x", "main").unwrap();
         assert!(w.fetch_failed.is_some());
         assert_eq!(w.from, "main");
         assert!(w.path.is_dir());
+    }
+
+    #[test]
+    fn never_pushed_base_does_not_report_a_fetch_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, clone) = cloned(tmp.path());
+        git(&clone, &["checkout", "-b", "local-only"]);
+        std::fs::write(clone.join("l.txt"), "l").unwrap();
+        git(&clone, &["add", "."]);
+        git(&clone, &["commit", "-m", "local"]);
+        let w = create_worktree(&repo(&clone).unwrap(), "x", "local-only").unwrap();
+        assert_eq!(w.fetch_failed, None);
+        assert_eq!(w.from, "local-only");
+    }
+
+    #[test]
+    fn worktree_branch_tracks_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, clone) = cloned(tmp.path());
+        let w = create_worktree(&repo(&clone).unwrap(), "x", "main").unwrap();
+        assert_eq!(w.from, "origin/main");
+        let out = command(&clone)
+            .args(["rev-parse", "--abbrev-ref", "wai/x@{upstream}"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+    }
+
+    #[test]
+    fn repo_with_orders_branches_by_creation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = repo_with(&tmp.path().join("r"), &["a", "b"]);
+        assert_eq!(repo(&root).unwrap().branches, ["b", "a", "main"]);
     }
 
     #[test]

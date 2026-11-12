@@ -162,7 +162,6 @@ pub(crate) fn still_working(n: usize) -> String {
     }
 }
 
-/// Whether the batch names `path`, or lost track of what changed.
 /// What the terminal runs to open Claude Code session `id` again; the shell may be anywhere.
 pub(crate) fn resume_command(cwd: &Path, id: &str) -> String {
     format!(
@@ -172,6 +171,7 @@ pub(crate) fn resume_command(cwd: &Path, id: &str) -> String {
     )
 }
 
+/// Whether the batch names `path`, or lost track of what changed.
 fn touches(batch: &[FsChange], path: &Path) -> bool {
     batch.iter().any(|change| match change {
         FsChange::Rescan => true,
@@ -1656,7 +1656,7 @@ impl Workspace {
                     json!({
                         "agent": s.agent,
                         "session": s.id,
-                        "title": s.model.shown_title(),
+                        "title": s.model.named_title(),
                         "state": state_name(s.status()),
                     })
                 });
@@ -1891,8 +1891,6 @@ impl Workspace {
         self.follow_session(window, cx);
     }
 
-    /// An Open row's ×: drops `session` from the open list and from its pane, if one shows it
-    /// (the agent keeps it in its history).
     /// Frees session `id` in its agent, when the agent can.
     pub(crate) fn close_in_agent(&mut self, agent: String, id: String, cx: &mut Context<Self>) {
         let closable = matches!(
@@ -1909,6 +1907,8 @@ impl Workspace {
         }
     }
 
+    /// An Open row's ×: drops `session` from the open list and from its pane, if one shows it
+    /// (the agent keeps it in its history).
     pub(crate) fn end_session(
         &mut self,
         session: &Entity<ChatSession>,
