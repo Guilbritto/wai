@@ -1007,8 +1007,8 @@ fn program_parses_like_the_spawn() {
 #[test]
 fn close_session_reaches_the_agent() {
     run(async {
-        let file = std::env::temp_dir().join(format!("wai-close-{}", std::process::id()));
-        let _ = std::fs::remove_file(&file);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("closed");
         let (agent, rx) = spawn(&["--close-file", file.to_str().unwrap()]);
         match ready(&rx).await {
             AgentEvent::Ready { caps, .. } => assert!(caps.close),
@@ -1017,7 +1017,6 @@ fn close_session_reaches_the_agent() {
         let session = agent.new_session(cwd(), vec![]).await.unwrap();
         assert!(agent.close_session(session.id).await.is_ok());
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "fake-1\n");
-        let _ = std::fs::remove_file(&file);
     })
 }
 
@@ -1040,5 +1039,34 @@ fn new_session_waits_for_its_gate() {
         );
         std::fs::write(&gate, "").unwrap();
         assert!(agent.new_session(cwd(), vec![]).await.is_ok());
+    });
+}
+
+#[test]
+fn read_flag_reports_its_location() {
+    run(async {
+        let path = PathBuf::from("/tmp/wai-read/a.txt");
+        let (agent, rx) = spawn(&["--read", "/tmp/wai-read/a.txt"]);
+        ready(&rx).await;
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        agent.prompt(session.id, hello());
+        let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+        let located = |events: &[AgentEvent]| {
+            events.iter().any(|e| match e {
+                AgentEvent::Update {
+                    event: SessionEvent::ToolCall(call),
+                    ..
+                } => call.id == "read-0" && call.locations[0].path == path,
+                _ => false,
+            })
+        };
+        assert!(located(&events));
+
+        agent
+            .load_session("abc".into(), cwd(), vec![])
+            .await
+            .unwrap();
+        let replay: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(located(&replay));
     });
 }

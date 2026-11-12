@@ -49,6 +49,9 @@
 //!   - `--edit-hunk`: appends ` // edited` to the file's middle line; the call starts with that
 //!     line as the snippet, and completes with the hunk (3 lines of context, no trailing newline)
 //!     and its first line as the location.
+//! - `--read <path>` (repeatable, in order): the turn starts with a Read tool call `read-<i>` titled
+//!   `Read <file name>`, kind read, location `<path>`, reported in progress then completed.
+//!   `session/load` replays the same calls after `previous answer`.
 //! - `--sessions <n>`: `session/list` returns n sessions titled `Session <i>`, 10 per page.
 //! - `--sessions-cwd <path>`: the cwd of those sessions; default `/tmp`.
 //! - `--pid-file <path>`: write the process id there at start.
@@ -125,6 +128,7 @@ struct Opts {
     flood: Option<usize>,
     steps: usize,
     edits: Vec<(EditKind, PathBuf)>,
+    reads: Vec<PathBuf>,
     sessions: usize,
     sessions_cwd: PathBuf,
     pid_file: Option<PathBuf>,
@@ -159,6 +163,7 @@ fn parse_args() -> Opts {
         flood: None,
         steps: 0,
         edits: Vec::new(),
+        reads: Vec::new(),
         sessions: 0,
         sessions_cwd: "/tmp".into(),
         pid_file: None,
@@ -211,6 +216,7 @@ fn parse_args() -> Opts {
             "--edit" => opts.edits.push((EditKind::Append, value().into())),
             "--write" => opts.edits.push((EditKind::Write, value().into())),
             "--edit-hunk" => opts.edits.push((EditKind::Hunk, value().into())),
+            "--read" => opts.reads.push(value().into()),
             "--sessions" => opts.sessions = number(value()),
             "--sessions-cwd" => opts.sessions_cwd = value().into(),
             "--pid-file" => opts.pid_file = Some(value().into()),
@@ -334,6 +340,7 @@ impl Fake {
                 ))]);
             send(cx, session, acp::SessionUpdate::ToolCall(call))?;
         }
+        read_calls(cx, session, &self.opts.reads)?;
         if self.opts.plan {
             let entry = |c: &str, s| acp::PlanEntry::new(c, acp::PlanEntryPriority::Medium, s);
             let entries = vec![
@@ -722,6 +729,27 @@ impl Fake {
     }
 }
 
+/// `--read`: a Read call per path, in progress and then completed.
+fn read_calls(
+    cx: &ConnectionTo<Client>,
+    session: &acp::SessionId,
+    reads: &[PathBuf],
+) -> Result<(), Error> {
+    for (i, path) in reads.iter().enumerate() {
+        let id = format!("read-{i}");
+        let title = format!("Read {}", path.file_name().unwrap_or_default().display());
+        let call = acp::ToolCall::new(id.clone(), title)
+            .kind(acp::ToolKind::Read)
+            .status(acp::ToolCallStatus::InProgress)
+            .locations(vec![acp::ToolCallLocation::new(path.clone())]);
+        send(cx, session, acp::SessionUpdate::ToolCall(call))?;
+        let fields = acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Completed);
+        let update = acp::ToolCallUpdate::new(id, fields);
+        send(cx, session, acp::SessionUpdate::ToolCallUpdate(update))?;
+    }
+    Ok(())
+}
+
 fn text_block(text: impl Into<String>) -> acp::ContentBlock {
     acp::ContentBlock::Text(acp::TextContent::new(text))
 }
@@ -888,6 +916,7 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                         session,
                         acp::SessionUpdate::AgentMessageChunk(chunk("previous answer")),
                     )?;
+                    read_calls(&cx, session, &fake.opts.reads)?;
                     responder.respond(
                         acp::LoadSessionResponse::new()
                             .modes(modes())

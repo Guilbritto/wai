@@ -328,7 +328,8 @@ fn split_content(content: &[ToolContent]) -> (String, Vec<FileDiff>) {
 }
 
 impl ChatModel {
-    /// What the session is called: the user's name for it, else the agent's title.
+    /// What the session is called: the user's name for it, else the agent's title, else the first
+    /// line of the first message.
     pub fn shown_title(&self) -> Option<&str> {
         let first_message = || {
             self.items.iter().find_map(|item| match item {
@@ -337,6 +338,11 @@ impl ChatModel {
             })
         };
         (self.name.as_deref().or(self.title.as_deref())).or_else(first_message)
+    }
+
+    /// The user's name for the session, else the agent's title: no first-message fallback.
+    pub fn named_title(&self) -> Option<&str> {
+        self.name.as_deref().or(self.title.as_deref())
     }
 
     /// A step line of a session that is starting: an ordinary tool row, in progress.
@@ -903,6 +909,14 @@ impl ChatModel {
 
     /// A subagent last seen live is not: nothing says what became of it.
     pub fn on_exited(&mut self, error: Option<&str>) {
+        self.wind_down();
+        let msg = error.unwrap_or("The agent exited");
+        self.state = TurnState::Error(msg.to_string());
+        self.notice(format!("Agent exited: {msg}"), NoticeKind::Error);
+    }
+
+    /// The turn is over for good: steers read, waiting cards cancelled, running subagents parked.
+    pub fn wind_down(&mut self) {
         self.in_turn = false;
         self.read_steers();
         let cards: Vec<(bool, u64)> = self
@@ -917,8 +931,6 @@ impl ChatModel {
         for (question, id) in cards {
             self.close(question, id, "Cancelled");
         }
-        let msg = error.unwrap_or("The agent exited");
-        self.state = TurnState::Error(msg.to_string());
         let live: Vec<String> = self
             .subagents
             .iter()
@@ -932,7 +944,6 @@ impl ChatModel {
                 ..Default::default()
             });
         }
-        self.notice(format!("Agent exited: {msg}"), NoticeKind::Error);
     }
 }
 
@@ -1220,6 +1231,17 @@ mod tests {
         m.apply(&SessionEvent::Title("Agent 2".into()));
         assert_eq!(m.shown_title(), Some("Mine"));
         assert_eq!(m.title.as_deref(), Some("Agent 2"));
+    }
+
+    #[test]
+    fn named_title_has_no_fallback() {
+        let mut m = ChatModel::default();
+        m.push_user("hello there\nmore");
+        assert_eq!(m.shown_title(), Some("hello there"));
+        assert_eq!(m.named_title(), None);
+        m.name = Some("Mine".into());
+        assert_eq!(m.shown_title(), Some("Mine"));
+        assert_eq!(m.named_title(), Some("Mine"));
     }
 
     #[test]

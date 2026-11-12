@@ -31,7 +31,7 @@ const IMAGE_MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// A file dropped, pasted or picked, ready to go out with the next prompt.
 #[derive(Clone)]
 pub struct Attachment {
-    pub(super) name: String,
+    pub(crate) name: String,
     path: PathBuf,
     block: PromptBlock,
 }
@@ -495,7 +495,9 @@ impl ChatSession {
         });
         // During a turn too: the message goes into the turn, or waits in the queue.
         let empty = self.input.read(cx).value().trim().is_empty() && self.attachments.is_empty();
-        let disabled = empty || !(self.model.in_turn || self.model.state == TurnState::Idle);
+        let disabled = empty
+            || self.is_starting()
+            || !(self.model.in_turn || self.model.state == TurnState::Idle);
         let send = send_button(disabled, cx)
             .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)));
         // R83: the textarea draws no ring of its own, so the box shows the focus, and a press
@@ -603,7 +605,11 @@ impl ChatSession {
     /// The folder, branch and agent, as read-only chips on the box's top edge.
     fn render_strip(&self, cx: &App) -> impl IntoElement + use<> {
         let icon = |name| Some(Icon::new(name).xsmall().into_any_element());
-        let branch = self.head.as_ref().and_then(|head| {
+        let (folder, head) = match &self.place {
+            Some(p) => (folder_name(&p.folder), Some(p)),
+            None => (folder_name(&self.cwd), self.head.as_ref()),
+        };
+        let branch = head.and_then(|head| {
             let mark = match head.worktree {
                 true => icon(gpui_kit::assets::IconName::GitFork),
                 false => icon(gpui_kit::assets::IconName::GitBranch),
@@ -623,7 +629,7 @@ impl ChatSession {
             .child(composer::strip_label(
                 "pill-folder",
                 icon(gpui_kit::assets::IconName::Folder),
-                folder_name(&self.cwd),
+                folder,
                 cx,
             ))
             .children(branch)
