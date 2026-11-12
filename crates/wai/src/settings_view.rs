@@ -21,6 +21,7 @@ use wai_settings::{Change, Processing, SeenModel, Settings, ThemeChoice, agent_l
 
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::extensions_view::ExtensionsView;
+use crate::update::UpdateStatus;
 
 pub(crate) mod claude;
 
@@ -92,7 +93,9 @@ impl Section {
                 "What a conversation shows while the agent works. Permission cards, questions and file edits always show."
             }
             Section::Terminal => "The terminal under the panes.",
-            Section::Updates => "wai checks GitHub releases once a day, only when you turn it on.",
+            Section::Updates => {
+                "wai checks for a new release each time it opens, downloads it in the background and installs it when you click Restart now."
+            }
             Section::Extensions => {
                 "Extensions add panels, commands, agents and MCP servers to wai. They run with your permissions."
             }
@@ -198,11 +201,12 @@ pub(crate) fn open_modal(view: Entity<SettingsView>, window: &mut Window, cx: &m
 }
 
 /// Every row with its section and label: what the search matches.
-const ROWS: [(Section, &str); 5] = [
+const ROWS: [(Section, &str); 6] = [
     (Section::Appearance, "Theme"),
     (Section::Conversation, "Processing"),
     (Section::Terminal, "Shell"),
-    (Section::Updates, "Check for updates"),
+    (Section::Updates, "Automatic updates"),
+    (Section::Updates, "Version"),
     (Section::Updates, "Repository"),
 ];
 
@@ -264,11 +268,16 @@ pub struct SettingsData {
     pub extensions: Option<Entity<ExtensionsView>>,
     /// Where `~/.claude` lives: paths on the Claude pages are shown relative to it.
     pub home: PathBuf,
+    pub update: UpdateStatus,
+    /// Why this copy cannot install an update; shown whatever the status says.
+    pub update_blocker: Option<String>,
 }
 
 pub enum SettingsEvent {
     Change(Change),
     OpenFile,
+    CheckUpdates,
+    RestartToUpdate,
     Test(String),
     CheckMcp,
     Open {
@@ -777,6 +786,68 @@ impl SettingsView {
             .children(command)
     }
 
+    /// The version, what the last check found, and the one button that fits it.
+    fn version_row(&self, cx: &mut Context<Self>) -> Div {
+        let status = &self.data.update;
+        let (label, page) = match status {
+            UpdateStatus::Ready(_) => ("Restart now", None),
+            UpdateStatus::Available { release, .. } => {
+                ("Open release page", Some(release.page.clone()))
+            }
+            _ => ("Check now", None),
+        };
+        let ready = matches!(status, UpdateStatus::Ready(_));
+        let busy = matches!(status, UpdateStatus::Checking);
+        let button = Button::new("settings-update-action")
+            .label(label)
+            .disabled(busy)
+            .on_click(cx.listener(move |_, _, _, cx| match &page {
+                Some(page) => cx.open_url(page),
+                None if ready => cx.emit(SettingsEvent::RestartToUpdate),
+                None => cx.emit(SettingsEvent::CheckUpdates),
+            }));
+        // A blocked copy opens the release page, but "turn on admin rights and install the next
+        // update from here" needs a way to look again without reopening wai.
+        let blocked_page = matches!(status, UpdateStatus::Available { why: Some(_), .. });
+        let check = blocked_page.then(|| {
+            Button::new("settings-update-check")
+                .label("Check now")
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::CheckUpdates)))
+        });
+        let color = |status: &UpdateStatus| match status {
+            UpdateStatus::Failed(_) => cx.theme().danger,
+            _ => cx.theme().muted_foreground,
+        };
+        let text = |id: &'static str, line: String, color| {
+            div()
+                .id(id)
+                .aria_label(line.clone())
+                .test_support()
+                .text_size(px(12.))
+                .text_color(color)
+                .child(line)
+        };
+        let line = status
+            .line()
+            .map(|line| text("settings-update-status", line, color(status)));
+        // `Available` already carries the sentence; otherwise it shows on its own.
+        let shown = matches!(
+            status,
+            UpdateStatus::Available { why: Some(_), .. } | UpdateStatus::Ready(_)
+        );
+        let blocker = (self.data.update_blocker.clone())
+            .filter(|_| !shown)
+            .map(|why| text("settings-update-blocker", why, cx.theme().muted_foreground));
+        let control = v_flex()
+            .gap_1()
+            .items_end()
+            .child(div().child(crate::topbar::version()))
+            .children(line)
+            .children(blocker)
+            .child(h_flex().gap_2().children(check).child(button));
+        self.row("Version", "settings-update", control, cx)
+    }
+
     fn rows(&self, label: &str, cx: &mut Context<Self>) -> Div {
         let off = self.data.error.is_some();
         match label {
@@ -798,8 +869,8 @@ impl SettingsView {
                 Input::new(&self.shell).small().disabled(off),
                 cx,
             ),
-            "Check for updates" => self.row(
-                "Check for updates",
+            "Automatic updates" => self.row(
+                "Automatic updates",
                 "settings-updates-check",
                 h_flex().justify_end().child(
                     Switch::new("settings-updates-switch")
@@ -811,6 +882,7 @@ impl SettingsView {
                 ),
                 cx,
             ),
+            "Version" => self.version_row(cx),
             _ => self.row(
                 "Repository",
                 "settings-updates-repo",
@@ -1066,6 +1138,7 @@ impl Render for SettingsView {
 #[cfg(test)]
 mod tests {
     use gpui_kit::component::WindowExt as _;
+    use gpui_kit::test::TestQueryExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
     use wai_settings::{Change, Processing, Settings, ThemeChoice};
@@ -1100,6 +1173,8 @@ mod tests {
             project_default: None,
             extensions: None,
             home: Default::default(),
+            update: crate::update::UpdateStatus::Idle,
+            update_blocker: None,
         }
     }
 
@@ -1296,6 +1371,57 @@ mod tests {
         assert_eq!(
             super::modal_size(vp, true),
             gpui_kit::size(gpui_kit::px(1376.), gpui_kit::px(876.))
+        );
+    }
+
+    #[gpui_kit::test]
+    fn settings_shows_update_status(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Updates, None, window, cx)
+        });
+        let release = crate::update::Release {
+            tag: "v9.0.0".into(),
+            page: "https://github.com/Guilbritto/wai/releases/tag/v9.0.0".into(),
+            assets: vec![],
+        };
+        let found = crate::update::UpdateStatus::Available {
+            release,
+            why: Some("x".into()),
+        };
+        workspace.update(cx, |w, cx| w.set_update(found, cx));
+        cx.update(|window, cx| window.render_frame(cx));
+        assert!(
+            cx.debug_bounds("settings-update").is_some(),
+            "the Version row"
+        );
+        cx.update(|window, _| window.find_by_label("wai 9.0.0 is available. x"));
+        cx.update(|window, _| window.find_by_label("Open release page"));
+        // Blocked: the page is not the only way on; Check now stays beside it.
+        cx.update(|window, _| window.find_by_label("Check now"));
+        // Up to date, but this copy cannot install the next update: the sentence still shows.
+        workspace.update(cx, |w, cx| {
+            w.update_blocker = Some("cannot update itself here".into());
+            w.set_update(crate::update::UpdateStatus::UpToDate, cx)
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        cx.update(|window, _| window.find_by_label("cannot update itself here"));
+        // A staged build turns the same button into Restart now, which goes through the quit flow.
+        let staged = crate::update::Staged {
+            tag: "v9.0.0".into(),
+            file: "/nonexistent/wai.zip".into(),
+            sha256: "00".into(),
+        };
+        workspace.update(cx, |w, cx| {
+            w.set_update(crate::update::UpdateStatus::Ready(staged), cx)
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        cx.update(|window, _| window.find_by_label("Restart now"));
+        click("settings-update-action", cx);
+        let status = workspace.read_with(cx, |w, _| w.update.clone());
+        assert!(
+            matches!(status, crate::update::UpdateStatus::Failed(_)),
+            "{status:?}"
         );
     }
 

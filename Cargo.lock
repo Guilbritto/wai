@@ -8145,6 +8145,7 @@ version = "0.6.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "dirs 6.0.0",
  "gpui-kit",
  "http-body-util",
  "hyper",
@@ -8155,6 +8156,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "similar",
  "smol",
  "tempfile",

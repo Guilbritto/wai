@@ -84,15 +84,27 @@ pub struct TerminalSettings {
     pub shell: Option<String>,
 }
 
-/// The opt-in update check, from the user's settings only (see `Settings::load`).
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+/// The repository wai's releases are published from.
+pub const DEFAULT_REPO: &str = "Guilbritto/wai";
+
+/// The automatic update, from the user's settings only (see `Settings::load`).
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct UpdateSettings {
-    /// Off by default: wai makes no request unless the user turns this on.
+    /// On by default; the user can turn it off.
     pub check: bool,
-    /// `owner/repo` on GitHub whose latest release is checked. Unset, nothing is checked; this
-    /// default is the placeholder until wai has a public repository.
+    /// `owner/repo` on GitHub whose latest release is checked. Unset, nothing is checked; settings
+    /// load merges the defaults, so clearing it in the user file brings `DEFAULT_REPO` back.
     pub repo: Option<String>,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            check: true,
+            repo: Some(DEFAULT_REPO.into()),
+        }
+    }
 }
 
 /// How a chat shows, from the user's settings only (see `Settings::load`).
@@ -264,7 +276,7 @@ impl Settings {
             // Nor may it make wai send a request, or name the repository whose page wai opens.
             if layer.remove("updates").is_some() {
                 notices.push(format!(
-                    "Ignored updates settings from {}: only user settings can turn on the update check.",
+                    "Ignored updates settings from {}: only user settings can change updates.",
                     path.display()
                 ));
             }
@@ -629,14 +641,17 @@ mod tests {
         );
     }
 
-    /// A cloned repository cannot turn the update check on or point it at another repository
-    /// (whose release page the notice would open).
+    /// A cloned repository cannot change updates (turn the check on or point it at another
+    /// repository, whose release page the notice would open).
     #[test]
     fn project_cannot_set_updates() {
         let u = tempfile::tempdir().unwrap();
         let p = tempfile::tempdir().unwrap();
         assert_eq!(Settings::default().updates, UpdateSettings::default());
-        assert!(!UpdateSettings::default().check && UpdateSettings::default().repo.is_none());
+        assert!(
+            UpdateSettings::default().check
+                && UpdateSettings::default().repo.as_deref() == Some(DEFAULT_REPO)
+        );
         write(
             p.path(),
             ".wai/settings.toml",
@@ -649,7 +664,7 @@ mod tests {
         assert_eq!(
             notices,
             [format!(
-                "Ignored updates settings from {}: only user settings can turn on the update check.",
+                "Ignored updates settings from {}: only user settings can change updates.",
                 path.display()
             )]
         );
@@ -662,6 +677,23 @@ mod tests {
         let (s, _) = Settings::load(u.path(), None).unwrap();
         assert!(s.updates.check);
         assert_eq!(s.updates.repo.as_deref(), Some("owner/wai"));
+    }
+
+    #[test]
+    fn default_repo_survives_clearing() {
+        let u = tempfile::tempdir().unwrap();
+        write(u.path(), "settings.toml", "[updates]\ncheck = true\n");
+        let (s, _) = Settings::load(u.path(), None).unwrap();
+        assert_eq!(s.updates.repo.as_deref(), Some("Guilbritto/wai"));
+
+        write(u.path(), "settings.toml", "[updates]\nrepo = \"x/y\"\n");
+        crate::edit::write_change(u.path(), &Change::UpdatesRepo(None)).unwrap();
+        let (s, _) = Settings::load(u.path(), None).unwrap();
+        assert_eq!(s.updates.repo.as_deref(), Some("Guilbritto/wai"));
+
+        write(u.path(), "settings.toml", "[updates]\ncheck = false\n");
+        let (s, _) = Settings::load(u.path(), None).unwrap();
+        assert!(!s.updates.check);
     }
 
     #[test]
