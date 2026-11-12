@@ -61,6 +61,8 @@ pub enum InstallError {
     NoManifest,
     #[error("{0} is already installed; uninstall it first")]
     AlreadyInstalled(String),
+    #[error("{0} is not installed")]
+    NotInstalled(String),
     #[error("an extension is installed only with every permission it asks for")]
     Consent,
 }

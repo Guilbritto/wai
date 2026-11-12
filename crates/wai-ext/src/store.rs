@@ -117,6 +117,44 @@ impl ExtStore {
         Ok(id)
     }
 
+    /// Replaces the code of an installed extension with `staged` (same id), keeping `enabled` and
+    /// the data folder. `granted` must be exactly what the new manifest asks for. Returns the id
+    /// and where the old code folder went: the caller deletes it off the main thread (like
+    /// `uninstall`) and stops the extension's processes first.
+    pub fn update(
+        &mut self,
+        staged: Staged,
+        granted: Vec<Permission>,
+    ) -> Result<(ExtId, PathBuf), InstallError> {
+        let asked = &staged.manifest().permissions;
+        if !(granted.iter().all(|p| asked.contains(p)) && asked.iter().all(|p| granted.contains(p)))
+        {
+            return Err(InstallError::Consent);
+        }
+        let id = staged.manifest().id.clone();
+        let ix = self
+            .position(&id)
+            .map_err(|_| InstallError::NotInstalled(id.as_str().into()))?;
+        let dir = self.installed[ix].dir.clone();
+        let trash = staging_path(&self.config_dir)?;
+        std::fs::rename(&dir, &trash)?;
+        if let Err(e) = std::fs::rename(staged.dir(), &dir) {
+            std::fs::rename(&trash, &dir).ok();
+            return Err(e.into());
+        }
+        let old_manifest =
+            std::mem::replace(&mut self.installed[ix].manifest, staged.manifest().clone());
+        let old_granted = std::mem::replace(&mut self.installed[ix].granted, granted);
+        if let Err(e) = self.save() {
+            self.installed[ix].manifest = old_manifest;
+            self.installed[ix].granted = old_granted;
+            std::fs::rename(&dir, staged.dir()).ok();
+            std::fs::rename(&trash, &dir).ok();
+            return Err(e.into());
+        }
+        Ok((id, trash))
+    }
+
     pub fn list(&self) -> Vec<Installed> {
         self.installed.clone()
     }

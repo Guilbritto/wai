@@ -443,3 +443,109 @@ fn project_suggestions_parse_and_skip_malformed() {
         );
     }
 }
+
+/// `sample` rewritten as `version`, with `extra` as an additional file.
+fn sample_v(root: &Path, version: &str, extra: &str) -> PathBuf {
+    let src = sample(root);
+    let manifest = std::fs::read_to_string(src.join(MANIFEST_FILE)).unwrap();
+    std::fs::write(src.join(MANIFEST_FILE), manifest.replace("1.2.0", version)).unwrap();
+    std::fs::write(src.join(extra), "x").unwrap();
+    src
+}
+
+fn installed_sample(tmp: &Path, config: &Path) -> (ExtStore, ExtId) {
+    let mut store = ExtStore::open(config);
+    let old = sample_v(&tmp.join("old"), "0.1.0", "old-only");
+    let id = store
+        .commit(store.stage(&Source::Folder(old)).unwrap(), perms())
+        .unwrap();
+    store.set_enabled(&id, false).unwrap();
+    (store, id)
+}
+
+#[test]
+fn update_swaps_code_keeps_flags() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config");
+    let (mut store, id) = installed_sample(tmp.path(), &config);
+    let data = store.list()[0].data.clone();
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("marker"), "keep").unwrap();
+
+    let new = sample_v(&tmp.path().join("new"), "0.2.0", "new-only");
+    let staged = store.stage(&Source::Folder(new)).unwrap();
+    let (got, trash) = store.update(staged, perms()).unwrap();
+
+    assert_eq!(got, id);
+    let check = |s: &ExtStore| {
+        let l = s.list();
+        assert_eq!(l[0].manifest.version, "0.2.0");
+        assert!(!l[0].enabled);
+    };
+    check(&store);
+    check(&ExtStore::open(&config));
+    let dir = config.join("extensions/sample");
+    assert!(dir.join("new-only").is_file());
+    assert!(!dir.join("old-only").exists());
+    assert_eq!(
+        std::fs::read_to_string(data.join("marker")).unwrap(),
+        "keep"
+    );
+    assert!(
+        std::fs::read_to_string(config.join("extensions.json"))
+            .unwrap()
+            .contains("0.2.0")
+    );
+    assert!(trash.join("old-only").is_file());
+}
+
+#[test]
+fn update_refuses_unknown_id_and_wrong_consent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config");
+    let mut empty = ExtStore::open(&config);
+    let staged = empty
+        .stage(&Source::Folder(sample(&tmp.path().join("a"))))
+        .unwrap();
+    assert!(matches!(
+        empty.update(staged, perms()),
+        Err(InstallError::NotInstalled(id)) if id == "sample"
+    ));
+    assert!(!config.join("extensions/sample").exists());
+
+    let (mut store, _) = installed_sample(tmp.path(), &config);
+    let new = sample_v(&tmp.path().join("new"), "0.2.0", "new-only");
+    let staged = store.stage(&Source::Folder(new)).unwrap();
+    assert!(matches!(
+        store.update(staged, vec![Permission::Process]),
+        Err(InstallError::Consent)
+    ));
+    assert_eq!(store.list()[0].manifest.version, "0.1.0");
+    assert!(config.join("extensions/sample/old-only").is_file());
+    assert!(!config.join("extensions/sample/new-only").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_update_restores_the_old_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config");
+    let (mut store, _) = installed_sample(tmp.path(), &config);
+    let new = sample_v(&tmp.path().join("new"), "0.2.0", "new-only");
+    let staged = store.stage(&Source::Folder(new)).unwrap();
+    // `save` removes a file at this name, not a non-empty folder: it fails.
+    let tmp_json = config.join("extensions.json.tmp");
+    std::fs::create_dir_all(tmp_json.join("x")).unwrap();
+
+    assert!(store.update(staged, perms()).is_err());
+
+    let dir = config.join("extensions/sample");
+    assert!(dir.join("old-only").is_file());
+    assert!(!dir.join("new-only").exists());
+    assert_eq!(store.list()[0].manifest.version, "0.1.0");
+    assert!(
+        std::fs::read_to_string(config.join("extensions.json"))
+            .unwrap()
+            .contains("0.1.0")
+    );
+}
