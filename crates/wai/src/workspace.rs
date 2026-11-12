@@ -2610,6 +2610,7 @@ impl Workspace {
                     label,
                     extension,
                     status,
+                    adapter: registry.adapter(&id).map(|(n, v)| format!("{n} {v}")),
                     command,
                     models: self.models_seen.get(&id).cloned().unwrap_or_default(),
                     default_model: self.settings.models.get(&id).cloned(),

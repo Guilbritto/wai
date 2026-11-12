@@ -244,6 +244,8 @@ pub struct AgentRow {
     pub label: String,
     pub extension: Option<String>,
     pub status: RowStatus,
+    /// `"<name> <version>"` of the running adapter; `None` until it is `Ready`.
+    pub adapter: Option<String>,
     /// The command in force (approved).
     pub command: String,
     pub models: Vec<SeenModel>,
@@ -684,6 +686,14 @@ impl SettingsView {
         let warn = warning(row).map(|w| div().text_color(cx.theme().warning).child(w));
         let selector = format!("settings-agent-{}", row.id);
         let test_selector = format!("settings-test-{}", row.id);
+        let adapter = row.adapter.as_ref().map(|a| {
+            let selector = format!("settings-adapter-{}", row.id);
+            div()
+                .debug_selector(move || selector)
+                .text_size(px(12.))
+                .text_color(muted)
+                .child(format!("Adapter {a}"))
+        });
         v_flex()
             .py_2()
             .child(
@@ -719,6 +729,7 @@ impl SettingsView {
                             ),
                     ),
             )
+            .children(adapter)
             .children(install)
             .children(warn)
             .child(self.default_model(row, cx))
@@ -1376,6 +1387,24 @@ mod tests {
             super::modal_size(vp, true),
             gpui_kit::size(gpui_kit::px(1376.), gpui_kit::px(876.))
         );
+    }
+
+    #[gpui_kit::test]
+    fn ai_row_shows_the_adapter_version(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = fake_ws(cx, "");
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Ai, None, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-adapter-fake").is_none());
+        workspace.update_in(cx, |w, window, cx| w.test_agent("fake", window, cx));
+        wait_until(cx, "the adapter version", |cx| {
+            row(&workspace, "fake", cx).adapter.is_some()
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        let version = env!("CARGO_PKG_VERSION");
+        cx.update(|window, _| window.find_by_label(&format!("Adapter wai-fake-agent {version}")));
+        assert!(cx.debug_bounds("settings-adapter-fake").is_some());
     }
 
     #[gpui_kit::test]

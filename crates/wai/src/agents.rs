@@ -56,6 +56,8 @@ struct Agent {
     status: AgentStatus,
     /// From `Ready`, kept so `mark_ready` can restore it after a sign-out.
     caps: Option<AgentCaps>,
+    /// From `Ready`: the adapter's name and version, for Settings.
+    adapter: Option<(String, String)>,
     _pump: Task<()>,
 }
 
@@ -170,6 +172,7 @@ impl AgentRegistry {
                 handle: handle.clone(),
                 status: AgentStatus::Starting,
                 caps: None,
+                adapter: None,
                 _pump: pump,
             },
         );
@@ -185,6 +188,11 @@ impl AgentRegistry {
                 stopped.await;
             }
         }
+    }
+
+    /// The adapter's `(name, version)`, from `Ready` until the process exits.
+    pub fn adapter(&self, id: &str) -> Option<&(String, String)> {
+        self.agents.get(id)?.adapter.as_ref()
     }
 
     pub fn status(&self, name: &str) -> Option<&AgentStatus> {
@@ -211,9 +219,14 @@ impl AgentRegistry {
 
     fn apply(&mut self, agent: &str, event: AgentEvent, cx: &mut Context<Self>) {
         let status = match event {
-            AgentEvent::Ready { caps, .. } => {
+            AgentEvent::Ready {
+                name,
+                version,
+                caps,
+            } => {
                 if let Some(entry) = self.agents.get_mut(agent) {
                     entry.caps = Some(caps);
+                    entry.adapter = Some((name, version));
                 }
                 AgentStatus::Ready(caps)
             }
@@ -223,6 +236,7 @@ impl AgentRegistry {
                 // the same batch, routed after it) must not hide the exit.
                 if let Some(entry) = self.agents.get_mut(agent) {
                     entry.caps = None;
+                    entry.adapter = None;
                 }
                 AgentStatus::Failed(error.unwrap_or_else(|| "the agent exited".into()))
             }
@@ -272,5 +286,57 @@ impl AgentRegistry {
             }
         };
         self.set_status(agent, status, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::{AppContext as _, TestAppContext};
+
+    use super::{AgentCaps, AgentEvent, AgentRegistry};
+    use crate::workspace::tests::fake_settings;
+
+    fn caps() -> AgentCaps {
+        AgentCaps {
+            load_session: false,
+            list_sessions: false,
+            fork: false,
+            close: false,
+            images: false,
+            steering: false,
+        }
+    }
+
+    fn ready() -> AgentEvent {
+        AgentEvent::Ready {
+            name: "wai-fake-agent".into(),
+            version: "1.2.3".into(),
+            caps: caps(),
+        }
+    }
+
+    #[gpui_kit::test]
+    fn ready_keeps_the_adapter_version(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let registry = cx.new(|_| AgentRegistry::new(fake_settings("").agents));
+        registry.update(cx, |r, cx| {
+            r.handle("fake", cx).unwrap();
+            assert_eq!(r.adapter("fake"), None);
+            r.apply("fake", ready(), cx);
+            let expected = ("wai-fake-agent".to_string(), "1.2.3".to_string());
+            assert_eq!(r.adapter("fake"), Some(&expected));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn exit_clears_the_adapter_version(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let registry = cx.new(|_| AgentRegistry::new(fake_settings("").agents));
+        registry.update(cx, |r, cx| {
+            r.handle("fake", cx).unwrap();
+            r.apply("fake", ready(), cx);
+            r.apply("fake", AgentEvent::Exited { error: None }, cx);
+            assert_eq!(r.adapter("fake"), None);
+        });
     }
 }
