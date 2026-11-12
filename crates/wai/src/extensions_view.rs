@@ -581,6 +581,7 @@ pub(crate) mod tests {
     /// enabled.
     #[gpui_kit::test]
     fn consent_dialog_lists_permissions(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the extension is a real process
         let tmp = tempfile::tempdir().unwrap();
         let (config, src) = (tmp.path().join("config"), sample(&tmp.path().join("src")));
         let (workspace, cx) = workspace(&config, cx);
@@ -858,6 +859,7 @@ pub(crate) mod tests {
     /// The dialog for an installed id is an update: `old → new`, Cancel changes nothing.
     #[gpui_kit::test]
     fn update_shows_old_and_new_version(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the extension is a real process
         let tmp = tempfile::tempdir().unwrap();
         let config = tmp.path().join("config");
         let old = MANIFEST.replace("1.2.0", "0.1.0");
@@ -986,6 +988,7 @@ pub(crate) mod tests {
     /// The Extensions page lists what is installed and offers the installs.
     #[gpui_kit::test]
     fn extensions_page_shows_installed(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the extension is a real process
         let tmp = tempfile::tempdir().unwrap();
         let (config, src) = (tmp.path().join("config"), sample(&tmp.path().join("src")));
         let mut store = wai_ext::ExtStore::open(&config);
