@@ -90,7 +90,7 @@ Calls in both directions are checked against what the user **granted** at instal
   A folder is copied whole, so keep build output (`target/`, `node_modules/`) out of the folder you install.
 - **Where things go.** The extension goes to `<config>/extensions/<id>/`, its data folder is `<config>/extension-data/<id>/` and the consent goes to `<config>/extensions.json`. It starts enabled.
 - **It is a copy.** Rebuilding in your source folder does not change the installed extension.
-- **Updating.** There is no upgrade in v1: uninstall, then install again. An id that is already installed is refused.
+- **Updating.** Install the same id again (folder or git URL). wai asks for consent again, stops the extension, replaces its folder and starts it again. It stays enabled or disabled as it was, and its data folder is untouched. A project suggestion of an installed id also goes through this.
 - **Project suggestions.** A project can suggest an extension in `.wai/extensions.toml`, but never install one (see the [user guide](user-guide.md#what-a-projects-wai-may-set)).
 
 ## The process
