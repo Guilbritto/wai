@@ -303,23 +303,15 @@ Todas as metas foram batidas, e o fundo estático de reserva da Tarefa 2 (um PNG
   - **Um PATH novo (outra versão do Node no nvm, por exemplo) só vale no launch seguinte.** A 1ª abertura depois da mudança ainda usa o cache.
   - Só a 1ª abertura (sem cache) espera o shell, com limite de 3 s; passou disso, segue com o PATH do launchd. O `.zshrc` desta máquina leva ~1,5–1,8 s. Nas outras aberturas esse tempo corre em segundo plano.
   - Testei com HOMEs de rascunho e um `.zshrc` de 1,5 s. A 1ª abertura esperou 1543 ms; as seguintes leram o cache (a linha do log sai ~60 ms após o exec, só o início do processo). Um agente `command = "npx"` achou o `npx` do `.zprofile`, e a troca de v1 para v2 valeu na abertura seguinte.
-- **As configurações só são lidas ao abrir o wai.**
-  - O `.wai/settings.toml` vale só para a pasta com que o wai foi aberto.
-  - Ao trocar de pasta (⌘O), modelos e sugestões de extensão são relidos, mas tema e `default_agent` do projeto novo não.
 - **A v1 não isola extensões.** Elas rodam com os seus poderes e herdam o ambiente do wai; `network` e `fs:` são só declarativos.
 - **Um wai por vez.** Dois processos dividem `state.json` e `recovery/`.
 - **Hot-exit:**
-  - sem fsync (uma queda de energia pode deixar uma cópia vazia, que é ignorada);
-  - cópias que não voltam (tamanho, erro de leitura) não são apagadas sozinhas;
   - um arquivo aberto antes de a restauração terminar fica para a próxima abertura.
 - **Checagem de atualização:**
   - não usa proxy (`HTTPS_PROXY`) nem segue redirecionamento (repositório renomeado dá `HTTP 301` no log);
   - sem `updates.repo` definido, não checa nada, nem ligada (ver a lista abaixo).
 - **Editor e busca:**
-  - as abas do editor não voltam ao reabrir (só as não salvas);
-  - o Revert recusa arquivos com tab e CRLF;
-  - árvore e busca só respeitam `.gitignore` dentro de repositório git;
-  - o terminal não rola com a roda do mouse dentro de `less`/`vim`.
+  - o Revert recusa arquivos com tab e CRLF.
 - **Permissão com o Claude real** nunca apareceu nesta máquina, porque as suas configurações usam `bypassPermissions`. O fluxo foi testado com o agente falso.
 - **Ids de sessão repetidos (R84).** `Workspace::session` (`crates/wai/src/workspace.rs`, ~linha 427) entrega cada evento à 1ª sessão aberta com o mesmo agente e id. Um agente que repete ids entre execuções mistura uma sessão retomada com uma nova: o texto do turno novo cola na sessão antiga e o prompt novo não aparece. Só o agente falso faz isso (um contador `fake-{n}` por processo); o `claude-agent-acp` usa ids únicos.
 

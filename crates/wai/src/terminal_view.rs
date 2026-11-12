@@ -3,19 +3,21 @@ use std::path::PathBuf;
 use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::*;
 use wai_terminal::{
-    DEFAULT_BG, DEFAULT_FG, GridSize, GridSnapshot, Rgb, TerminalEvent, TerminalModel,
-    key_to_bytes, paste_bytes,
+    DEFAULT_BG, DEFAULT_FG, GridSize, GridSnapshot, Rgb, TerminalEvent, TerminalModel, WheelMode,
+    key_to_bytes, paste_bytes, wheel_bytes,
 };
 
 use crate::app::{CopySelection, Paste};
+
+/// Emitted when the shell's title changes.
+pub struct TerminalChanged;
 
 const EXITED: &str = "[process exited] Click to restart.";
 
 /// The bottom panel: a shell in the project folder, painted from the model's grid snapshots.
 /// It redraws only when the shell writes (`Wakeup`), the panel changes size, or the user scrolls
 /// (10,000 lines of history) or selects with the mouse.
-// ponytail: the wheel scrolls wai's history only; in the alternate screen (less, vim) it does
-// nothing, where alacritty sends arrow keys. A drag that leaves the panel stops extending.
+// ponytail: a drag that leaves the panel stops extending.
 pub struct TerminalView {
     /// The next shell; a running one stays.
     pub shell: Option<String>,
@@ -25,6 +27,8 @@ pub struct TerminalView {
     model: Option<TerminalModel>,
     pub snapshot: GridSnapshot,
     size: GridSize,
+    /// The last title the shell set; `None` after it exits or restarts.
+    title: Option<String>,
     /// Why no shell runs: it exited or could not start.
     notice: Option<String>,
     focus: FocusHandle,
@@ -44,6 +48,7 @@ impl TerminalView {
             model: None,
             snapshot: GridSnapshot::default(),
             size: GridSize { cols: 80, rows: 24 },
+            title: None,
             notice: None,
             focus: cx.focus_handle(),
             grid: Bounds::default(),
@@ -66,7 +71,22 @@ impl TerminalView {
         self.model = None;
     }
 
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_shell(&self) -> bool {
+        self.model.is_some()
+    }
+
+    /// A job other than the shell runs in the terminal.
+    pub fn busy(&self) -> bool {
+        self.model.as_ref().is_some_and(TerminalModel::busy)
+    }
+
     fn start(&mut self, cx: &mut Context<Self>) {
+        self.set_title(None, cx);
         let spawned = TerminalModel::spawn(self.shell.as_deref(), &self.cwd, self.size);
         let (model, events) = match spawned {
             Ok(spawned) => spawned,
@@ -80,12 +100,22 @@ impl TerminalView {
         // Drained for as long as it is open: the reader thread blocks on a full channel.
         self._events = Some(cx.spawn(async move |this, cx| {
             while let Ok(event) = events.recv().await {
-                // One snapshot and one redraw per burst. Titles are not shown.
-                let mut exited = event == TerminalEvent::Exited;
-                while let Ok(event) = events.try_recv() {
-                    exited |= event == TerminalEvent::Exited;
+                // One snapshot and one redraw per burst; the last title of the burst wins.
+                let mut exited = false;
+                let mut title = None;
+                for event in
+                    std::iter::once(event).chain(std::iter::from_fn(|| events.try_recv().ok()))
+                {
+                    match event {
+                        TerminalEvent::Exited => exited = true,
+                        TerminalEvent::Title(t) => title = Some(t),
+                        _ => {}
+                    }
                 }
-                if this.update(cx, |t, cx| t.refresh(exited, cx)).is_err() {
+                if this
+                    .update(cx, |t, cx| t.refresh(exited, title, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -93,15 +123,26 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn refresh(&mut self, exited: bool, cx: &mut Context<Self>) {
+    fn refresh(&mut self, exited: bool, title: Option<String>, cx: &mut Context<Self>) {
         if let Some(model) = &self.model {
             self.snapshot = model.snapshot();
         }
         if exited {
             self.model = None;
             self.notice = Some(EXITED.into());
+            self.set_title(None, cx);
+        } else if let Some(title) = title {
+            // An empty title (a reset) is none.
+            self.set_title(Some(title).filter(|t| !t.is_empty()), cx);
         }
         cx.notify();
+    }
+
+    fn set_title(&mut self, title: Option<String>, cx: &mut Context<Self>) {
+        if self.title != title {
+            self.title = title;
+            cx.emit(TerminalChanged);
+        }
     }
 
     /// Fits the grid to the panel. Runs on every layout, so it only works on a real change.
@@ -161,11 +202,12 @@ impl TerminalView {
         // Not by the snapshot's offset: output since it was taken moved the view further up.
         if self.snapshot.display_offset > 0 {
             model.scroll_to_bottom();
-            self.refresh(false, cx);
+            self.refresh(false, None, cx);
         }
     }
 
-    /// The wheel scrolls through the history, a line per line height moved.
+    /// The wheel scrolls through the history, a line per line height moved; in the alternate
+    /// screen or a mouse mode it goes to the program.
     fn on_scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(model) = &self.model else {
             return;
@@ -174,9 +216,25 @@ impl TerminalView {
         let lines = (self.wheel / self.cell.height).trunc();
         if lines != 0. {
             self.wheel -= self.cell.height * lines;
-            model.scroll(lines as i32);
-            self.refresh(false, cx);
+            match model.wheel_mode() {
+                WheelMode::History => {
+                    model.scroll(lines as i32);
+                    self.refresh(false, None, cx);
+                }
+                mode => {
+                    let (col, row) = self.cell_at(event.position);
+                    self.write(&wheel_bytes(mode, lines as i32, col, row), cx);
+                }
+            }
         }
+    }
+
+    /// The grid cell under `at`, clamped to the grid.
+    fn cell_at(&self, at: Point<Pixels>) -> (u16, u16) {
+        let at = at - self.grid.origin;
+        let col = ((at.x / self.cell.width).max(0.) as u16).min(self.size.cols - 1);
+        let row = ((at.y / self.cell.height).max(0.) as u16).min(self.size.rows - 1);
+        (col, row)
     }
 
     /// Starts (`start`) or extends the selection to the cell under `at`.
@@ -184,17 +242,14 @@ impl TerminalView {
         let Some(model) = &self.model else {
             return;
         };
-        let at = at - self.grid.origin;
-        let x = (at.x / self.cell.width).max(0.);
-        let col = (x as u16).min(self.size.cols - 1);
-        let row = ((at.y / self.cell.height).max(0.) as u16).min(self.size.rows - 1);
-        let right = x - col as f32 >= 0.5;
+        let (col, row) = self.cell_at(at);
+        let right = ((at.x - self.grid.origin.x) / self.cell.width) - col as f32 >= 0.5;
         if start {
             model.select(col, row, right);
         } else {
             model.select_to(col, row, right);
         }
-        self.refresh(false, cx);
+        self.refresh(false, None, cx);
     }
 
     /// Scrolls `lines` up into the history and selects visible row `row` (screenshots).
@@ -205,7 +260,7 @@ impl TerminalView {
             model.select(0, row, false);
             model.select_to(self.size.cols - 1, row, true);
         }
-        self.refresh(false, cx);
+        self.refresh(false, None, cx);
     }
 
     /// ⌘C (ctrl-shift-c elsewhere): the selection to the clipboard.
@@ -219,6 +274,8 @@ impl TerminalView {
 pub(crate) fn color(Rgb(r, g, b): Rgb) -> Hsla {
     rgb(u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)).into()
 }
+
+impl EventEmitter<TerminalChanged> for TerminalView {}
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -354,7 +411,9 @@ mod tests {
     };
     use wai_settings::Settings;
 
-    use super::{EXITED, TerminalView};
+    use std::{cell::Cell, rc::Rc};
+
+    use super::{EXITED, TerminalChanged, TerminalView, WheelMode};
     use crate::workspace::tests::{open, wait_until};
 
     /// The visible row holding `text`, and where in it.
@@ -376,7 +435,7 @@ mod tests {
         cx.executor().allow_parking(); // the shell is a real process
         let (workspace, cx) = open(cx, Settings::default());
         cx.simulate_keystrokes("ctrl-`");
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
         cx.simulate_input("seq 1 200");
         cx.simulate_keystrokes("enter");
         // Not "200": the typed command shows it at once.
@@ -395,6 +454,54 @@ mod tests {
         assert_eq!(terminal.read_with(cx, |t, _| t.snapshot.display_offset), 0);
     }
 
+    /// Scrolls one line up over the grid.
+    fn wheel_up(cx: &mut VisualTestContext) {
+        let bounds = cx.debug_bounds("terminal").expect("terminal drawn");
+        cx.simulate_event(ScrollEvent {
+            position: bounds.center(),
+            delta: ScrollDelta::Lines(point(0., 1.)),
+            ..Default::default()
+        });
+    }
+
+    #[gpui_kit::test]
+    fn wheel_in_the_alternate_screen_sends_arrows(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the shell is a real process
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
+        cx.simulate_input("printf '\\033[?1049h'; cat");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "the alternate screen", |cx| {
+            terminal.read_with(cx, |t, _| {
+                t.model.as_ref().unwrap().wheel_mode() != WheelMode::History
+            })
+        });
+        wheel_up(cx);
+        wait_until(cx, "the arrow echoed", |cx| {
+            find(&terminal, "^[[A", cx).is_some()
+        });
+    }
+
+    #[gpui_kit::test]
+    fn wheel_in_mouse_mode_sends_reports(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the shell is a real process
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
+        cx.simulate_input("printf '\\033[?1000h\\033[?1006h'; cat");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "the mouse mode", |cx| {
+            terminal.read_with(cx, |t, _| {
+                t.model.as_ref().unwrap().wheel_mode() != WheelMode::History
+            })
+        });
+        wheel_up(cx);
+        wait_until(cx, "the report echoed", |cx| {
+            find(&terminal, "^[[<64;", cx).is_some()
+        });
+    }
+
     /// R41: output that comes while scrolled up moves the view with it, ahead of the snapshot
     /// until the next redraw; typing still lands at the bottom.
     #[gpui_kit::test]
@@ -402,7 +509,7 @@ mod tests {
         cx.executor().allow_parking(); // the shell is a real process
         let (workspace, cx) = open(cx, Settings::default());
         cx.simulate_keystrokes("ctrl-`");
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
         cx.simulate_input("seq 1 200");
         cx.simulate_keystrokes("enter");
         wait_until(cx, "the output", |cx| find(&terminal, "199", cx).is_some());
@@ -436,7 +543,7 @@ mod tests {
         cx.executor().allow_parking(); // the shell is a real process
         let (workspace, cx) = open(cx, Settings::default());
         cx.simulate_keystrokes("ctrl-`");
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
         cx.simulate_input("printf wai-%s sel");
         cx.simulate_keystrokes("enter");
         wait_until(cx, "the output", |cx| {
@@ -478,7 +585,7 @@ mod tests {
         cx.simulate_input("printf wai-%s ok");
         cx.simulate_keystrokes("enter");
 
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
         wait_until(cx, "the shell output", |cx| {
             terminal.read_with(cx, |t, _| {
                 t.snapshot.rows.iter().any(|row| {
@@ -494,7 +601,7 @@ mod tests {
         cx.executor().allow_parking(); // the shell is a real process
         let (workspace, cx) = open(cx, Settings::default());
         cx.simulate_keystrokes("ctrl-`");
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
 
         cx.write_to_clipboard(ClipboardItem::new_string("printf wai-%s pasted".into()));
         let paste = if cfg!(target_os = "macos") {
@@ -515,13 +622,35 @@ mod tests {
         });
     }
 
+    #[gpui_kit::test]
+    fn title_is_kept_and_announced(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the shell is a real process
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
+        let changes = Rc::new(Cell::new(0));
+        let seen = changes.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&terminal, move |_, _: &TerminalChanged, _| {
+                seen.set(seen.get() + 1)
+            })
+            .detach()
+        });
+        cx.simulate_input(r"printf '\033]0;hello\007'");
+        cx.simulate_keystrokes("enter");
+        wait_until(cx, "the title", |cx| {
+            terminal.read_with(cx, |t, _| t.title() == Some("hello"))
+        });
+        assert_eq!(changes.get(), 1);
+    }
+
     /// A shell that exits starts again on the next show, in the project open by then.
     #[gpui_kit::test]
     fn exited_shell_restarts_in_current_project(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the shell is a real process
         let (workspace, cx) = open(cx, Settings::default());
         cx.simulate_keystrokes("ctrl-`");
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("first toggle"));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("first toggle"));
         let project = std::env::temp_dir().join(format!("wai-cwd-{}", std::process::id()));
         std::fs::create_dir_all(&project).unwrap();
         cx.update(|window, cx| {

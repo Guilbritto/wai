@@ -2,6 +2,7 @@
 
 mod search;
 mod tree;
+mod walk;
 mod watch;
 
 pub use search::{MAX_MATCHES, Match, SearchHandle, SearchQuery, search, search_in};

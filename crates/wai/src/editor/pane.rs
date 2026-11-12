@@ -438,6 +438,11 @@ pub struct Emptied;
 
 impl EventEmitter<Emptied> for EditorPane {}
 
+/// Tabs were added, closed or switched: the workspace saves its state.
+pub struct TabsChanged;
+
+impl EventEmitter<TabsChanged> for EditorPane {}
+
 /// A clean tab whose file is gone asks to be closed.
 pub struct CloseRequest;
 
@@ -475,6 +480,7 @@ impl EditorPane {
     pub fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.active = ix;
         self.focus(window, cx);
+        cx.emit(TabsChanged);
         cx.notify();
     }
 
@@ -553,6 +559,7 @@ impl EditorPane {
         self.tabs.remove(ix);
         drop(self._subs.remove(ix));
         if self.tabs.is_empty() {
+            cx.emit(TabsChanged);
             return cx.emit(Emptied);
         }
         if ix < self.active || self.active == self.tabs.len() {

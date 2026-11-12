@@ -891,7 +891,7 @@ pub(crate) mod tests {
         let (workspace, cx) = start_after(&config, fake_settings(""), cx, |_, cx| {
             cx.simulate_keystrokes("ctrl-`");
         });
-        let terminal = workspace.read_with(cx, |w, _| w.terminal.clone().expect("the terminal"));
+        let terminal = workspace.read_with(cx, |w, _| w.terminal().cloned().expect("the terminal"));
 
         let session = pane_session(&workspace, cx);
         cx.simulate_input("echo typed-in-terminal");

@@ -39,6 +39,10 @@ actions!(
         Quit,
         NewSession,
         ToggleTerminal,
+        NewTerminal,
+        CloseTerminal,
+        NextTerminal,
+        PrevTerminal,
         ClosePane,
         FocusNextPane,
         OpenFolder,
@@ -84,6 +88,11 @@ fn bind_keys(cx: &mut App) {
         ("secondary-q", Box::new(Quit), None),
         ("secondary-n", Box::new(NewSession), workspace),
         ("ctrl-`", Box::new(ToggleTerminal), workspace),
+        ("secondary-t", Box::new(NewTerminal), workspace),
+        ("secondary-w", Box::new(CloseTerminal), Some("Terminal")),
+        // GPUI reports a shifted symbol key as the symbol with `shift` cleared: cmd-shift-] is cmd-}.
+        ("secondary-}", Box::new(NextTerminal), Some("Terminal")),
+        ("secondary-{", Box::new(PrevTerminal), Some("Terminal")),
         ("secondary-alt-b", Box::new(ToggleAgents), workspace),
         // A session leaves the screen and stays open; R20: an editor closes its active tab.
         ("secondary-w", Box::new(ClosePane), workspace),
@@ -113,18 +122,20 @@ fn bind_keys(cx: &mut App) {
 }
 
 /// Off macOS (Windows, and Linux alike), in the Terminal context: `NoAction` hides the app's
-/// ctrl-c/v/n/w/o/q (`secondary-` is ctrl there), so they reach the shell, and the app's actions
+/// ctrl-c/v/n/w/t/o/q (`secondary-` is ctrl there), so they reach the shell, and the app's actions
 /// move to ctrl-shift.
-fn terminal_ctrl_keymap() -> [(&'static str, Box<dyn Action>); 10] {
+fn terminal_ctrl_keymap() -> [(&'static str, Box<dyn Action>); 12] {
     [
         ("ctrl-c", Box::new(NoAction)),
         ("ctrl-v", Box::new(NoAction)),
         ("ctrl-n", Box::new(NoAction)),
         ("ctrl-w", Box::new(NoAction)),
+        ("ctrl-t", Box::new(NoAction)),
         ("ctrl-o", Box::new(NoAction)),
         ("ctrl-q", Box::new(NoAction)),
         ("ctrl-shift-n", Box::new(NewSession)),
-        ("ctrl-shift-w", Box::new(ClosePane)),
+        ("ctrl-shift-t", Box::new(NewTerminal)),
+        ("ctrl-shift-w", Box::new(CloseTerminal)),
         ("ctrl-shift-o", Box::new(OpenFolder)),
         ("ctrl-shift-q", Box::new(Quit)),
     ]
@@ -463,7 +474,7 @@ fn screenshot(
             run_in_terminal(window, &command, cx).await;
             executor.timer(Duration::from_millis(500)).await;
             workspace.update(cx, |w, cx| {
-                if let Some(terminal) = &w.terminal {
+                if let Some(terminal) = w.terminal() {
                     terminal.update(cx, |t, cx| t.show_history(20, 3, cx));
                 }
             });
@@ -592,7 +603,7 @@ async fn drag_open_row(
 
 #[cfg(test)]
 mod tests {
-    /// Off macOS, terminal focused: the shell gets ctrl-c/v/n/w/o/q, the app's actions move to
+    /// Off macOS, terminal focused: the shell gets ctrl-c/v/n/w/t/o/q, the app's actions move to
     /// ctrl-shift (copy and paste are ctrl-shift-c/v off macOS already).
     #[test]
     fn windows_terminal_keymap_table() {
@@ -606,10 +617,12 @@ mod tests {
             ("ctrl-v", shell),
             ("ctrl-n", shell),
             ("ctrl-w", shell),
+            ("ctrl-t", shell),
             ("ctrl-o", shell),
             ("ctrl-q", shell),
             ("ctrl-shift-n", "wai::NewSession"),
-            ("ctrl-shift-w", "wai::ClosePane"),
+            ("ctrl-shift-t", "wai::NewTerminal"),
+            ("ctrl-shift-w", "wai::CloseTerminal"),
             ("ctrl-shift-o", "wai::OpenFolder"),
             ("ctrl-shift-q", "wai::Quit"),
         ];

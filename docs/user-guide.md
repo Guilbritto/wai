@@ -12,7 +12,7 @@ This guide describes the latest wai release. On Windows, read **ctrl** where it 
 
 **The look:** the default dark theme is Aurora: an indigo night with a soft, still aurora behind floating glass cards. Set `theme = "light"` for the light one, which keeps plain panels and no aurora (see [Settings](#settings)).
 
-**On relaunch** wai restores the project, the open sessions with their history, which pane each was in, whether the terminal was open, where Agents was (and whether its panel was collapsed), and the sidebar width. Editor tabs are not restored, except unsaved ones (see [Unsaved edits after a quit](#unsaved-edits-after-a-quit)).
+**On relaunch** wai restores the project, the open sessions with their history, which pane each was in, whether the terminal was open, where Agents was (and whether its panel was collapsed), and the sidebar width. Editor tabs come back too (only when the project is the same), and unsaved edits as before (see [Unsaved edits after a quit](#unsaved-edits-after-a-quit)). The terminal returns as one fresh shell.
 
 **Opening another folder:** **⌘O** opens it in the same window. If any file has unsaved edits, wai asks first.
 
@@ -218,12 +218,17 @@ Clicking a card shows that session in the focused pane; dragging it onto a pane 
 
 ## The terminal
 
-**ctrl-`** shows or hides a terminal in the project folder.
+**ctrl-`** shows or hides the terminal in the project folder.
+
+- **Tabs:** a strip on top of the terminal has one tab per shell, a **+** to add one and a **×** on each tab to close it. Tabs are labelled by the title the shell or program sets, else "Terminal N", and there are at most 8. Closing a tab with a program still running asks first.
+- **Keys:** new tab **⌘T** (**ctrl-t**; **ctrl-shift-t** while the terminal has focus on Windows and Linux), close the tab **⌘W** (**ctrl-shift-w**), next and previous tab **⌘⇧]** and **⌘⇧[** (**ctrl-shift-]** and **ctrl-shift-[**).
+- **Install in terminal** and **Continue in terminal** open a new tab.
+- **Mouse wheel:** scrolls inside `less` and `vim`.
 
 - **Shell:** `terminal.shell` from your settings, else `$SHELL`, else `/bin/sh`. On Windows the fallbacks are `%COMSPEC%`, then `powershell.exe`.
 - **Scrollback:** 10,000 lines.
 - **Copy and paste:** select with the mouse, then copy with **⌘C** and paste with **⌘V**. On Windows and Linux use **ctrl-shift-c** and **ctrl-shift-v**.
-- **Keys on Windows and Linux:** while the terminal has focus, **ctrl-c/v/n/w/o/q** go to the shell. wai's own actions move to **ctrl-shift-n/w/o/q**.
+- **Keys on Windows and Linux:** while the terminal has focus, **ctrl-c/v/n/t/w/o/q** go to the shell. wai's own actions move to **ctrl-shift-n/t/w/o/q**.
 
 ## The command palette
 
@@ -242,7 +247,7 @@ Clicking a card shows that session in the focused pane; dragging it onto a pane 
 |---|---|---|---|
 | Quit | ⌘Q | ctrl-q (ctrl-shift-q in the terminal) | anywhere |
 | New session | ⌘N | ctrl-n (ctrl-shift-n in the terminal) | window |
-| Close the pane (the session stays open) or the editor's active tab | ⌘W | ctrl-w (ctrl-shift-w in the terminal) | window |
+| Close the pane (the session stays open) or the editor's active tab | ⌘W | ctrl-w (ctrl-shift-w in the terminal) | window; in the terminal it closes the active tab |
 | Save | ⌘S | ctrl-s | window |
 | Open folder | ⌘O | ctrl-o (ctrl-shift-o in the terminal) | window |
 | Command palette | ⌘⇧P | ctrl-shift-p | window |
@@ -250,6 +255,8 @@ Clicking a card shows that session in the focused pane; dragging it onto a pane 
 | Close Settings | Esc | Esc | Settings |
 | Focus next pane | ⌘⌥→ | ctrl-alt-→ | window |
 | Show or hide the terminal | ctrl-` | ctrl-` | window |
+| New terminal tab | ⌘T | ctrl-t (ctrl-shift-t in the terminal) | window |
+| Next / previous terminal tab | ⌘⇧] / ⌘⇧[ | ctrl-shift-] / ctrl-shift-[ | terminal |
 | Show or hide the Agents panel, while it is on the right | ⌘⌥B | ctrl-alt-b | window |
 | Stop the turn | Esc | Esc | chat session |
 | Send the prompt / new line | Enter / Shift+Enter | Enter / Shift+Enter | prompt box |
