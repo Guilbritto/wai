@@ -395,6 +395,7 @@ impl ChatSession {
 
     /// Esc: out of the agent list and its drawer first, keeping the turn; else Stop.
     pub(super) fn cancel(&mut self, _: &CancelTurn, window: &mut Window, cx: &mut Context<Self>) {
+        self.prune_agents();
         if self.drawer.is_none() && self.agent_cursor.is_none() {
             return self.stop_turn(cx);
         }

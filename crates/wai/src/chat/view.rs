@@ -1483,6 +1483,65 @@ mod tests {
         assert_eq!(typed(&session, cx), "x");
     }
 
+    /// A click on a subagent's row opens its drawer, a second click closes it, and so does a
+    /// click on `main`.
+    #[gpui_kit::test]
+    fn clicks_open_and_close_the_drawer(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--subagent"));
+        let session = start_session(&workspace, cx);
+        let sub = session.read_with(cx, |s, _| format!("{}-sub", s.id));
+        turn(&session, cx);
+        let row = ("agent-row", 0usize);
+
+        click_edits(None, row, cx);
+        assert_eq!(agents_at(&session, cx), (None, Some(sub.clone())));
+        click_edits(None, row, cx);
+        assert_eq!(agents_at(&session, cx), (None, None));
+        click_edits(None, row, cx);
+        assert_eq!(agents_at(&session, cx), (None, Some(sub)));
+        click_edits(None, "agent-main", cx);
+        assert_eq!(agents_at(&session, cx), (None, None));
+    }
+
+    /// A drawer whose subagent left the list (a new turn) is closed: the first Esc stops the turn.
+    #[gpui_kit::test]
+    fn escape_stops_the_turn_past_a_drawer_that_left_the_list(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(&slow_reply(200, 20)));
+        let session = start_session(&workspace, cx);
+        session.update(cx, |s, cx| {
+            let started = Instant::now();
+            s.model.subagents.push(Subagent {
+                id: "old".into(),
+                title: "Earlier task".into(),
+                kind: Some("Explore".into()),
+                state: SubagentState::Done,
+                used: None,
+                started,
+                ended: Some(started),
+                turn: s.model.turn,
+            });
+            s.open_drawer(Some("old".into()), cx);
+        });
+
+        send("go", cx);
+        wait_until(cx, "the first chunk", |cx| {
+            last_agent_text(&session, cx).is_some()
+        });
+        cx.simulate_keystrokes("escape");
+        wait_until(cx, "the turn's end", |cx| {
+            state(&session, cx) == TurnState::Idle
+        });
+        let cancelled = ChatItem::Notice {
+            text: "Cancelled".into(),
+            kind: NoticeKind::Info,
+        };
+        let last = session.read_with(cx, |s, _| s.model.items.last().cloned());
+        assert_eq!(last, Some(cancelled), "the first Esc did not stop the turn");
+        assert_eq!(agents_at(&session, cx), (None, None));
+    }
+
     /// Esc in the agent list only leaves it: the turn runs on to its end.
     #[gpui_kit::test]
     fn escape_leaves_the_agent_list_before_stopping(cx: &mut TestAppContext) {

@@ -40,10 +40,9 @@ fn join<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
 impl ChatSession {
     /// The list, while the session has subagents to show; `None` draws nothing.
     pub(super) fn render_agents(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.prune_agents();
         let subs = self.model.shown_subagents();
         if subs.is_empty() {
-            // Nothing to navigate: Esc and Enter are the prompt's again.
-            self.agent_cursor = None;
             return None;
         }
         let theme = cx.theme();
@@ -198,6 +197,21 @@ impl ChatSession {
             .child(list)
             .children(hint);
         Some(el.into_any_element())
+    }
+
+    /// Closes a drawer whose subagent left the list (a new turn), and leaves the list once it is
+    /// gone, so Esc and Enter are the prompt's again.
+    pub(super) fn prune_agents(&mut self) {
+        let shown = self.model.shown_subagents();
+        let open = shown
+            .iter()
+            .any(|s| self.drawer.as_deref() == Some(s.id.as_str()));
+        if shown.is_empty() {
+            self.agent_cursor = None;
+        }
+        if !open {
+            self.drawer = None;
+        }
     }
 
     /// Opens the subagent `id`'s drawer; `None` closes it (back to `main`).
