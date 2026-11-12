@@ -131,6 +131,8 @@ pub struct ChatSession {
     pub(super) open_groups: HashSet<usize>,
     /// While a turn runs: when it started, the status line's tick period and its timer.
     pub(super) turn: Option<(Instant, Duration, Task<()>)>,
+    /// When the state last changed; `None` until the first change (a restored session).
+    pub since: Option<Instant>,
     /// Per waiting `Question` card, by request id, made when it first draws.
     pub(super) questions: HashMap<u64, QuestionForm>,
     pub(super) scroller: Entity<MessageScrollerState>,
@@ -206,6 +208,7 @@ impl ChatSession {
             open_steps: HashSet::new(),
             open_groups: HashSet::new(),
             turn: None,
+            since: None,
             questions: HashMap::new(),
             scroller: cx.new(|cx| MessageScrollerState::new(0, cx)),
             waiting_height: px(0.),
@@ -609,6 +612,11 @@ impl ChatSession {
         cx.notify();
     }
 
+    /// When the running turn started, for the sidebar.
+    pub fn turn_started(&self) -> Option<Instant> {
+        self.turn.as_ref().map(|(at, ..)| *at)
+    }
+
     /// Runs `f` on the model and reports state and title changes.
     pub(super) fn update_model<R>(
         &mut self,
@@ -618,6 +626,7 @@ impl ChatSession {
         let (state, title) = (self.model.state.clone(), self.model.title.clone());
         let result = f(&mut self.model);
         if self.model.state != state {
+            self.since = Some(Instant::now());
             cx.emit(ChatEvent::StateChanged);
             self.sync_clock(cx);
         }
@@ -2222,6 +2231,22 @@ mod tests {
         assert!(!shows(("group", 1usize), cx));
         assert!(!shows(("step", 2usize), cx));
         assert!(last_agent_text(&session, cx).is_some());
+    }
+
+    #[gpui_kit::test]
+    fn since_follows_the_state(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = live(cx, fake_settings("--steps 1 --chunk-delay-ms 300"), None);
+        let session = start_session(&workspace, cx);
+        assert!(session.read_with(cx, |s, _| s.since.is_none()));
+        send("go", cx);
+        wait_until(cx, "the turn", |cx| {
+            session.read_with(cx, |s, _| s.since.is_some())
+        });
+        let working = session.read_with(cx, |s, _| s.since).unwrap();
+        wait_until(cx, "the turn's end", |cx| {
+            state(&session, cx) == TurnState::Idle && last_agent_text(&session, cx).is_some()
+        });
+        assert!(session.read_with(cx, |s, _| s.since).unwrap() > working);
     }
 
     fn typed(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> String {

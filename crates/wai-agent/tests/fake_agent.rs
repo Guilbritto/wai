@@ -768,7 +768,9 @@ fn subagent_traffic_reaches_the_parent() {
             SessionEvent::Subagent(SubagentPatch {
                 id: sub.clone(),
                 title: Some("Explore the code".into()),
+                description: Some("Explore".into()),
                 state: Some(state),
+                used: None,
             })
         };
         let position = |want: &SessionEvent| updates.iter().position(|e| *e == want);

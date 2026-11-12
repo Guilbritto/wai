@@ -43,7 +43,15 @@ impl Subagents {
                     Some((root, SessionEvent::ToolCall(v)))
                 }
                 e @ SessionEvent::ToolCallUpdate(_) => Some((root, e)),
-                // ponytail: a subagent's text, plan, usage and commands are not shown.
+                SessionEvent::Usage { used, .. } => Some((
+                    root,
+                    SessionEvent::Subagent(SubagentPatch {
+                        id: session,
+                        used: Some(used),
+                        ..Default::default()
+                    }),
+                )),
+                // ponytail: a subagent's text, plan and commands are not shown.
                 _ => None,
             },
         }
@@ -114,6 +122,7 @@ mod tests {
                     id: "c".into(),
                     title: Some("Explore".into()),
                     state: Some(SubagentState::Running),
+                    ..Default::default()
                 })
             ))
         );
@@ -136,6 +145,26 @@ mod tests {
     }
 
     /// Review focus 4: a subagent's subagent shows under the same session.
+    #[test]
+    fn child_usage_goes_to_its_subagent() {
+        let mut s = Subagents::default();
+        s.route("r".into(), sub("c", "Explore", running()));
+        let usage = acp::SessionUpdate::UsageUpdate(acp::UsageUpdate::new(46_900, 200_000));
+        assert_eq!(
+            s.route("c".into(), usage),
+            Some((
+                "r".into(),
+                SessionEvent::Subagent(SubagentPatch {
+                    id: "c".into(),
+                    used: Some(46_900),
+                    title: None,
+                    description: None,
+                    state: None,
+                })
+            ))
+        );
+    }
+
     #[test]
     fn nested_subagent_routes_to_the_root() {
         let mut s = Subagents::default();
@@ -206,8 +235,7 @@ mod tests {
             convert::subagent_patch(acp::SubagentUpdate::new("c")),
             SubagentPatch {
                 id: "c".into(),
-                title: None,
-                state: None,
+                ..Default::default()
             }
         );
 

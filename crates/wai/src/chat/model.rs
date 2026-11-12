@@ -1,6 +1,7 @@
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use wai_agent::{
     CommandInfo, ConfigOption, FileDiff, Location, ModeInfo, PermissionRequest, PlanEntry,
@@ -206,7 +207,22 @@ fn grouped(n: usize) -> String {
 pub struct Subagent {
     pub id: String,
     pub title: String,
+    /// ACP's `description`: for Claude, the subagent type (`general-purpose`).
+    pub kind: Option<String>,
     pub state: SubagentState,
+    pub used: Option<u64>,
+    pub started: Instant,
+    /// Set the first time the state becomes terminal.
+    pub ended: Option<Instant>,
+    /// The `ChatModel::turn` it was announced in.
+    pub turn: u32,
+}
+
+fn is_terminal(state: SubagentState) -> bool {
+    matches!(
+        state,
+        SubagentState::Done | SubagentState::Ended | SubagentState::Stopped | SubagentState::Failed
+    )
 }
 
 fn is_running(status: ToolStatus) -> bool {
@@ -248,6 +264,8 @@ pub struct ChatModel {
     pub config: Vec<ConfigOption>,
     pub commands: Vec<CommandInfo>,
     pub subagents: Vec<Subagent>,
+    /// Prompts sent by the user so far (`push_user`, not `push_steered`).
+    pub turn: u32,
     /// A turn is running: a card answered meanwhile leaves the session `Working`, not `Idle`.
     pub in_turn: bool,
     /// Open permission and question cards, oldest first: they wait over the list, and join
@@ -289,6 +307,7 @@ impl Default for ChatModel {
             config: Vec::new(),
             commands: Vec::new(),
             subagents: Vec::new(),
+            turn: 0,
             in_turn: false,
             waiting: Vec::new(),
             steering: Vec::new(),
@@ -357,6 +376,7 @@ impl ChatModel {
     }
 
     pub fn push_user(&mut self, text: &str) -> usize {
+        self.turn += 1;
         self.state = TurnState::Working;
         self.in_turn = true;
         self.done = false;
@@ -521,13 +541,24 @@ impl ChatModel {
                     .clone()
                     .unwrap_or(std::mem::take(&mut line.title));
                 line.state = patch.state.unwrap_or(line.state);
+                line.kind = patch.description.clone().or(line.kind.take());
+                line.used = patch.used.or(line.used);
+                if line.ended.is_none() && is_terminal(line.state) {
+                    line.ended = Some(Instant::now());
+                }
                 (line.title.clone(), line.state)
             }
             None => {
+                let state = patch.state.unwrap_or(SubagentState::Unknown);
                 let line = Subagent {
                     id: patch.id.clone(),
                     title: patch.title.clone().unwrap_or_else(|| "Subagent".into()),
-                    state: patch.state.unwrap_or(SubagentState::Unknown),
+                    kind: patch.description.clone(),
+                    state,
+                    used: patch.used,
+                    started: Instant::now(),
+                    ended: is_terminal(state).then(Instant::now),
+                    turn: self.turn,
                 };
                 let seen = (line.title.clone(), line.state);
                 self.subagents.push(line);
@@ -555,6 +586,16 @@ impl ChatModel {
                 subagent: None,
             })),
         }
+    }
+
+    /// The subagents of this turn, and any still running from an earlier one.
+    pub fn shown_subagents(&self) -> Vec<&Subagent> {
+        let live =
+            |s: &Subagent| matches!(s.state, SubagentState::Running | SubagentState::NeedsYou);
+        self.subagents
+            .iter()
+            .filter(|s| s.turn == self.turn || live(s))
+            .collect()
     }
 
     /// `{subagent title}: ` for a request a known subagent made.
@@ -887,8 +928,8 @@ impl ChatModel {
         for id in live {
             self.patch_subagent(&SubagentPatch {
                 id,
-                title: None,
                 state: Some(SubagentState::Unknown),
+                ..Default::default()
             });
         }
         self.notice(format!("Agent exited: {msg}"), NoticeKind::Error);
@@ -921,7 +962,65 @@ mod tests {
             id: id.into(),
             title: title.map(str::to_string),
             state,
+            ..Default::default()
         })
+    }
+
+    fn running(id: &str) -> SubagentPatch {
+        SubagentPatch {
+            id: id.into(),
+            state: Some(SubagentState::Running),
+            ..Default::default()
+        }
+    }
+
+    fn sub_patch(id: &str, title: &str, state: Option<SubagentState>) -> SessionEvent {
+        SessionEvent::Subagent(SubagentPatch {
+            title: Some(title.into()),
+            state,
+            ..running(id)
+        })
+    }
+
+    fn ids(v: Vec<&Subagent>) -> Vec<&str> {
+        v.into_iter().map(|s| s.id.as_str()).collect()
+    }
+
+    #[test]
+    fn subagents_of_earlier_turns_leave_unless_live() {
+        let mut m = ChatModel::default();
+        m.push_user("one");
+        m.apply(&sub_patch(
+            "a",
+            "Explore the code",
+            Some(SubagentState::Done),
+        ));
+        m.apply(&sub_patch(
+            "b",
+            "Watch the build",
+            Some(SubagentState::Running),
+        ));
+        assert_eq!(ids(m.shown_subagents()), ["a", "b"]);
+        m.push_user("two");
+        assert_eq!(
+            ids(m.shown_subagents()),
+            ["b"],
+            "a finished in an earlier turn"
+        );
+    }
+
+    #[test]
+    fn a_subagent_keeps_its_kind_and_end() {
+        let mut m = ChatModel::default();
+        m.apply(&SessionEvent::Subagent(SubagentPatch {
+            description: Some("Explore".into()),
+            ..running("a")
+        }));
+        let s = &m.subagents[0];
+        assert_eq!(s.kind.as_deref(), Some("Explore"));
+        assert!(s.ended.is_none());
+        m.apply(&sub_patch("a", "x", Some(SubagentState::Done)));
+        assert!(m.subagents[0].ended.is_some());
     }
 
     fn card(m: &ChatModel, id: &str) -> ToolItem {
@@ -948,13 +1047,10 @@ mod tests {
             (c.title.as_str(), c.status),
             ("Explore", ToolStatus::InProgress)
         );
+        let s = &m.subagents[0];
         assert_eq!(
-            m.subagents,
-            [Subagent {
-                id: "c".into(),
-                title: "Explore".into(),
-                state: SubagentState::Running,
-            }]
+            (s.id.as_str(), s.title.as_str(), s.state, s.turn),
+            ("c", "Explore", SubagentState::Running, 0)
         );
         let reply = SessionEvent::SubagentReply {
             id: "c".into(),
