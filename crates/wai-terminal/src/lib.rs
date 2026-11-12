@@ -457,21 +457,19 @@ mod tests {
 
     #[test]
     fn wheel_mode_follows_the_screen() {
-        let (m, rx, _dir) = spawn();
+        let (m, _rx, _dir) = spawn();
         assert_eq!(m.wheel_mode(), WheelMode::History);
-        m.write(b"printf '\\033[?1049h'; echo wai-alt\r");
-        wait_for(&m, &rx, |s| {
-            s.rows.iter().any(|r| text(r).contains("wai-alt"))
-        });
-        assert_eq!(m.wheel_mode(), WheelMode::Arrows { app_cursor: false });
-        m.write(b"printf '\\033[?1049l'\r");
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Waits on the mode itself: the echoed command line shows before the shell runs it.
+        let deadline = Instant::now() + Duration::from_secs(10);
         let until = |mode| {
             while m.wheel_mode() != mode {
                 assert!(Instant::now() < deadline, "never became {mode:?}");
                 std::thread::sleep(Duration::from_millis(10));
             }
         };
+        m.write(b"printf '\\033[?1049h'\r");
+        until(WheelMode::Arrows { app_cursor: false });
+        m.write(b"printf '\\033[?1049l'\r");
         until(WheelMode::History);
         m.write(b"printf '\\033[?1000h\\033[?1006h'\r");
         until(WheelMode::Mouse { sgr: true });
