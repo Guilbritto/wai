@@ -254,7 +254,7 @@ Clicking a card shows that session in the focused pane; dragging it onto a pane 
 
 | Group | Rows |
 |---|---|
-| wai | New session, Toggle terminal, Open folder…, Search, Files, Agents, Move Agents to the right (or to the sidebar), Extensions, Settings |
+| wai | New session, Toggle terminal, Open folder…, Search, Files, Agents, Move Agents to the right (or to the sidebar), Extensions, Settings, Copy diagnostics |
 | Templates | Every template |
 | Commands | The enabled extensions' commands |
 | Agents | `New session with <agent>`, one per agent |
@@ -310,6 +310,8 @@ Every push to the `main` branch of `Guilbritto/wai` publishes a release on GitHu
 - Downloads are kept in `~/Library/Caches/wai-updates` (macOS) or `%LOCALAPPDATA%\wai-updates` (Windows).
 - Only releases of `Guilbritto/wai` are installed. Pointing **Repository** at another repository only notifies you of its newer release, with **Open release page**; nothing is downloaded.
 - When wai cannot update itself where it is installed (a folder your account cannot write to, such as `/Applications` for a standard user), it notifies you instead, and Settings → Updates shows **Open release page**. On macOS install wai into `~/Applications`.
+- **Copy diagnostics** (the palette, or Settings → Updates) copies a report for an issue: wai and OS versions, agents and their status, settings, extensions and the last 200 log lines. It leaves out environment variables, extension settings and values, custom command arguments, and masks tokens and your home folder.
+- Settings → AI shows each adapter's version and, when `updates.check` is on, says if a newer `claude-agent-acp` exists on npm.
 - Failures (offline, rate-limited, a bad answer) go to wai's log and show nothing.
 
 The releases are unsigned. On the first launch macOS refuses to open the app: open it once, then use System Settings → Privacy & Security → **Open Anyway** (or run `xattr -dr com.apple.quarantine ~/Applications/wai.app`), and Windows SmartScreen needs **More info** then **Run anyway**. Without a Developer ID, macOS may also ask again for access to folders such as Documents after each update.

@@ -201,12 +201,13 @@ pub(crate) fn open_modal(view: Entity<SettingsView>, window: &mut Window, cx: &m
 }
 
 /// Every row with its section and label: what the search matches.
-const ROWS: [(Section, &str); 6] = [
+const ROWS: [(Section, &str); 7] = [
     (Section::Appearance, "Theme"),
     (Section::Conversation, "Processing"),
     (Section::Terminal, "Shell"),
     (Section::Updates, "Automatic updates"),
     (Section::Updates, "Version"),
+    (Section::Updates, "Diagnostics"),
     (Section::Updates, "Repository"),
 ];
 
@@ -244,6 +245,10 @@ pub struct AgentRow {
     pub label: String,
     pub extension: Option<String>,
     pub status: RowStatus,
+    /// `"<name> <version>"` of the running adapter; `None` until it is `Ready`.
+    pub adapter: Option<String>,
+    /// `"<version> is out (wai runs <pinned>)"` when npm has a newer adapter.
+    pub adapter_note: Option<String>,
     /// The command in force (approved).
     pub command: String,
     pub models: Vec<SeenModel>,
@@ -278,6 +283,7 @@ pub enum SettingsEvent {
     OpenFile,
     CheckUpdates,
     RestartToUpdate,
+    CopyDiagnostics,
     Test(String),
     CheckMcp,
     Open {
@@ -684,6 +690,22 @@ impl SettingsView {
         let warn = warning(row).map(|w| div().text_color(cx.theme().warning).child(w));
         let selector = format!("settings-agent-{}", row.id);
         let test_selector = format!("settings-test-{}", row.id);
+        let adapter = row.adapter.as_ref().map(|a| {
+            let selector = format!("settings-adapter-{}", row.id);
+            div()
+                .debug_selector(move || selector)
+                .text_size(px(12.))
+                .text_color(muted)
+                .child(format!("Adapter {a}"))
+        });
+        let adapter_note = row.adapter_note.as_ref().map(|note| {
+            let selector = format!("settings-adapter-note-{}", row.id);
+            div()
+                .debug_selector(move || selector)
+                .text_size(px(12.))
+                .text_color(muted)
+                .child(note.clone())
+        });
         v_flex()
             .py_2()
             .child(
@@ -719,6 +741,8 @@ impl SettingsView {
                             ),
                     ),
             )
+            .children(adapter)
+            .children(adapter_note)
             .children(install)
             .children(warn)
             .child(self.default_model(row, cx))
@@ -887,6 +911,18 @@ impl SettingsView {
                 cx,
             ),
             "Version" => self.version_row(cx),
+            "Diagnostics" => self.row(
+                "Diagnostics",
+                "settings-diagnostics",
+                h_flex().justify_end().child(
+                    Button::new("settings-diagnostics-copy")
+                        .label("Copy diagnostics")
+                        .on_click(
+                            cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::CopyDiagnostics)),
+                        ),
+                ),
+                cx,
+            ),
             _ => self.row(
                 "Repository",
                 "settings-updates-repo",
@@ -1273,6 +1309,18 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn settings_button_copies_diagnostics(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Updates, None, window, cx)
+        });
+        click("settings-diagnostics-copy", cx);
+        wait_until(cx, "the clipboard", |cx| cx.read_from_clipboard().is_some());
+        let text = cx.read_from_clipboard().and_then(|c| c.text()).unwrap();
+        assert!(text.contains("\nAgents\n"));
+    }
+
+    #[gpui_kit::test]
     fn test_learns_ready_and_models(cx: &mut TestAppContext) {
         let (workspace, cx, _dir) = fake_ws(cx, "--models");
         workspace.update_in(cx, |w, window, cx| w.test_agent("fake", window, cx));
@@ -1376,6 +1424,27 @@ mod tests {
             super::modal_size(vp, true),
             gpui_kit::size(gpui_kit::px(1376.), gpui_kit::px(876.))
         );
+    }
+
+    #[gpui_kit::test]
+    fn ai_row_shows_the_adapter_version(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = fake_ws(cx, "");
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Ai, None, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-adapter-fake").is_none());
+        workspace.update_in(cx, |w, window, cx| w.test_agent("fake", window, cx));
+        wait_until(cx, "the adapter version", |cx| {
+            row(&workspace, "fake", cx).adapter.is_some()
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(
+            row(&workspace, "fake", cx).adapter.as_deref(),
+            Some(format!("wai-fake-agent {version}").as_str())
+        );
+        assert!(cx.debug_bounds("settings-adapter-fake").is_some());
     }
 
     #[gpui_kit::test]
@@ -1671,5 +1740,33 @@ mod tests {
             text.ends_with("/bin/zsh") && !text.contains("fish"),
             "{text}"
         );
+    }
+
+    #[gpui_kit::test]
+    fn ai_row_shows_the_adapter_note(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.agents.insert(
+            "npx".into(),
+            wai_settings::AgentConfig {
+                command: "npx -y @a/b@1.0.0".into(),
+            },
+        );
+        let (workspace, cx) = open(cx, settings);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Ai, None, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-adapter-note-npx").is_none());
+        workspace.update(cx, |w, cx| {
+            w.registry
+                .update(cx, |r, _| r.set_latest("@a/b".into(), Some("1.1.0".into())));
+            w.sync_settings_view(cx);
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        assert_eq!(
+            row(&workspace, "npx", cx).adapter_note.as_deref(),
+            Some("1.1.0 is out (wai runs 1.0.0)")
+        );
+        assert!(cx.debug_bounds("settings-adapter-note-npx").is_some());
     }
 }
