@@ -862,6 +862,14 @@ impl ChatModel {
 
     /// A subagent last seen live is not: nothing says what became of it.
     pub fn on_exited(&mut self, error: Option<&str>) {
+        self.wind_down();
+        let msg = error.unwrap_or("The agent exited");
+        self.state = TurnState::Error(msg.to_string());
+        self.notice(format!("Agent exited: {msg}"), NoticeKind::Error);
+    }
+
+    /// The turn is over for good: steers read, waiting cards cancelled, running subagents parked.
+    pub fn wind_down(&mut self) {
         self.in_turn = false;
         self.read_steers();
         let cards: Vec<(bool, u64)> = self
@@ -876,8 +884,6 @@ impl ChatModel {
         for (question, id) in cards {
             self.close(question, id, "Cancelled");
         }
-        let msg = error.unwrap_or("The agent exited");
-        self.state = TurnState::Error(msg.to_string());
         let live: Vec<String> = self
             .subagents
             .iter()
@@ -891,7 +897,6 @@ impl ChatModel {
                 state: Some(SubagentState::Unknown),
             });
         }
-        self.notice(format!("Agent exited: {msg}"), NoticeKind::Error);
     }
 }
 

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::IndexPath;
@@ -28,10 +29,23 @@ use crate::git::Head;
 // ponytail: a fixed rate; lower it for smoother text at the cost of CPU.
 const STREAM_FLUSH: Duration = Duration::from_millis(100);
 
+/// What a session shows when the agent gave its id to another open session.
+pub(crate) const REUSED: &str =
+    "The agent gave this session's id to another session. Restart loads it here again.";
+
+/// Stamps `ChatSession::bound`: the higher stamp holds the id now.
+static BINDINGS: AtomicU64 = AtomicU64::new(0);
+
+fn next_binding() -> u64 {
+    BINDINGS.fetch_add(1, Ordering::Relaxed) + 1
+}
+
 #[derive(Debug)]
 pub enum ChatEvent {
     StateChanged,
     TitleChanged,
+    /// The agent gave or loaded this session's id.
+    Bound,
     /// A prompt's turn ended, with why. Loading a session replays it without one.
     TurnEnded(StopReason),
     /// The agent no longer has the session restored at launch.
@@ -94,6 +108,8 @@ impl SelectItem for Choice {
 pub struct ChatSession {
     pub agent: String,
     pub id: String,
+    /// When the agent last gave or loaded `id`: of two sessions with one id, the higher holds it.
+    pub(crate) bound: u64,
     pub cwd: PathBuf,
     /// The branch `cwd` is on, read in the background once the session is open.
     pub head: Option<Head>,
@@ -183,6 +199,11 @@ impl ChatSession {
         let mut this = Self {
             model: ChatModel::default(),
             agent,
+            bound: if started.id.is_empty() {
+                0
+            } else {
+                next_binding()
+            },
             id: started.id,
             cwd,
             head: None,
@@ -276,7 +297,21 @@ impl ChatSession {
         cx: &mut Context<Self>,
     ) {
         self.id = started.id.clone();
+        self.bound = next_binding();
         self.take_started(started, window, cx);
+        cx.emit(ChatEvent::Bound);
+        cx.notify();
+    }
+
+    /// Another open session holds this id now: the turn ends here and Restart shows.
+    pub fn lose_id(&mut self, cx: &mut Context<Self>) {
+        self.update_model(cx, |m| {
+            m.wind_down();
+            m.state = TurnState::Error(REUSED.into());
+            m.notice(REUSED.into(), NoticeKind::Error);
+        });
+        self.sync_rows(None, cx);
+        self.release_queue(false, cx);
         cx.notify();
     }
 
@@ -801,6 +836,8 @@ impl ChatSession {
             return;
         };
         self.handle = handle.clone();
+        self.bound = next_binding();
+        cx.emit(ChatEvent::Bound);
         self.model.items.clear();
         self.model.waiting.clear();
         self.model.steering.clear();
@@ -2719,6 +2756,73 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// `a` loses its process after one chunk; a new process starts `b` with the same id.
+    fn two_sessions_one_id(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Workspace>,
+        Entity<ChatSession>,
+        Entity<ChatSession>,
+        &mut VisualTestContext,
+    ) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--crash-after 1"));
+        let a = start_session(&workspace, cx);
+        a.update(cx, |s, cx| s.send_text("hi", cx));
+        wait_until(cx, "the crash", |cx| {
+            matches!(state(&a, cx), TurnState::Error(_))
+        });
+        let b = start_session(&workspace, cx);
+        let ids = (
+            a.read_with(cx, |s, _| s.id.clone()),
+            b.read_with(cx, |s, _| s.id.clone()),
+        );
+        assert_eq!(ids, ("fake-1".to_string(), "fake-1".to_string()));
+        (workspace, a, b, cx)
+    }
+
+    fn notices(session: &Entity<ChatSession>, text: &str, cx: &mut VisualTestContext) -> bool {
+        session.read_with(cx, |s, _| {
+            (s.model.items.iter())
+                .any(|i| matches!(i, ChatItem::Notice { text: t, .. } if t == text))
+        })
+    }
+
+    #[gpui_kit::test]
+    fn an_id_the_agent_reuses_goes_to_its_new_session(cx: &mut TestAppContext) {
+        let (_workspace, a, b, cx) = two_sessions_one_id(cx);
+        b.update(cx, |s, cx| s.send_text("go", cx));
+        wait_until(cx, "b's reply", |cx| {
+            last_agent_text(&b, cx).as_deref() == Some("Hello")
+        });
+        let agents = a.read_with(cx, |s, _| {
+            (s.model.items.iter())
+                .filter(|i| matches!(i, ChatItem::Agent { .. }))
+                .count()
+        });
+        assert_eq!(agents, 1, "a keeps only its own reply");
+        assert!(notices(&a, super::REUSED, cx));
+    }
+
+    #[gpui_kit::test]
+    fn restart_takes_a_reused_id_back(cx: &mut TestAppContext) {
+        let (_workspace, a, b, cx) = two_sessions_one_id(cx);
+        cx.update(|window, cx| a.update(cx, |s, cx| s.load(false, window, cx)));
+        wait_until(cx, "the replay", |cx| state(&a, cx) == TurnState::Idle);
+        let replay = [
+            ChatItem::User {
+                text: "previous prompt".into(),
+            },
+            ChatItem::Agent {
+                text: "previous answer".into(),
+            },
+        ];
+        assert_eq!(a.read_with(cx, |s, _| s.model.items.clone()), replay);
+        let b_items = b.read_with(cx, |s, _| s.model.items.clone());
+        assert!(replay.iter().all(|i| !b_items.contains(i)));
+        assert!(notices(&b, super::REUSED, cx));
     }
 
     /// Puts the window in the background, as when the user switched to another app.

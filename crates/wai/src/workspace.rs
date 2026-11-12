@@ -909,14 +909,36 @@ impl Workspace {
         }
     }
 
-    fn session(&self, agent: &str, id: &str, cx: &App) -> Option<Entity<ChatSession>> {
+    /// The open session the agent bound to `id` last.
+    pub(crate) fn session(&self, agent: &str, id: &str, cx: &App) -> Option<Entity<ChatSession>> {
         self.sessions
             .iter()
-            .find(|session| {
+            .filter(|session| {
                 let session = session.read(cx);
                 session.agent == agent && session.id == id
             })
+            .max_by_key(|session| session.read(cx).bound)
             .cloned()
+    }
+
+    /// Every other open session with `session`'s agent and id loses the id to it.
+    fn claim(&self, session: &Entity<ChatSession>, cx: &mut Context<Self>) {
+        let (agent, id) = {
+            let s = session.read(cx);
+            (s.agent.clone(), s.id.clone())
+        };
+        if id.is_empty() {
+            return;
+        }
+        for other in &self.sessions {
+            let same = {
+                let o = other.read(cx);
+                o.agent == agent && o.id == id
+            };
+            if same && other != session {
+                other.update(cx, |o, cx| o.lose_id(cx));
+            }
+        }
     }
 
     fn route(&mut self, event: &RegistryEvent, cx: &mut Context<Self>) {
@@ -1047,6 +1069,7 @@ impl Workspace {
                     this.sync_agents(cx);
                     this.save_state(cx);
                 }
+                ChatEvent::Bound => return this.claim(session, cx),
                 ChatEvent::OpenFile { path, line } => {
                     return this.open_file(path.clone(), Some(*line), window, cx);
                 }
@@ -1098,6 +1121,7 @@ impl Workspace {
             })
             .detach();
         }
+        self.claim(&session, cx);
         self.sessions.push(session);
         self.sync_agents(cx);
         self.sync_drafts(cx);
