@@ -150,7 +150,7 @@ pub(crate) enum Leave {
     Quit,
     Close,
     Open(PathBuf),
-    /// Quit to install the staged update (R5: asked about like a quit).
+    /// Quit to install the staged update (asked about like a quit).
     Update,
 }
 
@@ -189,6 +189,9 @@ pub struct Workspace {
     pub settings_error: Option<String>,
     /// What the update check found, staged or announced; Settings shows it.
     pub(crate) update: UpdateStatus,
+    /// Why this copy cannot install an update, for Settings. Refreshed when Settings opens and on
+    /// Check now: finding it writes a probe file, so it is not done per render.
+    pub(crate) update_blocker: Option<String>,
     /// The "New from template" menu's entries; empty hides the menu.
     pub templates: Vec<Template>,
     /// The config dir: the user's `templates.toml` (re-read on a project switch) and `scratch/`,
@@ -458,6 +461,7 @@ impl Workspace {
             next_recovery: 0,
             settings_error: None,
             update: UpdateStatus::Idle,
+            update_blocker: None,
             focus,
             _subscriptions: vec![
                 routing,
@@ -2053,9 +2057,16 @@ impl Workspace {
         if self.update == UpdateStatus::Checking {
             return;
         }
+        // Checking is off: nothing runs, not even the blocker's probe file.
+        if from_launch && !self.settings.updates.check {
+            return;
+        }
         let mut settings = self.settings.updates.clone();
         // ponytail: "Check now" is an explicit ask, so it ignores the automatic-updates switch.
         settings.check |= !from_launch;
+        if !from_launch {
+            self.update_blocker = update::blocker();
+        }
         self.set_update(UpdateStatus::Checking, cx);
         let found = cx.background_spawn(async move { update::check_and_stage(&settings) });
         cx.spawn_in(window, async move |this, cx| {
@@ -2406,6 +2417,7 @@ impl Workspace {
             extensions: self.extensions.clone(),
             home: self.claude_home.clone(),
             update: self.update.clone(),
+            update_blocker: self.update_blocker.clone(),
             agents: self.agent_rows(cx),
             project_default: wai_settings::project_default_agent(&self.project)
                 .filter(|p| Some(p) == self.settings.default_agent.as_ref()),
@@ -2520,6 +2532,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let notice = notice.map(|n| SharedString::from(n.to_string()));
+        self.update_blocker = update::blocker();
         self.extensions(window, cx);
         let data = self.settings_data(notice, cx);
         self.refresh_claude(cx);

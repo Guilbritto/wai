@@ -641,8 +641,8 @@ mod tests {
         );
     }
 
-    /// A cloned repository cannot turn the update check on or point it at another repository
-    /// (whose release page the notice would open).
+    /// A cloned repository cannot change updates (turn the check on or point it at another
+    /// repository, whose release page the notice would open).
     #[test]
     fn project_cannot_set_updates() {
         let u = tempfile::tempdir().unwrap();

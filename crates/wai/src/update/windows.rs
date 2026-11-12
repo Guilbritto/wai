@@ -1,5 +1,6 @@
-//! Windows install step: hand the downloaded NSIS setup to a detached PowerShell that waits for
-//! wai to exit, runs it silently and relaunches wai. Only the installer-managed copy can update.
+//! Windows install step: hand the downloaded NSIS setup to a hidden PowerShell that waits for
+//! every wai process to exit, runs it silently and relaunches wai.
+//! Only the installer-managed copy can update.
 
 use std::os::windows::process::CommandExt as _;
 use std::path::Path;
@@ -20,9 +21,9 @@ pub fn blocker(exe: &Path) -> Option<String> {
     })
 }
 
-/// Starts the installer to run once process `pid` exits. No window; the child outlives wai (children
+/// Starts the installer to run once every wai process has exited. No window; the child outlives wai (children
 /// are not killed with the parent) and holds none of its handles.
-pub fn install_after_exit(setup: &Path, pid: u32) -> std::io::Result<()> {
+pub fn install_after_exit(setup: &Path) -> std::io::Result<()> {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
     let powershell = Path::new(&root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
     Command::new(powershell)
@@ -32,7 +33,7 @@ pub fn install_after_exit(setup: &Path, pid: u32) -> std::io::Result<()> {
             "-WindowStyle",
             "Hidden",
             "-Command",
-            &super::installer_script(setup, pid),
+            &super::installer_script(setup),
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

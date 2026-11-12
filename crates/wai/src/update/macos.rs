@@ -17,8 +17,9 @@ const RELAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What `main` does after `on_start`.
 pub enum Start {
-    /// Carry on, showing the notice (if any) once the window exists.
-    Continue(Option<String>),
+    /// Carry on, showing the notice (if any) once the window exists: its text, and whether the
+    /// move or the reopen failed (a failure stays until dismissed).
+    Continue(Option<(String, bool)>),
     /// The moved copy is starting; this process must return without opening anything.
     Exit,
 }
@@ -51,13 +52,13 @@ fn current_bundle() -> Result<PathBuf, String> {
 }
 
 /// Whether this account can add and remove entries in `dir`. A probe file, not `access(2)`: it
-/// answers for the real user with ACLs applied, and it is only run when Settings looks.
+/// answers for the real user with ACLs applied, and it runs only when a check does or Settings opens.
 fn writable(dir: &Path) -> bool {
     let probe = dir.join(format!(".wai-write-check-{}", std::process::id()));
     if std::fs::write(&probe, b"").is_err() {
         return false;
     }
-    // Written but not removable (a delete-denying ACL) is not writable; retry once, then ignore.
+    // Written but not removable (a delete-denying ACL) is not writable; retry once.
     std::fs::remove_file(&probe).is_ok() || std::fs::remove_file(&probe).is_ok()
 }
 
@@ -322,8 +323,11 @@ pub fn on_start() -> Start {
     {
         // SAFETY: called from `main` before any other thread exists.
         unsafe { std::env::remove_var(RELOCATED_ENV) };
-        return Start::Continue(Some(format!(
-            "wai moved to ~/Applications. It was in {from}, where updates needed an administrator; from now on they install on their own."
+        return Start::Continue(Some((
+            format!(
+                "wai moved to ~/Applications. It was in {from}, where updates needed an administrator; from now on they install on their own."
+            ),
+            false,
         )));
     }
     if super::version(env!("CARGO_PKG_VERSION")).is_none() {
@@ -337,13 +341,19 @@ pub fn on_start() -> Start {
         Ok(Some(dest)) => match open_relocated(&dest) {
             Ok(()) => Start::Exit,
             // Moved but the copy won't start: keep running rather than exit into no wai at all.
-            Err(e) => Start::Continue(Some(format!(
-                "wai moved to ~/Applications but could not reopen itself from {}: {e}. Quit wai and open it from there.",
-                dest.display()
+            Err(e) => Start::Continue(Some((
+                format!(
+                    "wai moved to ~/Applications but could not reopen itself from {}: {e}. Quit wai and open it from there.",
+                    dest.display()
+                ),
+                true,
             ))),
         },
-        Err(e) => Start::Continue(Some(format!(
-            "wai could not move to ~/Applications: {e}. Updates here still need an administrator."
+        Err(e) => Start::Continue(Some((
+            format!(
+                "wai could not move to ~/Applications: {e}. Updates here still need an administrator."
+            ),
+            true,
         ))),
     }
 }

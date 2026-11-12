@@ -269,6 +269,8 @@ pub struct SettingsData {
     /// Where `~/.claude` lives: paths on the Claude pages are shown relative to it.
     pub home: PathBuf,
     pub update: UpdateStatus,
+    /// Why this copy cannot install an update; shown whatever the status says.
+    pub update_blocker: Option<String>,
 }
 
 pub enum SettingsEvent {
@@ -804,25 +806,45 @@ impl SettingsView {
                 None if ready => cx.emit(SettingsEvent::RestartToUpdate),
                 None => cx.emit(SettingsEvent::CheckUpdates),
             }));
-        let line = status.line().map(|line| {
-            let color = match status {
-                UpdateStatus::Failed(_) => cx.theme().danger,
-                _ => cx.theme().muted_foreground,
-            };
+        // A blocked copy opens the release page, but "turn on admin rights and install the next
+        // update from here" needs a way to look again without reopening wai.
+        let blocked_page = matches!(status, UpdateStatus::Available { why: Some(_), .. });
+        let check = blocked_page.then(|| {
+            Button::new("settings-update-check")
+                .label("Check now")
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::CheckUpdates)))
+        });
+        let color = |status: &UpdateStatus| match status {
+            UpdateStatus::Failed(_) => cx.theme().danger,
+            _ => cx.theme().muted_foreground,
+        };
+        let text = |id: &'static str, line: String, color| {
             div()
-                .id("settings-update-status")
+                .id(id)
                 .aria_label(line.clone())
                 .test_support()
                 .text_size(px(12.))
                 .text_color(color)
                 .child(line)
-        });
+        };
+        let line = status
+            .line()
+            .map(|line| text("settings-update-status", line, color(status)));
+        // `Available` already carries the sentence; otherwise it shows on its own.
+        let shown = matches!(
+            status,
+            UpdateStatus::Available { why: Some(_), .. } | UpdateStatus::Ready(_)
+        );
+        let blocker = (self.data.update_blocker.clone())
+            .filter(|_| !shown)
+            .map(|why| text("settings-update-blocker", why, cx.theme().muted_foreground));
         let control = v_flex()
             .gap_1()
             .items_end()
             .child(div().child(crate::topbar::version()))
             .children(line)
-            .child(button);
+            .children(blocker)
+            .child(h_flex().gap_2().children(check).child(button));
         self.row("Version", "settings-update", control, cx)
     }
 
@@ -1152,6 +1174,7 @@ mod tests {
             extensions: None,
             home: Default::default(),
             update: crate::update::UpdateStatus::Idle,
+            update_blocker: None,
         }
     }
 
@@ -1374,6 +1397,15 @@ mod tests {
         );
         cx.update(|window, _| window.find_by_label("wai 9.0.0 is available. x"));
         cx.update(|window, _| window.find_by_label("Open release page"));
+        // Blocked: the page is not the only way on; Check now stays beside it.
+        cx.update(|window, _| window.find_by_label("Check now"));
+        // Up to date, but this copy cannot install the next update: the sentence still shows.
+        workspace.update(cx, |w, cx| {
+            w.update_blocker = Some("cannot update itself here".into());
+            w.set_update(crate::update::UpdateStatus::UpToDate, cx)
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        cx.update(|window, _| window.find_by_label("cannot update itself here"));
         // A staged build turns the same button into Restart now, which goes through the quit flow.
         let staged = crate::update::Staged {
             tag: "v9.0.0".into(),

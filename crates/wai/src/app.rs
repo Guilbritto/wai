@@ -143,7 +143,7 @@ pub fn run(
     template_notices: Vec<String>,
     settings_error: Option<String>,
     state_path: PathBuf,
-    update_notice: Option<String>,
+    update_notice: Option<(String, bool)>,
 ) {
     // Without the asset source every component icon (status, chevrons) renders blank.
     let app = gpui_kit::application().with_assets(AppAssets);
@@ -201,8 +201,12 @@ pub fn run(
                     let pending = unapproved(&Settings::default(), &w.settings, &w.approved);
                     w.ask_approval(pending, window, cx);
                 });
-                if let Some(notice) = update_notice {
-                    window.push_notification(Notification::success(notice), cx);
+                if let Some((text, failed)) = update_notice {
+                    let note = match failed {
+                        true => Notification::warning(text).autohide(false),
+                        false => Notification::success(text),
+                    };
+                    window.push_notification(note, cx);
                 }
                 for notice in template_notices {
                     window.push_notification(Notification::warning(notice).autohide(false), cx);

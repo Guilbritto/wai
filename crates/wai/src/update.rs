@@ -1,4 +1,4 @@
-//! The opt-in update check: once per launch, when the user's `updates.check` is on and
+//! The update check: once per launch, when the user's `updates.check` is on and
 //! `updates.repo` names a GitHub repository, one GET of its latest release. A newer wai is
 //! announced; when this copy can install it, `run` also downloads the release's build for this OS
 //! and `SHA256SUMS.txt`, checks the build against its listed hash and stages it in the cache.
@@ -34,11 +34,11 @@ const MAX_SHOWN: usize = 32;
 type Fetched = anyhow::Result<(u16, Vec<u8>)>;
 
 /// The build's file-name ending for this OS; nothing is installed where it is empty.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const ASSET_SUFFIX: &str = "_aarch64.app.zip";
 #[cfg(windows)]
 const ASSET_SUFFIX: &str = "_x64-setup.exe";
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(all(target_os = "macos", target_arch = "aarch64"), windows)))]
 const ASSET_SUFFIX: &str = "";
 
 /// The release asset that lists the SHA-256 of every build.
@@ -161,7 +161,9 @@ impl UpdateStatus {
 /// aborts wai: whatever the network sends, it stops here.
 pub fn check_and_stage(settings: &UpdateSettings) -> anyhow::Result<Outcome> {
     let current = env!("CARGO_PKG_VERSION");
-    let (cache, blocker) = (cache_dir(), blocker());
+    // The blocker's probe file is written only when a check actually runs.
+    let blocker = if settings.check { blocker() } else { None };
+    let cache = cache_dir();
     let run = || {
         run(
             settings,
@@ -191,14 +193,15 @@ pub fn install(staged: &Staged) -> anyhow::Result<()> {
     }
     #[cfg(windows)]
     {
-        windows::install_after_exit(&staged.file, std::process::id())?;
+        windows::install_after_exit(&staged.file)?;
         Ok(())
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     bail!("wai updates itself only on macOS and Windows.")
 }
 
-/// Why this copy cannot install an update, when it cannot (R1).
+/// Why this copy cannot install an update, when it cannot. Computed only when a check runs or
+/// Settings opens: the macOS probe writes a file in the app's folder.
 pub fn blocker() -> Option<String> {
     #[cfg(target_os = "macos")]
     return macos::blocker();
@@ -210,7 +213,8 @@ pub fn blocker() -> Option<String> {
     Some("wai updates itself only on macOS and Windows.".into())
 }
 
-/// Where builds are staged: kept while the release's checksum still matches, else and refilled by each `run` that stages one.
+/// Where builds are staged: kept while the release's checksum still matches, otherwise emptied and refilled by the `run` that
+/// stages a build; emptied too when a check finds wai up to date.
 pub fn cache_dir() -> PathBuf {
     let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
     base.join("wai-updates")
@@ -241,6 +245,8 @@ pub fn run(
     let Some(release) = check(settings, current, fetch)? else {
         let asked = settings.check && settings.repo.is_some();
         return Ok(if asked {
+            // An installed update's build would otherwise linger in the cache.
+            std::fs::remove_dir_all(cache).ok();
             Outcome::UpToDate
         } else {
             Outcome::Off
@@ -281,7 +287,7 @@ fn stage(
     download: &impl Fn(&str, &Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<Staged> {
     std::fs::create_dir_all(cache)?;
-    // The sums always come fresh: they say whether the staged build is still this release's (R5).
+    // The sums always come fresh: they say whether the staged build is still this release's.
     let sums_file = cache.join(SUMS_ASSET);
     download(&sums.url, &sums_file).context("downloading the checksums")?;
     ensure!(
@@ -339,11 +345,12 @@ pub fn verify(staged: &Staged) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The PowerShell one-liner that waits for wai (`pid`) to exit, then runs the NSIS installer
-/// silently (`/S`) and relaunches wai (`/R`). Waiting lets wai quit cleanly (state saved, agents
-/// stopped) instead of being killed by the installer. Pure so it is tested on every OS.
+/// The PowerShell one-liner that waits for every wai process to exit, then runs the NSIS installer
+/// silently (`/S`), relaunches wai (`/R`) and skips the Desktop shortcut (`/NS`). The installer
+/// kills any running `wai.exe` and wai has no single-instance guard, so waiting for all of them
+/// lets each window quit cleanly (state saved, agents stopped). Pure so it is tested on every OS.
 #[cfg(any(windows, test))]
-pub(crate) fn installer_script(setup: &Path, pid: u32) -> String {
+pub(crate) fn installer_script(setup: &Path) -> String {
     // PowerShell also reads the curly quotes U+2018..U+201B as single quotes; double each as itself.
     let setup: String = setup
         .display()
@@ -359,8 +366,8 @@ pub(crate) fn installer_script(setup: &Path, pid: u32) -> String {
         })
         .collect();
     format!(
-        "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; \
-         Start-Process -FilePath '{setup}' -ArgumentList '/S','/R'"
+        "Wait-Process -Name wai -ErrorAction SilentlyContinue; \
+         Start-Process -FilePath '{setup}' -ArgumentList '/S','/R','/NS'"
     )
 }
 
@@ -820,7 +827,7 @@ mod tests {
         };
         assert!(why.contains("other/wai"), "{why}");
 
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
         {
             let calls = Cell::new(0);
             let download = |_: &str, _: &Path| {
@@ -841,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
     fn release_without_asset_only_notifies() {
         let cache = tempfile::tempdir().unwrap();
         let (asset, sums) = (asset_name(), SUMS);
@@ -903,8 +910,26 @@ mod tests {
         assert_eq!(out.unwrap(), Outcome::UpToDate);
     }
 
+    #[test]
+    fn up_to_date_empties_the_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("wai-updates");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("wai_1_x64-setup.exe"), b"old").unwrap();
+        let out = run(
+            &on(DEFAULT_REPO),
+            "9.0.0",
+            None,
+            &cache,
+            latest(&[]),
+            never_download,
+        );
+        assert_eq!(out.unwrap(), Outcome::UpToDate);
+        assert!(!cache.exists());
+    }
+
     /// A `download` that serves `bytes` for the asset and `sums` for the sums file.
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
     fn serve<'a>(
         bytes: &'a [u8],
         sums: &'a str,
@@ -922,7 +947,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
     fn stage(cache: &Path, bytes: &[u8], sums: &str) -> anyhow::Result<Outcome> {
         let names = [asset_name(), SUMS.to_string()];
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -941,7 +966,7 @@ mod tests {
     const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
     #[test]
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
     fn stages_a_verified_asset() {
         let cache = tempfile::tempdir().unwrap();
         std::fs::write(cache.path().join("old.zip"), b"old").unwrap();
@@ -959,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
     fn reuses_a_staged_build() {
         let cache = tempfile::tempdir().unwrap();
         let sums = format!("{ABC}  {}\n", asset_name());
@@ -997,7 +1022,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
     fn rejects_a_wrong_checksum() {
         let cache = tempfile::tempdir().unwrap();
         let sums = format!("{}  {}\n", "0".repeat(64), asset_name());
@@ -1045,10 +1070,10 @@ mod tests {
     fn installer_script_quotes_the_path() {
         let setup = Path::new(r"C:\Users\o'neil\AppData\Local\wai-updates\wai_1_x64-setup.exe");
         assert_eq!(
-            installer_script(setup, 42),
-            r"Wait-Process -Id 42 -ErrorAction SilentlyContinue; Start-Process -FilePath 'C:\Users\o''neil\AppData\Local\wai-updates\wai_1_x64-setup.exe' -ArgumentList '/S','/R'"
+            installer_script(setup),
+            r"Wait-Process -Name wai -ErrorAction SilentlyContinue; Start-Process -FilePath 'C:\Users\o''neil\AppData\Local\wai-updates\wai_1_x64-setup.exe' -ArgumentList '/S','/R','/NS'"
         );
         let curly = Path::new("C:\\Users\\O\u{2019}Neil\\x\u{2018}\u{201A}\u{201B}.exe");
-        assert!(installer_script(curly, 1).contains("'C:\\Users\\O\u{2019}\u{2019}Neil\\x\u{2018}\u{2018}\u{201A}\u{201A}\u{201B}\u{201B}.exe'"));
+        assert!(installer_script(curly).contains("'C:\\Users\\O\u{2019}\u{2019}Neil\\x\u{2018}\u{2018}\u{201A}\u{201A}\u{201B}\u{201B}.exe'"));
     }
 }
