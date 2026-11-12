@@ -47,7 +47,7 @@ use crate::search_view::{OpenMatch, SearchView};
 use crate::settings_view::{
     AgentRow, RowStatus, Section, SettingsData, SettingsEvent, SettingsView, open_modal,
 };
-use crate::sidebar::{SidebarTab, canonical};
+use crate::sidebar::{GROUP_COLORS, SidebarTab, canonical};
 use crate::terminal_view::{self, TerminalView};
 use crate::topbar::BRAND;
 use crate::update::{self, Outcome, UpdateStatus};
@@ -823,6 +823,12 @@ impl Workspace {
         };
         let state = AppState::load(path);
         self.groups = state.groups;
+        // Groups saved before swatches all load as colour 0: spread them over the cycle once.
+        if self.groups.len() > 1 && self.groups.iter().all(|g| g.color == 0) {
+            for (ix, group) in self.groups.iter_mut().enumerate() {
+                group.color = (ix % GROUP_COLORS.len()) as u8;
+            }
+        }
         let mut panes: [Option<Entity<ChatSession>>; MAX_PANES] = Default::default();
         for saved in state.open_sessions {
             let (agent, id, cwd) = (&saved.agent, &saved.session_id, &saved.cwd);

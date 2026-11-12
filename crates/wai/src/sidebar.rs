@@ -2393,4 +2393,20 @@ mod tests {
         }
         assert_eq!(colors(&workspace, cx), [0, 1, 2]);
     }
+
+    /// Groups saved before swatches all load as colour 0: the first launch spreads them over the
+    /// cycle.
+    #[gpui_kit::test]
+    fn groups_saved_without_colours_take_the_cycle(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = AppState {
+            groups: vec![named("A", &[]), named("B", &[]), named("C", &[])],
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        let (workspace, cx) = open_at(cx, Settings::default(), Some(path));
+        launch(&workspace, cx);
+        assert_eq!(colors(&workspace, cx), [0, 1, 2]);
+    }
 }
