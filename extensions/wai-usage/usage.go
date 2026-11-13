@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 type node = map[string]any
@@ -132,7 +134,7 @@ func parseUsage(body []byte) ([]window, error) {
 	var keys []string
 	for k := range top {
 		name, ok := strings.CutPrefix(k, "seven_day_")
-		if !ok || name == "oauth_apps" || name == "cowork" || name == "omelette" || strings.HasPrefix(name, "overage") {
+		if !ok || name == "" || name == "oauth_apps" || name == "cowork" || name == "omelette" || strings.HasPrefix(name, "overage") {
 			continue
 		}
 		keys = append(keys, k)
@@ -140,7 +142,8 @@ func parseUsage(body []byte) ([]window, error) {
 	sort.Strings(keys)
 	for _, k := range keys {
 		name := strings.TrimPrefix(k, "seven_day_")
-		add(top[k], "Current week ("+strings.ToUpper(name[:1])+name[1:]+")")
+		r, n := utf8.DecodeRuneInString(name)
+		add(top[k], "Current week ("+string(unicode.ToUpper(r))+name[n:]+")")
 	}
 	return ws, nil
 }

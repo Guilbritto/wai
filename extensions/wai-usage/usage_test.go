@@ -94,12 +94,13 @@ func TestParseFallback(t *testing.T) {
 	 "seven_day":{"utilization":20},"seven_day_opus":{"utilization":30},
 	 "seven_day_sonnet":null,"seven_day_oauth_apps":{"utilization":1},
 	 "seven_day_cowork":{"utilization":1},"seven_day_omelette":{"utilization":1},
-	 "seven_day_overage_x":{"utilization":1},"seven_day_haiku":{"utilization":null}}`)
+	 "seven_day_overage_x":{"utilization":1},"seven_day_haiku":{"utilization":null},
+	 "seven_day_":{"utilization":2},"seven_day_éclair":{"utilization":3}}`)
 	var got []string
 	for _, w := range ws {
 		got = append(got, w.Label)
 	}
-	want := []string{"Current session", "Current week (all models)", "Current week (Opus)"}
+	want := []string{"Current session", "Current week (all models)", "Current week (Opus)", "Current week (Éclair)"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v", got)
 	}
