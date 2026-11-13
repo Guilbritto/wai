@@ -1065,6 +1065,7 @@ pub(crate) fn hover_card(node: &Node, ext_name: &SharedString, cx: &App) -> AnyE
         .child(draw(node, &mut 0, cx))
         .child(
             div()
+                .debug_selector(|| "item-card-footer".into())
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
                 .child(format!("\u{2014} {ext_name}")),

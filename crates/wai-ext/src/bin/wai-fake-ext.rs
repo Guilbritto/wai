@@ -22,8 +22,8 @@
 //!   notification titled `after`.
 //! - `--call <method>[ <params>]` (repeatable): after `initialize`, call each method with its JSON
 //!   params (default `{}`), with ids from 1.
-//! - `--on-action <method>[ <params>]` (repeatable): the same, after each `item/action`, with
-//!   ids from 1000.
+//! - `--on-action <method>[ <params>]` (repeatable): the n-th `item/action` makes the n-th
+//!   call (the last repeats), with ids from 1000.
 //! - `--log <path>`: report to that file instead, one JSON line `{"title", "body"}` per report
 //!   (for a host that rate-limits or denies `notify`).
 //! - `--exit`: after all of the above, exit 0.
@@ -114,14 +114,12 @@ fn main() {
         std::fs::write(path, sleep.unwrap().id().to_string()).unwrap();
     }
 
-    let call_all = |name: &str, first_id: usize| {
-        for (ix, call) in values(name).iter().enumerate() {
-            let (method, params) = call.split_once(' ').unwrap_or((call, "{}"));
-            let params: Value = serde_json::from_str(params).unwrap();
-            let id = first_id + ix;
-            send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
-        }
+    let call = |id: usize, call: &str| {
+        let (method, params) = call.split_once(' ').unwrap_or((call, "{}"));
+        let params: Value = serde_json::from_str(params).unwrap();
+        send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
     };
+    let mut actions = 0;
     let log = value("--log");
     let report = |title: &str, body: String| report(log.as_deref(), title, body);
     let mut reset = false;
@@ -165,7 +163,9 @@ fn main() {
                         "params": {"title": "big", "body": big}}));
                     send(notify("after", "{}".into()));
                 }
-                call_all("--call", 1);
+                for (ix, c) in values("--call").iter().enumerate() {
+                    call(ix + 1, c);
+                }
                 if flag("--exit") {
                     std::process::exit(0);
                 }
@@ -176,7 +176,11 @@ fn main() {
                     send(json!({"jsonrpc": "2.0", "id": id, "result": null}));
                 }
                 if method == "item/action" {
-                    call_all("--on-action", 1000);
+                    let on = values("--on-action");
+                    if let Some(c) = on.get(actions).or(on.last()) {
+                        call(1000 + actions, c);
+                    }
+                    actions += 1;
                 }
                 if method == "panel/action" && flag("--panel") {
                     let p = &msg["params"];

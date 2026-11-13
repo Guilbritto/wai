@@ -483,6 +483,7 @@ pub(crate) mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
+    use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
     use serde_json::{Value, json};
     use wai_ext::{ExtStore, MANIFEST_FILE, Source, parse_manifest};
@@ -1323,56 +1324,123 @@ pub(crate) mod tests {
         assert!(label(("bottombar-item", 0usize), cx).is_none());
     }
 
-    /// Hovering an item with a card shows the card, ending with the extension's name; a later
-    /// update without a card removes it.
+    const TEXT: &str = r#"{"type": "text", "text": "Current session"}"#;
+
+    /// An `item/update` for `item` with a card of `n` text lines, as a fake-extension call.
+    fn card_call(flag: &str, item: &str, n: usize) -> String {
+        let lines = vec![TEXT; n].join(", ");
+        let card = format!(r#"{{"type": "column", "children": [{lines}]}}"#);
+        let update = format!(r#"{{"item": "{item}", "text": "x", "card": {card}}}"#);
+        format!("{flag} 'item/update {update}'")
+    }
+
+    /// The card's bounds once it is drawn, hovering `item` first; `None` if it is not drawn.
+    fn hover_card_bounds(
+        item: (&'static str, usize),
+        cx: &mut VisualTestContext,
+    ) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+        cx.update(|window, cx| window.hover(item, cx));
+        cx.executor().advance_clock(Duration::from_millis(700));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.draw(cx).clear(cx);
+        });
+        cx.debug_bounds("item-card")
+    }
+
+    fn item_bounds(
+        item: (&'static str, usize),
+        cx: &mut VisualTestContext,
+    ) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.find(item).bounds()
+        })
+    }
+
+    /// A bottom item's card opens above it with the extension's name last; an update with a
+    /// different card redraws it, and one without removes it, each with the pointer never
+    /// leaving the item.
     #[gpui_kit::test]
     fn extension_item_hover_card(cx: &mut TestAppContext) {
         use crate::workspace::tests::click;
-        use gpui_kit::test::TestWindowExt as _;
-        use gpui_kit::{Modifiers, VisualTestContext, point, px};
 
         let tmp = tempfile::tempdir().unwrap();
         let config = tmp.path().join("config");
-        let flags = r#"--call 'item/update {"item": "prs", "text": "3 PRs", "card": {"type": "column", "children": [{"type": "text", "text": "Current session"}, {"type": "progress", "value": 0.16}]}}' --on-action 'item/update {"item": "prs", "text": "3 PRs"}'"#;
-        install(tmp.path(), &config, ITEMS, flags, "");
+        let flags = [
+            card_call("--call", "prs", 1),
+            card_call("--on-action", "prs", 3),
+            r#"--on-action 'item/update {"item": "prs", "text": "x"}'"#.to_string(),
+        ]
+        .join(" ");
+        install(tmp.path(), &config, ITEMS, &flags, "");
         let (_workspace, cx) = workspace_at(&config, fake_settings(""), cx);
-        wait_until(cx, "the card item", |cx| {
+        let item = ("bottombar-item", 0usize);
+        wait_until(cx, "the item", |cx| {
             cx.update(|window, cx| {
                 window.render_frame(cx);
-                window.try_find(("bottombar-item", 0usize)).is_some()
+                window.try_find(item).is_some()
             })
         });
-        let hover = |cx: &mut VisualTestContext| {
-            let at = cx.update(|window, cx| {
-                window.render_frame(cx);
-                window.find(("bottombar-item", 0usize)).bounds().center()
-            });
-            cx.simulate_mouse_move(at, None, Modifiers::none());
-            cx.executor().advance_clock(Duration::from_millis(700));
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                window.draw(cx).clear(cx);
-                window.draw(cx).clear(cx);
-            });
-            at
-        };
-        let at = hover(cx);
-        let card = cx.debug_bounds("item-card").expect("the card is drawn");
-        assert!(
-            card.bottom() <= at.y,
-            "a bottom-bar card opens above its item"
-        );
 
-        // Moving away closes it; a click makes the extension drop the card.
-        cx.simulate_mouse_move(point(px(1.), px(1.)), None, Modifiers::none());
-        cx.executor().advance_clock(Duration::from_millis(400));
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("item-card").is_none());
-        click(("bottombar-item", 0usize), cx);
-        wait_until(cx, "the update without a card", |cx| {
-            hover(cx);
+        let card = hover_card_bounds(item, cx).expect("the card is drawn");
+        assert!(card.bottom() <= item_bounds(item, cx).top(), "opens above");
+        let footer = cx
+            .debug_bounds("item-card-footer")
+            .expect("the extension's name");
+        assert!(footer.bottom() <= card.bottom() && footer.top() > card.top());
+
+        // The pointer stays: a second card, taller, replaces the open one.
+        click(item, cx);
+        wait_until(cx, "the redrawn card", |cx| {
+            cx.update(|window, cx| window.render_frame(cx));
+            cx.debug_bounds("item-card")
+                .is_some_and(|c| c.size.height > card.size.height)
+        });
+        assert!(cx.debug_bounds("item-card-footer").is_some());
+
+        // An update without a card removes the open one.
+        click(item, cx);
+        wait_until(cx, "the card removed", |cx| {
+            cx.update(|window, cx| window.render_frame(cx));
             cx.debug_bounds("item-card").is_none()
         });
+    }
+
+    /// A top item's card opens below it, and stopping the extension removes both.
+    #[gpui_kit::test]
+    fn extension_top_item_hover_card_and_stop(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        install(
+            tmp.path(),
+            &config,
+            ITEMS,
+            &card_call("--call", "ci", 1),
+            "",
+        );
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        let item = ("topbar-item", 0usize);
+        wait_until(cx, "the top item", |cx| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.try_find(item).is_some()
+            })
+        });
+        let card = hover_card_bounds(item, cx).expect("the card is drawn");
+        assert!(card.top() >= item_bounds(item, cx).bottom(), "opens below");
+
+        let id = parse_manifest(ITEMS, tmp.path()).unwrap().id;
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        cx.update(|_, cx| host.update(cx, |h, cx| h.stop(&id, cx)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+        });
+        assert!(cx.debug_bounds("item-card").is_none());
+        assert!(cx.update(|window, _| { window.try_find(item).is_none() }));
     }
 
     /// Extension `id` with three bottom items `a`, `b` and `c`.
@@ -1401,10 +1469,7 @@ pub(crate) mod tests {
         wait_until(cx, "the items", |cx| {
             label(("bottombar-item", 2usize), cx).is_some()
         });
-        let version = cx.update(|window, _| {
-            use gpui_kit::test::TestWindowExt as _;
-            window.find("bottombar-version").bounds()
-        });
+        let version = cx.update(|window, _| window.find("bottombar-version").bounds());
         assert!(version.right() <= px(900.), "{version:?}");
     }
 
@@ -1563,10 +1628,7 @@ pub(crate) mod tests {
             workspace.read_with(cx, |w, _| w.sidebar_tab),
             SidebarTab::Sessions
         );
-        cx.update(|window, cx| {
-            use gpui_kit::test::TestWindowExt as _;
-            window.render_frame(cx)
-        });
+        cx.update(|window, cx| window.render_frame(cx));
         assert!(cx.debug_bounds("extension-pane-0").is_some());
 
         cx.update(|window, cx| {
