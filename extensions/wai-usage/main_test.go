@@ -273,6 +273,13 @@ func TestRateLimited(t *testing.T) {
 	if !errors.As(err, &rl) || rl.retry != 15*time.Minute {
 		t.Fatalf("bad Retry-After: err = %v", err)
 	}
+	_, err = get(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "9223372036854775807")
+		w.WriteHeader(429)
+	})
+	if !errors.As(err, &rl) || rl.retry != time.Hour {
+		t.Fatalf("huge Retry-After: err = %v", err)
+	}
 	v := view{updated: at(14, 0), failed: now, err: rl}
 	if got := next(v, 120*time.Second, now); !got.Equal(now.Add(120 * time.Second)) {
 		t.Fatalf("next = %v", got)
@@ -318,6 +325,7 @@ func TestNext(t *testing.T) {
 		{"a reset missed since the update is due at once", view{updated: at(14, 0), windows: ws(at(14, 1))}, now.Add(3 * time.Hour), at(14, 1).Add(5 * time.Second)},
 		{"after a sleep it is due at once", view{updated: at(14, 0)}, now.Add(3 * time.Hour), at(14, 5)},
 		{"a failure counts as an attempt", view{updated: at(14, 0), failed: at(14, 10), err: errors.New("x")}, now, at(14, 15)},
+		{"a reset between the success and the failure is not due", view{updated: at(14, 0), windows: ws(at(14, 1)), failed: at(14, 10), err: errors.New("x")}, now, at(14, 15)},
 		{"never fetched is due at once", view{}, now, time.Time{}.Add(5 * time.Minute)},
 	}
 	for _, tc := range tests {

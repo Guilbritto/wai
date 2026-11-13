@@ -143,12 +143,11 @@ func (s *server) handle(m message) {
 	case "item/action":
 		s.write(node{"jsonrpc": "2.0", "id": m.ID, "result": nil})
 		s.mu.Lock()
-		take := !s.busy
-		s.busy = true
-		s.mu.Unlock()
-		if take {
-			s.click <- struct{}{}
+		if !s.busy {
+			s.busy = true
+			s.click <- struct{}{} // under mu, so the scheduler never sees busy without the token
 		}
+		s.mu.Unlock()
 	default:
 		if m.ID != nil {
 			s.write(node{"jsonrpc": "2.0", "id": m.ID, "error": node{"code": -32601, "message": "Method not found"}})

@@ -99,7 +99,7 @@ func fetch(ctx context.Context, c *http.Client, usageURL, token string) ([]windo
 	case resp.StatusCode == http.StatusTooManyRequests:
 		retry := defaultRetry
 		if s, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); err == nil && s > 0 {
-			retry = time.Duration(s) * time.Second
+			retry = time.Duration(min(s, 3600)) * time.Second
 		}
 		return nil, rateLimited{retry}
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
@@ -113,8 +113,8 @@ func fetch(ctx context.Context, c *http.Client, usageURL, token string) ([]windo
 }
 
 // next is when the next fetch is due, by the wall clock. The base is five minutes after the last
-// attempt (a failure counts, or an outage would refetch every minute); a reset after the shown
-// values were fetched makes it due 5 s after that reset, even if already past; a 429's retry
+// attempt (a failure counts, or an outage would refetch every minute); a reset after the last attempt
+// (the shown values predate it) makes it due 5 s after that reset, even if already past; a 429's retry
 // overrides both. The caller compares it with the clock, so now is unused.
 func next(v view, retry time.Duration, _ time.Time) time.Time {
 	updated, failed := v.updated.Round(0), v.failed.Round(0)
@@ -127,7 +127,7 @@ func next(v view, retry time.Duration, _ time.Time) time.Time {
 	}
 	due := last.Add(5 * time.Minute)
 	for _, w := range v.windows {
-		if r := w.Resets.Round(0); r.After(updated) && r.Add(5*time.Second).Before(due) {
+		if r := w.Resets.Round(0); r.After(last) && r.Add(5*time.Second).Before(due) {
 			due = r.Add(5 * time.Second)
 		}
 	}
