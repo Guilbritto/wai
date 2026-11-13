@@ -8,11 +8,14 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use wai_ext::Bar;
 use wai_ext::panel::{LINE_CHARS, Tone, clamp};
 use wai_settings::claude::McpStatus;
 
+use crate::aurora;
 use crate::claude_config::NO_CLAUDE;
-use crate::ext_panel::tone_color;
+use crate::ext_host::BarItem;
+use crate::ext_panel::{lucide, tone_color};
 use crate::settings_view::Section;
 use crate::settings_view::claude::McpCheck;
 use crate::sidebar::{SidebarTab, TABS};
@@ -192,6 +195,70 @@ pub(crate) fn bottom_item(
         .child(text)
 }
 
+/// Extension items drawn in the top bar, over all extensions.
+pub(crate) const TOP_ITEMS: usize = 4;
+/// The top bar draws an item's text shorter than the bottom bar does.
+const TOP_TEXT_CHARS: usize = 24;
+
+/// `"{tooltip or title} — {ext_name}"`: the extension is always named.
+pub(crate) fn item_tooltip(item: &BarItem) -> String {
+    let said = item.state.as_ref().and_then(|s| s.tooltip.as_deref());
+    format!("{} — {}", said.unwrap_or(&item.title), item.ext_name)
+}
+
+/// An extension's item, as a focusable button that sends its click to the extension. In the top
+/// bar it is a pill that shrinks before wai's buttons do.
+pub(crate) fn ext_item(
+    item: &BarItem,
+    top: bool,
+    id: impl Into<ElementId>,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let state = item.state.clone().unwrap_or_default();
+    let text = (state.text.as_deref()).map(|t| match top {
+        true => clamp(t, TOP_TEXT_CHARS),
+        false => t.to_string(),
+    });
+    let icon = state.icon.as_deref().and_then(lucide);
+    let label = text.clone().unwrap_or_else(|| item.title.clone());
+    let tooltip = item_tooltip(item);
+    let (ext, item_id) = (item.ext.clone(), item.id.clone());
+    let click = cx.listener(move |this, _: &ClickEvent, _, cx| {
+        this.ext_host.read(cx).item_action(&ext, &item_id);
+    });
+    if !top {
+        let status = Status {
+            text: text.unwrap_or_default(),
+            tone: state.tone,
+            tooltip,
+        };
+        return bottom_item(id, &status, icon, true, cx)
+            .aria_label(label)
+            .on_click(click)
+            .test_support()
+            .into_any_element();
+    }
+    let theme = cx.theme();
+    let (ring, color) = (theme.ring, tone_color(state.tone, cx));
+    aurora::pill(cx)
+        .id(id)
+        .min_w_0()
+        .overflow_hidden()
+        .text_color(color)
+        .border_color(gpui_kit::transparent_black())
+        .cursor_pointer()
+        .role(Role::Button)
+        .aria_label(label)
+        .focus_visible(move |el| el.border_color(ring))
+        .tab_index(0)
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .on_click(click)
+        .children(icon.map(|name| Icon::new(name).size(px(12.)).flex_none()))
+        .children(text.map(|t| div().min_w_0().truncate().child(t)))
+        .test_support()
+        .into_any_element()
+}
+
 /// What the agent reports of the account's usage limit; `resets_at` in Unix seconds.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RateLimit {
@@ -285,14 +352,42 @@ pub(crate) fn hide_menu(
     menu
 }
 
+/// wai's `own` entries, then `items` grouped under their extension's name.
+pub(crate) fn hide_entries(own: &[(&str, &str)], items: &[BarItem]) -> Vec<HideEntry> {
+    let own = own.iter().map(|(key, label)| HideEntry {
+        key: key.to_string(),
+        label: label.to_string().into(),
+        group: None,
+    });
+    let ext = items.iter().map(|i| HideEntry {
+        key: i.key.clone(),
+        label: i.title.clone().into(),
+        group: Some(i.ext_name.clone()),
+    });
+    own.chain(ext).collect()
+}
+
 impl Workspace {
+    /// The items of `bar`, extensions in the rail's order (those without a panel after, as
+    /// enabled), hidden ones included: draw those with a state that are `shown`.
+    pub(crate) fn bar_items(&self, bar: Bar, cx: &App) -> Vec<BarItem> {
+        let keys = self.rail_keys(cx);
+        let rank = |item: &BarItem| {
+            let prefix = format!("{}/", item.ext.as_str());
+            (keys.iter().position(|k| k.starts_with(&prefix))).unwrap_or(usize::MAX)
+        };
+        let mut items = self.ext_host.read(cx).items();
+        items.retain(|i| i.bar == bar);
+        items.sort_by_key(rank);
+        items
+    }
+
     /// The status bar: the stopped extensions on the left, the version on the right.
     pub(crate) fn render_bottom_bar(
         &self,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let theme = cx.theme();
         let mcp = (self.shown("wai.mcp"))
             .then(|| mcp_status(&self.mcp))
             .flatten()
@@ -320,6 +415,12 @@ impl Workspace {
                 }))
                 .test_support()
             });
+        let drawn = |item: &BarItem| item.state.is_some() && self.shown(&item.key);
+        let items = self.bar_items(Bar::Bottom, cx);
+        let ext_items: Vec<_> = (items.iter().filter(|i| drawn(i)))
+            .enumerate()
+            .map(|(ix, item)| ext_item(item, false, ("bottombar-item", ix), cx))
+            .collect();
         let usage = (self.shown("wai.usage"))
             .then(|| self.rate_limit.as_ref().map(usage_status))
             .flatten()
@@ -338,20 +439,17 @@ impl Workspace {
                 }))
                 .test_support()
         });
-        let entries: Vec<HideEntry> = [
-            ("wai.mcp", "MCP servers"),
-            ("wai.extensions", "Stopped extensions"),
-            ("wai.usage", "Usage limit"),
-            ("wai.version", "Version"),
-        ]
-        .into_iter()
-        .map(|(key, label)| HideEntry {
-            key: key.into(),
-            label: label.into(),
-            group: None,
-        })
-        .collect();
+        let entries = hide_entries(
+            &[
+                ("wai.mcp", "MCP servers"),
+                ("wai.extensions", "Stopped extensions"),
+                ("wai.usage", "Usage limit"),
+                ("wai.version", "Version"),
+            ],
+            &items,
+        );
         let (hidden, workspace) = (self.hidden.clone(), cx.entity().downgrade());
+        let theme = cx.theme();
         h_flex()
             .id("bottombar")
             .debug_selector(|| "bottombar".into())
@@ -367,6 +465,7 @@ impl Workspace {
             .when(!theme.is_dark(), |el| el.bg(theme.title_bar))
             .children(mcp)
             .children(stopped)
+            .children(ext_items)
             .child(div().flex_1())
             .children(usage)
             .children(version)
@@ -449,12 +548,13 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use gpui_kit::{TestAppContext, VisualTestContext};
+    use wai_ext::Bar;
     use wai_ext::panel::Tone;
     use wai_settings::AppState;
 
     use super::{
-        RateLimit, Status, VersionClick, clock, mcp_status, ordered, rate_limit, stopped_status,
-        usage_status, version, version_click, version_status,
+        RateLimit, Status, VersionClick, clock, item_tooltip, mcp_status, ordered, rate_limit,
+        stopped_status, usage_status, version, version_click, version_status,
     };
     use crate::claude_config::NO_CLAUDE;
     use crate::settings_view::Section;
@@ -790,6 +890,45 @@ mod tests {
         };
         session.update(cx, |s, cx| s.handle_event(&usage, cx));
         assert_eq!(label("bottombar-usage", cx).as_deref(), Some("Usage ok"));
+    }
+
+    #[test]
+    fn item_tooltip_names_the_extension() {
+        use crate::ext_host::BarItem;
+        use wai_ext::panel::ItemState;
+        let mut item = BarItem {
+            key: "bars/prs".into(),
+            ext: wai_ext::parse_manifest(
+                "id = \"bars\"\nname = \"Bars\"\nversion = \"1.0.0\"\n",
+                std::path::Path::new("."),
+            )
+            .unwrap()
+            .id,
+            ext_name: "Bars".into(),
+            id: "prs".into(),
+            bar: Bar::Bottom,
+            title: "PRs".into(),
+            state: Some(ItemState {
+                tooltip: Some("2 green".into()),
+                ..Default::default()
+            }),
+        };
+        assert_eq!(item_tooltip(&item), "2 green — Bars");
+        item.state = None;
+        assert_eq!(item_tooltip(&item), "PRs — Bars");
+    }
+
+    /// Hiding a top-bar button removes it, not its shortcut.
+    #[gpui_kit::test]
+    fn top_bar_buttons_hide(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
+        assert!(label("topbar-terminal", cx).is_some());
+        menu_item("topbar", "Terminal", cx);
+        assert!(label("topbar-terminal", cx).is_none());
+        menu_item("topbar", "New session", cx);
+        assert!(label("sidebar-new", cx).is_none());
+        cx.simulate_keystrokes("secondary-n");
+        workspace.read_with(cx, |w, _| assert_eq!(w.drafts.len(), 1));
     }
 
     #[test]

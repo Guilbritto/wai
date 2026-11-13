@@ -5,14 +5,16 @@ use std::sync::{Arc, LazyLock};
 
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, TitleBar, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use wai_ext::Bar;
 use wai_ext::panel::clamp;
 
 use crate::app::{NewSession, OpenPalette, ToggleAgents, ToggleTerminal};
 use crate::aurora::{self, DISPLAY_FONT};
+use crate::bars::{TOP_ITEMS, ext_item, hide_entries, hide_menu};
 use crate::chat::TurnState;
 use crate::workspace::{Workspace, folder_name};
 
@@ -74,11 +76,21 @@ impl Workspace {
             };
             (ix..label.len(), style)
         });
-        let status = aurora::pill(cx)
-            .debug_selector(|| "topbar-status".into())
-            .flex_none()
-            .child(dot)
-            .child(StyledText::new(label).with_highlights(needs));
+        let status = self.shown("wai.status").then(|| {
+            aurora::pill(cx)
+                .debug_selector(|| "topbar-status".into())
+                .flex_none()
+                .child(dot)
+                .child(StyledText::new(label).with_highlights(needs))
+        });
+        let items = self.bar_items(Bar::Top, cx);
+        let drawn = (items.iter())
+            .filter(|i| i.state.is_some() && self.shown(&i.key))
+            .take(TOP_ITEMS);
+        let ext_items: Vec<_> = drawn
+            .enumerate()
+            .map(|(ix, item)| ext_item(item, true, ("topbar-item", ix), cx))
+            .collect();
 
         let brand = h_flex()
             .flex_none()
@@ -104,7 +116,8 @@ impl Workspace {
             .gap_2()
             .child(brand)
             .child(project)
-            .child(status);
+            .children(status)
+            .children(ext_items);
 
         let palette = Button::new("topbar-palette")
             .ghost()
@@ -162,12 +175,24 @@ impl Workspace {
             .flex_none()
             .gap_1()
             .children(self.templates_menu(cx))
-            .child(palette)
-            .child(terminal)
-            .children(agents)
-            .child(new);
+            .children(self.shown("wai.palette").then_some(palette))
+            .children(self.shown("wai.terminal").then_some(terminal))
+            .children(agents.filter(|_| self.shown("wai.agents-toggle")))
+            .children(self.shown("wai.new-session").then_some(new));
+        let entries = hide_entries(
+            &[
+                ("wai.status", "Agent status"),
+                ("wai.palette", "Command palette"),
+                ("wai.terminal", "Terminal"),
+                ("wai.agents-toggle", "Agents panel"),
+                ("wai.new-session", "New session"),
+            ],
+            &items,
+        );
+        let (hidden, workspace) = (self.hidden.clone(), cx.entity().downgrade());
 
         let bar = h_flex()
+            .id("topbar")
             .debug_selector(|| "topbar".into())
             // Width 0, then grown: the title bar's row sizes to its content otherwise, and a long
             // project name would push the actions out of the window.
@@ -177,7 +202,9 @@ impl Workspace {
             .gap_3()
             .pr_2()
             .child(left)
-            .child(right);
+            .child(right)
+            .test_support()
+            .context_menu(move |menu, _, _| hide_menu(menu, &entries, &hidden, workspace.clone()));
         if cfg!(target_os = "macos") {
             // Transparent over the aurora; light mode keeps the title bar's own colours.
             TitleBar::new()

@@ -1134,10 +1134,7 @@ pub(crate) mod tests {
     const PRS_UPDATE: &str =
         r#"--call 'item/update {"item": "prs", "text": "3 PRs", "tone": "warning"}'"#;
 
-    fn bar_items(
-        workspace: &Entity<Workspace>,
-        cx: &mut VisualTestContext,
-    ) -> Vec<super::BarItem> {
+    fn bar_items(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<super::BarItem> {
         workspace.read_with(cx, |w, cx| w.ext_host.read(cx).items())
     }
 
@@ -1221,6 +1218,148 @@ pub(crate) mod tests {
             l.iter().any(|l| l["title"] == "item/action")
         });
         assert_eq!(bodies(&lines, "item/action"), [json!({"item": "prs"})]);
+    }
+
+    /// Extension `id` with three top-bar items `a`, `b` and `c`.
+    fn top_items(id: &str, name: &str) -> String {
+        let items: String = ["a", "b", "c"]
+            .iter()
+            .map(|i| {
+                format!("[[contributes.items]]\nid = \"{i}\"\nbar = \"top\"\ntitle = \"{i}\"\n")
+            })
+            .collect();
+        format!(
+            "id = \"{id}\"\nname = \"{name}\"\nversion = \"1.0.0\"\n\
+            permissions = [\"process\", \"bar\"]\n[process]\ncommand = \"bin/run\"\n{items}"
+        )
+    }
+
+    /// Only the first four top items are drawn, and a narrow window still shows every button.
+    #[gpui_kit::test]
+    fn top_bar_fits_four_extension_items(cx: &mut TestAppContext) {
+        use crate::sidebar::tests::label;
+        use gpui_kit::{px, size};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let calls: String = ["a", "b", "c"]
+            .iter()
+            .map(|i| {
+                format!(
+                    r#"--call 'item/update {{"item": "{i}", "text": "a fairly long item text"}}' "#
+                )
+            })
+            .collect();
+        install(tmp.path(), &config, &top_items("bars", "Bars"), &calls, "");
+        install(
+            tmp.path(),
+            &config,
+            &top_items("bars2", "Bars 2"),
+            &calls,
+            "",
+        );
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        workspace.update(cx, |w, cx| {
+            w.project = std::env::temp_dir().join("x".repeat(60));
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(900.), px(700.)));
+        wait_until(cx, "four items", |cx| {
+            label(("topbar-item", 3usize), cx).is_some()
+        });
+        assert!(label(("topbar-item", 4usize), cx).is_none());
+        let new = cx.debug_bounds("sidebar-new").expect("new session drawn");
+        assert!(new.right() <= px(900.), "{new:?}");
+        let status = cx.debug_bounds("topbar-status").expect("status drawn");
+        let actions = cx.debug_bounds("topbar-actions").expect("actions drawn");
+        assert!(status.right() < actions.left(), "{status:?} {actions:?}");
+    }
+
+    /// A click reaches the extension; hiding the item in the bar's menu removes it, and a
+    /// relaunch keeps it hidden.
+    #[gpui_kit::test]
+    fn extension_item_click_and_hide(cx: &mut TestAppContext, relaunch: &mut TestAppContext) {
+        use crate::sidebar::tests::label;
+        use crate::workspace::tests::{click, launch, menu_item, open_at};
+        use wai_settings::AppState;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        install(tmp.path(), &config, ITEMS, PRS_UPDATE, "");
+        let path = tmp.path().join("state.json");
+
+        cx.executor().allow_parking();
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(path.clone()));
+        workspace.update(cx, |w, cx| {
+            w.user_dir = config.clone();
+            w.start_extensions(cx);
+        });
+        wait_until(cx, "the item", |cx| {
+            label(("bottombar-item", 0usize), cx).is_some()
+        });
+        click(("bottombar-item", 0usize), cx);
+        let log = log_path(tmp.path(), "bars");
+        let lines = logged(&log, "item/action", cx, |l| {
+            l.iter().any(|l| l["title"] == "item/action")
+        });
+        assert_eq!(bodies(&lines, "item/action"), [json!({"item": "prs"})]);
+
+        menu_item("bottombar", "PRs", cx);
+        assert!(label(("bottombar-item", 0usize), cx).is_none());
+        assert!(AppState::load(&path).hidden.contains("bars/prs"));
+
+        relaunch.executor().allow_parking();
+        let (workspace, cx) = open_at(relaunch, fake_settings(""), Some(path.clone()));
+        launch(&workspace, cx);
+        workspace.update(cx, |w, cx| {
+            w.user_dir = config.clone();
+            w.start_extensions(cx);
+        });
+        wait_until(cx, "the item's text", |cx| {
+            bar_items(&workspace, cx)[0].state.is_some()
+        });
+        assert!(label(("bottombar-item", 0usize), cx).is_none());
+    }
+
+    /// Extension `id` with a sidebar panel `p` and a bottom item `i`.
+    fn panel_and_item(id: &str) -> String {
+        format!(
+            "id = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\n\
+            permissions = [\"process\", \"panels\", \"bar\"]\n[process]\ncommand = \"bin/run\"\n\
+            [[contributes.panels]]\nid = \"p\"\ntitle = \"P\"\n\
+            [[contributes.items]]\nid = \"i\"\nbar = \"bottom\"\ntitle = \"I\"\n"
+        )
+    }
+
+    /// An extension's items sit in the order of its panel's icon in the rail.
+    #[gpui_kit::test]
+    fn bar_items_follow_the_rail(cx: &mut TestAppContext) {
+        use wai_ext::Bar;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        install(tmp.path(), &config, &panel_and_item("alpha"), "", "");
+        install(tmp.path(), &config, &panel_and_item("beta"), "", "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        wait_until(cx, "the panels", |cx| {
+            host.read_with(cx, |h, _| h.panels().len() == 2)
+        });
+        let keys = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, cx| {
+                (w.bar_items(Bar::Bottom, cx).into_iter())
+                    .map(|i| i.key)
+                    .collect::<Vec<_>>()
+            })
+        };
+        let rail = workspace.read_with(cx, |w, cx| w.rail_keys(cx));
+        let first = rail.iter().find(|k| k.contains('/')).unwrap().clone();
+        let second = rail.iter().rfind(|k| k.contains('/')).unwrap().clone();
+        let item_of = |panel: &str| format!("{}/i", panel.split('/').next().unwrap());
+        assert_eq!(keys(cx), [item_of(&first), item_of(&second)]);
+
+        workspace.update(cx, |w, cx| w.move_rail(&second, &first, cx));
+        assert_eq!(keys(cx), [item_of(&second), item_of(&first)]);
     }
 
     /// A crashed extension is listed with its name; the live one is not.
