@@ -25,7 +25,9 @@ use crate::aurora;
 use crate::bars::{HideEntry, hide_menu};
 use crate::chat::{ChatItem, ChatModel, ChatSession, DraftView, TurnState};
 use crate::settings_view::Section;
-use crate::workspace::{Dragged, DraggedSession, MAX_PANES, Pane, Renamed, Workspace};
+use crate::workspace::{
+    Dragged, DraggedSession, MAX_PANES, Pane, Preview, Renamed, Workspace,
+};
 
 pub(crate) const ROW_HEIGHT: f32 = 28.;
 
@@ -418,10 +420,6 @@ impl Workspace {
             (p.key(), el.into_any_element())
         });
         let mut icons: HashMap<String, AnyElement> = built_in.chain(extension).collect();
-        let icons: Vec<AnyElement> = (self.rail_keys(cx).iter())
-            .filter(|key| *key == "wai.sessions" || self.shown(key))
-            .filter_map(|key| icons.remove(key))
-            .collect();
         let entries: Vec<HideEntry> = (TABS.iter().skip(1))
             .map(|(_, key, _, label, _)| HideEntry {
                 key: key.to_string(),
@@ -433,6 +431,40 @@ impl Workspace {
                 label: p.title.clone().into(),
                 group: Some(p.ext_name.clone()),
             }))
+            .collect();
+        let (ring, dark) = (theme.ring, theme.is_dark());
+        let icons: Vec<AnyElement> = (self.rail_keys(cx).into_iter())
+            .filter(|key| key == "wai.sessions" || self.shown(key))
+            .filter_map(|key| {
+                let label = (entries.iter().find(|e| e.key == key))
+                    .map_or_else(|| "Sessions".into(), |e| e.label.clone());
+                let (drag, target) = (RailDrag { key: key.clone(), label }, key.clone());
+                let over = key.clone();
+                let el = icons.remove(&key)?;
+                // The icon's top border is the drop line, in the colour a drop zone's is.
+                Some(
+                    div()
+                        .id(SharedString::from(format!("rail-{key}")))
+                        .flex_none()
+                        .border_t_2()
+                        .border_color(gpui_kit::transparent_black())
+                        .on_drag(drag, |drag, offset, _, cx| {
+                            cx.new(|_| Preview(drag.label.clone(), offset))
+                        })
+                        .drag_over(move |style, drag: &RailDrag, _, _| match drag.key != over {
+                            true => style.border_color(match dark {
+                                true => aurora::lilas().alpha(0.45),
+                                false => ring,
+                            }),
+                            false => style,
+                        })
+                        .on_drop(cx.listener(move |this, drag: &RailDrag, _, cx| {
+                            this.move_rail(&drag.key, &target, cx)
+                        }))
+                        .child(el)
+                        .into_any_element(),
+                )
+            })
             .collect();
         let (hidden, workspace) = (self.hidden.clone(), cx.entity().downgrade());
         let foot = |id: &'static str, label: &'static str, name: Lucide, open: Option<Section>| {
@@ -1816,6 +1848,12 @@ pub(crate) fn row(active: bool, cx: &App) -> Div {
         .text_sm()
 }
 
+/// A rail icon in the middle of a drag.
+struct RailDrag {
+    key: String,
+    label: SharedString,
+}
+
 /// A group's header, or the rows outside any group, while an open session is dragged over it:
 /// lit as a pane is.
 fn light(
@@ -2785,6 +2823,31 @@ pub(crate) mod tests {
         cx.simulate_keystrokes("escape");
         assert_eq!(label(open_row(1), cx), None);
         assert_eq!(label(("history", 0usize), cx), None);
+    }
+
+    /// Dragging an icon onto another puts it there, and a relaunch keeps the order.
+    #[gpui_kit::test]
+    fn rail_reorders_by_drag_and_survives_a_relaunch(
+        cx: &mut TestAppContext,
+        relaunch: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let order = ["wai.search", "wai.sessions", "wai.files", "wai.agents"];
+        cx.executor().allow_parking();
+        let (workspace, cx) = open_at(cx, fake_settings(""), Some(path.clone()));
+        drag("tab-search", "tab-sessions", cx);
+        assert_eq!(workspace.read_with(cx, |w, _| w.rail_order.clone()), order);
+        assert!(center_of("tab-search", cx).y < center_of("tab-sessions", cx).y);
+
+        relaunch.executor().allow_parking();
+        let (workspace, cx) = open_at(relaunch, fake_settings(""), Some(path.clone()));
+        launch(&workspace, cx);
+        while question(&workspace, cx).is_some() {
+            click("approval-allow", cx);
+        }
+        assert_eq!(workspace.read_with(cx, |w, cx| w.rail_keys(cx)), order);
+        assert!(center_of("tab-search", cx).y < center_of("tab-sessions", cx).y);
     }
 
     /// Open and History fold, and stay folded on a relaunch, as the groups keep their colours.

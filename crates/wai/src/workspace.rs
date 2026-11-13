@@ -133,7 +133,7 @@ impl DraggedSession {
 
 /// GPUI draws a drag's view where its source was grabbed: the padding brings the pill under
 /// the pointer.
-pub(crate) struct Preview(SharedString, Point<Pixels>);
+pub(crate) struct Preview(pub(crate) SharedString, pub(crate) Point<Pixels>);
 
 impl Render for Preview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

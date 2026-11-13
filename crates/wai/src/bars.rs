@@ -83,6 +83,25 @@ impl Workspace {
             .collect();
         ordered(&default, &self.rail_order)
     }
+
+    /// Puts rail icon `from` where `to` is.
+    pub(crate) fn move_rail(&mut self, from: &str, to: &str, cx: &mut Context<Self>) {
+        if from == to {
+            return;
+        }
+        let mut keys = self.rail_keys(cx);
+        let (Some(at), Some(was)) = (
+            keys.iter().position(|k| k == to),
+            keys.iter().position(|k| k == from),
+        ) else {
+            return;
+        };
+        let key = keys.remove(was);
+        keys.insert(at, key);
+        self.rail_order = keys;
+        self.save_state(cx);
+        cx.notify();
+    }
 }
 
 #[cfg(test)]
