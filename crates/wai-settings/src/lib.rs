@@ -508,6 +508,10 @@ pub struct AppState {
     /// The Sessions panel's Open and History sections are folded.
     pub open_folded: bool,
     pub history_folded: bool,
+    /// Bar items the user hid, by key (`wai.files`, `<extension id>/<item id>`).
+    pub hidden: BTreeSet<String>,
+    /// The rail's keys in the user's order.
+    pub rail_order: Vec<String>,
 }
 
 /// A named group of open sessions.
@@ -580,6 +584,8 @@ impl Default for AppState {
             shown_area: None,
             open_folded: false,
             history_folded: false,
+            hidden: BTreeSet::new(),
+            rail_order: Vec::new(),
         }
     }
 }
@@ -989,6 +995,8 @@ mod tests {
                 focused: 1,
             }],
             shown_area: Some(0),
+            hidden: ["wai.files".to_string()].into(),
+            rail_order: vec!["wai.search".to_string()],
         };
         state.save(&path).unwrap();
         assert_eq!(AppState::load(&path), state);
@@ -1010,6 +1018,7 @@ mod tests {
         assert_eq!(state.work_areas, []);
         assert_eq!(state.shown_area, None);
         assert!(!state.open_folded && !state.history_folded);
+        assert!(state.hidden.is_empty() && state.rail_order.is_empty());
         std::fs::write(&path, r#"{"work_areas":[{"name":"A"}]}"#).unwrap();
         let area = WorkArea {
             name: "A".into(),

@@ -1,6 +1,7 @@
 //! The sidebar: the activity bar's panels (the open sessions with their status and the agent's
 //! history, the project's files, search, the agents, then each running extension's panels).
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ use wai_settings::{SessionGroup, WorkArea};
 use crate::agents::AgentStatus;
 use crate::app::{FilterSessions, NewSession};
 use crate::aurora;
+use crate::bars::{HideEntry, hide_menu};
 use crate::chat::{ChatItem, ChatModel, ChatSession, DraftView, TurnState};
 use crate::settings_view::Section;
 use crate::workspace::{Dragged, DraggedSession, MAX_PANES, Pane, Renamed, Workspace};
@@ -55,17 +57,36 @@ pub enum SidebarTab {
     Panel(EntityId),
 }
 
-/// Each tab with its element id and label.
-const TABS: [(SidebarTab, &str, &str, Lucide); 4] = [
+/// Each tab with its key (see `bars`), element id and label.
+pub(crate) const TABS: [(SidebarTab, &str, &str, &str, Lucide); 4] = [
     (
         SidebarTab::Sessions,
+        "wai.sessions",
         "tab-sessions",
         "Sessions",
         Lucide::MessageSquare,
     ),
-    (SidebarTab::Files, "tab-files", "Files", Lucide::Folder),
-    (SidebarTab::Search, "tab-search", "Search", Lucide::Search),
-    (SidebarTab::Agents, "tab-agents", "Agents", Lucide::Sparkles),
+    (
+        SidebarTab::Files,
+        "wai.files",
+        "tab-files",
+        "Files",
+        Lucide::Folder,
+    ),
+    (
+        SidebarTab::Search,
+        "wai.search",
+        "tab-search",
+        "Search",
+        Lucide::Search,
+    ),
+    (
+        SidebarTab::Agents,
+        "wai.agents",
+        "tab-agents",
+        "Agents",
+        Lucide::Sparkles,
+    ),
 ];
 
 /// An extension panel's mark on the rail: the first letters of its first two words, else of its
@@ -330,7 +351,7 @@ impl Workspace {
             .into_iter()
             // On the right, Agents has no icon.
             .filter(|(tab, ..)| !(self.agents_right && *tab == SidebarTab::Agents))
-            .map(|(tab, id, label, name)| {
+            .map(|(tab, key, id, label, name)| {
                 let mut el = tab_item(tab, id.into(), label.into(), icon(name).into_any_element());
                 if tab == SidebarTab::Sessions && needs_you > 0 {
                     let count = needs_you.to_string();
@@ -356,7 +377,7 @@ impl Workspace {
                             .test_support(),
                     );
                 }
-                el
+                (key.to_string(), el.into_any_element())
             });
         // A sidebar panel is a tab; a main panel's button opens its pane, or focuses it, and is
         // shown selected while the pane is on screen. Its icon, else the title's initials.
@@ -382,22 +403,38 @@ impl Workspace {
                     .into_any_element(),
             };
             if !p.main {
-                return tab_item(
-                    SidebarTab::Panel(p.view.entity_id()),
-                    ("tab-panel", ix).into(),
-                    title.into(),
-                    mark,
-                );
+                let tab = SidebarTab::Panel(p.view.entity_id());
+                let el = tab_item(tab, ("tab-panel", ix).into(), title.into(), mark);
+                return (p.key(), el.into_any_element());
             }
             let view = p.view.clone();
-            item(("tab-panel", ix).into(), title.into(), on)
+            let el = item(("tab-panel", ix).into(), title.into(), on)
                 .role(Role::Button)
                 .child(mark)
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.open_panel(view.clone(), true, window, cx)
                 }))
-                .test_support()
+                .test_support();
+            (p.key(), el.into_any_element())
         });
+        let mut icons: HashMap<String, AnyElement> = built_in.chain(extension).collect();
+        let icons: Vec<AnyElement> = (self.rail_keys(cx).iter())
+            .filter(|key| *key == "wai.sessions" || self.shown(key))
+            .filter_map(|key| icons.remove(key))
+            .collect();
+        let entries: Vec<HideEntry> = (TABS.iter().skip(1))
+            .map(|(_, key, _, label, _)| HideEntry {
+                key: key.to_string(),
+                label: (*label).into(),
+                group: None,
+            })
+            .chain(panels.iter().map(|p| HideEntry {
+                key: p.key(),
+                label: p.title.clone().into(),
+                group: Some(p.ext_name.clone()),
+            }))
+            .collect();
+        let (hidden, workspace) = (self.hidden.clone(), cx.entity().downgrade());
         let foot = |id: &'static str, label: &'static str, name: Lucide, open: Option<Section>| {
             item(id.into(), label.into(), false)
                 .role(Role::Button)
@@ -413,6 +450,7 @@ impl Workspace {
                 .test_support()
         };
         v_flex()
+            .id("rail")
             .debug_selector(|| "rail".into())
             .flex_none()
             .w(px(44.))
@@ -422,8 +460,7 @@ impl Workspace {
             .py(px(8.))
             .border_r_1()
             .border_color(theme.border)
-            .children(built_in)
-            .children(extension)
+            .children(icons)
             .child(div().flex_1())
             .child(foot(
                 "sidebar-extensions",
@@ -437,6 +474,20 @@ impl Workspace {
                 Lucide::Settings,
                 Some(Section::Ai),
             ))
+            .test_support()
+            .context_menu(move |menu, _, _| hide_menu(menu, &entries, &hidden, workspace.clone()))
+    }
+
+    /// The key of `tab`'s rail icon (`Sessions` included).
+    pub(crate) fn tab_key(&self, tab: SidebarTab, cx: &App) -> Option<String> {
+        match tab {
+            SidebarTab::Panel(id) => (self.ext_host.read(cx).panels().iter())
+                .find(|p| p.view.entity_id() == id)
+                .map(|p| p.key()),
+            _ => (TABS.iter())
+                .find(|(t, ..)| *t == tab)
+                .map(|(_, key, ..)| key.to_string()),
+        }
     }
 
     /// The Sessions panel: its title row and filter, then the Open section (drafts and sessions
@@ -1797,6 +1848,7 @@ fn side_button(id: impl Into<ElementId>) -> Button {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::SidebarTab;
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
     use gpui_kit::{
@@ -2098,7 +2150,7 @@ pub(crate) mod tests {
         cx.run_until_parked();
     }
 
-    fn label(id: impl Into<ElementId>, cx: &mut VisualTestContext) -> Option<String> {
+    pub(crate) fn label(id: impl Into<ElementId>, cx: &mut VisualTestContext) -> Option<String> {
         let id = id.into();
         cx.update(|window, cx| {
             window.render_frame(cx);
@@ -2779,6 +2831,49 @@ pub(crate) mod tests {
             label(("open-age", 0usize), cx),
             None,
             "a restored session has no time"
+        );
+    }
+
+    /// Hiding Files in the rail's menu removes its icon, and a relaunch keeps it hidden.
+    #[gpui_kit::test]
+    fn rail_icons_hide_and_survive_a_relaunch(
+        cx: &mut TestAppContext,
+        relaunch: &mut TestAppContext,
+    ) {
+        use crate::workspace::tests::menu_item;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        cx.executor().allow_parking();
+        let (_workspace, cx) = open_at(cx, fake_settings(""), Some(path.clone()));
+        assert_eq!(label("tab-files", cx).as_deref(), Some("Files"));
+        menu_item("rail", "Files", cx);
+        assert_eq!(label("tab-files", cx), None);
+        assert!(AppState::load(&path).hidden.contains("wai.files"));
+
+        relaunch.executor().allow_parking();
+        let (workspace, cx) = open_at(relaunch, fake_settings(""), Some(path.clone()));
+        launch(&workspace, cx);
+        while question(&workspace, cx).is_some() {
+            click("approval-allow", cx);
+        }
+        assert_eq!(label("tab-files", cx), None);
+        menu_item("rail", "Files", cx);
+        assert_eq!(label("tab-files", cx).as_deref(), Some("Files"));
+    }
+
+    #[gpui_kit::test]
+    fn hiding_the_selected_tab_shows_sessions(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
+        click("tab-files", cx);
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w.sidebar_tab),
+            SidebarTab::Files
+        );
+        workspace.update(cx, |w, cx| w.toggle_hidden("wai.files", cx));
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w.sidebar_tab),
+            SidebarTab::Sessions
         );
     }
 

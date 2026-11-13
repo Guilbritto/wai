@@ -1314,6 +1314,35 @@ pub(crate) mod tests {
         );
     }
 
+    /// Hiding the selected sidebar panel's icon shows the sessions; a main panel's pane stays.
+    #[gpui_kit::test]
+    fn hiding_a_selected_panel_icon_shows_sessions(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+        use crate::sidebar::SidebarTab;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (workspace, view, cx) = start_panels(tmp.path(), "--panel", cx);
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        let keys = host.read_with(cx, |h, _| {
+            h.panels().iter().map(|p| p.key()).collect::<Vec<_>>()
+        });
+        click(("tab-panel", 1usize), cx);
+        assert!(matches!(
+            workspace.read_with(cx, |w, _| w.sidebar_tab),
+            SidebarTab::Panel(_)
+        ));
+        workspace.update(cx, |w, cx| w.toggle_hidden(&keys[1], cx));
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w.sidebar_tab),
+            SidebarTab::Sessions
+        );
+
+        click(("tab-panel", 0usize), cx);
+        assert_eq!(panes_of(&workspace, &view, cx), 1);
+        workspace.update(cx, |w, cx| w.toggle_hidden(&keys[0], cx));
+        assert_eq!(panes_of(&workspace, &view, cx), 1);
+    }
+
     /// A main panel's × closes its pane and the extension keeps running; disabling the extension
     /// closes the pane, and the focus lands on a live pane.
     #[gpui_kit::test]

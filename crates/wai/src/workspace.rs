@@ -287,6 +287,9 @@ pub struct Workspace {
     /// The Sessions panel's sections are folded; kept in `state.json`.
     pub(crate) open_folded: bool,
     pub(crate) history_folded: bool,
+    /// The bar items the user hid, and the rail's order; kept in `state.json`.
+    pub(crate) hidden: BTreeSet<String>,
+    pub(crate) rail_order: Vec<String>,
     /// The agent commands and shells the user allowed; kept in `state.json`, never in
     /// `settings.toml`.
     pub approved: BTreeSet<String>,
@@ -491,6 +494,8 @@ impl Workspace {
                     .clean_on_escape()
             }),
             open_folded: false,
+            hidden: BTreeSet::new(),
+            rail_order: Vec::new(),
             history_folded: false,
             approved,
             shell,
@@ -880,6 +885,8 @@ impl Workspace {
         self.agents_collapsed = state.agents_collapsed;
         self.open_folded = state.open_folded;
         self.history_folded = state.history_folded;
+        self.hidden = state.hidden;
+        self.rail_order = state.rail_order;
         if let Some(ix) = state.shown_area.filter(|&ix| ix < self.work_areas.len()) {
             self.focused_pane = self.lay_out_area(ix, None, cx);
         }
@@ -1035,6 +1042,8 @@ impl Workspace {
             active_file,
             open_folded: self.open_folded,
             history_folded: self.history_folded,
+            hidden: self.hidden.clone(),
+            rail_order: self.rail_order.clone(),
         };
         // ponytail: a few hundred bytes on the UI thread; move to the background executor if
         // it ever shows in a frame.
@@ -5449,7 +5458,17 @@ pub(crate) mod tests {
         cx.run_until_parked();
         let item = cx.update(|window, cx| {
             window.render_frame(cx);
-            window.find_by_label(item).bounds().center()
+            let menu: Vec<_> = window.find_all_by_role(gpui_kit::Role::MenuItem);
+            let found = window.find_all_by_label(item);
+            let inside = |label: &&gpui_kit::test::ElementSnapshot| {
+                menu.iter().any(|m| label.path().starts_with(m.path()))
+            };
+            found
+                .iter()
+                .find(inside)
+                .expect("a menu item")
+                .bounds()
+                .center()
         });
         cx.simulate_mouse_move(item, None, Modifiers::none());
         cx.simulate_click(item, Modifiers::none());

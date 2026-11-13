@@ -3,6 +3,7 @@ mod agents_view;
 mod app;
 mod areas;
 mod aurora;
+mod bars;
 mod chat;
 mod claude_config;
 mod diagnostics;
