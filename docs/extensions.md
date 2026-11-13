@@ -1,8 +1,8 @@
 # Writing wai extensions
 
-An extension is a folder with a `wai-extension.toml` manifest. It can be manifest-only (templates, prompt commands, agents, MCP servers) or run a program of its own. That program can be in any language: it speaks line-delimited JSON-RPC 2.0 over stdio and can draw panels in wai's sidebar or main area.
+An extension is a folder with a `wai-extension.toml` manifest. It can be manifest-only (templates, prompt commands, agents, MCP servers) or run a program of its own. That program can be in any language: it speaks line-delimited JSON-RPC 2.0 over stdio and can draw panels in wai's sidebar or main area and show items in its top and bottom bars.
 
-This guide describes API version 1.2 (protocol 1), as implemented by the latest wai release. API 1.2 ships with wai 0.9.0. The [first-party extensions](../extensions) are working references:
+This guide describes API version 1.3 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
 - `wai-navegador` is manifest-only;
 - `wai-waycarbon` and `wai-rotinas` are written in Go.
 
@@ -15,8 +15,8 @@ id = "hello-go"                 # required
 name = "Hello (Go)"             # required
 version = "0.1.0"               # required
 description = "A minimal wai extension"
-api = "1.2"                     # optional: the oldest extension API it works with
-permissions = ["process", "panels", "notify"]
+api = "1.3"                     # optional: the oldest extension API it works with
+permissions = ["process", "panels", "bar", "notify"]
 
 [process]                       # optional: the extension's own program
 command = "bin/hello-go"
@@ -27,6 +27,11 @@ id = "main"
 title = "Hello"
 icon = "hand"                   # optional: a Lucide icon for the activity bar
 location = "main"               # optional: "sidebar" (default) or "main"
+
+[[contributes.items]]
+id = "prs"
+bar = "bottom"                  # "top" or "bottom"
+title = "Pull requests"
 ```
 
 **Unknown fields are refused** at every level, and so is a manifest that is not valid UTF-8 or is over 1 MB.
@@ -37,7 +42,7 @@ location = "main"               # optional: "sidebar" (default) or "main"
 | `name` | string | Shown in the extension list and the consent dialog |
 | `version` | string | Free form. wai shows it; it does not compare versions |
 | `description` | string, optional | Shown last in the consent dialog, cut to fit |
-| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.2"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.2)`. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
+| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.3"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.3)`. Set it to `"1.3"` when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
 | `permissions` | array of strings | See [Permissions](#permissions). An unknown permission is refused |
 | `process.command` | string | See [Commands and paths](#commands-and-paths). Needs `process` |
 | `process.args` | array of strings, optional | Arguments, passed as given (no shell) |
@@ -47,6 +52,7 @@ location = "main"               # optional: "sidebar" (default) or "main"
 | `contributes.mcp_servers` | array of tables | `name`, `command`, optional `args` (array), optional `env` (table of strings). Needs `process` |
 | `contributes.claude_plugins` | array of strings | Claude Code plugin names to suggest |
 | `contributes.panels` | array of tables | `id`, `title`, optional `icon`, optional `location`. See [Panels](#panels). Needs `panels` |
+| `contributes.items` | array of tables | `id`, `bar` (`"top"` or `"bottom"`), `title`. At most 3. See [Bar items](#bar-items). Needs `bar` |
 | `contributes.themes` | array of strings | Accepted, but not used in this version |
 
 **Extra rules:**
@@ -75,6 +81,7 @@ Calls in both directions are checked against what the user **granted** at instal
 | `sessions:control` | `sessions/open` and `sessions/prompt`. It does not include `sessions:read` |
 | `notify` | `notify`: system notifications |
 | `panels` | Contribute panels, `panel/render`, `panel/open`, and receive `panel/action` |
+| `bar` | Contribute bar items, `item/update`, and receive `item/action`. Shown as *Show items in the top and bottom bars* |
 | `network` | Nothing is enforced. It tells the user the extension uses the network |
 | `fs:<path>` | Nothing is enforced. It tells the user the extension uses `<path>`, which must be a relative path inside the extension's folder |
 
@@ -136,15 +143,16 @@ When an enabled extension with `[process]` and the `process` permission starts (
 
 | Method | Kind | Params | Notes |
 |---|---|---|---|
-| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.2", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
+| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.3", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
 | `command/run` | request | `{"id": "<command id>"}` | The user ran one of your commands without `prompt` from the palette. wai ignores the answer |
 | `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item, card, table row, button or menu item was clicked (after its confirmation, if it has one). `action_id` is its `id`. `values` has every form field in the panel by id: inputs as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels` |
+| `item/action` | request | `{"item": "<item id>"}` | The user clicked one of your bar items. wai ignores the answer. The usual reply is a `panel/open` or a `sessions/open`. Needs `bar` |
 | `event/session_state` | notification | `{"agent", "session", "state"}` | `state` is `idle`, `working`, `needs_you` or `error`. Needs `sessions:read` |
 | `event/turn_ended` | notification | `{"agent", "session", "reason"}` | `reason` is `end_turn`, `cancelled`, `max_tokens`, `refusal`, or the agent's own. Needs `sessions:read` |
 | `event/file_saved` | notification | `{"path": "<absolute path>"}` | The user saved a file in wai |
 
 - Paths are absolute, and on Windows they never carry the `\\?\` prefix.
-- Answer `initialize` before anything else. API 1.1 and 1.2 only add fields; ignore the ones you do not know.
+- Answer `initialize` before anything else. API 1.1, 1.2 and 1.3 only add fields and methods; ignore the ones you do not know.
 
 ### Extension → host
 
@@ -156,6 +164,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `notify` | `notify` | `{"title", "body"?}` | `null` |
 | `panel/render` | `panels` | `{"panel": "<panel id>", "tree": {…}}` | `null` |
 | `panel/open` | `panels` | `{"panel": "<panel id>"}` | `null` once shown |
+| `item/update` | `bar` | `{"item": "<item id>", "text"?, "icon"?, "tooltip"?, "tone"?}` | `null` |
 
 **`sessions/open`** starts a session with `agent`, or with the user's default agent.
 - **The prompt:** `prompt` is filled in and not sent, unless `send` is `true`.
@@ -181,6 +190,11 @@ When an enabled extension with `[process]` and the `process` permission starts (
 - At most **one every 2 seconds** per extension, or `Too many panel opens; try again later`.
 - A panel id not in your manifest gets `-32602`.
 - Typical use: a palette command without `prompt` → `command/run` → `panel/open`.
+
+**`item/update`** replaces a bar item's whole state (see [Bar items](#bar-items)).
+- `text` is cut to 32 characters, `tooltip` to 500, each on one line. `icon` is a Lucide name; an unknown name draws no icon. `tone` is `neutral`, `info`, `success`, `warning` or `danger`; anything else is `neutral`.
+- It shares `panel/render`'s limit: at most **100 per second** per extension, coalesced with each item keeping its last state, and the last one always lands.
+- An item id not in your manifest gets `-32602`.
 
 **Notifications or requests.** You may send any of these as a notification (no `id`) when you do not need the answer, as the examples below do. A denied notification is dropped without an answer.
 
@@ -396,6 +410,29 @@ A database restore form with a confirmed danger button, progress and output ([`s
     }
   ]
 }
+```
+
+## Bar items
+
+An item is a small pill in the top bar or the bottom bar, declared in the manifest with `contributes.items` (at most 3 per extension; more is an invalid manifest, and so is `items` without the `bar` permission).
+
+- **Content:** none until your first `item/update`. An update with neither `text` nor `icon` hides the item. The user clicking it sends `item/action`.
+- **Lifetime:** an item is drawn only while your process runs, and waits for a new `item/update` after a restart.
+- **Top bar:** after the status pill, at most 4 extension items in total, text drawn at 24 characters. **Bottom bar:** after wai's own items.
+- **Telling them apart:** each item's tooltip ends with `— <extension name>`. The user can hide any item with a right click on the bar.
+
+```toml
+permissions = ["process", "bar"]
+api = "1.3"
+
+[[contributes.items]]
+id = "prs"
+bar = "bottom"
+title = "Pull requests"
+```
+
+```json
+{"jsonrpc": "2.0", "method": "item/update", "params": {"item": "prs", "text": "3 PRs", "icon": "git-pull-request", "tooltip": "2 green, 1 failing", "tone": "warning"}}
 ```
 
 ## Contributions

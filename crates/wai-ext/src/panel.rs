@@ -305,6 +305,47 @@ pub fn icon_name(name: &str) -> bool {
         && (name.bytes()).all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// An extension item's text, in characters.
+pub const ITEM_TEXT_CHARS: usize = 32;
+
+/// What `item/update` last said about a bar item.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ItemState {
+    pub text: Option<Arc<str>>,
+    pub icon: Option<Arc<str>>,
+    pub tooltip: Option<Arc<str>>,
+    pub tone: Tone,
+}
+
+impl ItemState {
+    /// Drawn only with a text or an icon.
+    pub fn shown(&self) -> bool {
+        self.text.is_some() || self.icon.is_some()
+    }
+}
+
+/// The state `params` describe; anything that is not an object is the default.
+pub fn item_state(params: &Value) -> ItemState {
+    let Some(o) = params.as_object() else {
+        return ItemState::default();
+    };
+    let line = |key: &str, max: usize| {
+        let line = clamp(str_field(o, key)?, max);
+        (!line.is_empty()).then(|| Arc::from(line))
+    };
+    // `clamp` may add its `…` to `max` characters; the text's limit counts it.
+    let text = line("text", ITEM_TEXT_CHARS).map(|t: Arc<str>| match t.chars().count() {
+        n if n > ITEM_TEXT_CHARS => Arc::from(cut(&t, ITEM_TEXT_CHARS - 1)),
+        _ => t,
+    });
+    ItemState {
+        text,
+        icon: icon(o),
+        tooltip: line("tooltip", LINE_CHARS),
+        tone: tone(o).unwrap_or_default(),
+    }
+}
+
 /// Node types a table cell may be.
 const CELLS: [&str; 8] = [
     "text", "badge", "link", "icon", "button", "menu", "spinner", "progress",
@@ -653,6 +694,19 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::*;
+
+    #[test]
+    fn item_state_is_clamped() {
+        let long = "x".repeat(40);
+        let state = item_state(&json!({"text": long}));
+        let text = state.text.unwrap();
+        assert_eq!(text.chars().count(), ITEM_TEXT_CHARS);
+        assert!(text.ends_with('…'));
+        assert_eq!(item_state(&json!({"icon": "Bad Name"})).icon, None);
+        assert_eq!(item_state(&json!({"tone": "loud"})).tone, Tone::Neutral);
+        assert!(!item_state(&json!({"text": ""})).shown());
+        assert_eq!(item_state(&json!(5)), ItemState::default());
+    }
 
     fn text(s: &str) -> Node {
         Node::Text {

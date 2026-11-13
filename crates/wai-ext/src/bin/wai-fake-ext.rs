@@ -12,6 +12,8 @@
 //! - `--crash`: right after answering `initialize`, print `fake ext crashed` to stderr, exit 3.
 //! - `--flood <n>`: after `initialize`, send n `panel/render` notifications for panel `main`,
 //!   with text trees `0` to `n - 1`.
+//! - `--flood-items <n>`: after `initialize`, send n `item/update` notifications for item `prs`,
+//!   with the texts `0` to `n - 1`.
 //! - `--panel`: after `initialize`, render the sample tree (`sample` below) on panel `main`; each
 //!   `panel/action` renders it again, its last text saying `last action: <id> <values as JSON>`.
 //!   Its form's initial values are `query` "is:open", `scope` "Mine", `done` false; after action
@@ -136,6 +138,12 @@ fn main() {
                 if let Some(n) = value("--flood") {
                     for n in 0..n.parse::<u64>().unwrap() {
                         send(render(json!({"type": "text", "text": n.to_string()})));
+                    }
+                }
+                if let Some(n) = value("--flood-items") {
+                    for n in 0..n.parse::<u64>().unwrap() {
+                        send(json!({"jsonrpc": "2.0", "method": "item/update",
+                            "params": {"item": "prs", "text": n.to_string()}}));
                     }
                 }
                 if flag("--panel") {

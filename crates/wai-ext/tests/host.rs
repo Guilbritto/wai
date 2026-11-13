@@ -30,6 +30,11 @@ fn installed(dir: &Path, args: &[&str], granted: Vec<Permission>) -> Installed {
                 icon: None,
                 location: PanelLocation::Sidebar,
             }],
+            items: vec![ItemSpec {
+                id: "prs".into(),
+                bar: Bar::Bottom,
+                title: "PRs".into(),
+            }],
             ..Default::default()
         },
         process: Some(ProcessSpec {
@@ -230,6 +235,7 @@ fn ungranted_call_denied() {
         "panel/render",
         "fs/read",
         "panel/open",
+        "item/update",
     ];
     let args: Vec<&str> = calls.iter().flat_map(|c| ["--call", *c]).collect();
     let ext = installed(
@@ -257,6 +263,7 @@ fn ungranted_call_denied() {
         assert_eq!(errors[&4], denied("panels"));
         assert_eq!(errors[&5]["code"], -32601);
         assert_eq!(errors[&6], denied("panels"));
+        assert_eq!(errors[&7], denied("bar"));
         assert!(
             events
                 .iter()
@@ -376,6 +383,130 @@ fn flood_is_coalesced() {
             "{} renders in {elapsed:?}",
             renders.len()
         );
+    });
+}
+
+/// `item/update` reaches wai as the item's state.
+#[test]
+fn item_update_reaches_the_host() {
+    let tmp = tempfile::tempdir().unwrap();
+    let args = [
+        "--call",
+        r#"item/update {"item":"prs","text":"3 PRs","icon":"git-pull-request","tooltip":"2 green","tone":"warning"}"#,
+    ];
+    let ext = installed(
+        tmp.path(),
+        &args,
+        vec![Permission::Process, Permission::Bar],
+    );
+    run(Duration::from_secs(10), async {
+        let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        let events = until(&rx, |e| matches!(e, ExtEvent::Item { .. })).await;
+        let Some(ExtEvent::Item { item, state }) = events.last() else {
+            unreachable!()
+        };
+        assert_eq!(item, "prs");
+        assert_eq!(
+            *state,
+            panel::ItemState {
+                text: Some("3 PRs".into()),
+                icon: Some("git-pull-request".into()),
+                tooltip: Some("2 green".into()),
+                tone: panel::Tone::Warning,
+            }
+        );
+    });
+}
+
+/// `item/update` reaches wai for a contributed item only; one with neither text nor icon hides.
+#[test]
+fn item_update_needs_a_known_item() {
+    let tmp = tempfile::tempdir().unwrap();
+    let args = [
+        "--call",
+        r#"item/update {"item":"nope"}"#,
+        "--call",
+        r#"item/update {"item":"prs"}"#,
+    ];
+    let ext = installed(
+        tmp.path(),
+        &args,
+        vec![Permission::Process, Permission::Notify, Permission::Bar],
+    );
+    run(Duration::from_secs(10), async {
+        let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        let events = until(&rx, |e| matches!(e, ExtEvent::Item { .. })).await;
+        let Some(ExtEvent::Item { item, state }) = events.last() else {
+            unreachable!()
+        };
+        assert_eq!(item, "prs");
+        assert!(!state.shown());
+        let mut error = None;
+        for event in &events {
+            if let ExtEvent::Notify { title, body } = event
+                && title == "reply"
+            {
+                error.get_or_insert(serde_json::from_str::<Value>(body).unwrap());
+            }
+        }
+        let reply = match error {
+            Some(reply) => reply,
+            None => reported(&rx, "reply").await,
+        };
+        assert_eq!(reply["id"], 1);
+        assert_eq!(
+            reply["error"],
+            json!({"code": -32602, "message": "unknown item \"nope\""})
+        );
+    });
+}
+
+/// `item/update` is coalesced like `panel/render`, and the last state lands.
+#[test]
+fn item_flood_is_coalesced() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ext = installed(
+        tmp.path(),
+        &["--flood-items", "20000"],
+        vec![Permission::Process, Permission::Bar],
+    );
+    run(Duration::from_secs(10), async {
+        let start = Instant::now();
+        let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        let events = until(
+            &rx,
+            |e| matches!(e, ExtEvent::Item { state, .. } if state.text.as_deref() == Some("19999")),
+        )
+        .await;
+        let elapsed = start.elapsed();
+        let items = events
+            .iter()
+            .filter(|e| matches!(e, ExtEvent::Item { .. }))
+            .count();
+        assert!(
+            items as u128 <= elapsed.as_millis() / 10 + 1,
+            "{items} items in {elapsed:?}"
+        );
+    });
+}
+
+/// `item/action` is sent only to an extension granted `bar`.
+#[test]
+fn item_action_needs_bar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ext = installed(
+        tmp.path(),
+        &[],
+        vec![Permission::Process, Permission::Notify],
+    );
+    run(Duration::from_secs(10), async {
+        let (handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        reported(&rx, "initialize").await;
+        handle.item_action("prs");
+        handle.run_command("x");
+        let events = until(&rx, |e| title(e) == Some("command/run")).await;
+        let sent: Vec<_> = events.iter().filter_map(title).collect();
+        assert_eq!(sent, ["command/run"], "sent without permission");
     });
 }
 

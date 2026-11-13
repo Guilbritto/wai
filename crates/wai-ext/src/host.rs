@@ -17,7 +17,7 @@ use async_channel::{Receiver, Sender};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::panel::{self, Node, TooLarge};
+use crate::panel::{self, ItemState, Node, TooLarge};
 use crate::rpc::{self, Incoming, Line, RpcError};
 use crate::{ExtId, Installed, Permission};
 
@@ -47,6 +47,11 @@ pub enum ExtEvent {
     Render {
         panel: String,
         tree: Result<Node, TooLarge>,
+    },
+    /// `item/update`: the item's whole new state.
+    Item {
+        item: String,
+        state: ItemState,
     },
     Notify {
         title: String,
@@ -325,6 +330,12 @@ impl ExtHandle {
         }
     }
 
+    pub fn item_action(&self, item: &str) {
+        if self.granted.contains(&Permission::Bar) {
+            self.send("item/action", json!({"item": item}), true);
+        }
+    }
+
     /// Kills the process (its group on unix) now, on this thread; nothing restarts it.
     pub fn shutdown(&self) {
         let mut shared = lock(&self.shared);
@@ -361,6 +372,7 @@ struct Ext {
     data: PathBuf,
     granted: Vec<Permission>,
     panels: Vec<String>,
+    items: Vec<String>,
     init: Value,
 }
 
@@ -385,6 +397,7 @@ impl Ext {
             data: installed.data.clone(),
             granted: installed.granted.clone(),
             panels: m.contributes.panels.iter().map(|p| p.id.clone()).collect(),
+            items: m.contributes.items.iter().map(|i| i.id.clone()).collect(),
             init: json!({
                 "protocol": 1,
                 "api": crate::API,
@@ -530,7 +543,17 @@ impl Ext {
                 need(Permission::Panels)?;
                 let p: RenderParams = params_of(params)?;
                 known(&p.panel)?;
-                Call::Render(p.panel, p.tree)
+                Call::Render(Slot::Panel(p.panel), p.tree)
+            }
+            "item/update" => {
+                need(Permission::Bar)?;
+                let item = (params["item"].as_str())
+                    .ok_or_else(|| RpcError::new(rpc::INVALID_PARAMS, "missing item"))?;
+                if !self.items.iter().any(|i| i == item) {
+                    let error = format!("unknown item {item:?}");
+                    return Err(RpcError::new(rpc::INVALID_PARAMS, error));
+                }
+                Call::Render(Slot::Item(item.to_owned()), params)
             }
             "panel/open" => {
                 need(Permission::Panels)?;
@@ -568,7 +591,7 @@ enum Call {
     Done(ExtEvent),
     /// wai answers through the event's `Reply`.
     Deferred(ExtEvent),
-    Render(String, Value),
+    Render(Slot, Value),
 }
 
 #[derive(Deserialize)]
@@ -608,26 +631,33 @@ fn params_of<T: for<'de> Deserialize<'de>>(params: Value) -> Result<T, RpcError>
     serde_json::from_value(params).map_err(|e| RpcError::new(rpc::INVALID_PARAMS, e.to_string()))
 }
 
-/// Coalesces `panel/render`: one render per `RENDER_GAP` for the whole extension, each panel's
-/// latest tree kept while it waits (so at most one per declared panel is held).
+/// What a render is for: a panel or a bar item.
+#[derive(PartialEq)]
+enum Slot {
+    Panel(String),
+    Item(String),
+}
+
+/// Coalesces `panel/render` and `item/update`: one per `RENDER_GAP` for the whole extension, each
+/// slot's latest value kept while it waits (so at most one per declared panel and item is held).
 #[derive(Default)]
 struct Renders {
     last: Option<Instant>,
-    pending: VecDeque<(String, Value)>,
+    pending: VecDeque<(Slot, Value)>,
 }
 
 impl Renders {
     /// The render to emit now, if its slot is free; otherwise it waits.
-    fn offer(&mut self, panel: String, tree: Value, now: Instant) -> Option<(String, Value)> {
-        if let Some(waiting) = self.pending.iter_mut().find(|(p, _)| *p == panel) {
+    fn offer(&mut self, slot: Slot, tree: Value, now: Instant) -> Option<(Slot, Value)> {
+        if let Some(waiting) = self.pending.iter_mut().find(|(s, _)| *s == slot) {
             waiting.1 = tree;
             return None;
         }
         if self.pending.is_empty() && self.last.is_none_or(|last| now >= last + RENDER_GAP) {
             self.last = Some(now);
-            return Some((panel, tree));
+            return Some((slot, tree));
         }
-        self.pending.push_back((panel, tree));
+        self.pending.push_back((slot, tree));
         None
     }
 
@@ -636,7 +666,7 @@ impl Renders {
         (!self.pending.is_empty()).then(|| last + RENDER_GAP)
     }
 
-    fn take_due(&mut self, now: Instant) -> Option<(String, Value)> {
+    fn take_due(&mut self, now: Instant) -> Option<(Slot, Value)> {
         if self.next_due()? > now {
             return None;
         }
@@ -648,17 +678,25 @@ impl Renders {
     async fn flush(&mut self, emit: &impl Fn(ExtEvent)) {
         while let Some(due) = self.next_due() {
             smol::Timer::at(due).await;
-            if let Some((panel, tree)) = self.take_due(Instant::now()) {
-                emit(render(panel, &tree));
+            if let Some((slot, tree)) = self.take_due(Instant::now()) {
+                emit(render(slot, &tree));
             }
         }
     }
 }
 
 /// Only renders that are emitted are parsed: a coalesced one costs nothing.
-fn render(panel: String, tree: &Value) -> ExtEvent {
-    let tree = panel::parse(tree);
-    ExtEvent::Render { panel, tree }
+fn render(slot: Slot, tree: &Value) -> ExtEvent {
+    match slot {
+        Slot::Panel(panel) => ExtEvent::Render {
+            panel,
+            tree: panel::parse(tree),
+        },
+        Slot::Item(item) => ExtEvent::Item {
+            item,
+            state: panel::item_state(tree),
+        },
+    }
 }
 
 enum End {
@@ -766,8 +804,8 @@ async fn session(
         if !ready && now >= init_deadline {
             return End::Failed("it did not answer initialize within 10 s".into());
         }
-        if let Some((panel, tree)) = renders.take_due(now) {
-            emit(render(panel, &tree));
+        if let Some((slot, tree)) = renders.take_due(now) {
+            emit(render(slot, &tree));
         }
         let deadline = [(!ready).then_some(init_deadline), renders.next_due()]
             .into_iter()
@@ -846,10 +884,10 @@ async fn session(
                 emit(event);
                 respond(id, Ok(Value::Null));
             }
-            Ok(Call::Render(panel, tree)) => {
+            Ok(Call::Render(slot, tree)) => {
                 // Now, not the loop's `now`: that was before the wait.
-                if let Some((panel, tree)) = renders.offer(panel, tree, Instant::now()) {
-                    emit(render(panel, &tree));
+                if let Some((slot, tree)) = renders.offer(slot, tree, Instant::now()) {
+                    emit(render(slot, &tree));
                 }
                 respond(id, Ok(Value::Null));
             }
