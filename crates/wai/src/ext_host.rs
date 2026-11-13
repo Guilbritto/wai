@@ -19,9 +19,9 @@ use std::time::{Duration, Instant};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::*;
 use wai_agent::McpServer;
-use wai_ext::panel::clamp;
+use wai_ext::panel::{ItemState, clamp};
 use wai_ext::{
-    CommandSpec, ExtEvent, ExtHandle, ExtId, HostEvent, Installed, PanelLocation, PanelSpec,
+    Bar, CommandSpec, ExtEvent, ExtHandle, ExtId, HostEvent, Installed, PanelLocation, PanelSpec,
     Permission,
 };
 use wai_settings::{AgentConfig, Template};
@@ -66,6 +66,27 @@ pub struct Panel {
     _actions: Subscription,
 }
 
+impl Panel {
+    /// `<ext id>/<panel id>`.
+    pub fn key(&self) -> String {
+        format!("{}/{}", self.ext.as_str(), self.id)
+    }
+}
+
+/// An item an enabled extension contributes to a bar.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BarItem {
+    /// `<ext id>/<item id>`.
+    pub key: String,
+    pub ext: ExtId,
+    pub ext_name: SharedString,
+    pub id: String,
+    pub bar: Bar,
+    pub title: String,
+    /// What its live process last said, when that is drawn.
+    pub state: Option<ItemState>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExtStatus {
     Starting,
@@ -91,6 +112,8 @@ struct Running {
     opened: Option<Instant>,
     /// When it last showed one of its panels (`panel/open`).
     shown: Option<Instant>,
+    /// What each item last said (`item/update`); empty again for a fresh process.
+    items: HashMap<String, ItemState>,
     _pump: Task<()>,
 }
 
@@ -185,6 +208,49 @@ impl ExtHost {
     /// Extension `ext`'s panel `id`, while shown.
     pub fn panel_of(&self, ext: &ExtId, id: &str) -> Option<&Panel> {
         (self.panels.iter()).find(|p| p.ext == *ext && p.id == id)
+    }
+
+    /// Every item of the enabled extensions granted `bar`: stopped ones stay listed, without a
+    /// state.
+    pub fn items(&self) -> Vec<BarItem> {
+        let items = self.enabled.iter().flat_map(|i| {
+            let ext = &i.manifest.id;
+            let running = self.running.get(ext).filter(|r| r.status.live());
+            let granted = i.granted.contains(&Permission::Bar);
+            (i.manifest.contributes.items.iter().filter(move |_| granted)).map(move |spec| {
+                let state = running.and_then(|r| r.items.get(&spec.id));
+                BarItem {
+                    key: format!("{}/{}", ext.as_str(), spec.id),
+                    ext: ext.clone(),
+                    ext_name: i.manifest.name.clone().into(),
+                    id: spec.id.clone(),
+                    bar: spec.bar,
+                    title: spec.title.clone(),
+                    state: state.filter(|s| s.shown()).cloned(),
+                }
+            })
+        });
+        items.collect()
+    }
+
+    /// `item/action`, to a running extension.
+    pub fn item_action(&self, ext: &ExtId, item: &str) {
+        if let Some(handle) = self.handle(ext) {
+            handle.item_action(item);
+        }
+    }
+
+    /// The enabled extensions whose process failed or crashed: name and error.
+    pub fn stopped(&self) -> Vec<(String, String)> {
+        let stopped = self.enabled.iter().filter_map(|i| {
+            match self.running.get(&i.manifest.id).map(|r| &r.status) {
+                Some(ExtStatus::Failed(e) | ExtStatus::Crashed(e)) => {
+                    Some((i.manifest.name.clone(), e.clone()))
+                }
+                _ => None,
+            }
+        });
+        stopped.collect()
     }
 
     pub fn handle(&self, id: &ExtId) -> Option<&ExtHandle> {
@@ -333,6 +399,7 @@ impl ExtHost {
             notified: None,
             opened: None,
             shown: None,
+            items: HashMap::new(),
             _pump: pump,
         };
         self.running.insert(id, running);
@@ -360,6 +427,13 @@ impl ExtHost {
                 }
                 return;
             }
+            ExtEvent::Item { item, state } => {
+                if let Some(running) = self.running.get_mut(id).filter(|r| r.status.live()) {
+                    running.items.insert(item, state);
+                    cx.notify();
+                }
+                return;
+            }
             ExtEvent::Notify { title, body } => return self.notify(id, &title, &body),
             ExtEvent::OpenSession { reply, .. } if !self.may_open(id) => {
                 return reply.send(Err(TOO_MANY_OPENS.into()));
@@ -377,6 +451,7 @@ impl ExtHost {
         if let Some(running) = self.running.get_mut(id) {
             if !status.live() {
                 self.panels.retain(|p| p.ext != *id);
+                running.items.clear();
             }
             running.status = status;
             cx.notify();
@@ -1049,6 +1124,118 @@ pub(crate) mod tests {
         [[contributes.panels]]\nid = \"main\"\ntitle = \"My cards\"\nlocation = \"main\"\n\
         icon = \"git-pull-request\"\n\
         [[contributes.panels]]\nid = \"side\"\ntitle = \"Side\"\nicon = \"no-such-icon\"\n";
+
+    /// Extension `bars`: item `prs` in the bottom bar, `ci` in the top bar.
+    const ITEMS: &str = "id = \"bars\"\nname = \"Bars\"\nversion = \"1.0.0\"\n\
+        permissions = [\"process\", \"bar\"]\n[process]\ncommand = \"bin/run\"\n\
+        [[contributes.items]]\nid = \"prs\"\nbar = \"bottom\"\ntitle = \"PRs\"\n\
+        [[contributes.items]]\nid = \"ci\"\nbar = \"top\"\ntitle = \"CI\"\n";
+
+    const PRS_UPDATE: &str =
+        r#"--call 'item/update {"item": "prs", "text": "3 PRs", "tone": "warning"}'"#;
+
+    fn bar_items(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<super::BarItem> {
+        workspace.read_with(cx, |w, cx| w.ext_host.read(cx).items())
+    }
+
+    /// An item shows what its process last said; the unset one is listed without a state; a
+    /// disabled extension lists none.
+    #[gpui_kit::test]
+    fn items_follow_the_process(cx: &mut TestAppContext) {
+        use wai_ext::Bar;
+        use wai_ext::panel::{ItemState, Tone};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        install(tmp.path(), &config, ITEMS, PRS_UPDATE, "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        wait_until(cx, "the item", |cx| {
+            bar_items(&workspace, cx)[0].state.is_some()
+        });
+        let ext = parse_manifest(ITEMS, tmp.path()).unwrap().id;
+        let item = |key: &str, id: &str, bar, title: &str, state| super::BarItem {
+            key: key.into(),
+            ext: ext.clone(),
+            ext_name: "Bars".into(),
+            id: id.into(),
+            bar,
+            title: title.into(),
+            state,
+        };
+        let shown = ItemState {
+            text: Some("3 PRs".into()),
+            tone: Tone::Warning,
+            ..Default::default()
+        };
+        assert_eq!(
+            bar_items(&workspace, cx),
+            [
+                item("bars/prs", "prs", Bar::Bottom, "PRs", Some(shown)),
+                item("bars/ci", "ci", Bar::Top, "CI", None),
+            ]
+        );
+
+        disable_first(&workspace, cx);
+        assert_eq!(bar_items(&workspace, cx), []);
+    }
+
+    /// Review focus 3: a restarted extension's items stay empty until it sends them again.
+    #[gpui_kit::test]
+    fn restart_starts_items_empty(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        install(tmp.path(), &config, ITEMS, PRS_UPDATE, "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        wait_until(cx, "the item", |cx| {
+            bar_items(&workspace, cx)[0].state.is_some()
+        });
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let after = cx.update(|_, cx| {
+            host.update(cx, |h, cx| {
+                h.set_project(other, cx);
+                h.items()
+            })
+        });
+        assert_eq!(after[0].state, None);
+    }
+
+    /// A click on an item reaches its extension as `item/action`.
+    #[gpui_kit::test]
+    fn item_click_reaches_the_extension(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        install(tmp.path(), &config, ITEMS, "", "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        let ext = parse_manifest(ITEMS, tmp.path()).unwrap().id;
+        wait_until(cx, "the extension", |cx| {
+            host.read_with(cx, |h, _| h.status(&ext) == Some(&super::ExtStatus::Ready))
+        });
+        host.read_with(cx, |h, _| h.item_action(&ext, "prs"));
+        let lines = logged(&log_path(tmp.path(), "bars"), "item/action", cx, |l| {
+            l.iter().any(|l| l["title"] == "item/action")
+        });
+        assert_eq!(bodies(&lines, "item/action"), [json!({"item": "prs"})]);
+    }
+
+    /// A crashed extension is listed with its name; the live one is not.
+    #[gpui_kit::test]
+    fn stopped_lists_crashed_extensions(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        install(tmp.path(), &config, PANELS, "--crash", "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        wait_until(cx, "the crash", |cx| {
+            host.read_with(cx, |h, _| h.stopped().len() == 1)
+        });
+        assert_eq!(host.read_with(cx, |h, _| h.stopped()[0].0.clone()), "Cards");
+    }
 
     /// The panes that show `view`.
     fn panes_of(
