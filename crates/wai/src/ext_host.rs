@@ -76,7 +76,7 @@ impl Panel {
 /// An item an enabled extension contributes to a bar.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BarItem {
-    /// `<ext id>/<item id>`.
+    /// `<ext id>#<item id>`, apart from a panel's `<ext id>/<panel id>`.
     pub key: String,
     pub ext: ExtId,
     pub ext_name: SharedString,
@@ -220,12 +220,12 @@ impl ExtHost {
             (i.manifest.contributes.items.iter().filter(move |_| granted)).map(move |spec| {
                 let state = running.and_then(|r| r.items.get(&spec.id));
                 BarItem {
-                    key: format!("{}/{}", ext.as_str(), spec.id),
+                    key: format!("{}#{}", ext.as_str(), spec.id),
                     ext: ext.clone(),
-                    ext_name: i.manifest.name.clone().into(),
+                    ext_name: clamp(&i.manifest.name, crate::extensions_view::NAME_CHARS).into(),
                     id: spec.id.clone(),
                     bar: spec.bar,
-                    title: spec.title.clone(),
+                    title: clamp(&spec.title, crate::extensions_view::NAME_CHARS),
                     state: state.filter(|s| s.shown()).cloned(),
                 }
             })
@@ -428,7 +428,9 @@ impl ExtHost {
                 return;
             }
             ExtEvent::Item { item, state } => {
-                if let Some(running) = self.running.get_mut(id).filter(|r| r.status.live()) {
+                if let Some(running) = self.running.get_mut(id).filter(|r| r.status.live())
+                    && running.items.get(&item) != Some(&state)
+                {
                     running.items.insert(item, state);
                     cx.notify();
                 }
@@ -1170,8 +1172,8 @@ pub(crate) mod tests {
         assert_eq!(
             bar_items(&workspace, cx),
             [
-                item("bars/prs", "prs", Bar::Bottom, "PRs", Some(shown)),
-                item("bars/ci", "ci", Bar::Top, "CI", None),
+                item("bars#prs", "prs", Bar::Bottom, "PRs", Some(shown)),
+                item("bars#ci", "ci", Bar::Top, "CI", None),
             ]
         );
 
@@ -1306,7 +1308,7 @@ pub(crate) mod tests {
 
         menu_item("bottombar", "PRs", cx);
         assert!(label(("bottombar-item", 0usize), cx).is_none());
-        assert!(AppState::load(&path).hidden.contains("bars/prs"));
+        assert!(AppState::load(&path).hidden.contains("bars#prs"));
 
         relaunch.executor().allow_parking();
         let (workspace, cx) = open_at(relaunch, fake_settings(""), Some(path.clone()));
@@ -1319,6 +1321,65 @@ pub(crate) mod tests {
             bar_items(&workspace, cx)[0].state.is_some()
         });
         assert!(label(("bottombar-item", 0usize), cx).is_none());
+    }
+
+    /// Extension `id` with three bottom items `a`, `b` and `c`.
+    fn bottom_items(id: &str, name: &str) -> String {
+        top_items(id, name).replace("bar = \"top\"", "bar = \"bottom\"")
+    }
+
+    /// Several long bottom items shrink in a narrow window: the version stays in view.
+    #[gpui_kit::test]
+    fn bottom_bar_fits_narrow_window(cx: &mut TestAppContext) {
+        use crate::sidebar::tests::label;
+        use gpui_kit::{px, size};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let text = "x".repeat(32);
+        let calls: String = ["a", "b", "c"]
+            .iter()
+            .map(|i| format!(r#"--call 'item/update {{"item": "{i}", "text": "{text}"}}' "#))
+            .collect();
+        for (id, name) in [("bars", "Bars"), ("bars2", "Bars 2"), ("bars3", "Bars 3")] {
+            install(tmp.path(), &config, &bottom_items(id, name), &calls, "");
+        }
+        let (_workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        cx.simulate_resize(size(px(900.), px(700.)));
+        wait_until(cx, "the items", |cx| {
+            label(("bottombar-item", 2usize), cx).is_some()
+        });
+        let version = cx.update(|window, _| {
+            use gpui_kit::test::TestWindowExt as _;
+            window.find("bottombar-version").bounds()
+        });
+        assert!(version.right() <= px(900.), "{version:?}");
+    }
+
+    /// A panel and an item with the same id hide apart.
+    #[gpui_kit::test]
+    fn item_and_panel_with_one_id_hide_apart(cx: &mut TestAppContext) {
+        use crate::sidebar::tests::label;
+        use crate::workspace::tests::menu_item;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = "id = \"bars\"\nname = \"Bars\"\nversion = \"1.0.0\"\n\
+            permissions = [\"process\", \"panels\", \"bar\"]\n[process]\ncommand = \"bin/run\"\n\
+            [[contributes.panels]]\nid = \"x\"\ntitle = \"X panel\"\n\
+            [[contributes.items]]\nid = \"x\"\nbar = \"bottom\"\ntitle = \"X item\"\n";
+        let call = r#"--call 'item/update {"item": "x", "text": "hi"}'"#;
+        install(tmp.path(), &config, manifest, call, "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        wait_until(cx, "the item", |cx| {
+            label(("bottombar-item", 0usize), cx).is_some()
+        });
+        assert!(label(("tab-panel", 0usize), cx).is_some());
+        menu_item("bottombar", "X item", cx);
+        assert!(label(("bottombar-item", 0usize), cx).is_none());
+        assert!(label(("tab-panel", 0usize), cx).is_some());
+        let hidden = workspace.read_with(cx, |w, _| w.hidden.clone());
+        assert!(hidden.contains("bars#x") && !hidden.contains("bars/x"));
     }
 
     /// Extension `id` with a sidebar panel `p` and a bottom item `i`.
@@ -1355,7 +1416,7 @@ pub(crate) mod tests {
         let rail = workspace.read_with(cx, |w, cx| w.rail_keys(cx));
         let first = rail.iter().find(|k| k.contains('/')).unwrap().clone();
         let second = rail.iter().rfind(|k| k.contains('/')).unwrap().clone();
-        let item_of = |panel: &str| format!("{}/i", panel.split('/').next().unwrap());
+        let item_of = |panel: &str| format!("{}#i", panel.split('/').next().unwrap());
         assert_eq!(keys(cx), [item_of(&first), item_of(&second)]);
 
         workspace.update(cx, |w, cx| w.move_rail(&second, &first, cx));

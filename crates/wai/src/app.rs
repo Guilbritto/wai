@@ -185,7 +185,10 @@ pub fn run(
                     // Before `restore`: a saved session may be an extension agent's.
                     w.start_extensions(cx);
                     w.restore(window, cx);
-                    w.check_mcp(cx);
+                    // `restore` may have checked already, through `set_project`.
+                    if matches!(w.mcp, crate::settings_view::claude::McpCheck::NotRun) {
+                        w.check_mcp(cx);
+                    }
                     w.suggest_extensions(window, cx);
                     if w.settings_error.is_some() {
                         w.open_settings(Section::Ai, None, window, cx);

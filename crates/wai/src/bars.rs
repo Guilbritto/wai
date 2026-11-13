@@ -191,8 +191,8 @@ pub(crate) fn bottom_item(
                 .tab_index(0)
         })
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-        .children(icon.map(|name| Icon::new(name).size(px(12.))))
-        .child(text)
+        .children(icon.map(|name| Icon::new(name).size(px(12.)).flex_none()))
+        .child(div().min_w_0().truncate().child(text))
 }
 
 /// Extension items drawn in the top bar, over all extensions.
@@ -232,14 +232,18 @@ pub(crate) fn ext_item(
             tone: state.tone,
             tooltip,
         };
+        // Shrinks, text truncated, before wai's own items do.
         return bottom_item(id, &status, icon, true, cx)
+            .flex_shrink(1.)
+            .min_w_0()
+            .overflow_hidden()
             .aria_label(label)
             .on_click(click)
             .test_support()
             .into_any_element();
     }
     let theme = cx.theme();
-    let (ring, color) = (theme.ring, tone_color(state.tone, cx));
+    let (ring, hover, color) = (theme.ring, theme.list_hover, tone_color(state.tone, cx));
     aurora::pill(cx)
         .id(id)
         .min_w_0()
@@ -250,6 +254,7 @@ pub(crate) fn ext_item(
         .role(Role::Button)
         .aria_label(label)
         .focus_visible(move |el| el.border_color(ring))
+        .hover(move |el| el.bg(hover))
         .tab_index(0)
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .on_click(click)
@@ -257,6 +262,16 @@ pub(crate) fn ext_item(
         .children(text.map(|t| div().min_w_0().truncate().child(t)))
         .test_support()
         .into_any_element()
+}
+
+/// Whether `item` is drawn: it has a state with text or an icon wai knows, and is not hidden.
+pub(crate) fn drawn(item: &BarItem, hidden: &BTreeSet<String>) -> bool {
+    let Some(state) = &item.state else {
+        return false;
+    };
+    let text = state.text.as_deref().is_some_and(|t| !t.is_empty());
+    let icon = state.icon.as_deref().and_then(lucide).is_some();
+    (text || icon) && !hidden.contains(&item.key)
 }
 
 /// What the agent reports of the account's usage limit; `resets_at` in Unix seconds.
@@ -277,6 +292,9 @@ pub(crate) fn rate_limit(meta: &serde_json::Value) -> Option<RateLimit> {
     Some(RateLimit { status, resets_at })
 }
 
+/// The longest wait the usage wake is scheduled for.
+const MAX_WAKE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
+
 /// Unix seconds as the local `%H:%M`.
 pub(crate) fn clock(secs: i64) -> String {
     chrono::DateTime::from_timestamp(secs, 0)
@@ -285,9 +303,9 @@ pub(crate) fn clock(secs: i64) -> String {
 }
 
 pub(crate) fn usage_status(r: &RateLimit) -> Status {
-    let resets = r
-        .resets_at
-        .map(|t| format!(" · resets {}", clock(t)))
+    let resets = (r.resets_at.map(clock))
+        .filter(|c| !c.is_empty())
+        .map(|c| format!(" · resets {c}"))
         .unwrap_or_default();
     let (text, tone) = match r.status.as_str() {
         "allowed" => ("Usage ok".to_string(), Tone::Neutral),
@@ -415,9 +433,8 @@ impl Workspace {
                 }))
                 .test_support()
             });
-        let drawn = |item: &BarItem| item.state.is_some() && self.shown(&item.key);
         let items = self.bar_items(Bar::Bottom, cx);
-        let ext_items: Vec<_> = (items.iter().filter(|i| drawn(i)))
+        let ext_items: Vec<_> = (items.iter().filter(|i| drawn(i, &self.hidden)))
             .enumerate()
             .map(|(ix, item)| ext_item(item, false, ("bottombar-item", ix), cx))
             .collect();
@@ -479,6 +496,10 @@ impl Workspace {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
+        // Nothing changes, and the wake stays: it is for this very reset.
+        if self.rate_limit.as_ref() == Some(&r) {
+            return;
+        }
         // An older wake would clear this report at the old reset.
         self.rate_wake = None;
         match r.resets_at {
@@ -486,6 +507,10 @@ impl Workspace {
             Some(t) => {
                 let wait = std::time::Duration::from_secs((t - now) as u64);
                 self.rate_limit = Some(r);
+                // A reset further away than this is not worth a timer.
+                if wait > MAX_WAKE {
+                    return cx.notify();
+                }
                 self.rate_wake = Some(cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(wait).await;
                     this.update(cx, |this, cx| {
@@ -824,6 +849,8 @@ mod tests {
                 "rejected".into()
             )
         );
+        // No clock, no suffix.
+        assert_eq!(usage("rejected", Some(i64::MAX)).0, "Usage limit reached");
         assert_eq!(
             usage("weird", None),
             ("weird".into(), Tone::Neutral, "weird".into())
@@ -842,6 +869,54 @@ mod tests {
             status: status.into(),
             resets_at,
         }
+    }
+
+    /// A reset over 30 days away shows the report and schedules no wake; an equal report is
+    /// ignored.
+    #[gpui_kit::test]
+    fn far_reset_schedules_no_wake(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let far = report("allowed_warning", Some(unix_now() + 40 * 24 * 3600));
+        workspace.update(cx, |w, cx| w.set_rate_limit(far.clone(), cx));
+        assert!(workspace.read_with(cx, |w, _| w.rate_wake.is_none()));
+        assert!(label("bottombar-usage", cx).is_some());
+        let soon = report("rejected", Some(unix_now() + 60));
+        workspace.update(cx, |w, cx| w.set_rate_limit(soon.clone(), cx));
+        assert!(workspace.read_with(cx, |w, _| w.rate_wake.is_some()));
+        // The same report again keeps its wake.
+        workspace.update(cx, |w, cx| w.set_rate_limit(soon, cx));
+        assert!(workspace.read_with(cx, |w, _| w.rate_wake.is_some()));
+    }
+
+    #[test]
+    fn items_need_text_or_a_known_icon() {
+        use super::drawn;
+        use crate::ext_host::BarItem;
+        use wai_ext::panel::ItemState;
+        let item = |text: Option<&str>, icon: Option<&str>| BarItem {
+            key: "bars#prs".into(),
+            ext: wai_ext::parse_manifest(
+                "id = \"bars\"\nname = \"Bars\"\nversion = \"1.0.0\"\n",
+                std::path::Path::new("."),
+            )
+            .unwrap()
+            .id,
+            ext_name: "Bars".into(),
+            id: "prs".into(),
+            bar: Bar::Bottom,
+            title: "PRs".into(),
+            state: Some(ItemState {
+                text: text.map(Into::into),
+                icon: icon.map(Into::into),
+                ..Default::default()
+            }),
+        };
+        let none = std::collections::BTreeSet::new();
+        assert!(!drawn(&item(None, Some("no-such-icon")), &none));
+        assert!(drawn(&item(Some("hi"), Some("no-such-icon")), &none));
+        assert!(drawn(&item(None, Some("server")), &none));
+        let hidden = ["bars#prs".to_string()].into();
+        assert!(!drawn(&item(Some("hi"), None), &hidden));
     }
 
     #[gpui_kit::test]
@@ -897,7 +972,7 @@ mod tests {
         use crate::ext_host::BarItem;
         use wai_ext::panel::ItemState;
         let mut item = BarItem {
-            key: "bars/prs".into(),
+            key: "bars#prs".into(),
             ext: wai_ext::parse_manifest(
                 "id = \"bars\"\nname = \"Bars\"\nversion = \"1.0.0\"\n",
                 std::path::Path::new("."),

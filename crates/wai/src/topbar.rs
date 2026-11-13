@@ -14,7 +14,7 @@ use wai_ext::panel::clamp;
 
 use crate::app::{NewSession, OpenPalette, ToggleAgents, ToggleTerminal};
 use crate::aurora::{self, DISPLAY_FONT};
-use crate::bars::{TOP_ITEMS, ext_item, hide_entries, hide_menu};
+use crate::bars::{TOP_ITEMS, drawn, ext_item, hide_entries, hide_menu};
 use crate::chat::TurnState;
 use crate::workspace::{Workspace, folder_name};
 
@@ -85,7 +85,7 @@ impl Workspace {
         });
         let items = self.bar_items(Bar::Top, cx);
         let drawn = (items.iter())
-            .filter(|i| i.state.is_some() && self.shown(&i.key))
+            .filter(|i| drawn(i, &self.hidden))
             .take(TOP_ITEMS);
         let ext_items: Vec<_> = drawn
             .enumerate()
@@ -179,16 +179,17 @@ impl Workspace {
             .children(self.shown("wai.terminal").then_some(terminal))
             .children(agents.filter(|_| self.shown("wai.agents-toggle")))
             .children(self.shown("wai.new-session").then_some(new));
-        let entries = hide_entries(
-            &[
-                ("wai.status", "Agent status"),
-                ("wai.palette", "Command palette"),
-                ("wai.terminal", "Terminal"),
-                ("wai.agents-toggle", "Agents panel"),
-                ("wai.new-session", "New session"),
-            ],
-            &items,
-        );
+        let mut own = vec![
+            ("wai.status", "Agent status"),
+            ("wai.palette", "Command palette"),
+            ("wai.terminal", "Terminal"),
+        ];
+        // Listed only while its button can show.
+        if self.agents_right {
+            own.push(("wai.agents-toggle", "Agents panel"));
+        }
+        own.push(("wai.new-session", "New session"));
+        let entries = hide_entries(&own, &items);
         let (hidden, workspace) = (self.hidden.clone(), cx.entity().downgrade());
 
         let bar = h_flex()

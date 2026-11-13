@@ -454,6 +454,8 @@ impl Workspace {
                         .flex_none()
                         .border_t_2()
                         .border_b_2()
+                        // The borders take no room: the icons sit where they did.
+                        .my(px(-2.))
                         .border_color(gpui_kit::transparent_black())
                         .on_drag(drag, |drag, offset, _, cx| {
                             cx.new(|_| Preview(drag.label.clone(), offset))

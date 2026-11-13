@@ -63,7 +63,7 @@ fn permissions_text(permissions: &[Permission]) -> Vec<String> {
     permissions.iter().map(permission_text).collect()
 }
 
-const NAME_CHARS: usize = 80;
+pub(crate) const NAME_CHARS: usize = 80;
 const DESCRIPTION_CHARS: usize = 500;
 
 /// Deletes a stage's files off the main thread.
