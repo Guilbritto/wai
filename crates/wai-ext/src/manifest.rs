@@ -46,6 +46,7 @@ pub struct Contributes {
     pub mcp_servers: Vec<McpServerSpec>,
     pub claude_plugins: Vec<String>,
     pub panels: Vec<PanelSpec>,
+    pub items: Vec<ItemSpec>,
     pub themes: Vec<String>,
 }
 
@@ -77,7 +78,9 @@ pub struct McpServerSpec {
 
 /// The extension API this wai speaks: `initialize` sends it, and a manifest's `api` may not be
 /// newer.
-pub const API: &str = "1.2";
+pub const API: &str = "1.3";
+
+pub const MAX_ITEMS: usize = 3;
 
 /// `icon`: a Lucide name; one wai does not have falls back to the title's initials.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -89,6 +92,22 @@ pub struct PanelSpec {
     pub icon: Option<String>,
     #[serde(default)]
     pub location: PanelLocation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Bar {
+    Top,
+    Bottom,
+}
+
+/// `title` names the item in the consent dialog and the hide menu.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemSpec {
+    pub id: String,
+    pub bar: Bar,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -116,6 +135,7 @@ pub enum Permission {
     SessionsControl,
     Notify,
     Panels,
+    Bar,
     Network,
     Fs(PathBuf),
 }
@@ -128,6 +148,7 @@ impl std::fmt::Display for Permission {
             Self::SessionsControl => f.write_str("sessions:control"),
             Self::Notify => f.write_str("notify"),
             Self::Panels => f.write_str("panels"),
+            Self::Bar => f.write_str("bar"),
             Self::Network => f.write_str("network"),
             Self::Fs(p) => write!(f, "fs:{}", p.display()),
         }
@@ -186,6 +207,8 @@ struct RawContributes {
     #[serde(default)]
     panels: Vec<PanelSpec>,
     #[serde(default)]
+    items: Vec<ItemSpec>,
+    #[serde(default)]
     themes: Vec<String>,
 }
 
@@ -217,6 +240,7 @@ pub(crate) fn parse_permission(s: &str) -> Result<Permission, ManifestError> {
         "sessions:control" => Permission::SessionsControl,
         "notify" => Permission::Notify,
         "panels" => Permission::Panels,
+        "bar" => Permission::Bar,
         "network" => Permission::Network,
         _ => match s.strip_prefix("fs:") {
             Some(p) => {
@@ -324,6 +348,23 @@ pub fn parse_manifest(text: &str, _ext_dir: &Path) -> Result<Manifest, ManifestE
     if !c.panels.is_empty() {
         need(Permission::Panels)?;
     }
+    if !c.items.is_empty() {
+        need(Permission::Bar)?;
+    }
+    if c.items.len() > MAX_ITEMS {
+        return Err(ManifestError::Unknown(format!(
+            "at most {MAX_ITEMS} items, found {}",
+            c.items.len()
+        )));
+    }
+    for (i, item) in c.items.iter().enumerate() {
+        if c.items[..i].iter().any(|o| o.id == item.id) {
+            return Err(ManifestError::Unknown(format!(
+                "item id {:?} is declared twice",
+                item.id
+            )));
+        }
+    }
     for cmd in &c.commands {
         if cmd.prompt.is_none() && raw.process.is_none() {
             return Err(ManifestError::Unknown(format!(
@@ -373,6 +414,7 @@ pub fn parse_manifest(text: &str, _ext_dir: &Path) -> Result<Manifest, ManifestE
                 .collect(),
             claude_plugins: c.claude_plugins,
             panels: c.panels,
+            items: c.items,
             themes: c.themes,
         },
     })

@@ -222,19 +222,21 @@ fn api_version_is_checked_first() {
     let with_api = |api: &str, rest: &str| parse(&format!("api = {api}\n{FULL}{rest}"));
     assert!(with_api("\"1.0\"", "").is_ok());
     assert!(with_api("\"1.2\"", "").is_ok());
+    let body = item("prs", "bottom", "P");
+    assert!(items("\"bar\"", &format!("api=\"1.3\"\n{body}")).is_ok());
     assert!(with_api("\"0.9\"", "").is_ok());
     assert!(with_api(&format!("\"{API}\""), "").is_ok());
-    let newer = with_api("\"1.3\"", "").unwrap_err();
+    let newer = with_api("\"1.4\"", "").unwrap_err();
     assert_eq!(
         newer.to_string(),
-        "Go Tools needs a newer wai (extension API 1.3; this wai has 1.2)"
+        "Go Tools needs a newer wai (extension API 1.4; this wai has 1.3)"
     );
     // Even when the newer API's fields would fail the strict parse.
     assert_eq!(
         with_api("\"2.0\"", "\nfuture = true\n")
             .unwrap_err()
             .to_string(),
-        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.2)"
+        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.3)"
     );
     // Numeric, not lexical: 1.10 is newer than 1.2.
     assert!(matches!(
@@ -254,5 +256,76 @@ fn api_version_is_checked_first() {
             matches!(with_api(bad, ""), Err(ManifestError::Parse(_))),
             "{bad}"
         );
+    }
+}
+
+const HEAD: &str = "id=\"a\"\nname=\"n\"\nversion=\"1\"\n";
+
+fn items(perms: &str, body: &str) -> Result<Manifest, ManifestError> {
+    parse(&format!("{HEAD}permissions=[{perms}]\n{body}"))
+}
+
+fn item(id: &str, bar: &str, title: &str) -> String {
+    format!("[[contributes.items]]\nid=\"{id}\"\nbar=\"{bar}\"\ntitle=\"{title}\"\n")
+}
+
+#[test]
+fn items_parse() {
+    let body = item("prs", "bottom", "Pull requests") + &item("ci", "top", "CI");
+    let m = items("\"bar\"", &format!("api=\"1.2\"\n{body}")).unwrap();
+    assert_eq!(
+        m.contributes.items,
+        vec![
+            ItemSpec {
+                id: "prs".into(),
+                bar: Bar::Bottom,
+                title: "Pull requests".into()
+            },
+            ItemSpec {
+                id: "ci".into(),
+                bar: Bar::Top,
+                title: "CI".into()
+            }
+        ]
+    );
+    assert!(m.permissions.contains(&Permission::Bar));
+}
+
+#[test]
+fn items_need_bar() {
+    assert!(matches!(
+        items("", &item("prs", "bottom", "P")),
+        Err(ManifestError::MissingPermission(Permission::Bar))
+    ));
+}
+
+#[test]
+fn items_are_capped() {
+    let body: String = (0..4).map(|i| item(&format!("i{i}"), "top", "T")).collect();
+    let Err(ManifestError::Unknown(s)) = items("\"bar\"", &body) else {
+        panic!("four items are too many");
+    };
+    assert_eq!(s, "at most 3 items, found 4");
+}
+
+#[test]
+fn item_ids_are_unique() {
+    let body = item("prs", "top", "A") + &item("prs", "bottom", "B");
+    let Err(ManifestError::Unknown(s)) = items("\"bar\"", &body) else {
+        panic!("a repeated id is invalid");
+    };
+    assert_eq!(s, "item id \"prs\" is declared twice");
+}
+
+#[test]
+fn item_bar_is_top_or_bottom() {
+    for body in [
+        item("a", "left", "A"),
+        item("a", "top", "A") + "priority=1\n",
+    ] {
+        assert!(matches!(
+            items("\"bar\"", &body),
+            Err(ManifestError::Parse(_))
+        ));
     }
 }

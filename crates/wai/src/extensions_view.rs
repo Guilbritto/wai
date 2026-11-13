@@ -33,6 +33,7 @@ pub fn permission_text(permission: &Permission) -> String {
         Permission::SessionsControl => "Start sessions and send prompts".into(),
         Permission::Notify => "Show notifications".into(),
         Permission::Panels => "Show panels in the sidebar".into(),
+        Permission::Bar => "Show items in the top and bottom bars".into(),
         Permission::Network => "Use the network (not enforced)".into(),
         Permission::Fs(path) => format!("Access {} (not enforced)", path.display()),
     }
@@ -184,7 +185,13 @@ impl ExtensionsView {
         let verb = if updating { "Update" } else { "Install" };
         let description = (m.description.as_deref()).map(|d| clamp(d, DESCRIPTION_CHARS));
         let source = format!("From {}", clamp(&staged.source().to_string(), 300));
-        let lines = permissions_text(&m.permissions);
+        let mut lines = permissions_text(&m.permissions);
+        if !m.contributes.items.is_empty() {
+            let titles = (m.contributes.items.iter())
+                .map(|i| clamp(&i.title, NAME_CHARS))
+                .collect::<Vec<_>>();
+            lines.push(format!("Bar items: {}", titles.join(", ")));
+        }
         let pending = Pending(Some(staged), cx.background_executor().clone());
         let pending = Rc::new(RefCell::new(pending));
         let this = cx.entity().downgrade();
@@ -608,6 +615,26 @@ pub(crate) mod tests {
         assert!(!consent(cx));
         assert!(installed(&view, cx).is_empty());
         assert_eq!(staged(&config), 0, "Cancel drops the stage");
+
+        assert_eq!(
+            super::permission_text(&Permission::Bar),
+            "Show items in the top and bottom bars"
+        );
+        let manifest = format!(
+            "{}[[contributes.items]]\nid = \"prs\"\nbar = \"bottom\"\ntitle = \"Pull requests\"\n\
+             [[contributes.items]]\nid = \"ci\"\nbar = \"top\"\ntitle = \"CI\"\n",
+            MANIFEST.replace("\"fs:data\"", "\"fs:data\", \"bar\"")
+        );
+        let with_items = sample_with(&tmp.path().join("items"), &manifest);
+        review(&view, &with_items, cx);
+        assert!(consent(cx), "no consent dialog");
+        cx.update(|window, cx| window.render_frame(cx));
+        assert!(
+            cx.debug_bounds("consent: Bar items: Pull requests, CI")
+                .is_some()
+        );
+        click("consent-cancel", cx);
+        assert!(!consent(cx));
 
         review(&view, &src, cx);
         click("consent-install", cx);
