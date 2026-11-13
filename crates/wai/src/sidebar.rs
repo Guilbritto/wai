@@ -25,9 +25,7 @@ use crate::aurora;
 use crate::bars::{HideEntry, hide_menu};
 use crate::chat::{ChatItem, ChatModel, ChatSession, DraftView, TurnState};
 use crate::settings_view::Section;
-use crate::workspace::{
-    Dragged, DraggedSession, MAX_PANES, Pane, Preview, Renamed, Workspace,
-};
+use crate::workspace::{Dragged, DraggedSession, MAX_PANES, Pane, Preview, Renamed, Workspace};
 
 pub(crate) const ROW_HEIGHT: f32 = 28.;
 
@@ -439,7 +437,13 @@ impl Workspace {
             .filter_map(|key| {
                 let label = (entries.iter().find(|e| e.key == key))
                     .map_or_else(|| "Sessions".into(), |e| e.label.clone());
-                let (drag, target) = (RailDrag { key: key.clone(), label }, key.clone());
+                let (drag, target) = (
+                    RailDrag {
+                        key: key.clone(),
+                        label,
+                    },
+                    key.clone(),
+                );
                 let (over, order) = (key.clone(), order.clone());
                 let el = icons.remove(&key)?;
                 // The icon's border is the drop line, in the colour a drop zone's is: the bottom
@@ -461,8 +465,12 @@ impl Workspace {
                                 false => ring,
                             };
                             match (at(&drag.key), at(&over)) {
-                                (Some(from), Some(to)) if from < to => style.border_color(line).border_t_0().pt(px(2.)),
-                                (Some(from), Some(to)) if from > to => style.border_color(line).border_b_0().pb(px(2.)),
+                                (Some(from), Some(to)) if from < to => {
+                                    style.border_color(line).border_t_0().pt(px(2.))
+                                }
+                                (Some(from), Some(to)) if from > to => {
+                                    style.border_color(line).border_b_0().pb(px(2.))
+                                }
                                 _ => style,
                             }
                         })
