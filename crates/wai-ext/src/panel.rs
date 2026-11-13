@@ -371,7 +371,11 @@ pub fn item_state(params: &Value) -> ItemState {
         icon: icon(o),
         tooltip: line("tooltip", LINE_CHARS),
         tone: tone(o).unwrap_or_default(),
-        card: o.get("card").and_then(card).map(Arc::new),
+        card: o
+            .get("card")
+            .filter(|c| !c.is_null())
+            .and_then(card)
+            .map(Arc::new),
     }
 }
 
@@ -407,7 +411,7 @@ impl Parser {
         }
     }
 
-    /// Recurses at most `MAX_DEPTH` deep, and stops at the first node past a limit.
+    /// Recurses at most `max_depth` deep, and stops at the first node past a limit.
     fn node(&mut self, value: &Value, depth: usize) -> Result<Node, TooLarge> {
         self.count(depth)?;
         let Some(o) = value.as_object() else {
@@ -1588,6 +1592,7 @@ mod tests {
             Node::Column(vec![Node::Unsupported])
         );
         assert_eq!(item_state(&json!({"text": "x"})).card, None);
+        assert_eq!(card(Value::Null), None);
         assert_eq!(card(json!("not a tree")), Some(Arc::new(Node::Unsupported)));
     }
 
