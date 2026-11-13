@@ -208,6 +208,9 @@ pub struct Workspace {
     /// Ids this wai ended, and when: their transcript's fresh write is ours.
     pub(crate) ended: HashMap<String, std::time::Instant>,
     pub(crate) claude_task: Option<Task<()>>,
+    /// The last `claude mcp list`, for the bottom bar and the MCP page.
+    pub(crate) mcp: crate::settings_view::claude::McpCheck,
+    pub(crate) mcp_task: Option<Task<()>>,
     /// The `claude` that `mcp list` runs; none means the one on PATH.
     pub(crate) claude_program: Option<PathBuf>,
     pub registry: Entity<AgentRegistry>,
@@ -438,6 +441,8 @@ impl Workspace {
             claude_home: wai_settings::claude::claude_home(),
             ended: HashMap::new(),
             claude_task: None,
+            mcp: Default::default(),
+            mcp_task: None,
             claude_program: None,
             registry,
             agents,
@@ -2861,6 +2866,7 @@ impl Workspace {
             return;
         }
         let view = cx.new(|cx| SettingsView::new(section, data, window, cx));
+        view.update(cx, |v, cx| v.set_mcp_check(self.mcp.clone(), cx));
         cx.subscribe_in(
             &view,
             window,
@@ -2983,6 +2989,7 @@ impl Workspace {
         self.ext_host
             .update(cx, |host, cx| host.set_project(project, cx));
         self.save_state(cx);
+        self.check_mcp(cx);
         cx.notify();
     }
 

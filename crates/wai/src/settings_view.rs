@@ -398,8 +398,6 @@ pub struct SettingsView {
     /// A write is out: the switches wait for it.
     busy: bool,
     mcp_check: claude::McpCheck,
-    /// The running `claude mcp list`; dropping the view kills it.
-    pub(crate) mcp_task: Option<Task<()>>,
     /// Groups the user flipped from their default (open or closed), per page.
     toggled: HashSet<(Section, String)>,
     _subscriptions: Vec<Subscription>,
@@ -480,7 +478,6 @@ impl SettingsView {
             claude: None,
             busy: false,
             mcp_check: Default::default(),
-            mcp_task: None,
             toggled: HashSet::new(),
             _subscriptions: subscriptions,
         };

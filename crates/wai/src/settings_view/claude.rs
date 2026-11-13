@@ -346,7 +346,7 @@ impl SettingsView {
                     } else {
                         "Check status"
                     })
-                    .disabled(running)
+                    // Enabled while running: a newer check replaces the older one.
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::CheckMcp)));
                 return Some(
                     h_flex()

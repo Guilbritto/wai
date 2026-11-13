@@ -9,9 +9,12 @@ use gpui_kit::component::{ActiveTheme as _, Icon, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_ext::panel::{LINE_CHARS, Tone, clamp};
+use wai_settings::claude::McpStatus;
 
+use crate::claude_config::NO_CLAUDE;
 use crate::ext_panel::tone_color;
 use crate::settings_view::Section;
+use crate::settings_view::claude::McpCheck;
 use crate::sidebar::{SidebarTab, TABS};
 use crate::update::UpdateStatus;
 use crate::workspace::Workspace;
@@ -70,6 +73,66 @@ pub(crate) fn version_click(update: &UpdateStatus) -> VersionClick {
         UpdateStatus::Ready(_) => VersionClick::Restart,
         UpdateStatus::Available { release, .. } => VersionClick::Open(release.page.clone()),
         _ => VersionClick::Settings,
+    }
+}
+
+/// The MCP item, from the last `claude mcp list`; none until it ran, with no servers, or without
+/// the CLI.
+pub(crate) fn mcp_status(check: &McpCheck) -> Option<Status> {
+    let status = |text: String, tone, tooltip: String| {
+        Some(Status {
+            text,
+            tone,
+            tooltip,
+        })
+    };
+    let map = match check {
+        McpCheck::NotRun => return None,
+        McpCheck::Running => {
+            return status("MCP …".into(), Tone::Neutral, "Checking MCP servers".into());
+        }
+        McpCheck::Failed(e) if e == NO_CLAUDE => return None,
+        McpCheck::Failed(e) => return status("MCP".into(), Tone::Warning, clamp(e, LINE_CHARS)),
+        McpCheck::Done(map) if map.is_empty() => return None,
+        McpCheck::Done(map) => map,
+    };
+    let named = |want: fn(&McpStatus) -> bool| -> Vec<&str> {
+        (map.iter())
+            .filter(|(_, s)| want(s))
+            .map(|(n, _)| n.as_str())
+            .collect()
+    };
+    let connected = named(|s| matches!(s, McpStatus::Connected)).len();
+    let failed = named(|s| matches!(s, McpStatus::Failed(_)));
+    let auth = named(|s| matches!(s, McpStatus::NeedsAuth));
+    let mut lines = Vec::new();
+    if !failed.is_empty() {
+        lines.push(format!("Failed: {}", failed.join(", ")));
+    }
+    if !auth.is_empty() {
+        lines.push(format!("Needs a login: {}", auth.join(", ")));
+    }
+    if lines.is_empty() {
+        lines.push(format!("{connected} MCP servers connected"));
+    }
+    let tooltip = (lines.iter())
+        .map(|l| clamp(l, LINE_CHARS))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !failed.is_empty() {
+        status(
+            format!("MCP {connected} · {} failed", failed.len()),
+            Tone::Danger,
+            tooltip,
+        )
+    } else if !auth.is_empty() {
+        status(
+            format!("MCP {connected} · {} needs auth", auth.len()),
+            Tone::Warning,
+            tooltip,
+        )
+    } else {
+        status(format!("MCP {connected}"), Tone::Neutral, tooltip)
     }
 }
 
@@ -183,6 +246,17 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme();
+        let mcp = (self.shown("wai.mcp"))
+            .then(|| mcp_status(&self.mcp))
+            .flatten()
+            .map(|status| {
+                bottom_item("bottombar-mcp", &status, Some(Lucide::Server), cx)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_settings(Section::Mcp, None, window, cx);
+                        this.check_mcp(cx);
+                    }))
+                    .test_support()
+            });
         let stopped = (self.shown("wai.extensions"))
             .then(|| stopped_status(&self.ext_host.read(cx).stopped()))
             .flatten()
@@ -239,6 +313,7 @@ impl Workspace {
             .border_color(theme.title_bar_border)
             // Transparent over the aurora in dark mode, like the top bar.
             .when(!theme.is_dark(), |el| el.bg(theme.title_bar))
+            .children(mcp)
             .children(stopped)
             .child(div().flex_1())
             .children(version)
@@ -298,8 +373,10 @@ mod tests {
     use wai_settings::AppState;
 
     use super::{
-        Status, VersionClick, ordered, stopped_status, version, version_click, version_status,
+        Status, VersionClick, mcp_status, ordered, stopped_status, version, version_click,
+        version_status,
     };
+    use crate::claude_config::NO_CLAUDE;
     use crate::settings_view::Section;
     use crate::sidebar::tests::label;
     use crate::update::{Release, Staged, UpdateStatus};
@@ -417,6 +494,62 @@ mod tests {
                 tone: Tone::Danger,
                 tooltip: "a: x\nb: y".into(),
             })
+        );
+    }
+
+    #[test]
+    fn mcp_status_by_state() {
+        use crate::settings_view::claude::McpCheck;
+        use wai_settings::claude::McpStatus::{Connected, Failed, NeedsAuth};
+        let done = |servers: &[(&str, wai_settings::claude::McpStatus)]| {
+            McpCheck::Done(
+                servers
+                    .iter()
+                    .map(|(n, s)| (n.to_string(), s.clone()))
+                    .collect(),
+            )
+        };
+        let status = |text: &str, tone, tooltip: &str| {
+            Some(Status {
+                text: text.into(),
+                tone,
+                tooltip: tooltip.into(),
+            })
+        };
+        assert_eq!(mcp_status(&McpCheck::NotRun), None);
+        assert_eq!(
+            mcp_status(&McpCheck::Running).map(|s| (s.text, s.tone)),
+            Some(("MCP …".into(), Tone::Neutral))
+        );
+        assert_eq!(mcp_status(&McpCheck::Failed(NO_CLAUDE.into())), None);
+        assert_eq!(
+            mcp_status(&McpCheck::Failed("Check failed: x".into())),
+            status("MCP", Tone::Warning, "Check failed: x")
+        );
+        assert_eq!(mcp_status(&done(&[])), None);
+        assert_eq!(
+            mcp_status(&done(&[("a", Connected), ("b", Connected)])),
+            status("MCP 2", Tone::Neutral, "2 MCP servers connected")
+        );
+        assert_eq!(
+            mcp_status(&done(&[
+                ("a", Connected),
+                ("b", NeedsAuth),
+                ("c", NeedsAuth)
+            ])),
+            status("MCP 1 · 2 needs auth", Tone::Warning, "Needs a login: b, c")
+        );
+        assert_eq!(
+            mcp_status(&done(&[
+                ("a", Connected),
+                ("b", Failed("down".into())),
+                ("c", NeedsAuth)
+            ])),
+            status(
+                "MCP 1 · 1 failed",
+                Tone::Danger,
+                "Failed: b\nNeeds a login: c"
+            )
         );
     }
 

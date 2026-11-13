@@ -15,6 +15,9 @@ use wai_settings::claude::{
 use crate::settings_view::claude::McpCheck;
 use crate::workspace::Workspace;
 
+/// What the check says when there is no `claude` to run.
+pub(crate) const NO_CLAUDE: &str = "Needs the claude CLI";
+
 /// Runs `claude mcp list` in `cwd` and returns its output; a hung or failing run is an `Err`.
 pub(crate) async fn run_mcp_list(
     program: PathBuf,
@@ -61,40 +64,41 @@ impl Workspace {
         }));
     }
 
-    /// Runs `claude mcp list` in the project and shows each server's status in the open modal.
-    /// The run belongs to the modal: closing it drops the task and kills `claude`.
+    /// Runs `claude mcp list` in the project: at launch, on a project change, and on a Check or
+    /// item click. The result goes to the bottom bar and to an open Settings page. A newer run
+    /// replaces an older one: dropping its task kills its `claude`.
     pub(crate) fn check_mcp(&mut self, cx: &mut Context<Self>) {
-        let Some(view) = self.settings_view() else {
-            return;
-        };
         let claude =
             (self.claude_program.clone()).or_else(|| wai_settings::find_program("claude".as_ref()));
         let project = self.project.clone();
-        view.update(cx, |v, cx| {
-            v.set_mcp_check(McpCheck::Running, cx);
-            let me = cx.entity().downgrade();
-            v.mcp_task = Some(cx.spawn(async move |_, cx| {
-                let out = cx
-                    .background_spawn(async move {
-                        match claude.filter(|p| p.is_file()) {
-                            Some(program) => {
-                                run_mcp_list(program, project, Duration::from_secs(60)).await
-                            }
-                            None => Err(String::new()),
+        self.set_mcp(McpCheck::Running, cx);
+        self.mcp_task = Some(cx.spawn(async move |this, cx| {
+            let out = cx
+                .background_spawn(async move {
+                    match claude.filter(|p| p.is_file()) {
+                        Some(program) => {
+                            run_mcp_list(program, project, Duration::from_secs(60)).await
                         }
-                    })
-                    .await;
-                me.update(cx, |v, cx| {
-                    let check = match out {
-                        Ok(out) => McpCheck::Done(parse_mcp_list(&out)),
-                        Err(e) if e.is_empty() => McpCheck::Failed("Needs the claude CLI".into()),
-                        Err(e) => McpCheck::Failed(format!("Check failed: {e}")),
-                    };
-                    v.set_mcp_check(check, cx);
+                        None => Err(String::new()),
+                    }
                 })
-                .ok();
-            }));
-        });
+                .await;
+            let check = match out {
+                Ok(out) => McpCheck::Done(parse_mcp_list(&out)),
+                Err(e) if e.is_empty() => McpCheck::Failed(NO_CLAUDE.into()),
+                Err(e) => McpCheck::Failed(format!("Check failed: {e}")),
+            };
+            this.update(cx, |this, cx| this.set_mcp(check, cx)).ok();
+        }));
+    }
+
+    /// Records `check` and shows it in the open Settings page.
+    pub(crate) fn set_mcp(&mut self, check: McpCheck, cx: &mut Context<Self>) {
+        self.mcp = check.clone();
+        if let Some(view) = self.settings_view() {
+            view.update(cx, |v, cx| v.set_mcp_check(check, cx));
+        }
+        cx.notify();
     }
 
     /// Writes `enabledPlugins` unless the file changed since `seen`, then shows what is on disk.
@@ -190,6 +194,7 @@ mod tests {
 
     use crate::settings_view::Section;
     use crate::settings_view::claude::McpCheck;
+    use crate::sidebar::tests::label;
     use crate::workspace::tests::{click, open, wait_until};
     use crate::workspace::{Pane, Workspace};
 
@@ -368,6 +373,93 @@ mod tests {
             std::fs::canonicalize(cwd.trim()).unwrap(),
             std::fs::canonicalize(tmp.path().join("project")).unwrap()
         );
+    }
+
+    /// A `claude` whose runs are counted in `claude.runs`; the first one sleeps when `slow`.
+    #[cfg(unix)]
+    fn counting_claude(tmp: &tempfile::TempDir, slow: bool) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let bin = tmp.path().join("bin/claude");
+        let nap = if slow {
+            "[ \"$n\" = 0 ] && sleep 30\n"
+        } else {
+            ""
+        };
+        put(
+            &bin,
+            &format!(
+                "#!/bin/sh\nn=$(cat \"$0.runs\" 2>/dev/null | wc -l | tr -d ' ')\necho x >> \"$0.runs\"\n{nap}printf '%s\\n' 'u: url - ✔ Connected' 'plugin:alpha:db: url - ✘ Failed to connect — down'\n"
+            ),
+        );
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    #[cfg(unix)]
+    fn runs(tmp: &tempfile::TempDir) -> usize {
+        std::fs::read_to_string(tmp.path().join("bin/claude.runs"))
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn mcp_item_runs_once_per_launch_and_project(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (workspace, cx, tmp) = claude_ws(cx);
+        let bin = counting_claude(&tmp, false);
+        workspace.update(cx, |w, _| w.claude_program = Some(bin));
+        workspace.update(cx, |w, cx| w.check_mcp(cx));
+        wait_until(cx, "the launch check", |cx| {
+            label("bottombar-mcp", cx).as_deref() == Some("MCP 1 · 1 failed")
+        });
+        assert_eq!(runs(&tmp), 1);
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        workspace.update_in(cx, |w, window, cx| w.set_project(other, window, cx));
+        wait_until(cx, "the project check", |_| runs(&tmp) == 2);
+        click("bottombar-mcp", cx);
+        let view = workspace.read_with(cx, |w, _| w.settings_view().expect("settings open"));
+        assert_eq!(view.read_with(cx, |v, _| v.section()), Section::Mcp);
+        wait_until(cx, "the click check", |_| runs(&tmp) == 3);
+        wait_until(cx, "the page", |cx| {
+            mcp_statuses(&workspace, cx)
+                .iter()
+                .any(|(n, s)| n == "db" && s.1.contains("Failed"))
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn settings_check_replaces_the_launch_check(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (workspace, cx, tmp) = claude_ws(cx);
+        let bin = counting_claude(&tmp, true);
+        workspace.update(cx, |w, _| w.claude_program = Some(bin));
+        workspace.update(cx, |w, cx| w.check_mcp(cx));
+        wait_until(cx, "the slow launch check to start", |_| runs(&tmp) == 1);
+        open_mcp(&workspace, cx);
+        click("mcp-check", cx);
+        wait_until(cx, "the newer check", |cx| {
+            label("bottombar-mcp", cx).as_deref() == Some("MCP 1 · 1 failed")
+        });
+        let view = workspace.read_with(cx, |w, _| w.settings_view().unwrap());
+        assert_eq!(
+            view.read_with(cx, |v, _| v.mcp_check().clone()),
+            workspace.read_with(cx, |w, _| w.mcp.clone())
+        );
+        assert!(matches!(
+            workspace.read_with(cx, |w, _| w.mcp.clone()),
+            McpCheck::Done(_)
+        ));
+    }
+
+    #[gpui_kit::test]
+    fn mcp_item_is_absent_without_the_cli(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, Settings::default());
+        workspace.update(cx, |w, cx| w.check_mcp(cx));
+        cx.run_until_parked();
+        assert_eq!(label("bottombar-mcp", cx), None);
     }
 
     #[gpui_kit::test]
