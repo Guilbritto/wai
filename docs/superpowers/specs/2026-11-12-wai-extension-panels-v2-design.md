@@ -114,7 +114,7 @@ All fields without `?` are required.
 | `divider` | — | A horizontal rule |
 | `spacer` | — | In a row, takes the free space (pushes later children to the end) |
 | `kv` | `items` (array of `{key, value}`) | A key/value list, both one line. At most 200 items |
-| `menu` | `id`?, `label`?, `icon`? (default `ellipsis`), `items` (array of `{id, label, danger?, confirm?}`) | A button that opens a dropdown. Picking an item sends `panel/action` with the item's `id` (item ids may repeat). At most 50 items |
+| `menu` | `label`?, `icon`? (default `ellipsis`), `items` (array of `{id, label, danger?, confirm?}`) | A button that opens a dropdown. Picking an item sends `panel/action` with the item's `id` (item ids may repeat). At most 50 items |
 
 `tone` everywhere is one of `neutral` (default), `info`, `success`, `warning`, `danger`, mapped to the theme's tokens.
 
@@ -147,7 +147,7 @@ All fields without `?` are required.
 
 - **Clicks inside clickable things:** a click on a button, menu, link or form field inside a clickable `card` or table row goes to that control only, not to the card or row.
 - **Form fields in containers:** `card` and `section` children may hold any node, form fields included. Table cells may not hold form fields (the cell list above).
-- **`fill`** (`list`, `table`, `log`) behaves as `list`'s `fill` does today. It is honoured only for a direct child of the panel's root `column` (or the root itself); anywhere else it is ignored.
+- **`fill`** (`list`, `table`, `log`) behaves as `list`'s `fill` does today (API 1.1): it is honoured when every node above it is a `column` (the panel's root included), and ignored anywhere else (below a `row`, `card` or `section`).
 
 ## Testing and docs
 

@@ -1,8 +1,8 @@
 # Writing wai extensions
 
-An extension is a folder with a `wai-extension.toml` manifest. It can be manifest-only (templates, prompt commands, agents, MCP servers) or run a program of its own. That program can be in any language: it speaks line-delimited JSON-RPC 2.0 over stdio and can draw panels in wai's sidebar.
+An extension is a folder with a `wai-extension.toml` manifest. It can be manifest-only (templates, prompt commands, agents, MCP servers) or run a program of its own. That program can be in any language: it speaks line-delimited JSON-RPC 2.0 over stdio and can draw panels in wai's sidebar or main area.
 
-This guide describes API version 1.1 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
+This guide describes API version 1.2 (protocol 1), as implemented by the latest wai release. API 1.2 ships with wai 0.9.0. The [first-party extensions](../extensions) are working references:
 - `wai-navegador` is manifest-only;
 - `wai-waycarbon` and `wai-rotinas` are written in Go.
 
@@ -15,6 +15,7 @@ id = "hello-go"                 # required
 name = "Hello (Go)"             # required
 version = "0.1.0"               # required
 description = "A minimal wai extension"
+api = "1.2"                     # optional: the oldest extension API it works with
 permissions = ["process", "panels", "notify"]
 
 [process]                       # optional: the extension's own program
@@ -24,6 +25,8 @@ args = []
 [[contributes.panels]]
 id = "main"
 title = "Hello"
+icon = "hand"                   # optional: a Lucide icon for the activity bar
+location = "main"               # optional: "sidebar" (default) or "main"
 ```
 
 **Unknown fields are refused** at every level, and so is a manifest that is not valid UTF-8 or is over 1 MB.
@@ -34,6 +37,7 @@ title = "Hello"
 | `name` | string | Shown in the extension list and the consent dialog |
 | `version` | string | Free form. wai shows it; it does not compare versions |
 | `description` | string, optional | Shown last in the consent dialog, cut to fit |
+| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.2"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.2)`. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
 | `permissions` | array of strings | See [Permissions](#permissions). An unknown permission is refused |
 | `process.command` | string | See [Commands and paths](#commands-and-paths). Needs `process` |
 | `process.args` | array of strings, optional | Arguments, passed as given (no shell) |
@@ -42,7 +46,7 @@ title = "Hello"
 | `contributes.agents` | array of tables | `name`, `command`. Needs `process` |
 | `contributes.mcp_servers` | array of tables | `name`, `command`, optional `args` (array), optional `env` (table of strings). Needs `process` |
 | `contributes.claude_plugins` | array of strings | Claude Code plugin names to suggest |
-| `contributes.panels` | array of tables | `id`, `title`. Needs `panels` |
+| `contributes.panels` | array of tables | `id`, `title`, optional `icon`, optional `location`. See [Panels](#panels). Needs `panels` |
 | `contributes.themes` | array of strings | Accepted, but not used in this version |
 
 **Extra rules:**
@@ -70,7 +74,7 @@ Calls in both directions are checked against what the user **granted** at instal
 | `sessions:read` | `sessions/list`. Receive `event/session_state` and `event/turn_ended` |
 | `sessions:control` | `sessions/open` and `sessions/prompt`. It does not include `sessions:read` |
 | `notify` | `notify`: system notifications |
-| `panels` | Contribute panels, `panel/render`, and receive `panel/action` |
+| `panels` | Contribute panels, `panel/render`, `panel/open`, and receive `panel/action` |
 | `network` | Nothing is enforced. It tells the user the extension uses the network |
 | `fs:<path>` | Nothing is enforced. It tells the user the extension uses `<path>`, which must be a relative path inside the extension's folder |
 
@@ -132,15 +136,15 @@ When an enabled extension with `[process]` and the `process` permission starts (
 
 | Method | Kind | Params | Notes |
 |---|---|---|---|
-| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.1", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
+| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.2", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
 | `command/run` | request | `{"id": "<command id>"}` | The user ran one of your commands without `prompt` from the palette. wai ignores the answer |
-| `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item or button was clicked. `action_id` is the item's or button's `id`. `values` has every form field in the panel by id: inputs as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels` |
+| `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item, card, table row, button or menu item was clicked (after its confirmation, if it has one). `action_id` is its `id`. `values` has every form field in the panel by id: inputs as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels` |
 | `event/session_state` | notification | `{"agent", "session", "state"}` | `state` is `idle`, `working`, `needs_you` or `error`. Needs `sessions:read` |
 | `event/turn_ended` | notification | `{"agent", "session", "reason"}` | `reason` is `end_turn`, `cancelled`, `max_tokens`, `refusal`, or the agent's own. Needs `sessions:read` |
 | `event/file_saved` | notification | `{"path": "<absolute path>"}` | The user saved a file in wai |
 
 - Paths are absolute, and on Windows they never carry the `\\?\` prefix.
-- Answer `initialize` before anything else. API 1.1 only adds fields; ignore the ones you do not know.
+- Answer `initialize` before anything else. API 1.1 and 1.2 only add fields; ignore the ones you do not know.
 
 ### Extension → host
 
@@ -151,6 +155,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `sessions/prompt` | `sessions:control` | `{"agent", "session", "text"}` | `null` at once |
 | `notify` | `notify` | `{"title", "body"?}` | `null` |
 | `panel/render` | `panels` | `{"panel": "<panel id>", "tree": {…}}` | `null` |
+| `panel/open` | `panels` | `{"panel": "<panel id>"}` | `null` once shown |
 
 **`sessions/open`** starts a session with `agent`, or with the user's default agent.
 - **The prompt:** `prompt` is filled in and not sent, unless `send` is `true`.
@@ -171,34 +176,227 @@ When an enabled extension with `[process]` and the `process` permission starts (
 - At most **100 renders per second** per extension: extra renders are coalesced, keeping each panel's latest tree, and the last one always lands.
 - A panel id not in your manifest gets `-32602`.
 
+**`panel/open`** shows a panel: a sidebar panel becomes the sidebar's tab, a main panel opens in a pane or its pane is focused (see [Panels](#panels)).
+- It never takes the keyboard focus.
+- At most **one every 2 seconds** per extension, or `Too many panel opens; try again later`.
+- A panel id not in your manifest gets `-32602`.
+- Typical use: a palette command without `prompt` → `command/run` → `panel/open`.
+
 **Notifications or requests.** You may send any of these as a notification (no `id`) when you do not need the answer, as the examples below do. A denied notification is dropped without an answer.
 
 ## Panels
 
-A panel is a sidebar tab titled by `contributes.panels[].title`, cut to 24 characters. It exists while your process runs, and its content is the last tree you rendered. Before your first render it says `Waiting for the extension…`.
+A panel exists while your process runs, and its content is the last tree you rendered. Before your first render it says `Waiting for the extension…`. Each panel has a button in the activity bar (the column of icons on the left) showing its `icon`, or the first letters of its `title` when it has no icon or wai does not know the name.
 
-A tree is JSON nodes:
+**Where it shows (`location`):**
+- **`sidebar`** (the default): a sidebar tab titled by `title`, cut to 24 characters.
+- **`main`:** a pane in the main area, beside the sessions, with a header (icon, title, your extension's name, ×).
+  - Its activity-bar button opens the pane, or focuses it if it is open. The button shows selected while the pane is on screen. There is at most one pane per panel.
+  - It takes the focused pane, as a session does; the session there stays open in the sidebar. If the focused pane is the editor, it opens in a new pane beside it.
+  - Closing the pane does not stop your extension, and what the user typed stays: the panel is the same when it opens again.
+  - The pane closes when your process stops, fails, crashes or is disabled. Panes are not part of work areas and are not saved between runs.
+
+**`icon`:** a [Lucide](https://lucide.dev/icons) icon name in kebab-case, such as `git-pull-request`, `database` or `rocket`. wai ships the whole Lucide set it bundles; an unknown name falls back to the initials and does not fail the install. The `icon` node and the `icon` fields of nodes take the same names.
+
+### Trees
+
+A tree is JSON nodes. Every field without `?` is required.
+
+**Layout:**
 
 | `type` | Fields | Notes |
 |---|---|---|
 | `column` | `children` (array of nodes) | Stacks children vertically |
 | `row` | `children` (array of nodes) | Places children side by side; they wrap when there is no room |
-| `text` | `text`, `muted`? (bool) | Up to 10,000 characters |
+| `card` | `id`?, `title`?, `subtitle`?, `badge`?, `icon`?, `children`? | A bordered card: a header (icon, title, subtitle, badge), then its children. With `id`, the whole card is clickable (also with Enter or Space) and sends `panel/action` with that `id`. Card ids may repeat |
+| `section` | `id`, `title`, `open`? (bool, default `true`), `badge`?, `children` | A block the user can collapse. `open` is an initial value (see the rules) |
+| `divider` | | A horizontal line |
+| `spacer` | | In a row, takes the free space: what follows goes to the end |
+
+**Content:**
+
+| `type` | Fields | Notes |
+|---|---|---|
+| `text` | `text`, `muted`? (bool), `mono`? (bool) | Up to 10,000 characters. `mono`: monospace |
 | `markdown` | `text` | Up to 10,000 characters |
-| `list` | `items`, `fill`? (bool) | Items: `{"id", "title", "subtitle"?, "badge"?}`; clicking one sends `panel/action` with its `id`. Without `fill` it shows 12 rows and scrolls the rest; with `fill` it takes the panel's remaining height. At least 160 px wide |
-| `button` | `id`, `label`, `style`? | `style`: `primary`, `danger`, or default. Clicking sends `panel/action` with its `id` |
-| `input` | `id`, `placeholder`, `value`? | A text field; its value arrives in `values` |
+| `badge` | `text`, `tone`? | |
+| `icon` | `name`, `tone`? | An unknown name shows as `Unsupported element` |
+| `link` | `text`, `url` | Opens `url` in the default browser; its tooltip shows the URL. Only `https://` and `http://` URLs, of at most 2,048 characters; anything else is unsupported. Sends no action |
+| `alert` | `tone`, `title`?, `text` | A coloured notice. `tone` is `info`, `success`, `warning` or `danger`. `text` wraps, up to 10,000 characters |
+| `kv` | `items` (array of `{"key", "value"}`) | Keys and values side by side, one line each. At most 200 items |
+| `progress` | `value` (number) | From 0 to 1, clamped |
+| `spinner` | `label`? | A loading indicator |
+
+**Lists, tables and logs:**
+
+| `type` | Fields | Notes |
+|---|---|---|
+| `list` | `items`, `fill`? (bool) | Items: `{"id", "title", "subtitle"?, "badge"?}`; clicking one sends `panel/action` with its `id`. At least 160 px wide |
+| `table` | `columns` (array of `{"title", "width"?}`), `rows` (array of `{"id"?, "cells"}`), `fill`? | `width` is in pixels; columns without one share the rest. A cell is a string (one line) or a `text`, `badge`, `link`, `icon`, `button`, `menu`, `spinner` or `progress` node; any other node is unsupported. Extra cells are dropped, missing ones are blank. A row with `id` is clickable and sends `panel/action` with that `id` (row ids may repeat). At most 20 columns and 1,000 rows; the rest are dropped |
+| `log` | `text`, `follow`? (bool, default `true`), `fill`? | Monospace output, one line per line, with a **Copy** button. Keeps the **last** 100,000 characters, and ANSI escape codes (colours) are removed. With `follow` it stays at the bottom as you re-render it, unless the user scrolled up |
+
+Without `fill`, a list, table or log shows 12 rows (lines) and scrolls the rest. With `fill` it takes the panel's remaining height; that works only when every node above it is a `column` (the panel's root included), and is ignored anywhere else.
+
+**Controls:**
+
+| `type` | Fields | Notes |
+|---|---|---|
+| `button` | `id`, `label`, `style`?, `icon`?, `disabled`? (bool), `confirm`? | `style`: `primary`, `danger`, or default. Clicking sends `panel/action` with its `id` |
+| `menu` | `label`?, `icon`? (default `ellipsis`), `items` (array of `{"id", "label", "danger"?, "confirm"?}`) | A button that opens a dropdown. Picking an item sends `panel/action` with the item's `id` (item ids may repeat). At most 50 items |
+| `input` | `id`, `placeholder`, `value`?, `multiline`? (bool), `rows`? (number) | A text field. With `multiline`, a text area of `rows` lines (default 4, at most 20). Its value arrives in `values` |
 | `select` | `id`, `options` (array of strings), `value`? | At most 100 options; with no choice, the first |
 | `checkbox` | `id`, `label`, `checked`? (bool) | |
-| `badge` | `text` | |
-| `progress` | `value` (number) | From 0 to 1, clamped |
 
-**Rules:**
-- **Required fields:** every field without `?` is required. A node with a missing or mistyped field, or an unknown `type`, shows as `Unsupported element`. Fields the schema does not name are ignored.
-- **Text:** strings other than `text` and `markdown` are one line of at most 500 characters.
-- **Ids:** ids are 1–256 bytes. Buttons and form fields share one set of ids per tree, and a repeated id makes that node unsupported. List item ids may repeat.
-- **Size:** a tree deeper than 32 levels or with more than 2,000 nodes is refused whole, and the panel shows `Panel too large`.
-- **Initial values:** `value` and `checked` set a field when it first appears, or when you send a *different* initial value. Otherwise what the user typed or chose stays across your renders.
+**`tone`** is `neutral` (the default), `info`, `success`, `warning` or `danger`, in the theme's colours.
+
+**`confirm`** on a `button` or a `menu` item is `{"title", "text"?, "confirm_label"?}`. The click opens a dialog with your extension's name, the title and the text, **Cancel**, and a button labelled `confirm_label` (default `Confirm`), red when the button is `danger` style or the item is `danger`. Only that button sends `panel/action`, with the form's values at that moment; Cancel, Esc or a click outside send nothing. A `confirm` that is present but malformed makes the node unsupported, so a broken confirmation never turns into no confirmation.
+
+**Clicks inside clickable things:** a click on a button, menu, link or form field inside a clickable card or table row goes to that control only.
+
+### Rules
+
+- **Required fields:** a node with a missing or mistyped field, or an unknown `type`, shows as `Unsupported element`. Fields the schema does not name are ignored. A node type newer than the user's wai also shows as unsupported; declare `api` to get a clear refusal instead.
+- **Text:** strings other than `text`, `markdown` and `alert`'s `text` are one line of at most 500 characters.
+- **Ids:** ids are 1–256 bytes. Buttons, form fields and sections share one set of ids per tree, and a repeated id makes that node unsupported. List item, card, table row and menu item ids may repeat.
+- **Size:** a tree deeper than 32 levels or with more than 2,000 nodes is refused whole, and the panel shows `Panel too large`. A node in a table cell counts as a node; string cells, columns, rows, `kv` items and menu items do not (their own caps bound them).
+- **Initial values:** `value`, `checked` and a section's `open` apply when the node first appears, or when you send a *different* initial value. Otherwise what the user typed, chose or collapsed stays across your renders.
+
+### Two complete trees
+
+They are the [samples](samples) wai's tests render. A list of open pull requests ([`samples/meus-prs.json`](samples/meus-prs.json)), for a `main` panel:
+
+```json
+{
+  "type": "column",
+  "children": [
+    {
+      "type": "row",
+      "children": [
+        { "type": "icon", "name": "git-pull-request", "tone": "info" },
+        { "type": "text", "text": "Open pull requests" },
+        { "type": "badge", "text": "3" },
+        { "type": "spacer" },
+        { "type": "button", "id": "refresh", "label": "Refresh", "icon": "refresh-cw" }
+      ]
+    },
+    {
+      "type": "table",
+      "fill": true,
+      "columns": [
+        { "title": "Repo", "width": 110 },
+        { "title": "Title" },
+        { "title": "CI", "width": 80 },
+        { "title": "Updated", "width": 70 },
+        { "title": "", "width": 36 }
+      ],
+      "rows": [
+        {
+          "id": "pr:wai#42",
+          "cells": [
+            "wai",
+            { "type": "link", "text": "Extension panels v2", "url": "https://github.com/example/wai/pull/42" },
+            { "type": "badge", "text": "passing", "tone": "success" },
+            "2 h",
+            {
+              "type": "menu",
+              "items": [
+                { "id": "checkout:wai#42", "label": "Check out in a session" },
+                {
+                  "id": "close:wai#42",
+                  "label": "Close",
+                  "danger": true,
+                  "confirm": { "title": "Close pull request #42?", "text": "Its branch stays.", "confirm_label": "Close" }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "pr:api#317",
+          "cells": [
+            "api",
+            { "type": "link", "text": "Paginate the inventory list", "url": "https://github.com/example/api/pull/317" },
+            { "type": "spinner", "label": "running" },
+            "5 h",
+            { "type": "menu", "items": [{ "id": "checkout:api#317", "label": "Check out in a session" }] }
+          ]
+        },
+        {
+          "id": "pr:web#88",
+          "cells": [
+            "web",
+            { "type": "link", "text": "Fix the date filter", "url": "https://github.com/example/web/pull/88" },
+            { "type": "badge", "text": "failing", "tone": "danger" },
+            "1 d",
+            { "type": "menu", "items": [{ "id": "checkout:web#88", "label": "Check out in a session" }] }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+A database restore form with a confirmed danger button, progress and output ([`samples/restore.json`](samples/restore.json)):
+
+```json
+{
+  "type": "column",
+  "children": [
+    {
+      "type": "alert",
+      "tone": "warning",
+      "title": "Staging only",
+      "text": "Restoring replaces the target database."
+    },
+    {
+      "type": "card",
+      "title": "Restore a backup",
+      "subtitle": "From the nightly snapshots",
+      "icon": "database",
+      "children": [
+        { "type": "select", "id": "env", "options": ["staging", "dev"], "value": "staging" },
+        { "type": "input", "id": "snapshot", "placeholder": "Snapshot id", "value": "2026-11-12" },
+        { "type": "input", "id": "note", "placeholder": "Why (optional)", "multiline": true, "rows": 3 },
+        { "type": "checkbox", "id": "anonymize", "label": "Anonymize personal data", "checked": true },
+        {
+          "type": "row",
+          "children": [
+            { "type": "spacer" },
+            {
+              "type": "button",
+              "id": "restore",
+              "label": "Restore",
+              "style": "danger",
+              "icon": "rotate-ccw",
+              "confirm": { "title": "Restore staging?", "text": "Staging's data is replaced by the snapshot.", "confirm_label": "Restore" }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "last",
+      "title": "Last run",
+      "badge": "running",
+      "open": true,
+      "children": [
+        {
+          "type": "kv",
+          "items": [
+            { "key": "Started", "value": "14:02" },
+            { "key": "By", "value": "you" }
+          ]
+        },
+        { "type": "progress", "value": 0.4 },
+        { "type": "divider" },
+        { "type": "log", "text": "pg_restore: connecting\npg_restore: creating TABLE inventories\npg_restore: \u001b[33mwarning\u001b[0m: 2 roles skipped\n", "follow": true }
+      ]
+    }
+  ]
+}
+```
 
 ## Contributions
 
