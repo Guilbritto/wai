@@ -27,6 +27,8 @@ fn installed(dir: &Path, args: &[&str], granted: Vec<Permission>) -> Installed {
             panels: vec![PanelSpec {
                 id: "main".into(),
                 title: "Main".into(),
+                icon: None,
+                location: PanelLocation::Sidebar,
             }],
             ..Default::default()
         },
@@ -114,7 +116,7 @@ fn initialize_roundtrip() {
             init["params"],
             json!({
                 "protocol": 1,
-                "api": "1.1",
+                "api": "1.2",
                 "wai_version": env!("CARGO_PKG_VERSION"),
                 "ext_id": "fake",
                 "granted": ["process", "notify", "panels"],
@@ -173,6 +175,50 @@ fn granted_call_gets_reply() {
     });
 }
 
+/// `panel/open` reaches wai for a contributed panel only.
+#[test]
+fn panel_open_needs_a_known_panel() {
+    let tmp = tempfile::tempdir().unwrap();
+    let args = [
+        "--call",
+        r#"panel/open {"panel": "nope"}"#,
+        "--call",
+        r#"panel/open {"panel": "main"}"#,
+    ];
+    let granted = vec![Permission::Process, Permission::Notify, Permission::Panels];
+    let ext = installed(tmp.path(), &args, granted);
+    run(Duration::from_secs(10), async {
+        let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        let events = until(&rx, |e| matches!(e, ExtEvent::OpenPanel { .. })).await;
+        // The first call's error may come back before or after the second reaches wai.
+        let mut replies: Vec<Value> = (events.iter())
+            .filter_map(|e| match e {
+                ExtEvent::Notify { title, body } if title == "reply" => {
+                    serde_json::from_str(body).ok()
+                }
+                _ => None,
+            })
+            .collect();
+        let Some(ExtEvent::OpenPanel { panel, reply }) = events.into_iter().last() else {
+            unreachable!()
+        };
+        assert_eq!(panel, "main");
+        reply.send(Ok(Value::Null));
+        while replies.len() < 2 {
+            replies.push(reported(&rx, "reply").await);
+        }
+        replies.sort_by_key(|r| r["id"].as_u64());
+        assert_eq!(
+            replies[0]["error"],
+            json!({"code": -32602, "message": "unknown panel \"nope\""})
+        );
+        assert_eq!(
+            (replies[1]["id"].clone(), replies[1]["result"].clone()),
+            (json!(2), Value::Null)
+        );
+    });
+}
+
 /// Review Focus 1: every ext→host call and host→ext event is checked against the granted set.
 #[test]
 fn ungranted_call_denied() {
@@ -183,6 +229,7 @@ fn ungranted_call_denied() {
         "sessions/prompt",
         "panel/render",
         "fs/read",
+        "panel/open",
     ];
     let args: Vec<&str> = calls.iter().flat_map(|c| ["--call", *c]).collect();
     let ext = installed(
@@ -209,6 +256,7 @@ fn ungranted_call_denied() {
         assert_eq!(errors[&3], denied("sessions:control"));
         assert_eq!(errors[&4], denied("panels"));
         assert_eq!(errors[&5]["code"], -32601);
+        assert_eq!(errors[&6], denied("panels"));
         assert!(
             events
                 .iter()
@@ -292,6 +340,7 @@ fn text(text: &str) -> panel::Node {
     panel::Node::Text {
         text: text.into(),
         muted: false,
+        mono: false,
     }
 }
 

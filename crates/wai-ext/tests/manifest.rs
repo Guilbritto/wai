@@ -194,3 +194,65 @@ fn first_party_manifests_validate() {
     assert_eq!(remoto.permissions, [Permission::SessionsControl]);
     assert_eq!(remoto.contributes, Contributes::default());
 }
+
+#[test]
+fn panel_icon_and_location() {
+    let h = "id=\"a\"\nname=\"n\"\nversion=\"1\"\npermissions=[\"panels\"]\n";
+    let panel = |fields: &str| {
+        parse(&format!(
+            "{h}[[contributes.panels]]\nid=\"p\"\ntitle=\"P\"\n{fields}"
+        ))
+    };
+    let p = panel("").unwrap().contributes.panels.remove(0);
+    assert_eq!((p.icon, p.location), (None, PanelLocation::Sidebar));
+    let p = panel("icon=\"git-pull-request\"\nlocation=\"main\"\n").unwrap();
+    let p = &p.contributes.panels[0];
+    assert_eq!(p.icon.as_deref(), Some("git-pull-request"));
+    assert_eq!(p.location, PanelLocation::Main);
+    assert!(panel("location=\"sidebar\"\n").is_ok());
+    assert!(matches!(
+        panel("location=\"top\"\n"),
+        Err(ManifestError::Parse(_))
+    ));
+    assert!(matches!(panel("icon=3\n"), Err(ManifestError::Parse(_))));
+}
+
+#[test]
+fn api_version_is_checked_first() {
+    let with_api = |api: &str, rest: &str| parse(&format!("api = {api}\n{FULL}{rest}"));
+    assert!(with_api("\"1.0\"", "").is_ok());
+    assert!(with_api("\"1.2\"", "").is_ok());
+    assert!(with_api("\"0.9\"", "").is_ok());
+    assert!(with_api(&format!("\"{API}\""), "").is_ok());
+    let newer = with_api("\"1.3\"", "").unwrap_err();
+    assert_eq!(
+        newer.to_string(),
+        "Go Tools needs a newer wai (extension API 1.3; this wai has 1.2)"
+    );
+    // Even when the newer API's fields would fail the strict parse.
+    assert_eq!(
+        with_api("\"2.0\"", "\nfuture = true\n")
+            .unwrap_err()
+            .to_string(),
+        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.2)"
+    );
+    // Numeric, not lexical: 1.10 is newer than 1.2.
+    assert!(matches!(
+        with_api("\"1.10\"", ""),
+        Err(ManifestError::TooOld { .. })
+    ));
+    for bad in [
+        "\"1\"",
+        "\"x.y\"",
+        "\"1.2.3\"",
+        "\"+1.2\"",
+        "\"1.\"",
+        "1.2",
+        "\"\"",
+    ] {
+        assert!(
+            matches!(with_api(bad, ""), Err(ManifestError::Parse(_))),
+            "{bad}"
+        );
+    }
+}

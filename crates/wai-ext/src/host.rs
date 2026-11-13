@@ -66,6 +66,11 @@ pub enum ExtEvent {
     ListSessions {
         reply: Reply,
     },
+    /// `panel/open`: show the panel, a contributed one.
+    OpenPanel {
+        panel: String,
+        reply: Reply,
+    },
     /// It cannot run: no process to start, or no answer to `initialize` within 10 s. Last event.
     Failed {
         id: ExtId,
@@ -382,7 +387,7 @@ impl Ext {
             panels: m.contributes.panels.iter().map(|p| p.id.clone()).collect(),
             init: json!({
                 "protocol": 1,
-                "api": "1.1",
+                "api": crate::API,
                 "wai_version": env!("CARGO_PKG_VERSION"),
                 "ext_id": m.id.as_str(),
                 "granted": granted,
@@ -482,6 +487,13 @@ impl Ext {
             let error = format!("Permission denied: {p}");
             Err(RpcError::new(rpc::PERMISSION_DENIED, error))
         };
+        let known = |panel: &String| {
+            if self.panels.contains(panel) {
+                return Ok(());
+            }
+            let error = format!("unknown panel {panel:?}");
+            Err(RpcError::new(rpc::INVALID_PARAMS, error))
+        };
         Ok(match method {
             "sessions/list" => {
                 need(Permission::SessionsRead)?;
@@ -517,11 +529,17 @@ impl Ext {
             "panel/render" => {
                 need(Permission::Panels)?;
                 let p: RenderParams = params_of(params)?;
-                if !self.panels.contains(&p.panel) {
-                    let error = format!("unknown panel {:?}", p.panel);
-                    return Err(RpcError::new(rpc::INVALID_PARAMS, error));
-                }
+                known(&p.panel)?;
                 Call::Render(p.panel, p.tree)
+            }
+            "panel/open" => {
+                need(Permission::Panels)?;
+                let p: OpenPanelParams = params_of(params)?;
+                known(&p.panel)?;
+                Call::Deferred(ExtEvent::OpenPanel {
+                    panel: p.panel,
+                    reply: reply(),
+                })
             }
             _ => {
                 let error = format!("Method not found: {method}");
@@ -579,6 +597,11 @@ struct NotifyParams {
 struct RenderParams {
     panel: String,
     tree: Value,
+}
+
+#[derive(Deserialize)]
+struct OpenPanelParams {
+    panel: String,
 }
 
 fn params_of<T: for<'de> Deserialize<'de>>(params: Value) -> Result<T, RpcError> {

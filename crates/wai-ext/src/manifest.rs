@@ -75,11 +75,30 @@ pub struct McpServerSpec {
     pub env: Vec<(String, String)>,
 }
 
+/// The extension API this wai speaks: `initialize` sends it, and a manifest's `api` may not be
+/// newer.
+pub const API: &str = "1.2";
+
+/// `icon`: a Lucide name; one wai does not have falls back to the title's initials.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PanelSpec {
     pub id: String,
     pub title: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub location: PanelLocation,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PanelLocation {
+    /// A sidebar tab.
+    #[default]
+    Sidebar,
+    /// A pane in the main area, opened from the activity bar.
+    Main,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -127,11 +146,17 @@ pub enum ManifestError {
     MissingPermission(Permission),
     #[error("{0}")]
     Unknown(String),
+    #[error("{name} needs a newer wai (extension API {api}; this wai has {own})", own = API)]
+    TooOld { name: String, api: String },
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawManifest {
+    /// Checked before this strict parse, in `check_api`.
+    #[serde(default)]
+    #[allow(dead_code)]
+    api: Option<String>,
     id: String,
     name: String,
     version: String,
@@ -239,9 +264,43 @@ fn check_command(cmd: &str) -> Result<(), ManifestError> {
     Ok(())
 }
 
+/// `major.minor`, both decimal.
+fn api_version(api: &str) -> Option<(u32, u32)> {
+    let number = |s: &str| {
+        let digits = !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        digits.then(|| s.parse().ok()).flatten()
+    };
+    let (major, minor) = api.split_once('.')?;
+    Some((number(major)?, number(minor)?))
+}
+
+/// A manifest's `api` is read before the strict parse, so the fields a newer API added do not
+/// hide why it is refused.
+fn check_api(text: &str) -> Result<(), ManifestError> {
+    let loose: toml::Table =
+        toml::from_str(text).map_err(|e| ManifestError::Parse(e.to_string()))?;
+    let Some(api) = loose.get("api") else {
+        return Ok(());
+    };
+    let Some(wanted) = api.as_str().and_then(api_version) else {
+        let error = format!("api {api} is not \"major.minor\"");
+        return Err(ManifestError::Parse(error));
+    };
+    if Some(wanted) <= api_version(API) {
+        return Ok(());
+    }
+    let field = |key| loose.get(key).and_then(toml::Value::as_str);
+    let name = field("name").or(field("id")).unwrap_or("This extension");
+    Err(ManifestError::TooOld {
+        name: name.to_owned(),
+        api: api.as_str().unwrap_or_default().to_owned(),
+    })
+}
+
 /// `ext_dir` is the directory the manifest will live in; paths are checked lexically against
 /// it, so it is not touched on disk.
 pub fn parse_manifest(text: &str, _ext_dir: &Path) -> Result<Manifest, ManifestError> {
+    check_api(text)?;
     let raw: RawManifest = toml::from_str(text).map_err(|e| ManifestError::Parse(e.to_string()))?;
     let id = ExtId::new(&raw.id)?;
     let permissions = raw
