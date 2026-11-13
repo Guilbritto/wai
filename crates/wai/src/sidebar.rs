@@ -433,30 +433,38 @@ impl Workspace {
             }))
             .collect();
         let (ring, dark) = (theme.ring, theme.is_dark());
-        let icons: Vec<AnyElement> = (self.rail_keys(cx).into_iter())
+        let order = self.rail_keys(cx);
+        let icons: Vec<AnyElement> = (order.clone().into_iter())
             .filter(|key| key == "wai.sessions" || self.shown(key))
             .filter_map(|key| {
                 let label = (entries.iter().find(|e| e.key == key))
                     .map_or_else(|| "Sessions".into(), |e| e.label.clone());
                 let (drag, target) = (RailDrag { key: key.clone(), label }, key.clone());
-                let over = key.clone();
+                let (over, order) = (key.clone(), order.clone());
                 let el = icons.remove(&key)?;
-                // The icon's top border is the drop line, in the colour a drop zone's is.
+                // The icon's border is the drop line, in the colour a drop zone's is: the bottom
+                // one when dragged down, as the icon takes the target's place.
                 Some(
                     div()
                         .id(SharedString::from(format!("rail-{key}")))
                         .flex_none()
                         .border_t_2()
+                        .border_b_2()
                         .border_color(gpui_kit::transparent_black())
                         .on_drag(drag, |drag, offset, _, cx| {
                             cx.new(|_| Preview(drag.label.clone(), offset))
                         })
-                        .drag_over(move |style, drag: &RailDrag, _, _| match drag.key != over {
-                            true => style.border_color(match dark {
+                        .drag_over(move |style, drag: &RailDrag, _, _| {
+                            let at = |k: &str| order.iter().position(|o| o == k);
+                            let line = match dark {
                                 true => aurora::lilas().alpha(0.45),
                                 false => ring,
-                            }),
-                            false => style,
+                            };
+                            match (at(&drag.key), at(&over)) {
+                                (Some(from), Some(to)) if from < to => style.border_color(line).border_t_0().pt(px(2.)),
+                                (Some(from), Some(to)) if from > to => style.border_color(line).border_b_0().pb(px(2.)),
+                                _ => style,
+                            }
                         })
                         .on_drop(cx.listener(move |this, drag: &RailDrag, _, cx| {
                             this.move_rail(&drag.key, &target, cx)
@@ -2848,6 +2856,17 @@ pub(crate) mod tests {
         }
         assert_eq!(workspace.read_with(cx, |w, cx| w.rail_keys(cx)), order);
         assert!(center_of("tab-search", cx).y < center_of("tab-sessions", cx).y);
+    }
+
+    /// Dragging down puts the icon in the target's place.
+    #[gpui_kit::test]
+    fn rail_reorders_downward(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
+        drag("tab-sessions", "tab-files", cx);
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w.rail_order.clone()),
+            ["wai.files", "wai.sessions", "wai.search", "wai.agents"]
+        );
     }
 
     /// Open and History fold, and stay folded on a relaunch, as the groups keep their colours.
