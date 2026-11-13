@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use gpui_kit::base::{ResizeHandleRenderer, ResizeHandleState};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Theme, ThemeRegistry, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Theme, ThemeRegistry, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Axis, Bounds, BoxShadow, Corners, Div, FontWeight, Hsla, InteractiveElement,
@@ -189,6 +189,23 @@ pub(crate) fn card(focused: bool, cx: &App) -> Div {
                 .spread_radius(px(-40.)),
         ])
         .overflow_hidden()
+}
+
+/// A card inside a card, such as an extension panel's `card`: glass in dark mode, the theme's
+/// border in light.
+pub(crate) fn tile(cx: &App) -> Div {
+    let theme = cx.theme();
+    let (fill, border) = match theme.is_dark() {
+        true => (vidro(), borda()),
+        false => (theme.background, theme.border),
+    };
+    v_flex()
+        .p_2()
+        .gap_2()
+        .rounded(px(10.))
+        .border_1()
+        .border_color(border)
+        .bg(fill)
 }
 
 /// A card's header strip (`.painel-barra`).

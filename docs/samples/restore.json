@@ -1,0 +1,56 @@
+{
+  "type": "column",
+  "children": [
+    {
+      "type": "alert",
+      "tone": "warning",
+      "title": "Staging only",
+      "text": "Restoring replaces the target database."
+    },
+    {
+      "type": "card",
+      "title": "Restore a backup",
+      "subtitle": "From the nightly snapshots",
+      "icon": "database",
+      "children": [
+        { "type": "select", "id": "env", "options": ["staging", "dev"], "value": "staging" },
+        { "type": "input", "id": "snapshot", "placeholder": "Snapshot id", "value": "2026-11-12" },
+        { "type": "input", "id": "note", "placeholder": "Why (optional)", "multiline": true, "rows": 3 },
+        { "type": "checkbox", "id": "anonymize", "label": "Anonymize personal data", "checked": true },
+        {
+          "type": "row",
+          "children": [
+            { "type": "spacer" },
+            {
+              "type": "button",
+              "id": "restore",
+              "label": "Restore",
+              "style": "danger",
+              "icon": "rotate-ccw",
+              "confirm": { "title": "Restore staging?", "text": "Staging's data is replaced by the snapshot.", "confirm_label": "Restore" }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "id": "last",
+      "title": "Last run",
+      "badge": "running",
+      "open": true,
+      "children": [
+        {
+          "type": "kv",
+          "items": [
+            { "key": "Started", "value": "14:02" },
+            { "key": "By", "value": "you" }
+          ]
+        },
+        { "type": "progress", "value": 0.4 },
+        { "type": "divider" },
+        { "type": "log", "text": "pg_restore: connecting\npg_restore: creating TABLE inventories\npg_restore: \u001b[33mwarning\u001b[0m: 2 roles skipped\n", "follow": true }
+      ]
+    }
+  ]
+}

@@ -2,7 +2,8 @@
 //! (and on install or enable) and stop on disable, before uninstall and at quit. They inherit
 //! wai's cwd, the config dir (R18).
 //!
-//! Each live one granted `panels` shows its declared panels as sidebar tabs. A panel outlives a
+//! Each live one granted `panels` shows its declared panels, as sidebar tabs or main-area panes
+//! opened from the activity bar. A panel outlives a
 //! restart of its process (a project switch), so what the user typed stays; it goes when its
 //! extension stops, fails or crashes.
 //!
@@ -15,26 +16,29 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::*;
 use wai_agent::McpServer;
 use wai_ext::panel::clamp;
 use wai_ext::{
-    CommandSpec, ExtEvent, ExtHandle, ExtId, HostEvent, Installed, PanelSpec, Permission,
+    CommandSpec, ExtEvent, ExtHandle, ExtId, HostEvent, Installed, PanelLocation, PanelSpec,
+    Permission,
 };
 use wai_settings::{AgentConfig, Template};
 
-use crate::ext_panel::{ExtPanel, PanelAction};
+use crate::ext_panel::{ExtPanel, PanelAction, lucide};
 use crate::notify;
 
 /// Events applied per wake of an extension's pump: a flooding one cannot hold the UI thread.
 const MAX_BATCH: usize = 256;
-/// At most one notification, and one `sessions/open`, per 2 s per extension: the excess
-/// notifications are dropped, the excess opens refused.
+/// At most one notification, one `sessions/open` and one `panel/open` per 2 s per extension: the
+/// excess notifications are dropped, the excess opens refused.
 const CALL_GAP: Duration = Duration::from_secs(2);
 const TOO_MANY_OPENS: &str = "Too many sessions opened; try again later";
+const TOO_MANY_SHOWS: &str = "Too many panel opens; try again later";
 
-/// An extension's `sessions/open`, `sessions/prompt` or `sessions/list`, for the workspace to
-/// carry out (and answer through the event's `Reply`).
+/// An extension's `sessions/open`, `sessions/prompt`, `sessions/list` or `panel/open`, for the
+/// workspace to carry out (and answer through the event's `Reply`).
 pub struct SessionCall(Cell<Option<(ExtId, ExtEvent)>>);
 
 impl SessionCall {
@@ -46,11 +50,17 @@ impl SessionCall {
 
 impl EventEmitter<SessionCall> for ExtHost {}
 
-/// A panel an extension contributes: a sidebar tab.
+/// A panel an extension contributes: a sidebar tab, or a pane in the main area.
 pub struct Panel {
     ext: ExtId,
     id: String,
     pub title: String,
+    /// The extension's name, shown in the pane's header.
+    pub ext_name: SharedString,
+    /// Its Lucide icon, when the name is one; else the rail shows the title's initials.
+    pub icon: Option<Lucide>,
+    /// A main-area pane rather than a sidebar tab.
+    pub main: bool,
     pub view: Entity<ExtPanel>,
     /// Its clicks, sent to the extension as `panel/action`.
     _actions: Subscription,
@@ -79,6 +89,8 @@ struct Running {
     notified: Option<Instant>,
     /// When it last opened a session.
     opened: Option<Instant>,
+    /// When it last showed one of its panels (`panel/open`).
+    shown: Option<Instant>,
     _pump: Task<()>,
 }
 
@@ -126,7 +138,7 @@ impl ExtHost {
                 let kept = old.iter().position(|p| p.ext == *ext && p.id == spec.id);
                 let panel = match kept {
                     Some(ix) => old.swap_remove(ix),
-                    None => self.panel(ext.clone(), spec, cx),
+                    None => self.panel(installed, spec, cx),
                 };
                 self.panels.push(panel);
             }
@@ -168,6 +180,11 @@ impl ExtHost {
 
     pub fn panels(&self) -> &[Panel] {
         &self.panels
+    }
+
+    /// Extension `ext`'s panel `id`, while shown.
+    pub fn panel_of(&self, ext: &ExtId, id: &str) -> Option<&Panel> {
+        (self.panels.iter()).find(|p| p.ext == *ext && p.id == id)
     }
 
     pub fn handle(&self, id: &ExtId) -> Option<&ExtHandle> {
@@ -255,8 +272,18 @@ impl ExtHost {
         (self.running.get_mut(id)).is_some_and(|r| allow(&mut r.opened, Instant::now()))
     }
 
-    fn panel(&self, ext: ExtId, spec: &PanelSpec, cx: &mut Context<Self>) -> Panel {
-        let view = cx.new(|_| ExtPanel::new());
+    /// Whether extension `id` may show a panel now, at most once per `CALL_GAP`.
+    fn may_show(&mut self, id: &ExtId) -> bool {
+        (self.running.get_mut(id)).is_some_and(|r| allow(&mut r.shown, Instant::now()))
+    }
+
+    fn panel(&self, installed: &Installed, spec: &PanelSpec, cx: &mut Context<Self>) -> Panel {
+        let (ext, ext_name) = (
+            installed.manifest.id.clone(),
+            installed.manifest.name.clone(),
+        );
+        let ext_name = SharedString::from(ext_name);
+        let view = cx.new(|_| ExtPanel::new(ext_name.clone()));
         let (to, panel) = (ext.clone(), spec.id.clone());
         let actions = cx.subscribe(&view, move |this, _, action: &PanelAction, _| {
             if let Some(handle) = this.handle(&to) {
@@ -267,6 +294,9 @@ impl ExtHost {
             ext,
             id: spec.id.clone(),
             title: spec.title.clone(),
+            ext_name,
+            icon: spec.icon.as_deref().and_then(lucide),
+            main: spec.location == PanelLocation::Main,
             view,
             _actions: actions,
         }
@@ -302,6 +332,7 @@ impl ExtHost {
             handle,
             notified: None,
             opened: None,
+            shown: None,
             _pump: pump,
         };
         self.running.insert(id, running);
@@ -333,9 +364,13 @@ impl ExtHost {
             ExtEvent::OpenSession { reply, .. } if !self.may_open(id) => {
                 return reply.send(Err(TOO_MANY_OPENS.into()));
             }
+            ExtEvent::OpenPanel { reply, .. } if !self.may_show(id) => {
+                return reply.send(Err(TOO_MANY_SHOWS.into()));
+            }
             event @ (ExtEvent::OpenSession { .. }
             | ExtEvent::Prompt { .. }
-            | ExtEvent::ListSessions { .. }) => {
+            | ExtEvent::ListSessions { .. }
+            | ExtEvent::OpenPanel { .. }) => {
                 return cx.emit(SessionCall(Cell::new(Some((id.clone(), event)))));
             }
         };

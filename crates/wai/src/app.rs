@@ -11,41 +11,6 @@ use wai_settings::{Settings, Template, ThemeChoice, unapproved};
 use crate::settings_view::Section;
 use crate::workspace::{CHOOSE_AI, Workspace};
 
-gpui_kit::assets::icon_assets!(
-    ExtraIcons,
-    [
-        Monitor,
-        GitFork,
-        GitBranch,
-        Shield,
-        MessageSquare,
-        Sparkles,
-        Puzzle,
-        FolderPlus,
-        ChevronsDownUp
-    ]
-);
-
-/// The component icons plus the few wai draws itself (the draft's Local and worktree chips).
-struct AppAssets;
-
-impl AssetSource for AppAssets {
-    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        match ExtraIcons.load(path)? {
-            Some(bytes) => Ok(Some(bytes)),
-            None => gpui_kit::assets::Assets.load(path),
-        }
-    }
-
-    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        let mut paths = gpui_kit::assets::Assets.list(path)?;
-        paths.extend(ExtraIcons.list(path)?);
-        paths.sort();
-        paths.dedup();
-        Ok(paths)
-    }
-}
-
 actions!(
     wai,
     [
@@ -174,7 +139,8 @@ pub fn run(
     update_notice: Option<(String, bool)>,
 ) {
     // Without the asset source every component icon (status, chevrons) renders blank.
-    let app = gpui_kit::application().with_assets(AppAssets);
+    // The whole Lucide catalog: an extension may name any of its icons.
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     app.run(move |cx| {
         init(&settings, cx);
         // Quit is the workspace's: it asks about unsaved edits first.

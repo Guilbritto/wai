@@ -1,0 +1,69 @@
+{
+  "type": "column",
+  "children": [
+    {
+      "type": "row",
+      "children": [
+        { "type": "icon", "name": "git-pull-request", "tone": "info" },
+        { "type": "text", "text": "Open pull requests" },
+        { "type": "badge", "text": "3" },
+        { "type": "spacer" },
+        { "type": "button", "id": "refresh", "label": "Refresh", "icon": "refresh-cw" }
+      ]
+    },
+    {
+      "type": "table",
+      "fill": true,
+      "columns": [
+        { "title": "Repo", "width": 110 },
+        { "title": "Title" },
+        { "title": "CI", "width": 80 },
+        { "title": "Updated", "width": 70 },
+        { "title": "", "width": 36 }
+      ],
+      "rows": [
+        {
+          "id": "pr:wai#42",
+          "cells": [
+            "wai",
+            { "type": "link", "text": "Extension panels v2", "url": "https://github.com/example/wai/pull/42" },
+            { "type": "badge", "text": "passing", "tone": "success" },
+            "2 h",
+            {
+              "type": "menu",
+              "items": [
+                { "id": "checkout:wai#42", "label": "Check out in a session" },
+                {
+                  "id": "close:wai#42",
+                  "label": "Close",
+                  "danger": true,
+                  "confirm": { "title": "Close pull request #42?", "text": "Its branch stays.", "confirm_label": "Close" }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "pr:api#317",
+          "cells": [
+            "api",
+            { "type": "link", "text": "Paginate the inventory list", "url": "https://github.com/example/api/pull/317" },
+            { "type": "spinner", "label": "running" },
+            "5 h",
+            { "type": "menu", "items": [{ "id": "checkout:api#317", "label": "Check out in a session" }] }
+          ]
+        },
+        {
+          "id": "pr:web#88",
+          "cells": [
+            "web",
+            { "type": "link", "text": "Fix the date filter", "url": "https://github.com/example/web/pull/88" },
+            { "type": "badge", "text": "failing", "tone": "danger" },
+            "1 d",
+            { "type": "menu", "items": [{ "id": "checkout:web#88", "label": "Check out in a session" }] }
+          ]
+        }
+      ]
+    }
+  ]
+}
