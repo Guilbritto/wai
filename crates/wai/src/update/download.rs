@@ -1,8 +1,9 @@
 //! The download half of self-updating: a streamed, size-capped HTTPS GET to a file, the hosts it
-//! may be redirected to, and the checksum helpers.
+//! may be redirected to, and the checksum helper. Extension packages and indexes use the same GET
+//! with their own hosts and limits (`marketplace`).
 
 use std::fs::File;
-use std::io::{Read as _, Write as _};
+use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
@@ -11,7 +12,6 @@ use http_body_util::BodyExt as _;
 use hyper::header::{ACCEPT, LOCATION, USER_AGENT};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use sha2::{Digest as _, Sha256};
 
 /// The whole download, redirects included.
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
@@ -34,25 +34,55 @@ pub(super) fn allowed(url: &str) -> bool {
     HOSTS.iter().any(|h| authority.eq_ignore_ascii_case(h))
 }
 
-/// GET `url` into `dest` (created, or truncated). On any error `dest` is removed.
-// ponytail: blocks one GPUI background thread for up to 10 min, with its own runtime like `fetch`.
-// The file is written with blocking `std::fs` calls between awaits; a slow disk stalls only this
-// thread. Upgrade: tokio's `fs` feature if the runtime ever serves more than this one request.
+/// Where a GET may go and how much it may take.
+#[derive(Clone, Copy)]
+pub(crate) struct Limits {
+    /// Checked on the URL and on every redirect.
+    pub allowed: fn(&str) -> bool,
+    /// Bytes it may write; one past this fails.
+    pub max: u64,
+    /// The whole GET, redirects included.
+    pub timeout: Duration,
+}
+
+/// A release asset.
+const RELEASE: Limits = Limits {
+    allowed,
+    max: MAX_DOWNLOAD,
+    timeout: TOTAL_TIMEOUT,
+};
+
+/// GET a release asset into `dest` (created, or truncated). On any error `dest` is removed.
 pub(super) fn download(url: &str, dest: &Path) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let got = runtime.block_on(async { tokio::time::timeout(TOTAL_TIMEOUT, get(url, dest)).await });
-    runtime.shutdown_background();
-    let got = got.map_err(|_| anyhow!("no download in {} s", TOTAL_TIMEOUT.as_secs()));
-    let result = got.and_then(|r| r);
+    download_with(url, dest, RELEASE)
+}
+
+/// GET `url` into `dest` (created, or truncated) within `limits`. On any error `dest` is removed.
+pub(crate) fn download_with(url: &str, dest: &Path, limits: Limits) -> anyhow::Result<()> {
+    let result = File::create(dest)
+        .map_err(Into::into)
+        .and_then(|mut file| get_into(url, &mut file, limits));
     if result.is_err() {
         std::fs::remove_file(dest).ok();
     }
     result
 }
 
-async fn get(url: &str, dest: &Path) -> anyhow::Result<()> {
+/// GET `url` into `out` within `limits`.
+// ponytail: blocks one GPUI background thread up to `limits.timeout`, with its own runtime like
+// `fetch`. `out` is written with blocking calls between awaits; a slow disk stalls only this
+// thread. Upgrade: tokio's `fs` feature if the runtime ever serves more than this one request.
+pub(crate) fn get_into(url: &str, out: &mut impl Write, limits: Limits) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let got = runtime
+        .block_on(async { tokio::time::timeout(limits.timeout, get(url, out, limits)).await });
+    runtime.shutdown_background();
+    got.map_err(|_| anyhow!("no download in {} s", limits.timeout.as_secs()))?
+}
+
+async fn get(url: &str, out: &mut impl Write, limits: Limits) -> anyhow::Result<()> {
     let https = hyper_rustls::HttpsConnectorBuilder::new()
         .with_native_roots()?
         .https_only()
@@ -61,7 +91,7 @@ async fn get(url: &str, dest: &Path) -> anyhow::Result<()> {
     let client = Client::builder(TokioExecutor::new()).build(https);
     let mut url = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
-        ensure!(allowed(&url), "refusing to download from {url:?}");
+        ensure!((limits.allowed)(&url), "refusing to download from {url:?}");
         let request = hyper::Request::get(&url)
             .header(USER_AGENT, concat!("wai/", env!("CARGO_PKG_VERSION")))
             .header(ACCEPT, "application/octet-stream")
@@ -69,7 +99,7 @@ async fn get(url: &str, dest: &Path) -> anyhow::Result<()> {
         let response = client.request(request).await?;
         let status = response.status().as_u16();
         match status {
-            200 => return write(response.into_body(), dest).await,
+            200 => return write(response.into_body(), out, limits.max).await,
             301 | 302 | 303 | 307 | 308 => {
                 let to = response.headers().get(LOCATION);
                 url = to
@@ -83,34 +113,26 @@ async fn get(url: &str, dest: &Path) -> anyhow::Result<()> {
     bail!("too many redirects")
 }
 
-async fn write(mut body: hyper::body::Incoming, dest: &Path) -> anyhow::Result<()> {
-    let mut file = File::create(dest)?;
+async fn write(
+    mut body: hyper::body::Incoming,
+    out: &mut impl Write,
+    max: u64,
+) -> anyhow::Result<()> {
     let mut written = 0u64;
     while let Some(frame) = body.frame().await {
         let Ok(data) = frame?.into_data() else {
             continue;
         };
         written += data.len() as u64;
-        ensure!(written <= MAX_DOWNLOAD, "the download is over 512 MB");
-        file.write_all(&data)?;
+        ensure!(
+            written <= max,
+            "the download is over {} MB",
+            max / (1024 * 1024)
+        );
+        out.write_all(&data)?;
     }
-    file.flush()?;
+    out.flush()?;
     Ok(())
-}
-
-/// SHA-256 of the file, lowercase hex.
-pub(super) fn sha256_file(path: &Path) -> anyhow::Result<String> {
-    let mut file = File::open(path)?;
-    let mut hash = Sha256::new();
-    let mut chunk = vec![0u8; 64 * 1024];
-    loop {
-        let n = file.read(&mut chunk)?;
-        if n == 0 {
-            break;
-        }
-        hash.update(&chunk[..n]);
-    }
-    Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// The hash `sums` (`sha256sum` output: `hash  name` or `hash *name`) lists for exactly `name`,
@@ -169,16 +191,5 @@ mod tests {
         ] {
             assert!(!allowed(url), "{url}");
         }
-    }
-
-    #[test]
-    fn hashes_a_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("f");
-        std::fs::write(&file, b"abc").unwrap();
-        assert_eq!(
-            sha256_file(&file).unwrap(),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
     }
 }

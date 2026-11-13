@@ -1,6 +1,6 @@
-//! Staging an extension before consent: a folder is copied, or a git repository cloned, into a
-//! temp dir under the config dir, and its manifest is parsed. Nothing is installed or enabled
-//! here: `ExtStore::commit` does that once the user consents.
+//! Staging an extension before consent: a folder is copied, a git repository cloned, or a
+//! downloaded package unpacked, into a temp dir under the config dir, and its manifest is parsed.
+//! Nothing is installed or enabled here: `ExtStore::commit` does that once the user consents.
 //!
 //! What a stage refuses (Review Focus 2):
 //! - every symbolic link, wherever it points (v1): with none, the manifest's lexical path checks
@@ -9,14 +9,17 @@
 //!   ends);
 //! - more than 100 MB or 10,000 entries;
 //! - git URLs other than `https://` and `git@host:path`. git runs with a fixed argv, never a
-//!   shell.
+//!   shell;
+//! - a package whose SHA-256 is not the one its index pins, or whose paths leave its folder.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::io::Read as _;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Deserialize;
+use sha2::{Digest as _, Sha256};
 
 use crate::{ExtId, Manifest, ManifestError, parse_manifest, relative_inside};
 
@@ -25,7 +28,17 @@ pub const MANIFEST_FILE: &str = "wai-extension.toml";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     Folder(PathBuf),
-    Git { url: String, rev: Option<String> },
+    Git {
+        url: String,
+        rev: Option<String>,
+    },
+    /// A `.tar.gz` already downloaded from `url` to `archive`; it is unpacked only if its SHA-256
+    /// is `sha256`, the hash its index pins.
+    Package {
+        url: String,
+        sha256: String,
+        archive: PathBuf,
+    },
 }
 
 impl std::fmt::Display for Source {
@@ -37,6 +50,7 @@ impl std::fmt::Display for Source {
                 url,
                 rev: Some(rev),
             } => write!(f, "{url} at {rev}"),
+            Source::Package { url, .. } => f.write_str(url),
         }
     }
 }
@@ -57,6 +71,12 @@ pub enum InstallError {
     BadRev(String),
     #[error("git clone failed: {0}")]
     Git(String),
+    #[error("the package does not match the SHA-256 its index lists")]
+    Checksum,
+    #[error("cannot read the package: {0}")]
+    Package(String),
+    #[error("cannot download the package: {0}")]
+    Download(String),
     #[error("no wai-extension.toml in the extension folder")]
     NoManifest,
     #[error("{0} is already installed; install it again to update it")]
@@ -164,6 +184,14 @@ fn fill(root: &Path, source: &Source) -> Result<Manifest, InstallError> {
             copy_tree(&clone, &ext, LIMITS)?;
             std::fs::remove_dir_all(&clone)?;
         }
+        Source::Package {
+            sha256, archive, ..
+        } => {
+            if !sha256_file(archive)?.eq_ignore_ascii_case(sha256) {
+                return Err(InstallError::Checksum);
+            }
+            unpack(archive, &ext, LIMITS)?;
+        }
     }
     let text =
         wai_settings::read_config(&ext.join(MANIFEST_FILE))?.ok_or(InstallError::NoManifest)?;
@@ -197,6 +225,97 @@ fn copy_dir(src: &Path, dst: &Path, budget: &mut Budget) -> Result<(), InstallEr
                 "only regular files and folders are allowed in extensions"
             };
             return Err(InstallError::Refused { path: from, why });
+        }
+    }
+    Ok(())
+}
+
+/// SHA-256 of the file, lowercase hex.
+pub fn sha256_file(path: &Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&chunk[..n]);
+    }
+    Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// `path` inside the package's root, without its `./` parts; `None` when it is absolute or
+/// climbs out with `..`. The root itself is the empty path.
+fn inside(path: &Path) -> Option<PathBuf> {
+    let mut rel = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::Normal(name) => rel.push(name),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(rel)
+}
+
+/// Unpacks a `.tar.gz` into `dst` with the copy's rules: regular files and folders only, every
+/// path inside `dst`, a file never written twice, and the limits counted from each entry's
+/// declared size before anything is written (a small archive cannot fill the disk). No link is
+/// ever created, so nothing is written through one. On unix a file with an executable bit in the
+/// archive is installed 0755, others 0644.
+fn unpack(archive: &Path, dst: &Path, mut budget: Budget) -> Result<(), InstallError> {
+    let bad = |e: std::io::Error| InstallError::Package(e.to_string());
+    std::fs::create_dir(dst)?;
+    let gz = flate2::read::GzDecoder::new(std::fs::File::open(archive)?);
+    let mut tar = tar::Archive::new(gz);
+    for entry in tar.entries().map_err(bad)? {
+        let mut entry = entry.map_err(bad)?;
+        budget.entries = (budget.entries.checked_sub(1)).ok_or(InstallError::TooLarge)?;
+        let size = entry.size();
+        budget.bytes = (budget.bytes.checked_sub(size)).ok_or(InstallError::TooLarge)?;
+        let path = entry.path().map_err(bad)?.into_owned();
+        let refused = |why| InstallError::Refused {
+            path: path.clone(),
+            why,
+        };
+        let rel = inside(&path).ok_or_else(|| refused("paths in a package must stay inside it"))?;
+        let kind = entry.header().entry_type();
+        if kind.is_pax_global_extensions() {
+            continue;
+        }
+        if kind.is_dir() {
+            std::fs::create_dir_all(dst.join(&rel))?;
+        } else if kind.is_file() {
+            if rel.as_os_str().is_empty() {
+                return Err(refused("a file cannot be the package's root"));
+            }
+            let to = dst.join(&rel);
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut out = match std::fs::File::create_new(&to) {
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(refused("the package lists this file twice"));
+                }
+                out => out?,
+            };
+            std::io::copy(&mut (&mut entry).take(size), &mut out).map_err(bad)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let exec = entry.header().mode().is_ok_and(|m| m & 0o111 != 0);
+                let mode = if exec { 0o755 } else { 0o644 };
+                out.set_permissions(std::fs::Permissions::from_mode(mode))?;
+            }
+        } else if kind.is_symlink() {
+            return Err(refused("symbolic links are not allowed in extensions"));
+        } else if kind.is_hard_link() {
+            return Err(refused("links are not allowed in extensions"));
+        } else {
+            return Err(refused(
+                "only regular files and folders are allowed in extensions",
+            ));
         }
     }
     Ok(())
@@ -329,7 +448,194 @@ fn read_suggestions(path: &Path, project: &Path) -> Result<Vec<Suggestion>, Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{Budget, InstallError, copy_tree};
+    use std::fs::File;
+    use std::path::{Path, PathBuf};
+
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use tar::{Builder, EntryType, Header};
+
+    use super::{
+        Budget, InstallError, LIMITS, Source, copy_tree, sha256_file, stage, staging_dir, unpack,
+    };
+
+    type Tar = Builder<GzEncoder<File>>;
+
+    const MANIFEST: &[u8] = b"id = \"pkg\"\nname = \"Pkg\"\nversion = \"0.1.0\"\n";
+
+    fn targz(dir: &Path, build: impl FnOnce(&mut Tar)) -> PathBuf {
+        let path = dir.join("p.tar.gz");
+        let gz = GzEncoder::new(File::create(&path).unwrap(), Compression::default());
+        let mut tar = Builder::new(gz);
+        build(&mut tar);
+        tar.into_inner().unwrap().finish().unwrap();
+        path
+    }
+
+    /// An entry with `path` written as given: `Header::set_path` would refuse `..`.
+    fn add(tar: &mut Tar, kind: EntryType, path: &str, data: &[u8], mode: u32) {
+        let mut h = Header::new_gnu();
+        let name = &mut h.as_old_mut().name;
+        name.fill(0);
+        name[..path.len()].copy_from_slice(path.as_bytes());
+        h.set_entry_type(kind);
+        h.set_size(data.len() as u64);
+        h.set_mode(mode);
+        h.set_cksum();
+        tar.append(&h, data).unwrap();
+    }
+
+    fn file(tar: &mut Tar, path: &str, data: &[u8]) {
+        add(tar, EntryType::Regular, path, data, 0o644);
+    }
+
+    fn unpacked(dir: &Path, build: impl FnOnce(&mut Tar)) -> Result<(), InstallError> {
+        let archive = targz(dir, build);
+        unpack(&archive, &dir.join("out"), LIMITS)
+    }
+
+    /// GNU tar's `tar -C stage -czf p.tar.gz .`: a `./` root, `./` paths, folders implied.
+    #[test]
+    fn stages_a_package() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = targz(tmp.path(), |tar| {
+            add(tar, EntryType::Directory, "./", b"", 0o755);
+            file(tar, "./wai-extension.toml", MANIFEST);
+            add(tar, EntryType::Regular, "./bin/run", b"#!", 0o755);
+        });
+        let sha256 = sha256_file(&archive).unwrap();
+        let url = "https://example.com/p.tar.gz".to_string();
+        let source = Source::Package {
+            url: url.clone(),
+            sha256: sha256.to_uppercase(),
+            archive: archive.clone(),
+        };
+        let staged = stage(&tmp.path().join("config"), &source).unwrap();
+        assert_eq!(staged.manifest().id.as_str(), "pkg");
+        assert_eq!(staged.source().to_string(), url);
+        assert_eq!(std::fs::read(staged.dir().join("bin/run")).unwrap(), b"#!");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = |p: &str| {
+                let meta = std::fs::metadata(staged.dir().join(p)).unwrap();
+                meta.permissions().mode() & 0o777
+            };
+            assert_eq!(
+                (mode("bin/run"), mode("wai-extension.toml")),
+                (0o755, 0o644)
+            );
+        }
+
+        let wrong = Source::Package {
+            url,
+            sha256: "0".repeat(64),
+            archive,
+        };
+        let refused = stage(&tmp.path().join("config"), &wrong);
+        assert!(
+            matches!(refused, Err(InstallError::Checksum)),
+            "{refused:?}"
+        );
+    }
+
+    /// The download goes into the staging area and is deleted, staged or not.
+    #[test]
+    fn stages_a_downloaded_package() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = targz(tmp.path(), |tar| file(tar, "wai-extension.toml", MANIFEST));
+        let sha256 = sha256_file(&archive).unwrap();
+        let config = tmp.path().join("config");
+        let store = crate::ExtStore::open(&config);
+        let copy = |to: &Path| {
+            std::fs::copy(&archive, to)
+                .map(drop)
+                .map_err(|e| e.to_string())
+        };
+        let staged = store
+            .stage_package("https://e.com/p", &sha256, copy)
+            .unwrap();
+        assert_eq!(staged.manifest().id.as_str(), "pkg");
+        let left = || std::fs::read_dir(staging_dir(&config)).unwrap().count();
+        assert_eq!(left(), 1, "only the stage");
+        drop(staged);
+        let failed = store.stage_package("https://e.com/p", &sha256, |_| Err("HTTP 404".into()));
+        assert_eq!(
+            failed.unwrap_err().to_string(),
+            "cannot download the package: HTTP 404"
+        );
+        let wrong = store.stage_package("https://e.com/p", &"0".repeat(64), copy);
+        assert!(matches!(wrong, Err(InstallError::Checksum)));
+        assert_eq!(left(), 0);
+    }
+
+    #[test]
+    fn hashes_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("f");
+        std::fs::write(&file, b"abc").unwrap();
+        assert_eq!(
+            sha256_file(&file).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn refuses_what_a_folder_copy_refuses() {
+        let refused = |build: fn(&mut Tar), why: &str| {
+            let tmp = tempfile::tempdir().unwrap();
+            match unpacked(tmp.path(), build) {
+                Err(InstallError::Refused { why: got, .. }) => assert_eq!(got, why),
+                other => panic!("{why}: {other:?}"),
+            }
+        };
+        refused(
+            |t| add(t, EntryType::Symlink, "link", b"", 0o777),
+            "symbolic links are not allowed in extensions",
+        );
+        refused(
+            |t| add(t, EntryType::Link, "hard", b"", 0o644),
+            "links are not allowed in extensions",
+        );
+        refused(
+            |t| add(t, EntryType::Fifo, "fifo", b"", 0o644),
+            "only regular files and folders are allowed in extensions",
+        );
+        refused(
+            |t| file(t, "../evil", b"x"),
+            "paths in a package must stay inside it",
+        );
+        refused(
+            |t| file(t, "/etc/evil", b"x"),
+            "paths in a package must stay inside it",
+        );
+        refused(
+            |t| {
+                file(t, "a", b"1");
+                file(t, "./a", b"2");
+            },
+            "the package lists this file twice",
+        );
+    }
+
+    #[test]
+    fn unpack_caps_entries_and_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = targz(tmp.path(), |t| {
+            file(t, "a", b"12345");
+            file(t, "d/b", b"12345");
+        });
+        let run = |name: &str, bytes, entries| {
+            unpack(&archive, &tmp.path().join(name), Budget { bytes, entries })
+        };
+        assert!(run("fits", 10, 2).is_ok());
+        assert!(matches!(run("entries", 10, 1), Err(InstallError::TooLarge)));
+        assert!(matches!(run("bytes", 9, 2), Err(InstallError::TooLarge)));
+        let garbage = tmp.path().join("garbage.tar.gz");
+        std::fs::write(&garbage, b"not a gzip").unwrap();
+        let got = unpack(&garbage, &tmp.path().join("g"), LIMITS);
+        assert!(matches!(got, Err(InstallError::Package(_))), "{got:?}");
+    }
 
     #[test]
     fn copy_caps_entries_and_bytes() {

@@ -1,4 +1,5 @@
 mod host;
+pub mod index;
 mod install;
 mod manifest;
 pub mod panel;

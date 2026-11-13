@@ -81,6 +81,27 @@ impl ExtStore {
         install::stage(&self.config_dir, source)
     }
 
+    /// Has `download` write the package at `url` into the staging area, then stages it as a
+    /// `Source::Package` pinned to `sha256`. The download is deleted either way.
+    pub fn stage_package(
+        &self,
+        url: &str,
+        sha256: &str,
+        download: impl FnOnce(&Path) -> Result<(), String>,
+    ) -> Result<Staged, InstallError> {
+        let archive = staging_path(&self.config_dir)?.with_extension("tar.gz");
+        let source = Source::Package {
+            url: url.into(),
+            sha256: sha256.into(),
+            archive: archive.clone(),
+        };
+        let staged = download(&archive)
+            .map_err(InstallError::Download)
+            .and_then(|()| self.stage(&source));
+        std::fs::remove_file(&archive).ok();
+        staged
+    }
+
     /// Moves the stage into `<config>/extensions/<id>/` and records the consent, enabled. v1
     /// consent is all or nothing: `granted` must be exactly what the manifest asks for. An
     /// installed id is refused here; `update` replaces it.

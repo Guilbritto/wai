@@ -7,7 +7,7 @@
 //! repository is only announced. Every failure is only logged.
 
 pub mod adapter;
-mod download;
+pub(crate) mod download;
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(windows)]
@@ -298,7 +298,7 @@ fn stage(
     let listed = std::fs::read_to_string(&sums_file).context("reading the checksums")?;
     let file = cache.join(&build.name);
     let want = download::expected_sum(&listed, &build.name);
-    if let Ok(sha256) = download::sha256_file(&file)
+    if let Ok(sha256) = wai_ext::sha256_file(&file)
         && want.as_deref() == Some(&sha256)
     {
         return Ok(Staged {
@@ -316,7 +316,7 @@ fn stage(
     }
     let staged = (|| {
         download(&build.url, &file).context("downloading the update")?;
-        let sha256 = download::sha256_file(&file)?;
+        let sha256 = wai_ext::sha256_file(&file)?;
         ensure!(
             want.as_deref() == Some(&sha256),
             "the downloaded update does not match its checksum"
@@ -338,7 +338,7 @@ fn stage(
 
 /// Re-hashes the staged build, so a file changed since staging is never installed.
 pub fn verify(staged: &Staged) -> anyhow::Result<()> {
-    let now = download::sha256_file(&staged.file).ok();
+    let now = wai_ext::sha256_file(&staged.file).ok();
     ensure!(
         now.as_deref() == Some(&staged.sha256),
         "the downloaded update changed on disk; check for updates again"
@@ -527,7 +527,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
 
     use super::*;
-    use download::sha256_file;
+    use wai_ext::sha256_file;
     use wai_settings::DEFAULT_REPO;
 
     fn on(repo: &str) -> UpdateSettings {

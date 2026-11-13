@@ -13,6 +13,11 @@ smol.workspace = true
 thiserror.workspace = true
 wai-settings = { path = "../wai-settings" }
 dunce.workspace = true
+# Unpacking and checking an extension package (install.rs). flate2 and sha2 were already in
+# Cargo.lock; tar (MIT/Apache, cargo's own) reads GNU and pax headers, without xattr.
+flate2 = "1"
+sha2 = "0.10.9"
+tar = { version = "0.4.46", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 # Already in the tree (agent-client-protocol): kills an extension's whole process group.

@@ -20,6 +20,7 @@ mod git;
 mod instance;
 mod layout;
 mod log;
+mod marketplace;
 mod notify;
 mod palette;
 mod search_view;

@@ -3,7 +3,7 @@
 //! dialog, which lists each permission the extension asks for; nothing installs without it.
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -11,16 +11,21 @@ use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 // A manifest's text goes through `clamp`: a hostile one cannot push the permissions out of the
 // consent dialog.
+use wai_ext::index::Listing;
 use wai_ext::panel::clamp;
 use wai_ext::{ExtId, ExtStore, Installed, Permission, Source, Staged};
+use wai_settings::Settings;
 
 use crate::aurora;
 use crate::ext_host::{ExtHost, ExtStatus};
+use crate::marketplace::{self, Entry, Listings};
 
 /// v1 has no sandbox, and the consent dialog says so in these words.
 pub const LIMITATION: &str = "wai cannot restrict files or network access in this version; only install extensions you trust.";
@@ -83,13 +88,22 @@ impl Drop for Pending {
     }
 }
 
+/// The AVAILABLE list: fetched the first time the page shows, and on Refresh.
+enum Available {
+    NotFetched,
+    Loading { _fetch: Task<()> },
+    Loaded(Listings),
+}
+
 pub struct ExtensionsView {
+    config_dir: PathBuf,
     store: ExtStore,
     /// Runs what the store has enabled; told after each change.
     host: Entity<ExtHost>,
     url: Entity<InputState>,
     /// The stage in progress: a copy or a clone, off the main thread. A new one replaces it.
     staging: Option<Task<()>>,
+    available: Available,
     _host_changed: Subscription,
 }
 
@@ -102,11 +116,13 @@ impl ExtensionsView {
     ) -> Self {
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("https://… or git@…"));
         Self {
+            config_dir: config_dir.to_path_buf(),
             store: ExtStore::open(config_dir),
             _host_changed: cx.observe(&host, |_, _, cx| cx.notify()),
             host,
             url,
             staging: None,
+            available: Available::NotFetched,
         }
     }
 
@@ -129,7 +145,31 @@ impl ExtensionsView {
         cx: &mut Context<Self>,
     ) {
         let store = self.store.clone();
-        let staging = cx.background_spawn(async move { store.stage(&source) });
+        self.review_with(move || store.stage(&source), expect, window, cx)
+    }
+
+    /// Downloads the listing's package for this platform and reviews it; its manifest must have
+    /// the listing's id.
+    fn install_listing(&mut self, listing: &Listing, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(package) = listing.package().cloned() else {
+            return;
+        };
+        let store = self.store.clone();
+        let stage = move || {
+            let download = |to: &Path| marketplace::get_package(&package.url, to);
+            store.stage_package(&package.url, &package.sha256, download)
+        };
+        self.review_with(stage, Some(listing.id.clone()), window, cx)
+    }
+
+    fn review_with(
+        &mut self,
+        stage: impl FnOnce() -> Result<Staged, wai_ext::InstallError> + Send + 'static,
+        expect: Option<ExtId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let staging = cx.background_spawn(async move { stage() });
         self.staging = Some(cx.spawn_in(window, async move |this, cx| {
             let staged = staging.await;
             this.update_in(cx, |this, window, cx| {
@@ -286,6 +326,24 @@ impl ExtensionsView {
         cx.notify();
     }
 
+    /// Reads the indexes again: the official one, then the user's settings' (never a project's).
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        let dir = self.config_dir.clone();
+        let listings = cx.background_spawn(async move {
+            let settings = Settings::load(&dir, None).map(|(s, _)| s);
+            marketplace::fetch_all(&settings.unwrap_or_default().extensions.indexes)
+        });
+        let fetch = cx.spawn(async move |this, cx| {
+            let listings = listings.await;
+            this.update(cx, |this, cx| {
+                this.available = Available::Loaded(listings);
+                cx.notify();
+            })
+            .ok();
+        });
+        self.available = Available::Loading { _fetch: fetch };
+    }
+
     fn pick_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: false,
@@ -436,10 +494,113 @@ impl ExtensionsView {
     }
 }
 
+impl ExtensionsView {
+    /// Name, version, description, the user's index it came from, and what installing it does.
+    fn available_row(
+        &self,
+        ix: usize,
+        entry: &Entry,
+        installed: &[Installed],
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        let l = &entry.listing;
+        let have = (installed.iter()).find(|i| i.manifest.id == l.id);
+        let id = ("ext-available", ix);
+        let action = match (l.package(), have) {
+            (None, _) => div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child("Not available for this platform")
+                .into_any_element(),
+            (Some(_), Some(i)) if i.manifest.version == l.version => Button::new(id)
+                .small()
+                .label("Installed")
+                .disabled(true)
+                .into_any_element(),
+            (Some(_), have) => {
+                let label = match have {
+                    Some(_) => format!("Update to {}", clamp(&l.version, NAME_CHARS)),
+                    None => "Install".into(),
+                };
+                let listing = l.clone();
+                Button::new(id)
+                    .small()
+                    .label(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.install_listing(&listing, window, cx)
+                    }))
+                    .into_any_element()
+            }
+        };
+        let about = [l.description.as_deref(), entry.from.as_deref()];
+        let about = match about {
+            [Some(d), Some(host)] => format!(
+                "{} · from {}",
+                clamp(d, DESCRIPTION_CHARS),
+                clamp(host, NAME_CHARS)
+            ),
+            [Some(d), None] => clamp(d, DESCRIPTION_CHARS),
+            [None, Some(host)] => format!("from {}", clamp(host, NAME_CHARS)),
+            [None, None] => String::new(),
+        };
+        h_flex()
+            .gap_3()
+            .py_2()
+            .items_center()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(clamp(&l.name, NAME_CHARS)),
+                            )
+                            .child(aurora::badge(clamp(&l.version, NAME_CHARS), cx)),
+                    )
+                    .when(!about.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_xs()
+                                .truncate()
+                                .text_color(theme.muted_foreground)
+                                .child(about),
+                        )
+                    }),
+            )
+            .child(action)
+    }
+}
+
 impl Render for ExtensionsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // No request until the user looks at the page.
+        if matches!(self.available, Available::NotFetched) {
+            self.refresh(cx);
+        }
         let theme = cx.theme();
         let installed = self.store.list();
+        let listed = match &self.available {
+            Available::Loaded(listed) => Some(listed),
+            _ => None,
+        };
+        let header = |text: &'static str, count: Option<usize>| {
+            h_flex()
+                .gap_2()
+                .pt_2()
+                .text_size(px(11.))
+                .text_color(theme.muted_foreground)
+                .child(text)
+                .children(count.map(|n| n.to_string()))
+        };
         let muted = |text: &'static str| {
             div()
                 .text_sm()
@@ -471,15 +632,7 @@ impl Render for ExtensionsView {
                     ),
             )
             .when(self.staging.is_some(), |el| el.child(muted("Preparing…")))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .pt_2()
-                    .text_size(px(11.))
-                    .text_color(theme.muted_foreground)
-                    .child("INSTALLED")
-                    .child(installed.len().to_string()),
-            )
+            .child(header("INSTALLED", Some(installed.len())))
             .when(installed.is_empty(), |el| {
                 el.child(muted("No extensions installed"))
             })
@@ -489,6 +642,40 @@ impl Render for ExtensionsView {
                     .enumerate()
                     .map(|(ix, ext)| self.row(ix, ext, cx)),
             )
+            .child(
+                header("AVAILABLE", listed.map(|l| l.entries.len()))
+                    .items_center()
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("ext-refresh")
+                            .ghost()
+                            .xsmall()
+                            .label("Refresh")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.refresh(cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .when(listed.is_none(), |el| {
+                el.child(muted("Loading extensions…"))
+            })
+            .children(listed.into_iter().flat_map(|l| {
+                l.errors.iter().map(|e| {
+                    div()
+                        .text_xs()
+                        .truncate()
+                        .text_color(theme.muted_foreground)
+                        .child(clamp(e, DESCRIPTION_CHARS))
+                })
+            }))
+            .when(listed.is_some_and(|l| l.entries.is_empty()), |el| {
+                el.child(muted("No extensions listed"))
+            })
+            .children(listed.into_iter().flat_map(|l| {
+                (l.entries.iter().enumerate())
+                    .map(|(ix, entry)| self.available_row(ix, entry, &installed, cx))
+            }))
     }
 }
 
@@ -906,6 +1093,85 @@ pub(crate) mod tests {
         click("consent-cancel", cx);
         assert_eq!(installed(&view, cx)[0].manifest.version, "0.1.0");
         assert_eq!(staged(&config), 0, "Cancel drops the stage");
+    }
+
+    /// A package of `manifest` (made with the system's `tar`), and the URL and SHA-256 an index
+    /// lists it by in tests. Relative paths: GNU tar (Git Bash on Windows) reads `C:` as a host.
+    fn package(dir: &Path, name: &str, manifest: &str) -> (String, String) {
+        sample_with(&dir.join(name), manifest);
+        let archive = dir.join(format!("{name}.tar.gz"));
+        let packed = std::process::Command::new("tar")
+            .current_dir(dir)
+            .args(["-czf", &format!("{name}.tar.gz"), "-C", name, "."])
+            .status();
+        assert!(packed.unwrap().success());
+        let url = format!("https://test.invalid{}", archive.display());
+        (url, wai_ext::sha256_file(&archive).unwrap())
+    }
+
+    /// AVAILABLE lists the user's indexes once the page shows (the official one is offline in
+    /// tests). Install downloads the package and asks for consent; a listing whose package is
+    /// another extension is refused; after Refresh, a new version offers Update.
+    #[gpui_kit::test]
+    fn installs_and_updates_from_an_index(cx: &mut TestAppContext) {
+        use crate::marketplace::tests::{entry, index};
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = "id = \"sample\"\nname = \"Sample\"\nversion = \"1.2.0\"\n";
+        let (url, sha) = package(tmp.path(), "v1", manifest);
+        let listed = entry("sample", "1.2.0", &url, &sha) + &entry("other", "1.0.0", &url, &sha);
+        let listed = index(tmp.path(), "index.toml", &listed);
+        std::fs::create_dir_all(&config).unwrap();
+        let settings = format!("[extensions]\nindexes = ['{listed}']\n");
+        std::fs::write(config.join("settings.toml"), settings).unwrap();
+        let (workspace, cx) = workspace(&config, cx);
+        let view =
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.show_extensions(window, cx)));
+        cx.update(|window, cx| window.render_frame(cx));
+        cx.run_until_parked();
+        let listings = view.read_with(cx, |v, _| match &v.available {
+            super::Available::Loaded(l) => (l.entries.len(), l.errors.len()),
+            _ => (0, 0),
+        });
+        assert_eq!(
+            listings,
+            (2, 1),
+            "the user's index, and the official one failing"
+        );
+
+        click(("ext-available", 0usize), cx);
+        assert!(consent(cx), "no consent dialog");
+        cx.update(|window, cx| window.render_frame(cx));
+        let from = format!("consent: From {url}").leak();
+        assert!(
+            cx.debug_bounds(from).is_some(),
+            "the dialog names the package"
+        );
+        click("consent-install", cx);
+        assert_eq!(installed(&view, cx)[0].manifest.version, "1.2.0");
+        assert_eq!(staged(&config), 0, "the download and the stage are gone");
+        click(("ext-available", 0usize), cx);
+        assert!(!consent(cx), "Installed does nothing");
+
+        let before = notices(cx);
+        click(("ext-available", 1usize), cx);
+        assert!(!consent(cx), "another extension's package");
+        assert_eq!(notices(cx), before + 1);
+        assert_eq!(installed(&view, cx).len(), 1);
+
+        let (url, sha) = package(tmp.path(), "v2", &manifest.replace("1.2.0", "1.3.0"));
+        index(
+            tmp.path(),
+            "index.toml",
+            &entry("sample", "1.3.0", &url, &sha),
+        );
+        click("ext-refresh", cx);
+        click(("ext-available", 0usize), cx);
+        assert!(consent(cx), "no update dialog");
+        cx.update(|window, cx| window.render_frame(cx));
+        assert!(cx.debug_bounds("consent: 1.2.0 → 1.3.0").is_some());
+        click("consent-install", cx);
+        assert_eq!(installed(&view, cx)[0].manifest.version, "1.3.0");
     }
 
     /// Enabled before launch, it starts once the window is open; quitting kills it.

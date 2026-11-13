@@ -71,6 +71,7 @@ pub struct Settings {
     pub theme: ThemeChoice,
     pub updates: UpdateSettings,
     pub conversation: ConversationSettings,
+    pub extensions: ExtensionSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -105,6 +106,15 @@ impl Default for UpdateSettings {
             repo: Some(DEFAULT_REPO.into()),
         }
     }
+}
+
+/// Where the Extensions page lists extensions from, from the user's settings only (see
+/// `Settings::load`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ExtensionSettings {
+    /// Index URLs read after the official one.
+    pub indexes: Vec<String>,
 }
 
 /// How a chat shows, from the user's settings only (see `Settings::load`).
@@ -162,6 +172,7 @@ impl Default for Settings {
             theme: ThemeChoice::default(),
             updates: UpdateSettings::default(),
             conversation: ConversationSettings::default(),
+            extensions: ExtensionSettings::default(),
         }
     }
 }
@@ -241,7 +252,7 @@ impl Settings {
     /// Merges defaults, then `<user_dir>/settings.toml`, then `<project_dir>/.wai/settings.toml`.
     /// An error in the user's file fails the load. The project file may not set `agents` or
     /// `terminal` (R15: opening a cloned repository must not choose what wai runs), nor `updates`,
-    /// `models` or `conversation`; its `default_agent` counts only when the user already chose one, and names it,
+    /// `models`, `conversation` or `extensions`; its `default_agent` counts only when the user already chose one, and names it,
     /// an agent in the user's own `[agents]`, or an extension agent (an id with a `/`). Those
     /// tables, or a project file that does not load, are left out; the returned notices say so.
     pub fn load(
@@ -283,6 +294,13 @@ impl Settings {
             if layer.remove("models").is_some() {
                 notices.push(format!(
                     "Ignored models settings from {}: only user settings can choose default models.",
+                    path.display()
+                ));
+            }
+            // An index lists what the Extensions page offers to install.
+            if layer.remove("extensions").is_some() {
+                notices.push(format!(
+                    "Ignored extensions settings from {}: only user settings can add extension indexes.",
                     path.display()
                 ));
             }
@@ -744,6 +762,33 @@ mod tests {
         let (s, _) = Settings::load(u.path(), None).unwrap();
         assert!(s.updates.check);
         assert_eq!(s.updates.repo.as_deref(), Some("owner/wai"));
+    }
+
+    /// A cloned repository cannot add an index, whose listings the Extensions page would offer.
+    #[test]
+    fn project_cannot_add_indexes() {
+        let (u, p) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        write(
+            u.path(),
+            "settings.toml",
+            "[extensions]\nindexes = [\"https://a/i.toml\"]\n",
+        );
+        write(
+            p.path(),
+            ".wai/settings.toml",
+            "[extensions]\nindexes = [\"https://evil/i.toml\"]\n",
+        );
+        let (s, notices) = Settings::load(u.path(), Some(p.path())).unwrap();
+        assert_eq!(s.extensions.indexes, ["https://a/i.toml"]);
+        let path = p.path().join(".wai").join("settings.toml");
+        assert_eq!(
+            notices,
+            [format!(
+                "Ignored extensions settings from {}: only user settings can add extension indexes.",
+                path.display()
+            )]
+        );
+        assert!(Settings::default().extensions.indexes.is_empty());
     }
 
     #[test]
