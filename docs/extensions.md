@@ -4,7 +4,7 @@ An extension is a folder with a `wai-extension.toml` manifest. It can be manifes
 
 Users install an extension from a folder, from a git URL, or from the Extensions page's **Available** list, which downloads a prebuilt package from an index. Anyone can publish one: see [Publishing](#publishing).
 
-This guide describes API version 1.3 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
+This guide describes API version 1.4 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
 - `wai-navegador` is manifest-only;
 - `wai-waycarbon` and `wai-rotinas` are written in Go.
 
@@ -17,7 +17,7 @@ id = "hello-go"                 # required
 name = "Hello (Go)"             # required
 version = "0.1.0"               # required
 description = "A minimal wai extension"
-api = "1.3"                     # optional: the oldest extension API it works with
+api = "1.4"                     # optional: the oldest extension API it works with
 permissions = ["process", "panels", "bar", "notify"]
 
 [process]                       # optional: the extension's own program
@@ -44,7 +44,7 @@ title = "Pull requests"
 | `name` | string | Shown in the extension list and the consent dialog |
 | `version` | string | Free form. wai shows it; it does not compare versions |
 | `description` | string, optional | Shown last in the consent dialog, cut to fit |
-| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.3"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.3)`. Set it to `"1.3"` when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
+| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.4)`. Set it to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
 | `permissions` | array of strings | See [Permissions](#permissions). An unknown permission is refused |
 | `process.command` | string | See [Commands and paths](#commands-and-paths). Needs `process` |
 | `process.args` | array of strings, optional | Arguments, passed as given (no shell) |
@@ -146,7 +146,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 
 | Method | Kind | Params | Notes |
 |---|---|---|---|
-| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.3", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
+| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.4", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
 | `command/run` | request | `{"id": "<command id>"}` | The user ran one of your commands without `prompt` from the palette. wai ignores the answer |
 | `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item, card, table row, button or menu item was clicked (after its confirmation, if it has one). `action_id` is its `id`. `values` has every form field in the panel by id: inputs as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels` |
 | `item/action` | request | `{"item": "<item id>"}` | The user clicked one of your bar items. wai ignores the answer. The usual reply is a `panel/open` or a `sessions/open`. Needs `bar` |
@@ -155,7 +155,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `event/file_saved` | notification | `{"path": "<absolute path>"}` | The user saved a file in wai |
 
 - Paths are absolute, and on Windows they never carry the `\\?\` prefix.
-- Answer `initialize` before anything else. API 1.1, 1.2 and 1.3 only add fields and methods; ignore the ones you do not know.
+- Answer `initialize` before anything else. API 1.1 to 1.4 only add fields and methods; ignore the ones you do not know.
 
 ### Extension → host
 
@@ -167,7 +167,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `notify` | `notify` | `{"title", "body"?}` | `null` |
 | `panel/render` | `panels` | `{"panel": "<panel id>", "tree": {…}}` | `null` |
 | `panel/open` | `panels` | `{"panel": "<panel id>"}` | `null` once shown |
-| `item/update` | `bar` | `{"item": "<item id>", "text"?, "icon"?, "tooltip"?, "tone"?}` | `null` |
+| `item/update` | `bar` | `{"item": "<item id>", "text"?, "icon"?, "tooltip"?, "tone"?, "card"?}` | `null` |
 
 **`sessions/open`** starts a session with `agent`, or with the user's default agent.
 - **The prompt:** `prompt` is filled in and not sent, unless `send` is `true`.
@@ -194,7 +194,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 - A panel id not in your manifest gets `-32602`.
 - Typical use: a palette command without `prompt` → `command/run` → `panel/open`.
 
-**`item/update`** replaces a bar item's whole state (see [Bar items](#bar-items)).
+**`item/update`** replaces a bar item's whole state (see [Bar items](#bar-items)). `card` (API 1.4) is a display-only tree drawn when the pointer rests on the item.
 - `text` is cut to 32 characters, `tooltip` to 500, each on one line. `icon` is a Lucide name; an unknown name draws no icon. `tone` is `neutral`, `info`, `success`, `warning` or `danger`; anything else is `neutral`.
 - It shares `panel/render`'s limit: at most **100 per second** per extension, coalesced with each item keeping its last state, and the last one always lands.
 - An item id not in your manifest gets `-32602`.
@@ -422,11 +422,12 @@ An item is a small pill in the top bar or the bottom bar, declared in the manife
 - **Content:** none until your first `item/update`. An update with neither `text` nor `icon` hides the item. The user clicking it sends `item/action`.
 - **Lifetime:** an item is drawn only while your process runs, and waits for a new `item/update` after a restart.
 - **Top bar:** after the status pill, at most 4 extension items in total, text drawn at 24 characters. **Bottom bar:** after wai's own items.
+- **Card (API 1.4):** `card` is a node tree, as in a panel, drawn in a card when the pointer rests on the item, instead of the tooltip. Only `column`, `row`, `text`, `badge`, `progress`, `icon`, `divider`, `spacer` and `kv` are drawn (any other node shows as unsupported); at most 200 nodes and 8 levels deep, or the item has no card. The card ends with `— <extension name>`. An update without `card` removes it. Nothing in a card is clickable: the item itself is.
 - **Telling them apart:** each item's tooltip ends with `— <extension name>`. The user can hide any item with a right click on the bar.
 
 ```toml
 permissions = ["process", "bar"]
-api = "1.3"
+api = "1.4"
 
 [[contributes.items]]
 id = "prs"
@@ -436,6 +437,15 @@ title = "Pull requests"
 
 ```json
 {"jsonrpc": "2.0", "method": "item/update", "params": {"item": "prs", "text": "3 PRs", "icon": "git-pull-request", "tooltip": "2 green, 1 failing", "tone": "warning"}}
+```
+
+A card with one block:
+
+```json
+{"jsonrpc": "2.0", "method": "item/update", "params": {"item": "usage", "text": "16%", "card": {"type": "column", "children": [
+  {"type": "row", "children": [{"type": "text", "text": "Current session"}, {"type": "spacer"}, {"type": "text", "text": "16% used"}]},
+  {"type": "progress", "value": 0.16},
+  {"type": "text", "text": "Resets 00:20", "muted": true}]}}}
 ```
 
 ## Contributions

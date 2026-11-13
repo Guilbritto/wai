@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 
 use gpui_kit::assets::IconName as Lucide;
+use gpui_kit::component::hover_card::HoverCard;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, h_flex};
@@ -15,7 +16,7 @@ use wai_settings::claude::McpStatus;
 use crate::aurora;
 use crate::claude_config::NO_CLAUDE;
 use crate::ext_host::BarItem;
-use crate::ext_panel::{lucide, tone_color};
+use crate::ext_panel::{hover_card, lucide, tone_color};
 use crate::settings_view::Section;
 use crate::settings_view::claude::McpCheck;
 use crate::sidebar::{SidebarTab, TABS};
@@ -190,7 +191,9 @@ pub(crate) fn bottom_item(
                 // Focusable, and Enter or Space clicks it.
                 .tab_index(0)
         })
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .when(!tooltip.is_empty(), |el| {
+            el.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        })
         .children(icon.map(|name| Icon::new(name).size(px(12.)).flex_none()))
         .child(div().min_w_0().truncate().child(text))
 }
@@ -221,46 +224,74 @@ pub(crate) fn ext_item(
     });
     let icon = state.icon.as_deref().and_then(lucide);
     let label = text.clone().unwrap_or_else(|| item.title.clone());
-    let tooltip = item_tooltip(item);
+    // A card replaces the tooltip.
+    let card = state.card.clone();
+    let tooltip = if card.is_some() {
+        String::new()
+    } else {
+        item_tooltip(item)
+    };
     let (ext, item_id) = (item.ext.clone(), item.id.clone());
     let click = cx.listener(move |this, _: &ClickEvent, _, cx| {
         this.ext_host.read(cx).item_action(&ext, &item_id);
     });
-    if !top {
+    let id: ElementId = id.into();
+    let card_id = (id.clone(), "card");
+    let ext_name = item.ext_name.clone();
+    let drawn = if !top {
         let status = Status {
             text: text.unwrap_or_default(),
             tone: state.tone,
             tooltip,
         };
         // Shrinks, text truncated, before wai's own items do.
-        return bottom_item(id, &status, icon, true, cx)
+        bottom_item(id, &status, icon, true, cx)
             .flex_shrink(1.)
             .min_w_0()
             .overflow_hidden()
             .aria_label(label)
             .on_click(click)
             .test_support()
-            .into_any_element();
-    }
-    let theme = cx.theme();
-    let (ring, hover, color) = (theme.ring, theme.list_hover, tone_color(state.tone, cx));
-    aurora::pill(cx)
-        .id(id)
-        .min_w_0()
-        .overflow_hidden()
-        .text_color(color)
-        .border_color(gpui_kit::transparent_black())
-        .cursor_pointer()
-        .role(Role::Button)
-        .aria_label(label)
-        .focus_visible(move |el| el.border_color(ring))
-        .hover(move |el| el.bg(hover))
-        .tab_index(0)
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-        .on_click(click)
-        .children(icon.map(|name| Icon::new(name).size(px(12.)).flex_none()))
-        .children(text.map(|t| div().min_w_0().truncate().child(t)))
-        .test_support()
+            .into_any_element()
+    } else {
+        let theme = cx.theme();
+        let (ring, hover, color) = (theme.ring, theme.list_hover, tone_color(state.tone, cx));
+        aurora::pill(cx)
+            .id(id)
+            .min_w_0()
+            .overflow_hidden()
+            .text_color(color)
+            .border_color(gpui_kit::transparent_black())
+            .cursor_pointer()
+            .role(Role::Button)
+            .aria_label(label)
+            .focus_visible(move |el| el.border_color(ring))
+            .hover(move |el| el.bg(hover))
+            .tab_index(0)
+            .when(!tooltip.is_empty(), |el| {
+                el.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            })
+            .on_click(click)
+            .children(icon.map(|name| Icon::new(name).size(px(12.)).flex_none()))
+            .children(text.map(|t| div().min_w_0().truncate().child(t)))
+            .test_support()
+            .into_any_element()
+    };
+    let Some(card) = card else { return drawn };
+    // Opens above a bottom-bar item and below a top-bar one.
+    HoverCard::new(card_id)
+        .anchor(if top {
+            Anchor::TopCenter
+        } else {
+            Anchor::BottomCenter
+        })
+        // The wrapper takes the item's place in the bar: it shrinks, and fills the bar's height.
+        .trigger_style(match top {
+            true => StyleRefinement::default().min_w_0().flex_shrink(1.),
+            false => (StyleRefinement::default().min_w_0().flex_shrink(1.)).h_full(),
+        })
+        .trigger(drawn)
+        .content(move |_, _, cx| hover_card(&card, &ext_name, cx))
         .into_any_element()
 }
 

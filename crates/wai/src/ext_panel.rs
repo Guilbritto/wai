@@ -355,18 +355,13 @@ impl ExtPanel {
                 let fill = *fill && at.column;
                 return (self.log(k, text, *follow, fill, cx), fill);
             }
-            Node::Text {
-                text,
-                muted: dim,
-                mono,
-            } => div()
-                .text_sm()
-                .when(*dim, |el| el.text_color(muted))
-                .when(*mono, |el| {
-                    el.font_family(cx.theme().mono_font_family.clone())
-                })
-                .child(SharedString::from(text))
-                .into_any_element(),
+            Node::Text { .. }
+            | Node::Badge { .. }
+            | Node::Progress(_)
+            | Node::Icon { .. }
+            | Node::Divider
+            | Node::Spacer
+            | Node::Kv(_) => leaf(node, k, cx),
             Node::Markdown(text) => TextView::markdown(("panel-md", k), SharedString::from(text))
                 .text_sm()
                 .into_any_element(),
@@ -462,12 +457,6 @@ impl ExtPanel {
                     }));
                 own(checkbox, at)
             }
-            Node::Badge { text, tone } => h_flex()
-                .child(tag(*tone).small().child(SharedString::from(text)))
-                .into_any_element(),
-            Node::Progress(value) => Progress::new(("panel-progress", k))
-                .value(value * 100.)
-                .into_any_element(),
             Node::Card {
                 id,
                 title,
@@ -630,13 +619,6 @@ impl ExtPanel {
                     .test_support()
                     .into_any_element()
             }
-            Node::Icon { name, tone } => match lucide(name) {
-                Some(icon) => Icon::new(icon)
-                    .small()
-                    .text_color(tone_color(*tone, cx))
-                    .into_any_element(),
-                None => unsupported(muted),
-            },
             Node::Spinner(label) => h_flex()
                 .gap_2()
                 .child(Spinner::new().small())
@@ -645,35 +627,6 @@ impl ExtPanel {
                         .text_sm()
                         .text_color(muted)
                         .child(SharedString::from(l))
-                }))
-                .into_any_element(),
-            Node::Divider => div()
-                .w_full()
-                .h(px(1.))
-                .bg(cx.theme().border)
-                .into_any_element(),
-            Node::Spacer => div().flex_1().into_any_element(),
-            Node::Kv(items) => v_flex()
-                .gap_1()
-                .children(items.iter().map(|(key, value)| {
-                    h_flex()
-                        .gap_2()
-                        .text_sm()
-                        .child(
-                            div()
-                                .w(px(KV_KEY))
-                                .flex_none()
-                                .truncate()
-                                .text_color(muted)
-                                .child(SharedString::from(key)),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .child(SharedString::from(value)),
-                        )
                 }))
                 .into_any_element(),
             Node::Menu { label, icon, items } => {
@@ -1022,6 +975,101 @@ pub(crate) fn lucide(name: &str) -> Option<Lucide> {
             .collect()
     });
     icons.get(name).copied()
+}
+
+/// The display leaves, drawn the same in a panel and in an item's hover card; `k` numbers the
+/// node for its element id. Anything else is unsupported.
+fn leaf(node: &Node, k: usize, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let muted = theme.muted_foreground;
+    match node {
+        Node::Text {
+            text,
+            muted: dim,
+            mono,
+        } => div()
+            .text_sm()
+            .when(*dim, |el| el.text_color(muted))
+            .when(*mono, |el| {
+                el.font_family(cx.theme().mono_font_family.clone())
+            })
+            .child(SharedString::from(text))
+            .into_any_element(),
+        Node::Badge { text, tone } => h_flex()
+            .child(tag(*tone).small().child(SharedString::from(text)))
+            .into_any_element(),
+        Node::Progress(value) => Progress::new(("panel-progress", k))
+            .value(value * 100.)
+            .into_any_element(),
+        Node::Icon { name, tone } => match lucide(name) {
+            Some(icon) => Icon::new(icon)
+                .small()
+                .text_color(tone_color(*tone, cx))
+                .into_any_element(),
+            None => unsupported(muted),
+        },
+        Node::Divider => div()
+            .w_full()
+            .h(px(1.))
+            .bg(cx.theme().border)
+            .into_any_element(),
+        Node::Spacer => div().flex_1().into_any_element(),
+        Node::Kv(items) => v_flex()
+            .gap_1()
+            .children(items.iter().map(|(key, value)| {
+                h_flex()
+                    .gap_2()
+                    .text_sm()
+                    .child(
+                        div()
+                            .w(px(KV_KEY))
+                            .flex_none()
+                            .truncate()
+                            .text_color(muted)
+                            .child(SharedString::from(key)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(SharedString::from(value)),
+                    )
+            }))
+            .into_any_element(),
+        _ => unsupported(muted),
+    }
+}
+
+/// An item's hover card: the tree, then the extension's name. Display nodes only (the parser
+/// makes anything else `Unsupported`), so nothing in it is interactive.
+pub(crate) fn hover_card(node: &Node, ext_name: &SharedString, cx: &App) -> AnyElement {
+    fn draw(node: &Node, n: &mut usize, cx: &App) -> AnyElement {
+        *n += 1;
+        match node {
+            Node::Column(children) => v_flex()
+                .gap_1()
+                .children(children.iter().map(|c| draw(c, n, cx)))
+                .into_any_element(),
+            Node::Row(children) => h_flex()
+                .gap_1()
+                .children(children.iter().map(|c| draw(c, n, cx)))
+                .into_any_element(),
+            leaf_node => leaf(leaf_node, *n, cx),
+        }
+    }
+    v_flex()
+        .debug_selector(|| "item-card".into())
+        .w(px(320.))
+        .gap_2()
+        .child(draw(node, &mut 0, cx))
+        .child(
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("\u{2014} {ext_name}")),
+        )
+        .into_any_element()
 }
 
 fn unsupported(muted: Hsla) -> AnyElement {

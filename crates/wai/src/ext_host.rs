@@ -1323,6 +1323,58 @@ pub(crate) mod tests {
         assert!(label(("bottombar-item", 0usize), cx).is_none());
     }
 
+    /// Hovering an item with a card shows the card, ending with the extension's name; a later
+    /// update without a card removes it.
+    #[gpui_kit::test]
+    fn extension_item_hover_card(cx: &mut TestAppContext) {
+        use crate::workspace::tests::click;
+        use gpui_kit::test::TestWindowExt as _;
+        use gpui_kit::{Modifiers, VisualTestContext, point, px};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let flags = r#"--call 'item/update {"item": "prs", "text": "3 PRs", "card": {"type": "column", "children": [{"type": "text", "text": "Current session"}, {"type": "progress", "value": 0.16}]}}' --on-action 'item/update {"item": "prs", "text": "3 PRs"}'"#;
+        install(tmp.path(), &config, ITEMS, flags, "");
+        let (_workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        wait_until(cx, "the card item", |cx| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.try_find(("bottombar-item", 0usize)).is_some()
+            })
+        });
+        let hover = |cx: &mut VisualTestContext| {
+            let at = cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.find(("bottombar-item", 0usize)).bounds().center()
+            });
+            cx.simulate_mouse_move(at, None, Modifiers::none());
+            cx.executor().advance_clock(Duration::from_millis(700));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                window.draw(cx).clear(cx);
+            });
+            at
+        };
+        let at = hover(cx);
+        let card = cx.debug_bounds("item-card").expect("the card is drawn");
+        assert!(
+            card.bottom() <= at.y,
+            "a bottom-bar card opens above its item"
+        );
+
+        // Moving away closes it; a click makes the extension drop the card.
+        cx.simulate_mouse_move(point(px(1.), px(1.)), None, Modifiers::none());
+        cx.executor().advance_clock(Duration::from_millis(400));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("item-card").is_none());
+        click(("bottombar-item", 0usize), cx);
+        wait_until(cx, "the update without a card", |cx| {
+            hover(cx);
+            cx.debug_bounds("item-card").is_none()
+        });
+    }
+
     /// Extension `id` with three bottom items `a`, `b` and `c`.
     fn bottom_items(id: &str, name: &str) -> String {
         top_items(id, name).replace("bar = \"top\"", "bar = \"bottom\"")
