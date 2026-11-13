@@ -428,6 +428,8 @@ impl Ext {
             .stderr(Stdio::piped());
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000); // CREATE_NO_WINDOW
         let spawned = {
             let _spawn = SPAWN.lock().unwrap_or_else(PoisonError::into_inner);
             command.spawn()

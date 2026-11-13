@@ -38,6 +38,9 @@ pub(crate) fn command(dir: &Path) -> Command {
     c.current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null());
+    // wai has no console on Windows: without this every git call flashes one.
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000); // CREATE_NO_WINDOW
     #[cfg(test)]
     c.env(
         "GIT_CONFIG_GLOBAL",

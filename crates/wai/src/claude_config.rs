@@ -25,14 +25,15 @@ pub(crate) async fn run_mcp_list(
     timeout: Duration,
 ) -> Result<String, String> {
     let run = async {
-        let out = smol::process::Command::new(program)
+        let mut command = smol::process::Command::new(program);
+        command
             .args(["mcp", "list"])
             .current_dir(cwd)
             .stdin(smol::process::Stdio::null())
-            .kill_on_drop(true)
-            .output()
-            .await
-            .map_err(|e| e.to_string())?;
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        smol::process::windows::CommandExt::creation_flags(&mut command, 0x0800_0000); // CREATE_NO_WINDOW
+        let out = command.output().await.map_err(|e| e.to_string())?;
         if out.status.success() {
             return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
         }

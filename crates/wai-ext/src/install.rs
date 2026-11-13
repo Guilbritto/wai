@@ -249,6 +249,8 @@ pub fn git_clone_command(url: &str, rev: Option<&str>, dest: &Path, cwd: &Path) 
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
         .stdin(Stdio::null());
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000); // CREATE_NO_WINDOW
     command
 }
 

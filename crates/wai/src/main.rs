@@ -1,3 +1,6 @@
+// Release builds are GUI apps on Windows: no console window that kills wai when closed.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod agents;
 mod agents_view;
 mod app;
