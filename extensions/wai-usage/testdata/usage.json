@@ -1,0 +1,87 @@
+{
+  "five_hour": {
+    "utilization": 32.0,
+    "resets_at": "2026-11-14T03:19:59.652662+00:00",
+    "limit_dollars": null,
+    "used_dollars": null,
+    "remaining_dollars": null,
+    "locked_reason": null
+  },
+  "seven_day": {
+    "utilization": 61.0,
+    "resets_at": "2026-11-14T01:59:59.652680+00:00",
+    "limit_dollars": null,
+    "used_dollars": null,
+    "remaining_dollars": null,
+    "locked_reason": null
+  },
+  "seven_day_oauth_apps": null,
+  "seven_day_opus": null,
+  "seven_day_sonnet": null,
+  "seven_day_cowork": null,
+  "seven_day_omelette": null,
+  "tangelo": null,
+  "iguana_necktie": null,
+  "omelette_promotional": null,
+  "nimbus_quill": null,
+  "cinder_cove": null,
+  "copper_kite": null,
+  "brass_thimble": null,
+  "harbor_lantern": null,
+  "wattle_ember": null,
+  "promo_credits": null,
+  "amber_ladder": null,
+  "granite_teacup": null,
+  "amber_cistern": null,
+  "amber_cistern_offer": null,
+  "juniper_tide": null,
+  "cedar_ember": null,
+  "starry_waterfall": null,
+  "amber_gauge": null,
+  "pace": null,
+  "indicator": null,
+  "limits": [
+    {
+      "kind": "session",
+      "group": "session",
+      "percent": 32,
+      "severity": "normal",
+      "resets_at": "2026-11-14T03:19:59.652662+00:00",
+      "scope": null,
+      "is_active": false
+    },
+    {
+      "kind": "weekly_all",
+      "group": "weekly",
+      "percent": 61,
+      "severity": "normal",
+      "resets_at": "2026-11-14T01:59:59.652680+00:00",
+      "scope": null,
+      "is_active": true
+    },
+    {
+      "kind": "weekly_scoped",
+      "group": "weekly",
+      "percent": 0,
+      "severity": "normal",
+      "resets_at": "2026-11-14T02:00:00+00:00",
+      "scope": {
+        "model": {
+          "id": null,
+          "display_name": "Fable"
+        },
+        "surface": null
+      },
+      "is_active": false
+    }
+  ],
+  "member_dashboard_available": false,
+  "seven_day_breakdown": null,
+  "weekly_scoped_shares": [
+    {
+      "limit_index": 2,
+      "used_percent_of_weekly": 0,
+      "allowance_percent_of_weekly": 50
+    }
+  ]
+}
