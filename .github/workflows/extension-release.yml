@@ -1,0 +1,137 @@
+name: extension-release
+# Publishes one wai extension as prebuilt packages (docs/extensions.md, "Publishing"). Call it
+# from a workflow that runs on a tag ending in `v<version>`, the manifest's version:
+#
+#   on:
+#     push:
+#       tags: ['v*']
+#   jobs:
+#     release:
+#       permissions:
+#         contents: write
+#       uses: Guilbritto/wai/.github/workflows/extension-release.yml@main
+#
+# A manifest whose `process.command` is a path (`bin/x`) is built with Go for every platform
+# (`go.mod` in the extension's folder); any other (no process, or a program on PATH such as
+# `npx`) is one `any` package. The release gets the packages, SHA256SUMS.txt and
+# index-entry.toml, the entry to paste into an index.
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: The extension's folder, where wai-extension.toml is
+        type: string
+        default: .
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the manifest
+        id: manifest
+        working-directory: ${{ inputs.path }}
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'EOF'
+          import tomllib
+          m = tomllib.load(open("wai-extension.toml", "rb"))
+          command = (m.get("process") or {}).get("command", "")
+          print(f"id={m['id']}")
+          print(f"version={m['version']}")
+          print(f"command={command if '/' in command else ''}")
+          EOF
+      - name: Check the tag
+        env:
+          VERSION: ${{ steps.manifest.outputs.version }}
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *"v$VERSION") ;;
+            *) echo "::error::the tag $GITHUB_REF_NAME does not end in v$VERSION, the manifest's version"; exit 1 ;;
+          esac
+      - uses: actions/setup-go@v5
+        if: steps.manifest.outputs.command != ''
+        with:
+          go-version-file: ${{ inputs.path }}/go.mod
+          cache: false
+      - name: Build and pack
+        working-directory: ${{ inputs.path }}
+        env:
+          ID: ${{ steps.manifest.outputs.id }}
+          VERSION: ${{ steps.manifest.outputs.version }}
+          COMMAND: ${{ steps.manifest.outputs.command }}
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/dist"
+          mkdir -p "$dist"
+          pack() { # platform [program]
+            stage="$RUNNER_TEMP/stage-$1"
+            mkdir -p "$stage"
+            cp wai-extension.toml "$stage/"
+            for f in README* LICENSE*; do
+              if [ -f "$f" ]; then cp "$f" "$stage/"; fi
+            done
+            if [ -n "${2:-}" ]; then
+              mkdir -p "$stage/$(dirname "$2")"
+              mv "$RUNNER_TEMP/program" "$stage/$2"
+            fi
+            tar -czf "$dist/$ID-$VERSION-$1.tar.gz" -C "$stage" .
+          }
+          if [ -z "$COMMAND" ]; then
+            pack any
+          else
+            for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
+              os="${target%/*}"
+              arch="${target#*/}"
+              platform="$os-${arch/amd64/x64}"
+              program="$COMMAND"
+              [ "$os" = windows ] && program="$COMMAND.exe"
+              GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$RUNNER_TEMP/program" .
+              pack "$platform" "$program"
+            done
+          fi
+      - name: Write SHA256SUMS.txt and index-entry.toml
+        env:
+          ID: ${{ steps.manifest.outputs.id }}
+          VERSION: ${{ steps.manifest.outputs.version }}
+        working-directory: ${{ inputs.path }}
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/dist"
+          (cd "$dist" && sha256sum -- *.tar.gz > SHA256SUMS.txt)
+          python3 - "$dist" > "$dist/index-entry.toml" <<'EOF'
+          import json, os, sys, tomllib
+          dist = sys.argv[1]
+          m = tomllib.load(open("wai-extension.toml", "rb"))
+          base = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{os.environ['GITHUB_REF_NAME']}"
+          q = json.dumps  # a JSON string is a valid TOML basic string
+          print("[[extensions]]")
+          print(f"id = {q(m['id'])}")
+          print(f"name = {q(m['name'])}")
+          print(f"version = {q(m['version'])}")
+          if m.get("description"):
+              print(f"description = {q(m['description'])}")
+          print(f"repository = {q('https://github.com/' + os.environ['GITHUB_REPOSITORY'])}")
+          prefix = f"{m['id']}-{m['version']}-"
+          for line in open(os.path.join(dist, "SHA256SUMS.txt")):
+              sha, name = line.split()
+              platform = name[len(prefix):-len(".tar.gz")]
+              print(f"\n[extensions.packages.{platform}]")
+              print(f"url = {q(base + '/' + name)}")
+              print(f"sha256 = {q(sha)}")
+          EOF
+          cat "$dist/index-entry.toml"
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ID: ${{ steps.manifest.outputs.id }}
+          VERSION: ${{ steps.manifest.outputs.version }}
+        # --latest=false: in a repository that also releases an app (wai itself), its updater
+        # reads /releases/latest.
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP"/dist/* \
+            --repo "$GITHUB_REPOSITORY" --title "$ID $VERSION" --latest=false \
+            --notes "Add or update this extension in an index with index-entry.toml (see docs/extensions.md in Guilbritto/wai)."

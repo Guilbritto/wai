@@ -1,0 +1,14 @@
+# The official wai extension index: the Extensions page lists what is here (docs/extensions.md,
+# "Publishing"). Add an extension with a pull request that changes only this file: paste the
+# index-entry.toml from its release. CI checks every package before the owner reviews it.
+#
+# [[extensions]]
+# id = "my-extension"
+# name = "My extension"
+# version = "0.1.0"
+# description = "One line"
+# repository = "https://github.com/me/my-extension"
+#
+# [extensions.packages.darwin-arm64]
+# url = "https://github.com/me/my-extension/releases/download/v0.1.0/my-extension-0.1.0-darwin-arm64.tar.gz"
+# sha256 = "<64 hex digits>"

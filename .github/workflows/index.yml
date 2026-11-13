@@ -1,0 +1,35 @@
+name: index
+# Checks extensions/index.toml the way wai reads it: every entry parses, and every package
+# downloads, matches its SHA-256, unpacks under wai's rules and holds the entry's extension.
+# The checker is built from the base branch, never from the pull request; only the PR's index is
+# read.
+on:
+  pull_request:
+    paths: [extensions/index.toml]
+  push:
+    branches: [development]
+    paths: [extensions/index.toml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+      - uses: actions/checkout@v4
+        with:
+          path: proposed
+          sparse-checkout: extensions/index.toml
+          sparse-checkout-cone-mode: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run -q -p wai-ext --bin wai-index-check -- proposed/extensions/index.toml

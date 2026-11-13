@@ -1,0 +1,26 @@
+name: extensions
+# Publishes a first-party extension from extensions/<id> on a tag `<id>-v<version>`
+# (`wai-rotinas-v0.1.0`). Never `v*`: semantic-release owns those for wai itself.
+on:
+  push:
+    tags: ['wai-*-v*']
+
+permissions:
+  contents: read
+
+jobs:
+  which:
+    runs-on: ubuntu-latest
+    outputs:
+      path: ${{ steps.path.outputs.path }}
+    steps:
+      - id: path
+        run: echo "path=extensions/${GITHUB_REF_NAME%-v*}" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: which
+    permissions:
+      contents: write
+    uses: ./.github/workflows/extension-release.yml
+    with:
+      path: ${{ needs.which.outputs.path }}
