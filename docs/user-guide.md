@@ -369,7 +369,7 @@ Settings is a modal over the window, not a pane.
 - **Conversation:** **Processing**, how a chat shows the agent's steps: Step by step, Grouped or Hidden (see [Chatting](#chatting)). It applies at once to every open session. Permission cards, questions and file edits always show.
 - **Terminal:** **Shell**, a path; empty is the system default. It applies to terminals opened afterwards, and changing it asks `Run a new command?`.
 - **Updates:** **Automatic updates** (switch), **Version** (the installed version, its status and one button: **Check now**, **Restart now** or **Open release page**) and **Repository** (see [Updates](#updates)).
-- **Extensions:** extensions add panels, commands, agents and MCP servers to wai. They run with your permissions. Install from a folder or a git URL. The **Installed** group lists each one with its version badge, permissions, any problem, the Claude plugins it suggests (**Install in terminal**), an **Enabled** switch and **Uninstall** (see [Extensions](#extensions)).
+- **Extensions:** extensions add panels, commands, agents and MCP servers to wai. They run with your permissions. Install from a folder or a git URL. The **Installed** group lists each one with its version badge, permissions, any problem, the Claude plugins it suggests (**Install in terminal**), an **Enabled** switch and **Uninstall**. The **Available** group lists what the extension indexes offer, with **Install** or **Update to <version>** and **Refresh** (see [Extensions](#extensions)).
 
 The search filters the current page's rows by label (agents by name). A broken `settings.toml` shows its error banner on every wai page and makes them read-only.
 
@@ -492,7 +492,7 @@ A repository you open can carry a `.wai/` folder. Because opening a cloned repos
 
 | File | Allowed | Not allowed |
 |---|---|---|
-| `.wai/settings.toml` | `theme`; `default_agent`, when you have already chosen a default and it names that default, an agent with an `[agents.<id>]` entry in your file, or an agent of an installed extension | `agents` and `terminal` (commands, shells, environment); `models`; `updates`; `conversation`. These are ignored with a notice |
+| `.wai/settings.toml` | `theme`; `default_agent`, when you have already chosen a default and it names that default, an agent with an `[agents.<id>]` entry in your file, or an agent of an installed extension | `agents` and `terminal` (commands, shells, environment); `models`; `updates`; `conversation`; `extensions` (indexes). These are ignored with a notice |
 | `.wai/templates.toml` | Templates, as above | — |
 | `.wai/extensions.toml` | Suggesting extensions | Installing anything |
 
@@ -513,15 +513,32 @@ wai shows `This project suggests extension <id>` with **Review**. Review opens t
 
 ## Extensions
 
-The **Extensions** button opens Settings on its **Extensions** page, the list of installed extensions. There you can:
+The **Extensions** button opens Settings on its **Extensions** page. **Installed** lists your extensions; there you can:
 - turn each one on or off (**Enabled**);
 - **Uninstall** it;
 - install from a folder (**Install from folder…**) or a git URL (**Install from git URL…**, `https://` or `git@`).
 
+**Available** lists the extensions that indexes offer, each with its name, version, description and, for one from your own index, `from <host>`:
+- **Install** downloads its prebuilt package for your platform, checks it against the SHA-256 the index pins and opens the consent dialog. Nothing is compiled on your machine.
+- **Update to <version>** shows when the index lists another version of an extension you have; **Installed** when you have that version.
+- `Not available for this platform` means the index has no package for your system.
+- The indexes are read the first time you open the page, never at launch, and again on **Refresh**. An index that does not load shows `Could not load <url>: <error>`; the others still list.
+
+**Indexes.** wai always reads the official index, `extensions/index.toml` in wai's repository, where anyone can list an extension through a reviewed pull request. To add your own (a team's, say), list them in your `settings.toml`:
+
+```toml
+[extensions]
+indexes = ["https://example.com/wai-index.toml"]
+```
+
+- Only `https://` URLs load, and only your own settings file can add indexes: a project's `.wai/settings.toml` cannot.
+- The official index is read first, and the first index to list an id keeps it, so your indexes add extensions but never replace an official one.
+- A change applies on the next **Refresh**.
+
 **Consent.** Every install shows the extension's name, version and source, and **every permission it asks for**, with the warning `wai cannot restrict files or network access in this version; only install extensions you trust.`
 
 - Nothing is installed until you click **Install**, and consent is all or nothing.
-- To update an extension, install the same id again (folder or git URL). You consent again; it stays enabled or disabled as it was and keeps its data folder.
+- To update an extension, install the same id again (folder, git URL or **Update to <version>**). You consent again; it stays enabled or disabled as it was and keeps its data folder.
 - An extension's data folder, `<config>/extension-data/<id>/`, is kept when you uninstall it or update it.
 - **Claude Code plugins** an extension suggests are listed under it with **Install in terminal**. That types `claude plugin install <name>` into the terminal without pressing Enter: you confirm with Enter.
 
@@ -536,4 +553,4 @@ First-party extensions live in `extensions/`. Each has its own README:
 - `wai-rotinas`: scheduled scripts;
 - `wai-remoto`: phone access, design only.
 
-To write your own, see [extensions.md](extensions.md).
+To write and publish your own, see [extensions.md](extensions.md#publishing).

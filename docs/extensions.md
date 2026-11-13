@@ -2,6 +2,8 @@
 
 An extension is a folder with a `wai-extension.toml` manifest. It can be manifest-only (templates, prompt commands, agents, MCP servers) or run a program of its own. That program can be in any language: it speaks line-delimited JSON-RPC 2.0 over stdio and can draw panels in wai's sidebar or main area and show items in its top and bottom bars.
 
+Users install an extension from a folder, from a git URL, or from the Extensions page's **Available** list, which downloads a prebuilt package from an index. Anyone can publish one: see [Publishing](#publishing).
+
 This guide describes API version 1.3 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
 - `wai-navegador` is manifest-only;
 - `wai-waycarbon` and `wai-rotinas` are written in Go.
@@ -89,19 +91,20 @@ Calls in both directions are checked against what the user **granted** at instal
 
 ## Installing and consent
 
-- **Sources.** Users install from a folder or from a git URL (`https://…` or `git@host:path`). wai copies the folder, or clones the repository with depth 1, into a staging area, then reads the manifest.
+- **Sources.** Users install from a folder, from a git URL (`https://…` or `git@host:path`), or from an index's listing. wai copies the folder, clones the repository with depth 1, or downloads the listing's package for the user's platform and checks it against the SHA-256 the index pins, then unpacks it into a staging area and reads the manifest. A package whose manifest id is not its listing's id is refused.
 - **The consent dialog.** It lists every permission in plain words, then the warning `wai cannot restrict files or network access in this version; only install extensions you trust.`, the source, and the description.
   - Nothing is installed or run before **Install**.
   - Consent is all or nothing: the extension gets exactly what it asks for.
 - **What a stage refuses:**
   - symbolic links anywhere in the folder;
   - anything that is not a regular file or a folder;
-  - more than 100 MB or 10,000 entries.
+  - more than 100 MB or 10,000 entries;
+  - in a package, also absolute paths, `..` and an entry listed twice.
 
   A folder is copied whole, so keep build output (`target/`, `node_modules/`) out of the folder you install.
 - **Where things go.** The extension goes to `<config>/extensions/<id>/`, its data folder is `<config>/extension-data/<id>/` and the consent goes to `<config>/extensions.json`. It starts enabled.
 - **It is a copy.** Rebuilding in your source folder does not change the installed extension.
-- **Updating.** Install the same id again (folder or git URL). wai asks for consent again, stops the extension, replaces its folder and starts it again. It stays enabled or disabled as it was, and its data folder is untouched. A project suggestion of an installed id also goes through this.
+- **Updating.** Install the same id again (folder, git URL, or **Update to <version>** in the Available list). wai asks for consent again, stops the extension, replaces its folder and starts it again. It stays enabled or disabled as it was, and its data folder is untouched. A project suggestion of an installed id also goes through this.
 - **Project suggestions.** A project can suggest an extension in `.wai/extensions.toml`, but never install one (see the [user guide](user-guide.md#what-a-projects-wai-may-set)).
 
 ## The process
@@ -463,6 +466,7 @@ Agents and MCP servers come only from enabled extensions that were granted `proc
   - only https and ssh are allowed, and ssh runs in batch mode (no prompts);
   - LFS filters do not run, and the system gitconfig is not read;
   - symlinks are refused.
+- **Pinned packages:** a package from an index downloads over https only (redirects too), at most 100 MB, and must match the SHA-256 the index lists. A user's own index cannot replace an id the official index lists, and a project cannot add an index.
 - **Bounded input:** message size, render rate, notification and session-open rates, panel tree size and text length are all capped, and panel trees are parsed off the UI thread. A broken or hostile panel shows as unsupported or `Panel too large`; it cannot crash wai.
 - **Clean stops:** an extension's whole process tree dies with it.
 - **Claude plugins** are never installed without the user pressing Enter.
@@ -475,7 +479,7 @@ Agents and MCP servers come only from enabled extensions that were granted `proc
 - **The project's Claude settings:** claude-agent-acp itself already loads the project's own Claude settings (`.claude/`), as Claude Code does in a terminal. wai neither adds to nor limits what they can do.
 - **Windows:** a child that the extension starts in its first instant, before it joins the job object, can outlive it.
 
-Real isolation (a sandbox) is planned for after a public catalogue exists.
+Real isolation (a sandbox) is planned. Until then, every entry in the official index is reviewed by hand before it is merged.
 
 ## A minimal Go extension
 
@@ -652,4 +656,105 @@ printf '%s\n' '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocol
 
 Then install `ext/` from **Extensions → Install from folder…**.
 
-On Windows, a binary built there is `hello-rs.exe`, and the manifest's `command` must name it that way.
+On Windows, a binary built there is `hello-rs.exe`. Keep `command = "bin/hello-rs"`: on Windows wai runs `bin/hello-rs.exe` for it, so one manifest serves every platform.
+
+## Publishing
+
+Anyone can publish an extension, as with VS Code or Zed. wai lists extensions from **indexes**: TOML files on the web that point at prebuilt packages, each pinned by its SHA-256. The Extensions page shows them under **Available**; installing one downloads the package for the user's platform and goes through the same consent as any install. Nothing is compiled on the user's machine.
+- The **official index** is [`extensions/index.toml`](../extensions/index.toml) in this repository, and every wai reads it.
+- Users can add their own indexes in their settings (see the [user guide](user-guide.md#extensions)).
+- Your packages stay in your own repository's GitHub Releases (or any https host). An index only points at them.
+
+In short: put your extension in its own repository, release it with the shared workflow, then open a pull request that adds the release's `index-entry.toml` to the official index.
+
+### Packages
+
+A package is a `.tar.gz` with `wai-extension.toml` at its root (a leading `./` is fine) and everything the extension needs at run time: its program, a README, a LICENSE.
+- Regular files and folders only: no links, absolute paths, `..` or entry listed twice.
+- At most 100 MB downloaded, and 100 MB and 10,000 entries unpacked.
+- A file with any execute bit is installed as `0755`, any other as `0644`.
+- **One package per platform:** `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `windows-x64`, `windows-arm64`. A package that runs everywhere (manifest-only, or a program found on `PATH` such as `npx`) is `any`. wai takes its own platform's package, else `any`, else shows `Not available for this platform`.
+- **Windows:** for `command = "bin/x"`, wai runs `bin/x.exe` on Windows. Keep one manifest for every platform and ship `bin/x.exe` in the Windows packages.
+
+### Releasing with the shared workflow
+
+For an extension written in Go, or a manifest-only one, add `.github/workflows/release.yml` to its repository:
+
+```yaml
+name: release
+on:
+  push:
+    tags: ['v*']
+jobs:
+  release:
+    permissions:
+      contents: write
+    uses: Guilbritto/wai/.github/workflows/extension-release.yml@main
+    # with:
+    #   path: ext   # when wai-extension.toml is not at the repository's root
+```
+
+To release, set `version` in the manifest, commit, and push a matching tag:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The workflow:
+- fails unless the tag ends in `v<version>`, the manifest's version;
+- when `process.command` is a path (`bin/x`), builds the Go program in the extension's folder (its `go.mod` there) for the six platforms with `CGO_ENABLED=0`, one package each; otherwise it makes one `any` package;
+- packs the manifest, `README*`, `LICENSE*` and the program. Anything else the extension reads at run time must be embedded in the program (Go's `embed`), or you build the packages yourself (below);
+- publishes a GitHub release with the packages, `SHA256SUMS.txt` and `index-entry.toml`, the entry to paste into an index.
+
+**Another language, or extra files.** Build each platform's program, pack it by the rules above, and write the entry by hand:
+
+```sh
+mkdir -p stage/bin
+cp wai-extension.toml README.md LICENSE stage/
+cp target/aarch64-apple-darwin/release/my-extension stage/bin/
+tar -czf my-extension-0.2.0-darwin-arm64.tar.gz -C stage .
+shasum -a 256 my-extension-0.2.0-darwin-arm64.tar.gz
+```
+
+### The index format
+
+```toml
+[[extensions]]
+id = "my-extension"                                  # the manifest's id
+name = "My extension"
+version = "0.2.0"                                    # the manifest's version
+description = "One line"                             # optional
+repository = "https://github.com/me/my-extension"    # optional
+
+[extensions.packages.darwin-arm64]
+url = "https://github.com/me/my-extension/releases/download/v0.2.0/my-extension-0.2.0-darwin-arm64.tar.gz"
+sha256 = "<64 hex digits>"
+
+[extensions.packages.windows-x64]
+url = "…"
+sha256 = "…"
+```
+
+- Every URL must be `https://`, and so must every redirect.
+- An entry that does not validate is skipped, and the rest still list. Unknown fields and platforms are ignored, so a newer index keeps working in an older wai.
+- The first index to list an id keeps it, and the official index comes first.
+
+### Listing it in the official index
+
+1. Open a pull request to this repository that changes only `extensions/index.toml`. To add your extension, append the release's `index-entry.toml`. To update it, replace your entry with the new release's.
+2. CI (the `index` check) runs `wai-index-check` on the proposed file. Every entry must parse and ids must be unique. Every package must download, match its SHA-256, unpack under wai's rules, and hold a manifest with the entry's id and version. A platform package must also hold its program.
+3. The owner reviews the extension and merges it. wai reads the index from `main`, so the listing shows in wai once the merge reaches `main`.
+
+Run the same check before you open the pull request (it needs `curl`):
+
+```sh
+cargo run -q -p wai-ext --bin wai-index-check -- extensions/index.toml
+```
+
+### Your own index
+
+Host a file in the same format at any https URL. A raw file in a GitHub repository works: `https://raw.githubusercontent.com/<owner>/<repo>/main/index.toml`. Users add the URL to `[extensions] indexes` in their settings, and its extensions show with `from <host>`. It cannot replace an id the official index lists.
+
+### First-party extensions
+
+The extensions in this repository's `extensions/` folder release from here on a tag `<id>-v<version>` (`wai-rotinas-v0.1.0`), through `.github/workflows/extensions.yml` and the same shared workflow. They never use `v*` tags, which belong to wai's own releases. Their entries go into the official index like anyone's.
