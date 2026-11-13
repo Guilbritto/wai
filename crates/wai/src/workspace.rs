@@ -7,8 +7,8 @@ use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, Sizable as _, Theme, h_flex, h_resizable, resizable_panel, v_flex,
-    v_resizable,
+    ActiveTheme as _, Icon, IconName, Sizable as _, Theme, h_flex, h_resizable, resizable_panel,
+    v_flex, v_resizable,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -38,6 +38,7 @@ use crate::aurora;
 use crate::chat::{ChatEvent, ChatSession, DraftView, TurnState, signed_out};
 use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved, TabsChanged, recovery};
 use crate::ext_host::{ExtHost, SessionCall};
+use crate::ext_panel::ExtPanel;
 use crate::extensions_view::{ExtensionsView, InstallPlugin};
 use crate::files::{FileTree, OpenFile};
 use crate::git;
@@ -81,6 +82,9 @@ pub enum Pane {
     Editor(Entity<EditorPane>),
     /// A session that starts when sent; its view is also in `Workspace::drafts`.
     Draft(Entity<DraftView>),
+    /// An extension's `main` panel: the view `ExtHost` owns. At most one pane per panel; not
+    /// kept between runs, not part of a work area.
+    Extension(Entity<ExtPanel>),
 }
 
 impl Pane {
@@ -377,14 +381,18 @@ impl Workspace {
         window.set_window_title(&title(&project));
         let project = canonical(&project);
         let ext_host = cx.new(|_| ExtHost::new(project.clone()));
-        // Its panels are sidebar tabs: a shown one that goes leaves the sessions shown. Its agents
-        // and MCP servers follow the enabled extensions.
-        let panels = cx.observe(&ext_host, |this: &mut Self, host, cx| {
+        // Its panels are sidebar tabs or panes: a shown tab that goes leaves the sessions shown, a
+        // pane closes. Its agents and MCP servers follow the enabled extensions.
+        let panels = cx.observe_in(&ext_host, window, |this: &mut Self, host, window, cx| {
+            let live: Vec<_> = (host.read(cx).panels().iter())
+                .map(|p| p.view.entity_id())
+                .collect();
             if let SidebarTab::Panel(shown) = this.sidebar_tab
-                && !(host.read(cx).panels().iter()).any(|p| p.view.entity_id() == shown)
+                && !live.contains(&shown)
             {
                 this.sidebar_tab = SidebarTab::Sessions;
             }
+            this.close_gone_panels(&live, window, cx);
             this.sync_contributions(cx);
             cx.notify();
         });
@@ -1838,7 +1846,70 @@ impl Workspace {
                     eprintln!("wai: an extension's prompt for {agent} {session} was dropped");
                 }
             }
+            ExtEvent::OpenPanel { panel, reply } => {
+                let Some(p) = self.ext_host.read(cx).panel_of(&ext, &panel) else {
+                    return reply.send(Err(format!("No panel named {panel}")));
+                };
+                let (view, main) = (p.view.clone(), p.main);
+                if main {
+                    self.open_panel(view, false, window, cx);
+                } else {
+                    self.sidebar_tab = SidebarTab::Panel(view.entity_id());
+                    cx.notify();
+                }
+                reply.send(Ok(serde_json::Value::Null));
+            }
             _ => {}
+        }
+    }
+
+    /// Shows `view`, a main panel, in the pane that shows it, else in the session pane
+    /// (`session_pane`): a session there stays open in the sidebar. `focus`: the user opened it;
+    /// an extension's `panel/open` never takes the keyboard.
+    pub(crate) fn open_panel(
+        &mut self,
+        view: Entity<ExtPanel>,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let shown = (self.panes.iter()).position(|p| matches!(p, Pane::Extension(v) if *v == view));
+        let ix = shown.unwrap_or_else(|| {
+            let ix = self.session_pane();
+            self.panes[ix] = Pane::Extension(view);
+            ix
+        });
+        if focus {
+            self.focus_pane(ix, window, cx);
+        }
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    /// Closes the panes of main panels that are gone (`live`: the views still shown), as when
+    /// their extension stops, crashes or is disabled. The focus stays where it was unless it
+    /// was on such a pane; then it lands on its neighbour.
+    fn close_gone_panels(
+        &mut self,
+        live: &[EntityId],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let gone = |p: &Pane| matches!(p, Pane::Extension(v) if !live.contains(&v.entity_id()));
+        let mut closed = false;
+        while let Some(ix) = self.panes.iter().position(gone) {
+            closed = true;
+            if ix == self.focused_pane || self.panes.len() == 1 {
+                self.drop_pane(ix, window, cx);
+            } else {
+                self.panes.remove(ix);
+                if self.focused_pane > ix {
+                    self.focused_pane -= 1;
+                }
+            }
+        }
+        if closed {
+            self.save_state(cx);
         }
     }
 
@@ -3071,6 +3142,73 @@ impl Workspace {
     }
 }
 
+impl Workspace {
+    /// A main panel's pane: a slim header (its icon or initials, title, extension, ×) above the
+    /// panel.
+    fn extension_pane(
+        &self,
+        ix: usize,
+        view: &Entity<ExtPanel>,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let panel = (self.ext_host.read(cx).panels().iter()).find(|p| p.view == *view);
+        let title: SharedString = panel.map_or("".into(), |p| p.title.clone().into());
+        let ext_name = panel.map_or("".into(), |p| p.ext_name.clone());
+        let mark = match panel.and_then(|p| p.icon) {
+            Some(icon) => Icon::new(icon).size(px(15.)).into_any_element(),
+            None => div()
+                .text_size(px(9.))
+                .font_weight(FontWeight::EXTRA_BOLD)
+                .child(crate::sidebar::initials(&title))
+                .into_any_element(),
+        };
+        let close = Button::new(("extension-pane-close", ix))
+            .ghost()
+            .xsmall()
+            .icon(IconName::Close)
+            .tooltip("Close pane (the extension keeps running)")
+            .accessibility_label("Close pane")
+            .on_click(cx.listener(move |this, _, window, cx| {
+                // The panes may have changed since this frame drew.
+                if matches!(this.panes.get(ix), Some(Pane::Extension(_))) {
+                    this.close_pane(ix, window, cx);
+                }
+            }));
+        let header = aurora::card_bar(cx)
+            .gap_2()
+            .px_3()
+            .py_2()
+            .child(mark)
+            .child(
+                div()
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .truncate()
+                    .font_family(aurora::DISPLAY_FONT)
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::BOLD)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.))
+                    .text_color(theme.muted_foreground)
+                    .child(ext_name),
+            )
+            .child(div().flex_1())
+            .child(close);
+        v_flex()
+            .debug_selector(move || format!("extension-pane-{ix}"))
+            .size_full()
+            .child(header)
+            .child(v_flex().flex_1().min_h_0().child(view.clone()))
+    }
+}
+
 pub(crate) fn folder_name(project: &Path) -> String {
     project
         .file_name()
@@ -3184,6 +3322,7 @@ impl Render for Workspace {
                     Pane::Empty(error) => {
                         self.empty_pane(ix, error.as_ref(), cx).into_any_element()
                     }
+                    Pane::Extension(view) => self.extension_pane(ix, view, cx).into_any_element(),
                 })
                 .when(dragging, |el| el.relative().child(Self::drop_zones(ix, cx)));
             resizable_panel().child(on_card(aurora::card(focused, cx), content))

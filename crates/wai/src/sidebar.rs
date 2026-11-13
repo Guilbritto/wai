@@ -23,7 +23,7 @@ use crate::app::{FilterSessions, NewSession};
 use crate::aurora;
 use crate::chat::{ChatItem, ChatModel, ChatSession, DraftView, TurnState};
 use crate::settings_view::Section;
-use crate::workspace::{Dragged, DraggedSession, MAX_PANES, Renamed, Workspace};
+use crate::workspace::{Dragged, DraggedSession, MAX_PANES, Pane, Renamed, Workspace};
 
 pub(crate) const ROW_HEIGHT: f32 = 28.;
 
@@ -358,30 +358,45 @@ impl Workspace {
                 }
                 el
             });
+        // A sidebar panel is a tab; a main panel's button opens its pane, or focuses it, and is
+        // shown selected while the pane is on screen. Its icon, else the title's initials.
         let extension = panels.iter().enumerate().map(|(ix, p)| {
             let title = p.title.clone();
-            let mark = div()
-                .size(px(20.))
-                .rounded(px(6.))
-                .border(px(1.5))
-                .border_color(
-                    if self.sidebar_tab == SidebarTab::Panel(p.view.entity_id()) {
-                        selected
-                    } else {
-                        idle
-                    },
-                )
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(9.))
-                .child(initials(&title));
-            tab_item(
-                SidebarTab::Panel(p.view.entity_id()),
-                ("tab-panel", ix).into(),
-                title.into(),
-                mark.into_any_element(),
-            )
+            let on = match p.main {
+                true => (self.panes.iter())
+                    .any(|pane| matches!(pane, Pane::Extension(v) if *v == p.view)),
+                false => self.sidebar_tab == SidebarTab::Panel(p.view.entity_id()),
+            };
+            let mark = match p.icon {
+                Some(name) => icon(name).into_any_element(),
+                None => div()
+                    .size(px(20.))
+                    .rounded(px(6.))
+                    .border(px(1.5))
+                    .border_color(if on { selected } else { idle })
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(9.))
+                    .child(initials(&title))
+                    .into_any_element(),
+            };
+            if !p.main {
+                return tab_item(
+                    SidebarTab::Panel(p.view.entity_id()),
+                    ("tab-panel", ix).into(),
+                    title.into(),
+                    mark,
+                );
+            }
+            let view = p.view.clone();
+            item(("tab-panel", ix).into(), title.into(), on)
+                .role(Role::Button)
+                .child(mark)
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.open_panel(view.clone(), true, window, cx)
+                }))
+                .test_support()
         });
         let foot = |id: &'static str, label: &'static str, name: Lucide, open: Option<Section>| {
             item(id.into(), label.into(), false)

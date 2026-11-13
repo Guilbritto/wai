@@ -1041,6 +1041,168 @@ pub(crate) mod tests {
             assert_eq!(w.sessions[0].read(cx).draft(cx), "theirs");
         });
     }
+
+    /// Extension `cards`: panel `main` in the main area with a known icon, panel `side` in the
+    /// sidebar with an unknown one.
+    const PANELS: &str = "id = \"cards\"\nname = \"Cards\"\nversion = \"1.0.0\"\n\
+        permissions = [\"process\", \"panels\"]\n[process]\ncommand = \"bin/run\"\n\
+        [[contributes.panels]]\nid = \"main\"\ntitle = \"My cards\"\nlocation = \"main\"\n\
+        icon = \"git-pull-request\"\n\
+        [[contributes.panels]]\nid = \"side\"\ntitle = \"Side\"\nicon = \"no-such-icon\"\n";
+
+    /// The panes that show `view`.
+    fn panes_of(
+        workspace: &Entity<Workspace>,
+        view: &Entity<crate::ext_panel::ExtPanel>,
+        cx: &mut VisualTestContext,
+    ) -> usize {
+        workspace.read_with(cx, |w, _| {
+            (w.panes.iter())
+                .filter(|p| matches!(p, Pane::Extension(v) if v == view))
+                .count()
+        })
+    }
+
+    /// `PANELS` installed with `flags` and started; its main panel's view once both panels show.
+    fn start_panels<'a>(
+        tmp: &Path,
+        flags: &str,
+        cx: &'a mut TestAppContext,
+    ) -> (
+        Entity<Workspace>,
+        Entity<crate::ext_panel::ExtPanel>,
+        &'a mut VisualTestContext,
+    ) {
+        let config = tmp.join("config");
+        install(tmp, &config, PANELS, flags, "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        wait_until(cx, "the panels", |cx| {
+            host.read_with(cx, |h, _| h.panels().len() == 2)
+        });
+        let view = host.read_with(cx, |h, _| h.panels()[0].view.clone());
+        (workspace, view, cx)
+    }
+
+    /// A main panel's rail button opens it as a pane, once: a second click focuses that pane.
+    /// It is never a sidebar tab. A known icon replaces the initials; an unknown one leaves them.
+    #[gpui_kit::test]
+    fn main_panel_opens_as_a_pane(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+        use crate::sidebar::SidebarTab;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (workspace, view, cx) = start_panels(tmp.path(), "--panel", cx);
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        let icons = host.read_with(cx, |h, _| {
+            (h.panels().iter())
+                .map(|p| p.icon.map(|i| i.path().to_string()))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(icons, [Some("icons/git-pull-request.svg".into()), None]);
+
+        click(("tab-panel", 0usize), cx);
+        assert_eq!(panes_of(&workspace, &view, cx), 1);
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w.sidebar_tab),
+            SidebarTab::Sessions
+        );
+        cx.update(|window, cx| {
+            use gpui_kit::test::TestWindowExt as _;
+            window.render_frame(cx)
+        });
+        assert!(cx.debug_bounds("extension-pane-0").is_some());
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.panes.push(Pane::Empty(None));
+                w.focus_pane(1, window, cx);
+            })
+        });
+        click(("tab-panel", 0usize), cx);
+        assert_eq!(panes_of(&workspace, &view, cx), 1);
+        assert_eq!(
+            workspace.read_with(cx, |w, _| (w.panes.len(), w.focused_pane)),
+            (2, 0)
+        );
+    }
+
+    /// A main panel's × closes its pane and the extension keeps running; disabling the extension
+    /// closes the pane, and the focus lands on a live pane.
+    #[gpui_kit::test]
+    fn main_pane_closes_with_its_panel(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (workspace, view, cx) = start_panels(tmp.path(), "--panel", cx);
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        click(("tab-panel", 0usize), cx);
+        click(("extension-pane-close", 0usize), cx);
+        assert_eq!(panes_of(&workspace, &view, cx), 0);
+        assert_eq!(host.read_with(cx, |h, _| h.panels().len()), 2);
+
+        click(("tab-panel", 0usize), cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.panes.insert(0, Pane::Empty(None));
+                w.panes.push(Pane::Empty(None));
+                w.focus_pane(1, window, cx);
+            })
+        });
+        let mut list = ExtStore::open(&tmp.path().join("config")).list();
+        list[0].enabled = false;
+        host.update(cx, |h, cx| h.sync(&list, cx));
+        cx.run_until_parked();
+        assert_eq!(panes_of(&workspace, &view, cx), 0);
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), 2);
+            assert!(w.focused_pane < 2);
+        });
+    }
+
+    /// `panel/open` shows a main panel beside the editor without taking its keyboard; a second
+    /// one within 2 s is refused and shows nothing.
+    #[gpui_kit::test]
+    fn panel_open_shows_and_rate_limits(cx: &mut TestAppContext) {
+        use crate::sidebar::SidebarTab;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let file = tmp.path().join("notes.md");
+        std::fs::write(&file, "notes\n").unwrap();
+        let calls =
+            r#"--call 'panel/open {"panel": "main"}' --call 'panel/open {"panel": "side"}'"#;
+        install(tmp.path(), &config, PANELS, calls, "");
+        let (workspace, cx) = start_after(&config, fake_settings(""), cx, |workspace, cx| {
+            let path = file.clone();
+            cx.update(|window, cx| {
+                workspace.update(cx, |w, cx| w.open_file(path, None, window, cx))
+            });
+            cx.run_until_parked();
+        });
+        let log = log_path(tmp.path(), "cards");
+
+        assert_eq!(reply(&log, 1, cx)["result"], Value::Null);
+        assert_eq!(
+            reply(&log, 2, cx)["error"]["message"],
+            "Too many panel opens; try again later"
+        );
+        cx.run_until_parked();
+        workspace.read_with(cx, |w, _| {
+            assert!(matches!(w.panes[..], [Pane::Editor(_), Pane::Extension(_)]));
+            assert_eq!(w.focused_pane, 0);
+            assert_eq!(w.sidebar_tab, SidebarTab::Sessions);
+        });
+        cx.simulate_input("typed ");
+        let editor = workspace.read_with(cx, |w, _| match &w.panes[0] {
+            Pane::Editor(pane) => pane.clone(),
+            _ => unreachable!("the editor stays in pane 0"),
+        });
+        let text = editor.read_with(cx, |p, cx| {
+            p.tabs[p.active].read(cx).editor.read(cx).text().to_string()
+        });
+        assert_eq!(text, "typed notes\n");
+    }
 }
 
 #[cfg(test)]
