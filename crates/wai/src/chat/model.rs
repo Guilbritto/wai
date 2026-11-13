@@ -263,7 +263,6 @@ pub struct UsageInfo {
     pub used: u64,
     pub size: u64,
     pub cost_usd: Option<f64>,
-    pub rate_limit_status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -511,17 +510,12 @@ impl ChatModel {
                 used,
                 size,
                 cost_usd,
-                rate_limit,
+                ..
             } => {
                 self.usage = Some(UsageInfo {
                     used: *used,
                     size: *size,
                     cost_usd: cost_usd.or(self.usage.as_ref().and_then(|u| u.cost_usd)),
-                    rate_limit_status: rate_limit
-                        .as_ref()
-                        .and_then(|v| v.get("status"))
-                        .and_then(|s| s.as_str())
-                        .map(str::to_string),
                 });
                 None
             }
@@ -1737,21 +1731,6 @@ mod tests {
         assert_eq!(m.state, TurnState::Error("boom".into()));
         assert!(
             matches!(m.items.last(), Some(ChatItem::Notice { text, .. }) if text.contains("boom"))
-        );
-    }
-
-    #[test]
-    fn usage_reads_rate_limit_status() {
-        let mut m = ChatModel::default();
-        m.apply(&SessionEvent::Usage {
-            used: 1,
-            size: 2,
-            cost_usd: None,
-            rate_limit: Some(serde_json::json!({"status":"allowed"})),
-        });
-        assert_eq!(
-            m.usage.unwrap().rate_limit_status.as_deref(),
-            Some("allowed")
         );
     }
 

@@ -211,6 +211,9 @@ pub struct Workspace {
     /// The last `claude mcp list`, for the bottom bar and the MCP page.
     pub(crate) mcp: crate::settings_view::claude::McpCheck,
     pub(crate) mcp_task: Option<Task<()>>,
+    /// The account's usage limit as the agent last reported it, until its reset.
+    pub(crate) rate_limit: Option<crate::bars::RateLimit>,
+    pub(crate) rate_wake: Option<Task<()>>,
     /// The `claude` that `mcp list` runs; none means the one on PATH.
     pub(crate) claude_program: Option<PathBuf>,
     pub registry: Entity<AgentRegistry>,
@@ -443,6 +446,8 @@ impl Workspace {
             claude_task: None,
             mcp: Default::default(),
             mcp_task: None,
+            rate_limit: None,
+            rate_wake: None,
             claude_program: None,
             registry,
             agents,
@@ -1218,6 +1223,7 @@ impl Workspace {
                     this.save_state(cx);
                 }
                 ChatEvent::Bound => return this.claim(session, cx),
+                ChatEvent::RateLimit(r) => return this.set_rate_limit(r.clone(), cx),
                 ChatEvent::OpenFile { path, line } => {
                     return this.open_file(path.clone(), Some(*line), window, cx);
                 }

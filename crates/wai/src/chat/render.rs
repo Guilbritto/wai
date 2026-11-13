@@ -76,13 +76,9 @@ pub(super) fn tokens(n: u64) -> String {
     }
 }
 
-/// `43k / 1M`, then the rate-limit status when the agent reports one.
+/// `43k / 1M`.
 fn usage_label(usage: &UsageInfo) -> String {
-    let label = format!("{} / {}", tokens(usage.used), tokens(usage.size));
-    match &usage.rate_limit_status {
-        Some(status) => format!("{label} · {status}"),
-        None => label,
-    }
+    format!("{} / {}", tokens(usage.used), tokens(usage.size))
 }
 
 /// `$0.42`: what the conversation has cost.

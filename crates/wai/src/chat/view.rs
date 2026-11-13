@@ -47,6 +47,8 @@ pub enum ChatEvent {
     TitleChanged,
     /// The agent gave or loaded this session's id.
     Bound,
+    /// The agent reported the account's usage limit.
+    RateLimit(crate::bars::RateLimit),
     /// A prompt's turn ended, with why. Loading a session replays it without one.
     TurnEnded(StopReason),
     /// The agent no longer has the session restored at launch.
@@ -648,6 +650,14 @@ impl ChatSession {
             return;
         }
         self.pickers_stale |= matches!(ev, SessionEvent::ConfigChanged(_));
+        if let SessionEvent::Usage {
+            rate_limit: Some(v),
+            ..
+        } = ev
+            && let Some(r) = crate::bars::rate_limit(v)
+        {
+            cx.emit(ChatEvent::RateLimit(r));
+        }
         let Some(ix) = self.update_model(cx, |m| m.apply(ev)) else {
             return cx.notify(); // header: title, usage, mode
         };

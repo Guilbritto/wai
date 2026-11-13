@@ -156,11 +156,13 @@ pub(crate) fn stopped_status(stopped: &[(String, String)]) -> Option<Status> {
     })
 }
 
-/// One bottom-bar item, coloured by its tone; the caller adds the click and `test_support`.
+/// One bottom-bar item, coloured by its tone; the caller adds the click and `test_support`. A
+/// `clickable` one is a focusable button; the other is plain text with its tooltip.
 pub(crate) fn bottom_item(
     id: impl Into<ElementId>,
     status: &Status,
     icon: Option<Lucide>,
+    clickable: bool,
     cx: &App,
 ) -> Stateful<Div> {
     let theme = cx.theme();
@@ -173,19 +175,64 @@ pub(crate) fn bottom_item(
         .px_2()
         .gap_1()
         .rounded(px(5.))
-        .cursor_pointer()
         .border_1()
         .border_color(gpui_kit::transparent_black())
         .text_color(tone_color(status.tone, cx))
-        .role(Role::Button)
         .aria_label(text.clone())
-        .focus_visible(move |el| el.border_color(ring))
-        .hover(move |el| el.bg(hover))
-        // Focusable, and Enter or Space clicks it.
-        .tab_index(0)
+        .when(clickable, |el| {
+            el.cursor_pointer()
+                .role(Role::Button)
+                .focus_visible(move |el| el.border_color(ring))
+                .hover(move |el| el.bg(hover))
+                // Focusable, and Enter or Space clicks it.
+                .tab_index(0)
+        })
         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         .children(icon.map(|name| Icon::new(name).size(px(12.))))
         .child(text)
+}
+
+/// What the agent reports of the account's usage limit; `resets_at` in Unix seconds.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RateLimit {
+    pub status: String,
+    pub resets_at: Option<i64>,
+}
+
+/// The report in an agent's `rate_limit` metadata; none without a string `status`.
+pub(crate) fn rate_limit(meta: &serde_json::Value) -> Option<RateLimit> {
+    let status = meta.get("status")?.as_str()?.to_string();
+    let resets_at = meta
+        .get("resetsAt")
+        .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)));
+    // Above 10^12 it is milliseconds.
+    let resets_at = resets_at.map(|t| if t > 1_000_000_000_000 { t / 1000 } else { t });
+    Some(RateLimit { status, resets_at })
+}
+
+/// Unix seconds as the local `%H:%M`.
+pub(crate) fn clock(secs: i64) -> String {
+    chrono::DateTime::from_timestamp(secs, 0)
+        .map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string())
+        .unwrap_or_default()
+}
+
+pub(crate) fn usage_status(r: &RateLimit) -> Status {
+    let resets = r
+        .resets_at
+        .map(|t| format!(" · resets {}", clock(t)))
+        .unwrap_or_default();
+    let (text, tone) = match r.status.as_str() {
+        "allowed" => ("Usage ok".to_string(), Tone::Neutral),
+        "allowed_warning" => (format!("Near usage limit{resets}"), Tone::Warning),
+        "rejected" => (format!("Usage limit reached{resets}"), Tone::Danger),
+        other => (clamp(other, 32), Tone::Neutral),
+    };
+    Status {
+        text,
+        tone,
+        tooltip: r.status.clone(),
+    }
 }
 
 /// `default`'s keys: those in `order` first, in its order, then the rest as `default` has them.
@@ -250,7 +297,7 @@ impl Workspace {
             .then(|| mcp_status(&self.mcp))
             .flatten()
             .map(|status| {
-                bottom_item("bottombar-mcp", &status, Some(Lucide::Server), cx)
+                bottom_item("bottombar-mcp", &status, Some(Lucide::Server), true, cx)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.open_settings(Section::Mcp, None, window, cx);
                         this.check_mcp(cx);
@@ -265,6 +312,7 @@ impl Workspace {
                     "bottombar-extensions",
                     &status,
                     Some(Lucide::TriangleAlert),
+                    true,
                     cx,
                 )
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -272,9 +320,13 @@ impl Workspace {
                 }))
                 .test_support()
             });
+        let usage = (self.shown("wai.usage"))
+            .then(|| self.rate_limit.as_ref().map(usage_status))
+            .flatten()
+            .map(|status| bottom_item("bottombar-usage", &status, None, false, cx).test_support());
         let version = self.shown("wai.version").then(|| {
             let status = version_status(&self.update);
-            bottom_item("bottombar-version", &status, None, cx)
+            bottom_item("bottombar-version", &status, None, true, cx)
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     match version_click(&this.update) {
                         VersionClick::Restart => this.install_update(window, cx),
@@ -316,9 +368,37 @@ impl Workspace {
             .children(mcp)
             .children(stopped)
             .child(div().flex_1())
+            .children(usage)
             .children(version)
             .test_support()
             .context_menu(move |menu, _, _| hide_menu(menu, &entries, &hidden, workspace.clone()))
+    }
+
+    /// Stores the report, and drops it at its reset: the only timer wai keeps, one shot. A report
+    /// whose reset has passed is stale and shows nothing.
+    pub(crate) fn set_rate_limit(&mut self, r: RateLimit, cx: &mut Context<Self>) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        // An older wake would clear this report at the old reset.
+        self.rate_wake = None;
+        match r.resets_at {
+            Some(t) if t <= now => self.rate_limit = None,
+            Some(t) => {
+                let wait = std::time::Duration::from_secs((t - now) as u64);
+                self.rate_limit = Some(r);
+                self.rate_wake = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(wait).await;
+                    this.update(cx, |this, cx| {
+                        this.rate_limit = None;
+                        cx.notify();
+                    })
+                    .ok();
+                }));
+            }
+            None => self.rate_limit = Some(r),
+        }
+        cx.notify();
     }
 
     pub(crate) fn shown(&self, key: &str) -> bool {
@@ -373,16 +453,18 @@ mod tests {
     use wai_settings::AppState;
 
     use super::{
-        Status, VersionClick, mcp_status, ordered, stopped_status, version, version_click,
-        version_status,
+        RateLimit, Status, VersionClick, clock, mcp_status, ordered, rate_limit, stopped_status,
+        usage_status, version, version_click, version_status,
     };
     use crate::claude_config::NO_CLAUDE;
     use crate::settings_view::Section;
     use crate::sidebar::tests::label;
     use crate::update::{Release, Staged, UpdateStatus};
     use crate::workspace::tests::{
-        click, fake_settings, launch, menu_item, open, open_at, question,
+        click, fake_settings, launch, menu_item, open, open_at, question, start_now,
     };
+    use serde_json::json;
+    use wai_agent::SessionEvent;
 
     fn release() -> Release {
         Release {
@@ -586,6 +668,128 @@ mod tests {
         assert!(!drawn(cx));
         menu_item("bottombar", "Version", cx);
         assert!(drawn(cx));
+    }
+
+    #[test]
+    fn rate_limit_reads_status_and_reset() {
+        let read = |v: serde_json::Value| rate_limit(&v);
+        let warn = |resets_at| {
+            Some(RateLimit {
+                status: "allowed_warning".into(),
+                resets_at,
+            })
+        };
+        assert_eq!(
+            read(json!({"status":"allowed_warning","resetsAt":1800000000})),
+            warn(Some(1800000000))
+        );
+        assert_eq!(
+            read(json!({"status":"allowed_warning","resetsAt":1800000000000_i64})),
+            warn(Some(1800000000))
+        );
+        assert_eq!(
+            read(json!({"status":"allowed_warning","resetsAt":1800000000.0})),
+            warn(Some(1800000000))
+        );
+        assert_eq!(read(json!({"status":"allowed_warning"})), warn(None));
+        assert_eq!(read(json!({"resetsAt":1800000000})), None);
+    }
+
+    #[test]
+    fn usage_status_by_state() {
+        let usage = |status: &str, resets_at| {
+            let s = usage_status(&RateLimit {
+                status: status.into(),
+                resets_at,
+            });
+            (s.text, s.tone, s.tooltip)
+        };
+        assert_eq!(
+            usage("allowed", None),
+            ("Usage ok".into(), Tone::Neutral, "allowed".into())
+        );
+        assert_eq!(
+            usage("allowed_warning", Some(1800000000)),
+            (
+                format!("Near usage limit · resets {}", clock(1800000000)),
+                Tone::Warning,
+                "allowed_warning".into()
+            )
+        );
+        assert_eq!(
+            usage("rejected", None),
+            (
+                "Usage limit reached".into(),
+                Tone::Danger,
+                "rejected".into()
+            )
+        );
+        assert_eq!(
+            usage("weird", None),
+            ("weird".into(), Tone::Neutral, "weird".into())
+        );
+    }
+
+    fn unix_now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    fn report(status: &str, resets_at: Option<i64>) -> RateLimit {
+        RateLimit {
+            status: status.into(),
+            resets_at,
+        }
+    }
+
+    #[gpui_kit::test]
+    fn rejected_usage_hides_at_its_reset(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let set = |r, cx: &mut VisualTestContext| {
+            workspace.update(cx, |w, cx| w.set_rate_limit(r, cx));
+        };
+        set(report("rejected", Some(unix_now() + 60)), cx);
+        let text = label("bottombar-usage", cx).expect("drawn");
+        assert!(text.starts_with("Usage limit reached · resets "), "{text}");
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(61));
+        cx.run_until_parked();
+        assert_eq!(label("bottombar-usage", cx), None);
+
+        // A newer report without a reset drops the older wake.
+        set(report("rejected", Some(unix_now() + 60)), cx);
+        set(report("allowed", None), cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(61));
+        cx.run_until_parked();
+        assert_eq!(label("bottombar-usage", cx).as_deref(), Some("Usage ok"));
+    }
+
+    /// Review focus 2: a reset at or before now is stale, and nothing shows.
+    #[gpui_kit::test]
+    fn stale_usage_is_not_shown(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
+        workspace.update(cx, |w, cx| {
+            w.set_rate_limit(report("rejected", Some(unix_now() - 5)), cx)
+        });
+        assert_eq!(label("bottombar-usage", cx), None);
+    }
+
+    #[gpui_kit::test]
+    fn rate_limit_event_reaches_the_workspace(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_now(&workspace, cx);
+        let usage = SessionEvent::Usage {
+            used: 0,
+            size: 0,
+            cost_usd: None,
+            rate_limit: Some(json!({"status": "allowed"})),
+        };
+        session.update(cx, |s, cx| s.handle_event(&usage, cx));
+        assert_eq!(label("bottombar-usage", cx).as_deref(), Some("Usage ok"));
     }
 
     #[test]
