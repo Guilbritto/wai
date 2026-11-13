@@ -1,4 +1,5 @@
-//! The declarative panel schema (API 1.2): the tree an extension sends in `panel/render`, checked
+//! The declarative panel schema (API 1.2): the tree an extension sends in `panel/render` (and, as
+//! a display-only `card`, in `item/update`), checked
 //! into typed nodes. The tree is untrusted: parsing never panics and never recurses past
 //! `MAX_DEPTH`. An unknown or broken node becomes `Unsupported`; only a tree beyond the size limits
 //! is refused whole (`TooLarge`, shown as "Panel too large").
@@ -27,6 +28,9 @@ use serde_json::{Map, Value};
 
 pub const MAX_DEPTH: usize = 32;
 pub const MAX_NODES: usize = 2_000;
+/// The limits of an item's hover card.
+pub const CARD_DEPTH: usize = 8;
+pub const CARD_NODES: usize = 200;
 pub const TEXT_CHARS: usize = 10_000;
 pub const LINE_CHARS: usize = 500;
 pub const MAX_ID: usize = 256;
@@ -212,7 +216,30 @@ pub struct MenuItem {
 pub struct TooLarge;
 
 pub fn parse(tree: &Value) -> Result<Node, TooLarge> {
-    Parser::default().node(tree, 1)
+    Parser::new(MAX_DEPTH, MAX_NODES).node(tree, 1)
+}
+
+/// An item's hover card: the display nodes only; any other node becomes `Unsupported`. `None`
+/// when past the card's limits.
+fn card(tree: &Value) -> Option<Node> {
+    fn display(node: Node) -> Node {
+        match node {
+            Node::Column(children) => Node::Column(children.into_iter().map(display).collect()),
+            Node::Row(children) => Node::Row(children.into_iter().map(display).collect()),
+            Node::Text { .. }
+            | Node::Badge { .. }
+            | Node::Icon { .. }
+            | Node::Spacer
+            | Node::Progress(_)
+            | Node::Divider
+            | Node::Kv(_) => node,
+            _ => Node::Unsupported,
+        }
+    }
+    Parser::new(CARD_DEPTH, CARD_NODES)
+        .node(tree, 1)
+        .ok()
+        .map(display)
 }
 
 impl Node {
@@ -315,6 +342,7 @@ pub struct ItemState {
     pub icon: Option<Arc<str>>,
     pub tooltip: Option<Arc<str>>,
     pub tone: Tone,
+    pub card: Option<Arc<Node>>,
 }
 
 impl ItemState {
@@ -343,6 +371,7 @@ pub fn item_state(params: &Value) -> ItemState {
         icon: icon(o),
         tooltip: line("tooltip", LINE_CHARS),
         tone: tone(o).unwrap_or_default(),
+        card: o.get("card").and_then(card).map(Arc::new),
     }
 }
 
@@ -351,18 +380,28 @@ const CELLS: [&str; 8] = [
     "text", "badge", "link", "icon", "button", "menu", "spinner", "progress",
 ];
 
-#[derive(Default)]
 struct Parser {
+    max_depth: usize,
+    max_nodes: usize,
     nodes: usize,
     /// Taken by buttons, form fields and sections.
     ids: HashSet<String>,
 }
 
 impl Parser {
+    fn new(max_depth: usize, max_nodes: usize) -> Self {
+        Parser {
+            max_depth,
+            max_nodes,
+            nodes: 0,
+            ids: HashSet::new(),
+        }
+    }
+
     /// Counts a node at `depth`.
     fn count(&mut self, depth: usize) -> Result<(), TooLarge> {
         self.nodes += 1;
-        match depth > MAX_DEPTH || self.nodes > MAX_NODES {
+        match depth > self.max_depth || self.nodes > self.max_nodes {
             true => Err(TooLarge),
             false => Ok(()),
         }
@@ -1528,6 +1567,42 @@ mod tests {
         assert_eq!(children[1], Node::Unsupported);
         assert_eq!(children[2], Node::Unsupported);
         assert!(matches!(&children[3], Node::Section { id, .. } if id == "c"));
+    }
+
+    #[test]
+    fn item_card_keeps_display_nodes_only() {
+        let card = |tree| item_state(&json!({"text": "x", "card": tree})).card;
+        let ok = json!({"type": "column", "children": [
+            {"type": "row", "children": [{"type": "text", "text": "Current session"}, {"type": "spacer"},
+                                         {"type": "badge", "text": "16% used"}, {"type": "icon", "name": "gauge"}]},
+            {"type": "progress", "value": 0.16}, {"type": "divider"},
+            {"type": "kv", "items": [{"key": "a", "value": "b"}]}]});
+        let node = card(ok).expect("card");
+        let mut unsupported = 0;
+        node.walk(&mut |n| unsupported += matches!(n, Node::Unsupported) as usize);
+        assert_eq!(unsupported, 0);
+        let button =
+            json!({"type": "column", "children": [{"type": "button", "id": "b", "label": "Go"}]});
+        assert_eq!(
+            *card(button).unwrap(),
+            Node::Column(vec![Node::Unsupported])
+        );
+        assert_eq!(item_state(&json!({"text": "x"})).card, None);
+        assert_eq!(card(json!("not a tree")), Some(Arc::new(Node::Unsupported)));
+    }
+
+    #[test]
+    fn item_card_caps() {
+        let card = |tree| item_state(&json!({"text": "x", "card": tree})).card;
+        let flat = |n| json!({"type": "column", "children": vec![json!({"type": "divider"}); n]});
+        assert!(card(flat(CARD_NODES - 1)).is_some()); // the column is a node
+        assert!(card(flat(CARD_NODES)).is_none());
+        let mut deep = json!({"type": "divider"});
+        for _ in 1..CARD_DEPTH {
+            deep = json!({"type": "column", "children": [deep]});
+        }
+        assert!(card(deep.clone()).is_some());
+        assert!(card(json!({"type": "column", "children": [deep]})).is_none());
     }
 
     #[test]

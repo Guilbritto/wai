@@ -226,17 +226,18 @@ fn api_version_is_checked_first() {
     assert!(items("\"bar\"", &format!("api=\"1.3\"\n{body}")).is_ok());
     assert!(with_api("\"0.9\"", "").is_ok());
     assert!(with_api(&format!("\"{API}\""), "").is_ok());
-    let newer = with_api("\"1.4\"", "").unwrap_err();
+    assert!(with_api("\"1.4\"", "").is_ok());
+    let newer = with_api("\"1.5\"", "").unwrap_err();
     assert_eq!(
         newer.to_string(),
-        "Go Tools needs a newer wai (extension API 1.4; this wai has 1.3)"
+        "Go Tools needs a newer wai (extension API 1.5; this wai has 1.4)"
     );
     // Even when the newer API's fields would fail the strict parse.
     assert_eq!(
         with_api("\"2.0\"", "\nfuture = true\n")
             .unwrap_err()
             .to_string(),
-        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.3)"
+        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.4)"
     );
     // Numeric, not lexical: 1.10 is newer than 1.2.
     assert!(matches!(

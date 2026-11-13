@@ -121,7 +121,7 @@ fn initialize_roundtrip() {
             init["params"],
             json!({
                 "protocol": 1,
-                "api": "1.3",
+                "api": "1.4",
                 "wai_version": env!("CARGO_PKG_VERSION"),
                 "ext_id": "fake",
                 "granted": ["process", "notify", "panels"],
@@ -413,6 +413,7 @@ fn item_update_reaches_the_host() {
                 icon: Some("git-pull-request".into()),
                 tooltip: Some("2 green".into()),
                 tone: panel::Tone::Warning,
+                card: None,
             }
         );
     });

@@ -78,7 +78,7 @@ pub struct McpServerSpec {
 
 /// The extension API this wai speaks: `initialize` sends it, and a manifest's `api` may not be
 /// newer.
-pub const API: &str = "1.3";
+pub const API: &str = "1.4";
 
 pub const MAX_ITEMS: usize = 3;
 
