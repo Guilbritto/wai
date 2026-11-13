@@ -3293,6 +3293,7 @@ fn on_card(card: Div, content: impl IntoElement) -> Div {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let top_bar = self.render_top_bar(window, cx);
+        let bottom_bar = self.render_bottom_bar(window, cx);
         let sidebar = self.render_sidebar(cx);
         let terminal_panel = self.render_terminal_panel(window, cx);
         let rail = self.render_rail(cx);
@@ -3416,7 +3417,7 @@ impl Render for Workspace {
                                 ),
                         ),
                     ),
-                ),
+                ).child(bottom_bar),
             )
     }
 }
@@ -4695,9 +4696,7 @@ pub(crate) mod tests {
             narrow < wide,
             "the name truncates: {narrow:?} at 900 px, {wide:?} at 1400 px"
         );
-        let version = cx.debug_bounds("topbar-version").expect("version drawn");
-        let project = cx.debug_bounds("topbar-project").expect("project drawn");
-        assert!(version.right() < project.left(), "{version:?} {project:?}");
+        assert!(crate::sidebar::tests::label("bottombar-version", cx).is_some());
         let new = cx.debug_bounds("sidebar-new").expect("new session drawn");
         assert!(new.right() <= px(900.), "{new:?}");
         let status = cx.debug_bounds("topbar-status").expect("status drawn");

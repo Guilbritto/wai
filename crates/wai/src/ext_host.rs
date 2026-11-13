@@ -1237,6 +1237,23 @@ pub(crate) mod tests {
         assert_eq!(host.read_with(cx, |h, _| h.stopped()[0].0.clone()), "Cards");
     }
 
+    /// A crashed extension shows in the bottom bar; a click opens the Extensions view.
+    #[gpui_kit::test]
+    fn stopped_extension_shows_in_the_bottom_bar(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        install(tmp.path(), &config, PANELS, "--crash", "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        wait_until(cx, "the stopped item", |cx| {
+            crate::sidebar::tests::label("bottombar-extensions", cx).as_deref()
+                == Some("Cards stopped")
+        });
+        crate::workspace::tests::click("bottombar-extensions", cx);
+        let view = workspace.read_with(cx, |w, _| w.settings_view().expect("settings open"));
+        let section = view.read_with(cx, |v, _| v.section());
+        assert_eq!(section, crate::settings_view::Section::Extensions);
+    }
+
     /// The panes that show `view`.
     fn panes_of(
         workspace: &Entity<Workspace>,

@@ -869,7 +869,7 @@ impl SettingsView {
         let control = v_flex()
             .gap_1()
             .items_end()
-            .child(div().child(crate::topbar::version()))
+            .child(div().child(crate::bars::version()))
             .children(line)
             .children(blocker)
             .child(h_flex().gap_2().children(check).child(button));

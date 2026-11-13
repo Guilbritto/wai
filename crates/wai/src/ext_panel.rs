@@ -997,7 +997,7 @@ fn tag(tone: Tone) -> Tag {
     }
 }
 
-fn tone_color(tone: Tone, cx: &App) -> Hsla {
+pub(crate) fn tone_color(tone: Tone, cx: &App) -> Hsla {
     let theme = cx.theme();
     match tone {
         Tone::Neutral => theme.muted_foreground,
