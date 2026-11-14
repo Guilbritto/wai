@@ -89,8 +89,9 @@ func (e *env) send(from, to, text string) helpapi.Request {
 type sseFrame struct{ event, data string }
 
 type stream struct {
-	t  *testing.T
-	ch chan sseFrame
+	t    *testing.T
+	resp *http.Response
+	ch   chan sseFrame
 }
 
 func (e *env) stream(login string) *stream {
@@ -99,7 +100,7 @@ func (e *env) stream(login string) *stream {
 	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "text/event-stream" {
 		e.t.Fatalf("events: %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
 	}
-	st := &stream{t: e.t, ch: make(chan sseFrame, 64)}
+	st := &stream{t: e.t, resp: resp, ch: make(chan sseFrame, 64)}
 	go func() {
 		defer close(st.ch)
 		sc := bufio.NewScanner(resp.Body)
@@ -293,5 +294,26 @@ func TestSweepAndMemberChecks(t *testing.T) {
 	}
 	if r := e.post("bob", "/requests/"+req.ID+"/cancel", nil); r.StatusCode != 401 {
 		t.Fatalf("leaver token: %d", r.StatusCode)
+	}
+}
+
+func TestLastStreamLeavingBroadcastsOffline(t *testing.T) {
+	e := newEnv(t)
+	ana := e.stream("ana")
+	ana.next(helpapi.EvSync)
+	ana.next(helpapi.EvPeople)
+	bob1 := e.stream("bob")
+	var people []helpapi.Person
+	json.Unmarshal([]byte(ana.next(helpapi.EvPeople)), &people)
+	if p, _ := person(people, "bob"); !p.Online {
+		t.Fatalf("bob not online: %+v", people)
+	}
+	bob2 := e.stream("bob")
+	bob1.resp.Body.Close()
+	bob2.resp.Body.Close()
+	// If closing bob's first stream had broadcast, ana's next people event would still say online.
+	json.Unmarshal([]byte(ana.next(helpapi.EvPeople)), &people)
+	if p, ok := person(people, "bob"); !ok || p.Online {
+		t.Fatalf("bob should be offline: %+v", people)
 	}
 }
