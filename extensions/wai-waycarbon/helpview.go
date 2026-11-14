@@ -3,6 +3,7 @@ package main
 import (
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"wai-waycarbon/helpapi"
@@ -100,8 +101,6 @@ func (st HelpState) sent(r helpapi.Request) node {
 			kids = append(kids, b)
 		case replyNew:
 			kids = append(kids, button("help:newsession:"+r.ID, "Open in a new session", "primary"))
-		case replySent:
-			kids = append(kids, muted("Sent to the session."))
 		}
 	case helpapi.Declined:
 		kids = []node{muted("@" + r.To + " declined"), plain(r.Reason)}
@@ -180,9 +179,9 @@ func helpTree(st HelpState) node {
 	var in, out []node
 	for _, r := range reqs {
 		switch {
-		case r.To == st.Login && (r.State == helpapi.Waiting || r.State == helpapi.Accepted):
+		case strings.EqualFold(r.To, st.Login) && (r.State == helpapi.Waiting || r.State == helpapi.Accepted):
 			in = append(in, st.incoming(r))
-		case r.From == st.Login && st.Replies[r.ID] != replySent && (r.State == helpapi.Waiting || r.State == helpapi.Accepted ||
+		case strings.EqualFold(r.From, st.Login) && st.Replies[r.ID] != replySent && (r.State == helpapi.Waiting || r.State == helpapi.Accepted ||
 			r.State == helpapi.Replied || r.State == helpapi.Declined):
 			out = append(out, st.sent(r))
 		}

@@ -419,32 +419,35 @@ func (s *server) signedOut() {
 	s.help.auth, s.help.reqs, s.help.people, s.help.notMember = nil, nil, nil, false
 }
 
+// loadSessions replaces the cached sessions with the host's list; false when it could not be read.
+func (s *server) loadSessions() bool {
+	raw, err := s.request(s.ctx, "sessions/list", node{})
+	var list []struct {
+		Agent, Session string
+		Title          *string
+		State          string
+	}
+	if err != nil || json.Unmarshal(raw, &list) != nil {
+		return false
+	}
+	out := make([]sessInfo, 0, len(list))
+	for _, e := range list {
+		si := sessInfo{Agent: e.Agent, Session: e.Session, State: e.State}
+		if e.Title != nil {
+			si.Title = *e.Title
+		}
+		out = append(out, si)
+	}
+	s.smu.Lock()
+	s.help.sess, s.help.sessLoaded = out, true
+	s.paintAll()
+	s.smu.Unlock()
+	return true
+}
+
 func (s *server) refreshSessions() {
 	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		raw, err := s.request(s.ctx, "sessions/list", node{})
-		var list []struct {
-			Agent, Session string
-			Title          *string
-			State          string
-		}
-		if err != nil || json.Unmarshal(raw, &list) != nil {
-			return
-		}
-		out := make([]sessInfo, 0, len(list))
-		for _, e := range list {
-			si := sessInfo{Agent: e.Agent, Session: e.Session, State: e.State}
-			if e.Title != nil {
-				si.Title = *e.Title
-			}
-			out = append(out, si)
-		}
-		s.smu.Lock()
-		s.help.sess, s.help.sessLoaded = out, true
-		s.paintAll()
-		s.smu.Unlock()
-	}()
+	go func() { defer s.wg.Done(); s.loadSessions() }()
 }
 
 func (s *server) sessionState(p json.RawMessage) {
@@ -660,6 +663,7 @@ func (s *server) helpSend(values map[string]string) {
 		s.smu.Lock()
 		defer s.smu.Unlock()
 		s.help.sending = false
+		defer s.refreshSessions()
 		if err != nil {
 			s.help.err = err.Error()
 		} else {
@@ -699,6 +703,7 @@ func (s *server) helpAct(action, id, text string) {
 		s.applyUpdate(helpapi.Update{ID: id, State: resp.State, Reply: resp.Reply, Reason: resp.Reason})
 		s.paintAll()
 		s.smu.Unlock()
+		s.refreshSessions()
 		if action == "accept" {
 			s.call("sessions/open", node{"prompt": acceptPrompt(r), "send": false})
 		}
@@ -717,18 +722,27 @@ func (s *server) markSent(id string) {
 	saveTargets(s.dataDir, s.help.targets)
 }
 
-// helpToSession sends the reply to its session when that is idle.
+// helpToSession sends the reply to its session when that is still open and idle. It asks the host
+// first: a closed session would drop the prompt and the reply would be lost.
 func (s *server) helpToSession(id string) {
-	s.smu.Lock()
-	defer s.smu.Unlock()
-	r, ok := s.help.reqs[id]
-	t := s.help.targets[id]
-	if !ok || r.State != helpapi.Replied || t.Sent || s.sessionOf(t) != "idle" {
-		return
-	}
-	s.call("sessions/prompt", node{"agent": t.Agent, "session": t.Session, "text": replyText(r)})
-	s.markSent(id)
-	s.paintAll()
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		if !s.loadSessions() {
+			s.fail(errors.New("Could not check the open sessions"))
+			return
+		}
+		s.smu.Lock()
+		defer s.smu.Unlock()
+		r, ok := s.help.reqs[id]
+		t := s.help.targets[id]
+		if !ok || r.State != helpapi.Replied || t.Sent || s.sessionOf(t) != "idle" {
+			return
+		}
+		s.call("sessions/prompt", node{"agent": t.Agent, "session": t.Session, "text": replyText(r)})
+		s.markSent(id)
+		s.paintAll()
+	}()
 }
 
 // helpNewSession opens the reply in a new, unsent session.

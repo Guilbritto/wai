@@ -446,6 +446,7 @@ func TestReplyGoesToIdleSessionOnly(t *testing.T) {
 		b := findID(tab, "help:tosession:r1")
 		return b != nil && b["disabled"] == false
 	})
+	r2.sessions = `[{"agent":"claude","session":"s1","title":null,"state":"idle"}]`
 	r2.click(5, "help:tosession:r1", "{}")
 	pr := r2.until(t, func(m map[string]any) bool { return m["method"] == "sessions/prompt" })
 	p := pr["params"].(map[string]any)
@@ -579,5 +580,35 @@ func TestProjectInfoEmptyOnFailure(t *testing.T) {
 	}
 	if p := projectInfo(t.Context(), "/elsewhere"); p != (helpapi.Project{}) {
 		t.Errorf("failing git: %v", p)
+	}
+}
+
+func TestClosedSessionIsNotSentTo(t *testing.T) {
+	f := newRelay(t)
+	f.initial = []helpapi.Request{{ID: "r1", From: "me", To: "bob", State: helpapi.Replied, Text: "deploy", Reply: "done", Created: time.Now()}}
+	fakeTools(t)
+	dir := t.TempDir()
+	saveAuth(dir, auth{token, "me"})
+	saveTargets(dir, map[string]replyTarget{"r1": {Agent: "claude", Session: "s1"}})
+	r, _ := restartIn(t, dir, `[{"agent":"claude","session":"s1","title":null,"state":"idle"}]`)
+	r.helpUntil(t, func(tab map[string]any) bool {
+		b := findID(tab, "help:tosession:r1")
+		return b != nil && b["disabled"] == false
+	})
+	r.sessions = "[]" // the user closed the session; the cached state still says idle
+	r.click(5, "help:tosession:r1", "{}")
+	prompted := false
+	r.until(t, func(m map[string]any) bool {
+		prompted = prompted || m["method"] == "sessions/prompt"
+		if m["method"] != "panel/render" {
+			return false
+		}
+		return findID(helpTab(t, m), "help:newsession:r1") != nil
+	})
+	if prompted {
+		t.Error("a closed session must get no sessions/prompt")
+	}
+	if loadTargets(dir)["r1"].Sent {
+		t.Error("help.json must stay unsent")
 	}
 }
