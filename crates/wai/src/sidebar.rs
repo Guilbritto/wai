@@ -24,6 +24,7 @@ use crate::app::{FilterSessions, NewSession};
 use crate::aurora;
 use crate::bars::{HideEntry, hide_menu};
 use crate::chat::{ChatItem, ChatModel, ChatSession, DraftView, TurnState};
+use crate::ext_host::PanelIcon;
 use crate::settings_view::Section;
 use crate::workspace::{Dragged, DraggedSession, MAX_PANES, Pane, Preview, Renamed, Workspace};
 
@@ -397,9 +398,16 @@ impl Workspace {
                     .any(|pane| matches!(pane, Pane::Extension(v) if *v == p.view)),
                 false => self.sidebar_tab == SidebarTab::Panel(p.view.entity_id()),
             };
-            let mark = match p.icon {
-                Some(name) => icon(name).into_any_element(),
+            let mark = match &p.icon {
+                Some(PanelIcon::Lucide(name)) => icon(*name).into_any_element(),
+                Some(PanelIcon::Svg(path)) => svg()
+                    .external_path(path.clone())
+                    .size(px(17.))
+                    .text_color(if on { selected } else { idle })
+                    .into_any_element(),
                 None => div()
+                    .id(("panel-initials", ix))
+                    .test_support()
                     .size(px(20.))
                     .rounded(px(6.))
                     .border(px(1.5))

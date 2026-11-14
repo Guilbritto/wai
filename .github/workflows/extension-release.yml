@@ -43,6 +43,9 @@ jobs:
           print(f"id={m['id']}")
           print(f"version={m['version']}")
           print(f"command={command if '/' in command else ''}")
+          icons = [(p.get("icon") or "") for p in (m.get("contributes") or {}).get("panels", [])]
+          icons = [i for i in icons if i.endswith(".svg") and ".." not in i and not i.startswith("/")]
+          print(f"icons={' '.join(i for i in icons if ' ' not in i)}")
           EOF
       - name: Check the tag
         env:
@@ -63,6 +66,7 @@ jobs:
           ID: ${{ steps.manifest.outputs.id }}
           VERSION: ${{ steps.manifest.outputs.version }}
           COMMAND: ${{ steps.manifest.outputs.command }}
+          ICONS: ${{ steps.manifest.outputs.icons }}
         run: |
           set -euo pipefail
           dist="$RUNNER_TEMP/dist"
@@ -73,6 +77,12 @@ jobs:
             cp wai-extension.toml "$stage/"
             for f in README* LICENSE*; do
               if [ -f "$f" ]; then cp "$f" "$stage/"; fi
+            done
+            for f in $ICONS; do
+              if [ -f "$f" ]; then
+                mkdir -p "$stage/$(dirname "$f")"
+                cp "$f" "$stage/$f"
+              fi
             done
             if [ -n "${2:-}" ]; then
               mkdir -p "$stage/$(dirname "$2")"

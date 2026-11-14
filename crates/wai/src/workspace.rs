@@ -37,7 +37,7 @@ use crate::app::{
 use crate::aurora;
 use crate::chat::{ChatEvent, ChatSession, DraftView, TurnState, signed_out};
 use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved, TabsChanged, recovery};
-use crate::ext_host::{ExtHost, SessionCall};
+use crate::ext_host::{ExtHost, PanelIcon, SessionCall};
 use crate::ext_panel::ExtPanel;
 use crate::extensions_view::{ExtensionsView, InstallPlugin};
 use crate::files::{FileTree, OpenFile};
@@ -3173,8 +3173,12 @@ impl Workspace {
         let panel = (self.ext_host.read(cx).panels().iter()).find(|p| p.view == *view);
         let title: SharedString = panel.map_or("".into(), |p| p.title.clone().into());
         let ext_name = panel.map_or("".into(), |p| p.ext_name.clone());
-        let mark = match panel.and_then(|p| p.icon) {
-            Some(icon) => Icon::new(icon).size(px(15.)).into_any_element(),
+        let mark = match panel.and_then(|p| p.icon.as_ref()) {
+            Some(PanelIcon::Lucide(icon)) => Icon::new(*icon).size(px(15.)).into_any_element(),
+            Some(PanelIcon::Svg(path)) => svg()
+                .external_path(path.clone())
+                .size(px(15.))
+                .into_any_element(),
             None => div()
                 .text_size(px(9.))
                 .font_weight(FontWeight::EXTRA_BOLD)

@@ -213,7 +213,7 @@ A panel exists while your process runs, and its content is the last tree you ren
   - Closing the pane does not stop your extension, and what the user typed stays: the panel is the same when it opens again.
   - The pane closes when your process stops, fails, crashes or is disabled. Panes are not part of work areas and are not saved between runs.
 
-**`icon`:** a [Lucide](https://lucide.dev/icons) icon name in kebab-case, such as `git-pull-request`, `database` or `rocket`. wai ships the whole Lucide set it bundles; an unknown name falls back to the initials and does not fail the install. The `icon` node and the `icon` fields of nodes take the same names.
+**`icon`:** a [Lucide](https://lucide.dev/icons) icon name in kebab-case, such as `git-pull-request`, `database` or `rocket`. wai ships the whole Lucide set it bundles; an unknown name falls back to the initials and does not fail the install. The `icon` node and the `icon` fields of nodes take the same names. A panel's `icon` may instead be the path of an `.svg` file in your extension's folder (`icons/panel.svg`): a relative path without `..`, at most 32 KB, a regular file (not a symlink). wai draws it as a mask in the activity bar's colours, so its fill colour does not matter, and shows the initials when the file is missing or too big. The shared release workflow packs it.
 
 ### Trees
 

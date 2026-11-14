@@ -13,7 +13,7 @@
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as Lucide;
@@ -50,6 +50,29 @@ impl SessionCall {
 
 impl EventEmitter<SessionCall> for ExtHost {}
 
+/// A panel's icon: a bundled Lucide one, or the extension's own SVG, drawn as a mask.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PanelIcon {
+    Lucide(Lucide),
+    /// The absolute path of the file.
+    Svg(SharedString),
+}
+
+/// The largest SVG icon file read.
+pub(crate) const MAX_SVG_ICON: u64 = 32 * 1024;
+
+/// `spec`'s icon: the extension's `.svg` file when it is a small regular file (no symlink),
+/// else the Lucide icon of that name.
+pub(crate) fn panel_icon(spec: &PanelSpec, ext_dir: &Path) -> Option<PanelIcon> {
+    if let Some(rel) = spec.svg_icon() {
+        let path = ext_dir.join(rel);
+        let meta = std::fs::symlink_metadata(&path).ok()?;
+        let ok = meta.is_file() && meta.len() <= MAX_SVG_ICON;
+        return ok.then(|| PanelIcon::Svg(path.to_string_lossy().into_owned().into()));
+    }
+    spec.icon.as_deref().and_then(lucide).map(PanelIcon::Lucide)
+}
+
 /// A panel an extension contributes: a sidebar tab, or a pane in the main area.
 pub struct Panel {
     ext: ExtId,
@@ -57,8 +80,8 @@ pub struct Panel {
     pub title: String,
     /// The extension's name, shown in the pane's header.
     pub ext_name: SharedString,
-    /// Its Lucide icon, when the name is one; else the rail shows the title's initials.
-    pub icon: Option<Lucide>,
+    /// Its icon, when it has a usable one; else the rail shows the title's initials.
+    pub icon: Option<PanelIcon>,
     /// A main-area pane rather than a sidebar tab.
     pub main: bool,
     pub view: Entity<ExtPanel>,
@@ -361,7 +384,7 @@ impl ExtHost {
             id: spec.id.clone(),
             title: spec.title.clone(),
             ext_name,
-            icon: spec.icon.as_deref().and_then(lucide),
+            icon: panel_icon(spec, &installed.dir),
             main: spec.location == PanelLocation::Main,
             view,
             _actions: actions,
@@ -489,6 +512,7 @@ pub(crate) mod tests {
     use wai_ext::{ExtStore, MANIFEST_FILE, Source, parse_manifest};
     use wai_settings::{AgentConfig, Settings};
 
+    use super::{PanelIcon, panel_icon};
     use crate::chat::{ChatItem, ChatSession, TurnState};
     use crate::workspace::tests::{fake_settings, gated, open, start_now, wait_until};
     use crate::workspace::{Pane, Workspace};
@@ -1605,6 +1629,70 @@ pub(crate) mod tests {
         (workspace, view, cx)
     }
 
+    #[test]
+    fn panel_icon_resolves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let svg = "<svg viewBox=\"0 0 24 24\"><path d=\"M3 3h18v18H3z\"/></svg>";
+        std::fs::write(dir.join("icon.svg"), svg).unwrap();
+        std::fs::write(dir.join("big.svg"), vec![b' '; 33 * 1024]).unwrap();
+        std::fs::write(tmp.path().join("x.svg"), svg).unwrap();
+        std::fs::create_dir(dir.join("ext")).unwrap();
+        let ext = dir.join("ext");
+        std::fs::write(ext.join("icon.svg"), svg).unwrap();
+        std::fs::write(ext.join("big.svg"), vec![b' '; 33 * 1024]).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("x.svg"), ext.join("link.svg")).unwrap();
+        let spec = |icon: &str| {
+            let text = format!(
+                "id = \"a\"\nname = \"A\"\nversion = \"1.0.0\"\npermissions = [\"panels\"]\n\
+                 [[contributes.panels]]\nid = \"p\"\ntitle = \"P\"\nicon = \"{icon}\"\n"
+            );
+            parse_manifest(&text, &ext)
+                .unwrap()
+                .contributes
+                .panels
+                .remove(0)
+        };
+        let got = |icon: &str| panel_icon(&spec(icon), &ext);
+        assert_eq!(
+            got("icon.svg"),
+            Some(PanelIcon::Svg(
+                ext.join("icon.svg").to_string_lossy().into_owned().into()
+            ))
+        );
+        assert!(matches!(got("database"), Some(PanelIcon::Lucide(_))));
+        assert_eq!(got("nope"), None);
+        assert_eq!(got("missing.svg"), None);
+        assert_eq!(got("big.svg"), None);
+        assert_eq!(got("../x.svg"), None);
+        #[cfg(unix)]
+        assert_eq!(got("link.svg"), None);
+    }
+
+    /// A main panel with an SVG icon shows no initials in the rail.
+    #[gpui_kit::test]
+    fn svg_icon_replaces_initials(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = PANELS.replace("git-pull-request", "icon.svg");
+        let dir = install(tmp.path(), &config, &manifest, "--panel", "");
+        std::fs::write(dir.join("icon.svg"), "<svg viewBox=\"0 0 24 24\"/>").unwrap();
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        wait_until(cx, "the panels", |cx| {
+            host.read_with(cx, |h, _| h.panels().len() == 2)
+        });
+        let found = |ix: usize, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.try_find(("panel-initials", ix)).is_some()
+            })
+        };
+        assert!(!found(0, cx), "the SVG panel has no initials");
+        assert!(found(1, cx), "the unknown icon keeps them");
+    }
+
     /// A main panel's rail button opens it as a pane, once: a second click focuses that pane.
     /// It is never a sidebar tab. A known icon replaces the initials; an unknown one leaves them.
     #[gpui_kit::test]
@@ -1617,7 +1705,10 @@ pub(crate) mod tests {
         let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
         let icons = host.read_with(cx, |h, _| {
             (h.panels().iter())
-                .map(|p| p.icon.map(|i| i.path().to_string()))
+                .map(|p| match &p.icon {
+                    Some(PanelIcon::Lucide(i)) => Some(i.path().to_string()),
+                    _ => None,
+                })
                 .collect::<Vec<_>>()
         });
         assert_eq!(icons, [Some("icons/git-pull-request.svg".into()), None]);
