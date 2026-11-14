@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,8 +46,8 @@ func installPlugin(ctx context.Context) error {
 }
 
 // updatePluginDaily refreshes the marketplace and the plugin at most once a day. Nothing runs when
-// the plugin is not installed. The time is written even when the update fails, so a broken network
-// does not retry at every start.
+// the plugin is not installed. The time is written only after a successful update, so a failed or
+// cancelled one is tried again at the next start.
 func updatePluginDaily(ctx context.Context, dataDir string, now time.Time) error {
 	stamp := filepath.Join(dataDir, "plugin-updated")
 	if b, err := os.ReadFile(stamp); err == nil {
@@ -63,6 +64,11 @@ func updatePluginDaily(ctx context.Context, dataDir string, now time.Time) error
 	if err == nil {
 		_, err = runCLI(ctx, "claude", "plugin", "update", id)
 	}
-	os.WriteFile(stamp, []byte(now.Format(time.RFC3339)), 0o644)
-	return err
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(stamp, []byte(now.Format(time.RFC3339)), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "wai-waycarbon: plugin update stamp:", err)
+	}
+	return nil
 }

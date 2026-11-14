@@ -103,7 +103,7 @@ func TestUpdateSkippedWithoutPlugin(t *testing.T) {
 	}
 }
 
-func TestUpdateFailureStillRecordsTime(t *testing.T) {
+func TestUpdateFailureLeavesNoStamp(t *testing.T) {
 	fakeCLI(t, "claude", `[ "$2" = list ] && { echo '[{"id":"waycarbon@m"}]'; exit 0; }
 echo "network down" >&2; exit 1
 `)
@@ -112,7 +112,7 @@ echo "network down" >&2; exit 1
 	if err == nil || !strings.Contains(err.Error(), "network down") {
 		t.Fatalf("want the stderr line, got %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "plugin-updated")); err != nil {
-		t.Error("the time must be written on failure")
+	if _, err := os.Stat(filepath.Join(dir, "plugin-updated")); err == nil {
+		t.Error("a failed update must not be stamped, the next start tries again")
 	}
 }
