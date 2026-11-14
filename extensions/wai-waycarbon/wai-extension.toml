@@ -1,18 +1,26 @@
 id = "wai-waycarbon"
 name = "WayCarbon"
-version = "0.1.0"
-description = "WayCarbon conventions, session templates and a Jira \"My cards\" panel"
-permissions = ["process", "panels", "sessions:control"]
+version = "0.2.0"
+api = "1.5"
+description = "What needs you at WayCarbon: PRs, reviews, Jira cards and help requests, one click from the right /waycarbon command"
+permissions = ["process", "panels", "bar", "sessions:control", "sessions:read", "notify", "network"]
 
 [process]
 command = "bin/wai-waycarbon"
 
-[contributes]
-claude_plugins = ["beehive-waycarbon"]
+[[requires.claude_plugins]]
+name = "waycarbon"
+marketplace = "waycarbon/claude-code"
 
 [[contributes.panels]]
-id = "cards"
-title = "My cards"
+id = "waycarbon"
+title = "WayCarbon"
+icon = "icon.svg"
+
+[[contributes.items]]
+id = "attention"
+bar = "bottom"
+title = "WayCarbon: needs you"
 
 [[contributes.templates]]
 name = "WayCarbon front"

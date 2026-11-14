@@ -1,5 +1,5 @@
 //! The `extensions/wai-waycarbon` extension (Go), end to end: built, installed from its folder
-//! with consent, started with a fake `jira` on its PATH.
+//! with consent, started with fake `jira`, `gh` and `claude` on its PATH.
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
@@ -22,6 +22,15 @@ case "$*" in
 esac
 "#;
 
+/// Answers `plugin list --json` as installed and everything else with success: no test reaches the
+/// real `claude`.
+const FAKE_CLAUDE: &str = r#"#!/bin/sh
+[ "$1 $2" = "plugin list" ] && echo '[{"id":"waycarbon@waycarbon"}]'
+exit 0
+"#;
+
+const FAKE_GH: &str = "#!/bin/sh\nexit 0\n";
+
 fn executable(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, text).unwrap();
@@ -33,8 +42,27 @@ fn build(tmp: &Path) -> Option<std::path::PathBuf> {
     let from = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions/wai-waycarbon");
     let src = tmp.join("src");
     std::fs::create_dir_all(&src).unwrap();
-    for file in [MANIFEST_FILE, "go.mod", "main.go", "jira.go"] {
-        std::fs::copy(from.join(file), src.join(file)).unwrap();
+    let mut files = vec![
+        MANIFEST_FILE.to_string(),
+        "go.mod".into(),
+        "icon.svg".into(),
+    ];
+    for entry in std::fs::read_dir(&from).unwrap().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".go") && !name.ends_with("_test.go") {
+            files.push(name);
+        }
+    }
+    for entry in std::fs::read_dir(from.join("helpapi")).unwrap().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".go") && !name.ends_with("_test.go") {
+            files.push(format!("helpapi/{name}"));
+        }
+    }
+    for file in files {
+        let to = src.join(&file);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(from.join(&file), to).unwrap();
     }
     let built = Command::new("go")
         .args(["build", "-o", "bin/wai-waycarbon-real", "."])
@@ -44,9 +72,11 @@ fn build(tmp: &Path) -> Option<std::path::PathBuf> {
         eprintln!("SKIPPED: `go build` is unavailable, so wai-waycarbon cannot be built");
         return None;
     }
-    // The extension is started from wai's environment: a wrapper puts the fake jira first.
+    // The extension is started from wai's environment: a wrapper puts the fakes first.
     let fake = tmp.join("fake-bin");
     executable(&fake.join("jira"), FAKE_JIRA);
+    executable(&fake.join("gh"), FAKE_GH);
+    executable(&fake.join("claude"), FAKE_CLAUDE);
     let wrapper = format!(
         "#!/bin/sh\nPATH='{}':\"$PATH\" exec \"$(dirname \"$0\")/wai-waycarbon-real\"\n",
         fake.display()
@@ -73,7 +103,7 @@ fn my_cards_panel_renders_and_click_prefills(cx: &mut TestAppContext) {
     });
     let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
     let panel = host.read_with(cx, |h, _| h.panels().first().map(|p| p.view.clone()));
-    let panel = panel.expect("a tab for the My cards panel");
+    let panel = panel.expect("a tab for the WayCarbon panel");
     let titles = |cx: &mut gpui_kit::VisualTestContext| {
         let tree = panel.read_with(cx, |p, _| p.tree.clone());
         let mut titles = Vec::new();

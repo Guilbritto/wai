@@ -11,14 +11,17 @@ import (
 	"time"
 )
 
-// fakeJira puts a `jira` script on PATH that only answers the exact argv the extension must use.
+// fakeJira puts a `jira` script first on PATH that only answers the exact argv the extension must use.
 func fakeJira(t *testing.T, script string) {
 	t.Helper()
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "jira"), []byte("#!/bin/sh\n"+script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir)
+	fakeCLI(t, "jira", script)
+}
+
+// fakeTools puts a harmless `claude` (plugin installed) first on PATH: initialize starts the plugin
+// check and the daily update, and no test may reach the real CLI.
+func fakeTools(t *testing.T) {
+	t.Helper()
+	fakeClaude(t)
 }
 
 const happyJira = happyJiraBody
@@ -63,10 +66,10 @@ func TestPromptStripsControlCharacters(t *testing.T) {
 	}
 }
 
-// rpc runs the server on in-memory pipes; send writes a message, recv reads the next one.
+// rpc runs the server on in-memory pipes; a goroutine drains its output so no write blocks.
 type rpc struct {
 	send func(string)
-	recv func() map[string]any
+	msgs chan map[string]any
 	done chan struct{}
 	in   *io.PipeWriter
 }
@@ -75,55 +78,86 @@ func start(t *testing.T) *rpc {
 	t.Helper()
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	r := &rpc{done: make(chan struct{}), in: inW}
+	r := &rpc{done: make(chan struct{}), in: inW, msgs: make(chan map[string]any, 1000)}
 	go func() {
 		run(inR, outW)
 		outW.Close()
 		close(r.done)
 	}()
-	br := bufio.NewReader(outR)
+	go func() {
+		br := bufio.NewReader(outR)
+		for {
+			line, err := br.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+			var m map[string]any
+			if json.Unmarshal(line, &m) == nil {
+				r.msgs <- m
+			}
+		}
+	}()
 	r.send = func(s string) { io.WriteString(inW, s+"\n") }
-	r.recv = func() map[string]any {
-		line, err := br.ReadBytes('\n')
-		if err != nil {
-			t.Fatalf("read: %v", err)
-		}
-		var m map[string]any
-		if err := json.Unmarshal(line, &m); err != nil {
-			t.Fatalf("bad json %q: %v", line, err)
-		}
-		return m
-	}
 	t.Cleanup(func() { inW.Close(); <-r.done })
 	return r
 }
 
+// until discards messages up to the first one that satisfies ok, and returns it.
+func (r *rpc) until(t *testing.T, ok func(map[string]any) bool) map[string]any {
+	t.Helper()
+	timeout := time.After(10 * time.Second)
+	for {
+		select {
+		case m := <-r.msgs:
+			if ok(m) {
+				return m
+			}
+		case <-timeout:
+			t.Fatal("timed out waiting for a message")
+		}
+	}
+}
+
+func (r *rpc) reply(t *testing.T, id float64) map[string]any {
+	t.Helper()
+	return r.until(t, func(m map[string]any) bool { return m["id"] == id && m["method"] == nil })
+}
+
 func (r *rpc) initialize(t *testing.T) {
-	r.send(`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocol":1,"ext_dir":"/x"}}`)
-	if m := r.recv(); m["id"] != float64(0) || m["result"] == nil {
+	t.Helper()
+	fakeTools(t)
+	r.send(`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocol":1,"ext_dir":"/x","data_dir":"` + t.TempDir() + `","project":""}}`)
+	if m := r.reply(t, 0); m["result"] == nil {
 		t.Fatalf("initialize reply: %v", m)
 	}
 }
 
-// cards reads the Loading tree, then the cards tree that follows it.
-func (r *rpc) cards(t *testing.T) map[string]any {
+// render is a panel/render of the panel; it returns its tree.
+func render(t *testing.T, m map[string]any) map[string]any {
 	t.Helper()
-	if txt := textOf(tree(t, r.recv())); txt != "Loading…" {
-		t.Fatalf("want the Loading tree first, got %q", txt)
-	}
-	return tree(t, r.recv())
-}
-
-func tree(t *testing.T, m map[string]any) map[string]any {
-	t.Helper()
-	if m["method"] != "panel/render" {
-		t.Fatalf("want panel/render, got %v", m)
-	}
 	p := m["params"].(map[string]any)
-	if p["panel"] != "cards" {
+	if p["panel"] != "waycarbon" {
 		t.Fatalf("panel: %v", p["panel"])
 	}
 	return p["tree"].(map[string]any)
+}
+
+// work returns the Work tab's children as a column, once the cards are no longer loading.
+func (r *rpc) cards(t *testing.T) map[string]any {
+	t.Helper()
+	m := r.until(t, func(m map[string]any) bool {
+		if m["method"] != "panel/render" {
+			return false
+		}
+		return !strings.Contains(textOf(render(t, m)), "Loading…")
+	})
+	return workTab(t, render(t, m))
+}
+
+func workTab(t *testing.T, root map[string]any) map[string]any {
+	t.Helper()
+	tabs := find(root, "tabs")["tabs"].([]any)
+	return map[string]any{"type": "column", "children": tabs[0].(map[string]any)["children"]}
 }
 
 // find returns the first node of the type, depth first.
@@ -131,10 +165,12 @@ func find(n map[string]any, typ string) map[string]any {
 	if n["type"] == typ {
 		return n
 	}
-	kids, _ := n["children"].([]any)
-	for _, k := range kids {
-		if f := find(k.(map[string]any), typ); f != nil {
-			return f
+	for _, key := range []string{"children", "tabs"} {
+		kids, _ := n[key].([]any)
+		for _, k := range kids {
+			if f := find(k.(map[string]any), typ); f != nil {
+				return f
+			}
 		}
 	}
 	return nil
@@ -165,18 +201,10 @@ func TestCardClickOpensSession(t *testing.T) {
 	r.initialize(t)
 	r.cards(t)
 
-	r.send(`{"jsonrpc":"2.0","id":7,"method":"panel/action","params":{"panel":"cards","action_id":"EC-2","values":{}}}`)
-	// The host's request gets its answer, and the session is opened pre-filled.
-	var open, ack map[string]any
-	for i := 0; i < 2; i++ {
-		m := r.recv()
-		if m["method"] == "sessions/open" {
-			open = m
-		} else {
-			ack = m
-		}
-	}
-	if ack["id"] != float64(7) {
+	r.send(`{"jsonrpc":"2.0","id":7,"method":"panel/action","params":{"panel":"waycarbon","action_id":"EC-2","values":{}}}`)
+	ack := r.reply(t, 7)
+	open := r.until(t, func(m map[string]any) bool { return m["method"] == "sessions/open" })
+	if ack["error"] != nil {
 		t.Errorf("panel/action not answered: %v", ack)
 	}
 	p := open["params"].(map[string]any)
@@ -190,17 +218,15 @@ func TestRefreshAndUnknownMethod(t *testing.T) {
 	r := start(t)
 	r.initialize(t)
 	r.cards(t)
-	r.send(`{"jsonrpc":"2.0","id":3,"method":"panel/action","params":{"panel":"cards","action_id":"refresh","values":{}}}`)
-	if m := r.recv(); m["id"] != float64(3) {
-		t.Errorf("refresh not answered first: %v", m)
-	}
+	r.send(`{"jsonrpc":"2.0","id":3,"method":"panel/action","params":{"panel":"waycarbon","action_id":"refresh","values":{}}}`)
+	r.reply(t, 3)
 	if find(r.cards(t), "list") == nil {
 		t.Error("refresh must render the cards")
 	}
 	// A request gets -32601; a notification stays silent (the next answer is for id 5).
 	r.send(`{"jsonrpc":"2.0","method":"event/file_saved","params":{}}`)
 	r.send(`{"jsonrpc":"2.0","id":4,"method":"nope/nothing","params":{}}`)
-	m := r.recv()
+	m := r.reply(t, 4)
 	e, _ := m["error"].(map[string]any)
 	if m["id"] != float64(4) || e == nil || e["code"] != float64(-32601) {
 		t.Errorf("want Method not found for id 4, got %v", m)
@@ -211,33 +237,38 @@ func TestRefreshAndUnknownMethod(t *testing.T) {
 func TestSlowJiraDoesNotBlock(t *testing.T) {
 	release := filepath.Join(t.TempDir(), "release")
 	t.Cleanup(func() { os.WriteFile(release, nil, 0o644) })
-	dir := t.TempDir()
-	script := "#!/bin/sh\nwhile [ ! -f '" + release + "' ]; do sleep 0.05; done\n" + happyJiraBody
-	if err := os.WriteFile(filepath.Join(dir, "jira"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+":/bin:/usr/bin")
+	fakeJira(t, "while [ ! -f '"+release+"' ]; do sleep 0.05; done\n"+happyJiraBody)
 	r := start(t)
 	r.initialize(t)
-	if txt := textOf(tree(t, r.recv())); txt != "Loading…" {
-		t.Fatalf("want Loading, got %q", txt)
+	loading := func(m map[string]any) bool {
+		return m["method"] == "panel/render" && strings.Contains(textOf(render(t, m)), "Loading…")
 	}
-	r.send(`{"jsonrpc":"2.0","id":8,"method":"panel/action","params":{"panel":"cards","action_id":"EC-1","values":{}}}`)
-	if m := r.recv(); m["id"] != float64(8) {
-		t.Fatalf("action not answered while jira runs: %v", m)
+	r.until(t, loading)
+	r.send(`{"jsonrpc":"2.0","id":8,"method":"panel/action","params":{"panel":"waycarbon","action_id":"EC-1","values":{}}}`)
+	r.reply(t, 8) // answered while jira runs
+	r.send(`{"jsonrpc":"2.0","id":9,"method":"panel/action","params":{"panel":"waycarbon","action_id":"refresh","values":{}}}`)
+	r.reply(t, 9)
+	r.until(t, loading)                // the newer refresh
+	time.Sleep(500 * time.Millisecond) // the plugin check repaints meanwhile; let it settle
+	for len(r.msgs) > 0 {
+		<-r.msgs
 	}
-	r.send(`{"jsonrpc":"2.0","id":9,"method":"panel/action","params":{"panel":"cards","action_id":"refresh","values":{}}}`)
-	r.recv() // ack 9
-	r.recv() // Loading of the newer refresh
 	os.WriteFile(release, nil, 0o644)
-	if find(tree(t, r.recv()), "list") == nil {
-		t.Error("want the cards once jira finishes")
+	hasList := func(m map[string]any) bool {
+		return m["method"] == "panel/render" && find(render(t, m), "list") != nil
 	}
-	// The first render's result is stale: nothing is painted before the next reply.
+	r.until(t, hasList)
+	// The first refresh's result is stale: no second render with the cards follows.
 	time.Sleep(300 * time.Millisecond)
-	r.send(`{"jsonrpc":"2.0","id":10,"method":"probe","params":{}}`)
-	if m := r.recv(); m["id"] != float64(10) {
-		t.Errorf("a stale result was painted: %v", m)
+	for {
+		select {
+		case m := <-r.msgs:
+			if hasList(m) {
+				t.Fatalf("a stale result was painted: %v", m)
+			}
+		default:
+			return
+		}
 	}
 }
 
@@ -272,9 +303,71 @@ echo "boom" >&2; exit 1
 
 func textOf(n map[string]any) string {
 	s, _ := n["text"].(string)
-	kids, _ := n["children"].([]any)
-	for _, k := range kids {
-		s += " " + textOf(k.(map[string]any))
+	for _, key := range []string{"children", "tabs"} {
+		kids, _ := n[key].([]any)
+		for _, k := range kids {
+			s += " " + textOf(k.(map[string]any))
+		}
 	}
 	return s
+}
+
+func TestInitializeRendersTabs(t *testing.T) {
+	fakeJira(t, happyJira)
+	r := start(t)
+	r.initialize(t)
+	m := r.until(t, func(m map[string]any) bool { return m["method"] == "panel/render" })
+	root := render(t, m)
+	kids := root["children"].([]any)
+	tabs := kids[0].(map[string]any)
+	if root["type"] != "column" || tabs["type"] != "tabs" {
+		t.Fatalf("want column > tabs, got %v", root)
+	}
+	var ids []string
+	for _, tb := range tabs["tabs"].([]any) {
+		ids = append(ids, tb.(map[string]any)["id"].(string))
+	}
+	if strings.Join(ids, ",") != "work,help" {
+		t.Errorf("tab ids: %v", ids)
+	}
+}
+
+func TestBarItemOpensPanel(t *testing.T) {
+	fakeJira(t, happyJira)
+	r := start(t)
+	r.initialize(t)
+	r.send(`{"jsonrpc":"2.0","id":5,"method":"item/action","params":{"item":"attention"}}`)
+	m := r.until(t, func(m map[string]any) bool { return m["method"] == "panel/open" })
+	if p := m["params"].(map[string]any); p["panel"] != "waycarbon" || len(p) != 1 {
+		t.Errorf("params: %v", p)
+	}
+}
+
+func TestPluginMissingOffersInstall(t *testing.T) {
+	fakeJira(t, happyJira)
+	r := start(t)
+	fakeCLI(t, "claude", `echo '[]'`)
+	r.send(`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"data_dir":"` + t.TempDir() + `"}}`)
+	m := r.until(t, func(m map[string]any) bool {
+		return m["method"] == "panel/render" && strings.Contains(textOf(render(t, m)), "The WayCarbon Claude plugin is not installed, so the /waycarbon commands will not work.")
+	})
+	found := false
+	var walk func(n map[string]any)
+	walk = func(n map[string]any) {
+		if n["type"] == "button" && n["id"] == "plugin:install" {
+			found = true
+		}
+		kids, _ := n["children"].([]any)
+		for _, k := range kids {
+			walk(k.(map[string]any))
+		}
+		tabs, _ := n["tabs"].([]any)
+		for _, tb := range tabs {
+			walk(tb.(map[string]any))
+		}
+	}
+	walk(render(t, m))
+	if !found {
+		t.Error("want an Install plugin button")
+	}
 }

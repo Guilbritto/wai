@@ -1,24 +1,14 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"os/exec"
 	"regexp"
 	"strings"
-	"time"
 )
 
 // Card is one row of `jira issue list --plain`.
 type Card struct{ Key, Summary, Status string }
-
-const jiraTimeout = 30 * time.Second
-
-// Problem is something the user can fix; it is shown in the panel as is.
-type Problem string
-
-func (p Problem) Error() string { return string(p) }
 
 var keyRe = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[0-9]+$`)
 
@@ -44,36 +34,15 @@ func parseCards(out string) []Card {
 	return cards
 }
 
-// errSilent: the CLI failed without saying why on stderr.
-var errSilent = errors.New("jira failed without a message")
-
-// jira runs the user's own CLI with argv only (never a shell); it holds the credentials, we never see them.
+// jira runs the user's own CLI; it holds the credentials, we never see them.
 func jira(args ...string) (string, error) {
-	path, err := exec.LookPath("jira")
-	if err != nil {
+	out, err := runCLI(context.Background(), "jira", args...)
+	var nf ErrNotFound
+	if errors.As(err, &nf) {
 		return "", Problem("jira CLI not found — install it and run jira init")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), jiraTimeout)
-	defer cancel()
-	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, path, args...)
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	// A grandchild holding the pipes cannot hang Run after the timeout kills jira.
-	cmd.WaitDelay = 2 * time.Second
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return "", Problem("jira timed out")
-		}
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			return "", errSilent
-		}
-		return "", errors.New(firstLine(msg))
-	}
-	return stdout.String(), nil
+	return out, err
 }
-
-func firstLine(s string) string { return strings.SplitN(s, "\n", 2)[0] }
 
 // myCards is R45: `jira me` first, then the open cards assigned to that user.
 func myCards() ([]Card, error) {
