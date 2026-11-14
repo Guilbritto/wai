@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 )
@@ -27,12 +28,12 @@ type message struct {
 type node = map[string]any
 
 type server struct {
-	wmu sync.Mutex // serialises writes
-	out io.Writer
+	nextID atomic.Int64 // request ids; no lock needed
+	wmu    sync.Mutex   // serialises writes
+	out    io.Writer
 
 	smu      sync.Mutex // guards the rest
-	nextID   int
-	gen      int // the latest render; an older result is stale
+	gen      int        // the latest render; an older result is stale
 	cards    map[string]Card
 	cardList []Card
 	cardsErr error
@@ -61,12 +62,9 @@ func (s *server) write(v any) {
 	fmt.Fprintf(s.out, "%s\n", b)
 }
 
-// call sends a request; the caller must not hold smu.
+// call sends a request; safe with or without smu held.
 func (s *server) call(method string, params any) {
-	s.smu.Lock()
-	s.nextID++
-	id := s.nextID
-	s.smu.Unlock()
+	id := s.nextID.Add(1)
 	s.write(node{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 }
 

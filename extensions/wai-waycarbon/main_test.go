@@ -239,7 +239,10 @@ func TestSlowJiraDoesNotBlock(t *testing.T) {
 	t.Cleanup(func() { os.WriteFile(release, nil, 0o644) })
 	fakeJira(t, "while [ ! -f '"+release+"' ]; do sleep 0.05; done\n"+happyJiraBody)
 	r := start(t)
-	r.initialize(t)
+	// A missing plugin gives an unmistakable repaint, so the test knows the plugin check is done.
+	fakeCLI(t, "claude", `echo '[]'`)
+	r.send(`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"data_dir":"` + t.TempDir() + `"}}`)
+	r.reply(t, 0)
 	loading := func(m map[string]any) bool {
 		return m["method"] == "panel/render" && strings.Contains(textOf(render(t, m)), "Loading…")
 	}
@@ -371,3 +374,110 @@ func TestPluginMissingOffersInstall(t *testing.T) {
 		t.Error("want an Install plugin button")
 	}
 }
+
+func TestBarItemFollowsCounts(t *testing.T) {
+	fakeJira(t, happyJira)
+	r := start(t)
+	r.initialize(t)
+	// The server is internal to run(); drive the real paint path through a second instance.
+	var out strings.Builder
+	s := &server{out: &out, lastBar: jsonString(node{"item": "attention"})}
+	s.smu.Lock()
+	s.counts = counts{NeedsYou: 2, Help: 1}
+	s.paintAll() // must not deadlock on smu
+	s.smu.Unlock()
+	var bar map[string]any
+	for _, l := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		var m map[string]any
+		json.Unmarshal([]byte(l), &m)
+		if m["method"] == "item/update" {
+			bar = m["params"].(map[string]any)
+		}
+	}
+	if bar["item"] != "attention" || bar["text"] != "3" || bar["icon"] != "bell" || bar["tone"] != "warning" {
+		t.Fatalf("bar: %v", bar)
+	}
+	items := bar["card"].(map[string]any)["items"].([]any)
+	if len(items) != 2 || items[0].(map[string]any)["key"] != "Needs you" || items[1].(map[string]any)["key"] != "Help requests" {
+		t.Errorf("card: %v", items)
+	}
+	out.Reset()
+	s.smu.Lock()
+	s.counts = counts{}
+	s.paintAll()
+	s.smu.Unlock()
+	for _, l := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+		var m map[string]any
+		json.Unmarshal([]byte(l), &m)
+		if m["method"] == "item/update" {
+			if p := m["params"].(map[string]any); len(p) != 1 || p["item"] != "attention" {
+				t.Errorf("hidden bar must be only the item: %v", p)
+			}
+			return
+		}
+	}
+	t.Error("no item/update when the count returned to 0")
+}
+
+func TestPluginInstallClick(t *testing.T) {
+	fakeJira(t, happyJira)
+	dir := t.TempDir()
+	log, release := filepath.Join(dir, "log"), filepath.Join(dir, "release")
+	t.Cleanup(func() { os.WriteFile(release, nil, 0o644) })
+	fakeCLI(t, "claude", `case "$1 $2" in
+  "plugin list") echo '[]' ;;
+  "plugin install")
+    echo install >> '`+log+`'
+    while [ ! -f '`+release+`' ]; do sleep 0.02; done
+    echo "noise" >&2; echo "marketplace unreachable" >&2; exit 1 ;;
+esac
+exit 0
+`)
+	r := start(t)
+	r.send(`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"data_dir":"` + t.TempDir() + `"}}`)
+	r.reply(t, 0)
+	has := func(text string) func(map[string]any) bool {
+		return func(m map[string]any) bool {
+			return m["method"] == "panel/render" && strings.Contains(textOf(render(t, m)), text)
+		}
+	}
+	r.until(t, has("is not installed"))
+	click := `{"jsonrpc":"2.0","id":1,"method":"panel/action","params":{"panel":"waycarbon","action_id":"plugin:install","values":{}}}`
+	r.send(click)
+	m := r.until(t, func(m map[string]any) bool {
+		return m["method"] == "panel/render" && find(render(t, m), "spinner") != nil
+	})
+	if find(render(t, m), "button") != nil && find(find(render(t, m), "button"), "button")["id"] == "plugin:install" {
+		t.Error("the install button must give way to the spinner")
+	}
+	r.send(strings.Replace(click, `"id":1`, `"id":2`, 1)) // lands while the first install runs
+	r.reply(t, 2)
+	os.WriteFile(release, nil, 0o644)
+	m = r.until(t, has("marketplace unreachable"))
+	root := render(t, m)
+	if find(root, "spinner") != nil {
+		t.Error("spinner must be gone after the failure")
+	}
+	var btn bool
+	var walk func(n map[string]any)
+	walk = func(n map[string]any) {
+		if n["id"] == "plugin:install" {
+			btn = true
+		}
+		for _, key := range []string{"children", "tabs"} {
+			kids, _ := n[key].([]any)
+			for _, k := range kids {
+				walk(k.(map[string]any))
+			}
+		}
+	}
+	walk(root)
+	if !btn {
+		t.Error("the Install plugin button must come back")
+	}
+	if got := strings.Count(string(mustRead(log)), "install"); got != 1 {
+		t.Errorf("install ran %d times, want 1", got)
+	}
+}
+
+func mustRead(p string) []byte { b, _ := os.ReadFile(p); return b }
