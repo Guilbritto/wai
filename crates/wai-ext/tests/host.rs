@@ -23,6 +23,7 @@ fn installed(dir: &Path, args: &[&str], granted: Vec<Permission>) -> Installed {
         name: "Fake".into(),
         version: "1.0.0".into(),
         description: None,
+        requires: Requires::default(),
         contributes: Contributes {
             panels: vec![PanelSpec {
                 id: "main".into(),
@@ -121,7 +122,7 @@ fn initialize_roundtrip() {
             init["params"],
             json!({
                 "protocol": 1,
-                "api": "1.4",
+                "api": "1.5",
                 "wai_version": env!("CARGO_PKG_VERSION"),
                 "ext_id": "fake",
                 "granted": ["process", "notify", "panels"],

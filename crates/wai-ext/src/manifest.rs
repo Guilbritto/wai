@@ -36,6 +36,21 @@ pub struct Manifest {
     pub contributes: Contributes,
     pub process: Option<ProcessSpec>,
     pub permissions: Vec<Permission>,
+    pub requires: Requires,
+}
+
+/// Claude Code plugins the extension needs, installed on consent.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Requires {
+    pub claude_plugins: Vec<RequiredPlugin>,
+}
+
+/// `name` is a bare plugin name; `marketplace` is `owner/repo` or an `https://` URL.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequiredPlugin {
+    pub name: String,
+    pub marketplace: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -78,11 +93,36 @@ pub struct McpServerSpec {
 
 /// The extension API this wai speaks: `initialize` sends it, and a manifest's `api` may not be
 /// newer.
-pub const API: &str = "1.4";
+pub const API: &str = "1.5";
 
 pub const MAX_ITEMS: usize = 3;
 
-/// `icon`: a Lucide name; one wai does not have falls back to the title's initials.
+pub const MAX_REQUIRED_PLUGINS: usize = 5;
+
+/// `[A-Za-z0-9._-]`, 1-214 chars, no leading `-`.
+pub fn plugin_name_ok(name: &str) -> bool {
+    (1..=214).contains(&name.len()) && !name.starts_with('-') && name.bytes().all(repo_byte)
+}
+
+/// `owner/repo`, or `https://` followed by a URL without whitespace or control characters.
+pub fn marketplace_ok(source: &str) -> bool {
+    if let Some(rest) = source.strip_prefix("https://") {
+        return !rest.is_empty()
+            && source.len() <= 2048
+            && !source.chars().any(|c| c.is_whitespace() || c.is_control());
+    }
+    let part = |s: &str| !s.is_empty() && !s.starts_with('-') && s.bytes().all(repo_byte);
+    source
+        .split_once('/')
+        .is_some_and(|(o, r)| part(o) && part(r))
+}
+
+fn repo_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')
+}
+
+/// `icon`: a Lucide name (one wai does not have falls back to the title's initials), or a
+/// relative path to an `.svg` inside the extension.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PanelSpec {
@@ -92,6 +132,13 @@ pub struct PanelSpec {
     pub icon: Option<String>,
     #[serde(default)]
     pub location: PanelLocation,
+}
+
+impl PanelSpec {
+    pub fn svg_icon(&self) -> Option<&Path> {
+        let icon = self.icon.as_deref()?;
+        (icon.ends_with(".svg") && relative_inside(icon)).then(|| Path::new(icon))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -189,6 +236,15 @@ struct RawManifest {
     process: Option<ProcessSpec>,
     #[serde(default)]
     contributes: RawContributes,
+    #[serde(default)]
+    requires: RawRequires,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawRequires {
+    #[serde(default)]
+    claude_plugins: Vec<RequiredPlugin>,
 }
 
 #[derive(Deserialize, Default)]
@@ -344,6 +400,20 @@ pub fn parse_manifest(text: &str, _ext_dir: &Path) -> Result<Manifest, ManifestE
         need(Permission::Process)?;
         check_command(&p.command)?;
     }
+    if raw.requires.claude_plugins.len() > MAX_REQUIRED_PLUGINS {
+        return Err(ManifestError::Unknown(format!(
+            "at most {MAX_REQUIRED_PLUGINS} required Claude plugins, found {}",
+            raw.requires.claude_plugins.len()
+        )));
+    }
+    for p in &raw.requires.claude_plugins {
+        if !plugin_name_ok(&p.name) || !marketplace_ok(&p.marketplace) {
+            return Err(ManifestError::Unknown(format!(
+                "invalid required Claude plugin {} from {}",
+                p.name, p.marketplace
+            )));
+        }
+    }
     let c = raw.contributes;
     if !c.panels.is_empty() {
         need(Permission::Panels)?;
@@ -390,6 +460,9 @@ pub fn parse_manifest(text: &str, _ext_dir: &Path) -> Result<Manifest, ManifestE
         description: raw.description,
         process: raw.process,
         permissions,
+        requires: Requires {
+            claude_plugins: raw.requires.claude_plugins,
+        },
         contributes: Contributes {
             templates: c
                 .templates

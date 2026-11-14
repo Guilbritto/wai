@@ -30,6 +30,13 @@ fn parses_full_manifest() {
     assert_eq!(c.panels[0].id, "main");
     assert_eq!(c.claude_plugins, ["plug-a"]);
     assert_eq!(c.themes, ["themes/dark.json"]);
+    assert_eq!(
+        m.requires.claude_plugins,
+        [RequiredPlugin {
+            name: "plug-b".into(),
+            marketplace: "acme/plugins".into()
+        }]
+    );
 }
 
 fn with(id: &str, command: &str, perms: &str) -> String {
@@ -227,17 +234,18 @@ fn api_version_is_checked_first() {
     assert!(with_api("\"0.9\"", "").is_ok());
     assert!(with_api(&format!("\"{API}\""), "").is_ok());
     assert!(with_api("\"1.4\"", "").is_ok());
-    let newer = with_api("\"1.5\"", "").unwrap_err();
+    assert!(with_api("\"1.5\"", "").is_ok());
+    let newer = with_api("\"1.6\"", "").unwrap_err();
     assert_eq!(
         newer.to_string(),
-        "Go Tools needs a newer wai (extension API 1.5; this wai has 1.4)"
+        "Go Tools needs a newer wai (extension API 1.6; this wai has 1.5)"
     );
     // Even when the newer API's fields would fail the strict parse.
     assert_eq!(
         with_api("\"2.0\"", "\nfuture = true\n")
             .unwrap_err()
             .to_string(),
-        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.4)"
+        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.5)"
     );
     // Numeric, not lexical: 1.10 is newer than 1.2.
     assert!(matches!(
@@ -329,4 +337,66 @@ fn item_bar_is_top_or_bottom() {
             Err(ManifestError::Parse(_))
         ));
     }
+}
+
+#[test]
+fn required_plugins_parse() {
+    let m = parse(&format!(
+        "{}\n[[requires.claude_plugins]]\nname = \"waycarbon\"\nmarketplace = \"waycarbon/claude-code\"\n",
+        with("x", "bin/x", "\"process\"")
+    ))
+    .unwrap();
+    assert_eq!(
+        m.requires.claude_plugins,
+        [RequiredPlugin {
+            name: "waycarbon".into(),
+            marketplace: "waycarbon/claude-code".into()
+        }]
+    );
+}
+
+#[test]
+fn required_plugins_are_checked() {
+    let head = "id = \"x\"\nname = \"X\"\nversion = \"1\"\n";
+    for (name, market) in [
+        ("-x", "a/b"),
+        ("a b", "a/b"),
+        ("a@b", "a/b"),
+        ("ok", "-a/b"),
+        ("ok", "a"),
+        ("ok", "http://x/y"),
+        ("ok", "https://x/ y"),
+    ] {
+        let toml = format!(
+            "{head}[[requires.claude_plugins]]\nname = {name:?}\nmarketplace = {market:?}\n"
+        );
+        assert_eq!(
+            parse(&toml).unwrap_err().to_string(),
+            format!("invalid required Claude plugin {name} from {market}"),
+            "{name} {market}"
+        );
+    }
+    let entry = "[[requires.claude_plugins]]\nname = \"p\"\nmarketplace = \"a/b\"\n";
+    assert!(parse(&format!("{head}{}", entry.repeat(5))).is_ok());
+    assert!(parse(&format!("{head}{}", entry.repeat(6))).is_err());
+    assert!(parse(&format!("{head}[requires]\nother = 1\n")).is_err());
+    assert!(parse(&format!("{head}{entry}extra = 1\n")).is_err());
+}
+
+#[test]
+fn svg_icon_paths() {
+    let spec = |icon: &str| PanelSpec {
+        id: "p".into(),
+        title: "P".into(),
+        icon: Some(icon.into()),
+        location: Default::default(),
+    };
+    assert_eq!(spec("icon.svg").svg_icon(), Some(Path::new("icon.svg")));
+    assert_eq!(
+        spec("assets/w.svg").svg_icon(),
+        Some(Path::new("assets/w.svg"))
+    );
+    assert_eq!(spec("../w.svg").svg_icon(), None);
+    assert_eq!(spec("/tmp/w.svg").svg_icon(), None);
+    assert_eq!(spec("database").svg_icon(), None);
 }

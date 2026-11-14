@@ -38,3 +38,7 @@ env = { TOKEN = "x" }
 [[contributes.panels]]
 id = "main"
 title = "Main"
+
+[[requires.claude_plugins]]
+name = "plug-b"
+marketplace = "acme/plugins"
