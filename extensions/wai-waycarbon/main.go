@@ -36,6 +36,7 @@ type server struct {
 	work       Work
 	wst        WorkState
 	refreshing bool
+	again      bool      // a refresh was asked mid-refresh: run once more
 	signCmd    *exec.Cmd // the running gh login
 	signKilled bool
 
@@ -69,10 +70,11 @@ func (s *server) call(method string, params any) {
 }
 
 // refreshWork loads GitHub and Jira in parallel, off the caller. One refresh at a time: a request
-// while one runs is dropped.
+// while one runs makes it run once more when it ends.
 func (s *server) refreshWork() {
 	s.smu.Lock()
 	if s.refreshing {
+		s.again = true
 		s.smu.Unlock()
 		return
 	}
@@ -109,11 +111,16 @@ func (s *server) refreshWork() {
 			}
 		}
 		s.smu.Lock()
-		defer s.smu.Unlock()
 		st.SignIn = s.wst.SignIn
 		s.work, s.wst, s.refreshing = buildWork(snap, cards), st, false
 		s.counts.NeedsYou, s.counts.Reviews, s.counts.Cards = len(s.work.NeedsYou), len(s.work.Reviews), s.work.merged()
 		s.paintAll()
+		again := s.again && s.ctx.Err() == nil
+		s.again = false
+		s.smu.Unlock()
+		if again {
+			s.refreshWork()
+		}
 	}()
 }
 

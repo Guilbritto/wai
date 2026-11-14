@@ -212,9 +212,19 @@ func oneLine(s string) string {
 
 func ghLink(url string) node { return node{"type": "link", "text": "Open on GitHub", "url": url} }
 
-func prCard(id string, p PR, badge string) node {
-	return node{"type": "card", "id": id, "title": oneLine(fmt.Sprintf("#%d %s", p.Number, p.Title)),
-		"subtitle": oneLine(p.Repo), "badge": badge, "children": []node{ghLink(p.URL)}}
+var tones = map[Reason]string{Conflict: "danger", CIFailed: "danger", ChangesRequested: "warning", ReadyToMerge: "success"}
+
+// prCard: a reason with a tone puts a toned badge node beside the link (the header badge has no
+// tone); any other badge stays in the header.
+func prCard(id string, p PR, badge, tone string) node {
+	n := node{"type": "card", "id": id, "title": oneLine(fmt.Sprintf("#%d %s", p.Number, p.Title)),
+		"subtitle": oneLine(p.Repo), "children": []node{ghLink(p.URL)}}
+	if tone == "" {
+		n["badge"] = badge
+	} else {
+		n["children"] = []node{{"type": "row", "children": []node{{"type": "badge", "text": badge, "tone": tone}, ghLink(p.URL)}}}
+	}
+	return n
 }
 
 func section(id, title string, open bool, kids []node) node {
@@ -229,9 +239,10 @@ func cardRow(c CardRow) node {
 	n := node{"type": "card", "id": "card:" + c.Key, "title": title, "subtitle": strings.TrimRight(oneLine(c.Key+" · "+c.Status), " ·")}
 	switch {
 	case c.MergedNoOpen:
-		n["badge"] = "PR merged"
-		n["children"] = []node{{"type": "button", "id": "done:" + c.Key, "label": "Move to Done",
-			"confirm": node{"title": "Move " + c.Key + " to Done?"}}}
+		n["children"] = []node{{"type": "row", "children": []node{
+			{"type": "badge", "text": "PR merged", "tone": "warning"},
+			{"type": "button", "id": "done:" + c.Key, "label": "Move to Done",
+				"confirm": node{"title": "Move " + c.Key + " to Done?"}}}}}
 	case len(c.Open) > 0:
 		n["badge"] = "#" + strconv.Itoa(c.Open[0].Number)
 		n["children"] = []node{ghLink(c.Open[0].URL)}
@@ -293,14 +304,14 @@ func workTree(w Work, st WorkState) node {
 	kids = append(kids, problems(st)...)
 	var needs, reviews, cards, waiting []node
 	for _, p := range w.NeedsYou {
-		needs = append(needs, prCard("pr:"+p.URL, p, badges[reasonOf(p)]))
+		needs = append(needs, prCard("pr:"+p.URL, p, badges[reasonOf(p)], tones[reasonOf(p)]))
 	}
 	for _, p := range w.Reviews {
 		badge := "Review"
 		if p.Requested {
 			badge = "Requested"
 		}
-		reviews = append(reviews, prCard("review:"+p.URL, p.PR, badge))
+		reviews = append(reviews, prCard("review:"+p.URL, p.PR, badge, ""))
 	}
 	for _, c := range w.Cards {
 		cards = append(cards, cardRow(c))
@@ -313,7 +324,7 @@ func workTree(w Work, st WorkState) node {
 		if state == "" {
 			state = "Waiting"
 		}
-		waiting = append(waiting, prCard("pr:"+p.URL, p, oneLine(strings.ToUpper(state[:1])+strings.ToLower(state[1:]))))
+		waiting = append(waiting, prCard("pr:"+p.URL, p, oneLine(strings.ToUpper(state[:1])+strings.ToLower(state[1:])), ""))
 	}
 	for _, s := range []struct {
 		id, title string

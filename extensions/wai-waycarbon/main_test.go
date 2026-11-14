@@ -251,7 +251,7 @@ func TestRefreshAndUnknownMethod(t *testing.T) {
 }
 
 // A slow jira must not block the loop: Loading arrives at once, calls are answered meanwhile, and a
-// refresh asked while one runs is dropped.
+// refresh asked while one runs runs once more.
 func TestSlowJiraDoesNotBlock(t *testing.T) {
 	dir := t.TempDir()
 	release, runs := filepath.Join(dir, "release"), filepath.Join(dir, "runs")
@@ -273,8 +273,10 @@ func TestSlowJiraDoesNotBlock(t *testing.T) {
 	os.WriteFile(release, nil, 0o644)
 	r.cards(t)
 	time.Sleep(300 * time.Millisecond)
-	if n := strings.Count(string(mustRead(runs)), "me\n"); n != 1 {
-		t.Errorf("jira me ran %d times, want 1: the second refresh is dropped", n)
+	waitFor(t, "the queued refresh", func() bool { return strings.Count(string(mustRead(runs)), "me\n") == 2 })
+	time.Sleep(300 * time.Millisecond)
+	if n := strings.Count(string(mustRead(runs)), "me\n"); n != 2 {
+		t.Errorf("jira me ran %d times, want 2: the refresh asked mid-refresh reruns once", n)
 	}
 }
 
@@ -665,3 +667,46 @@ exit 1
 		t.Errorf("a cancel is not an error: %v", textOf(render(t, m)))
 	}
 }
+
+// A Move to Done confirmed while a slow refresh runs leads to one more refresh, so the card goes away.
+func TestMoveToDoneDuringRefresh(t *testing.T) {
+	dir := t.TempDir()
+	gate, moved, ghLog := filepath.Join(dir, "gate"), filepath.Join(dir, "moved"), filepath.Join(dir, "gh.log")
+	t.Cleanup(func() { os.WriteFile(gate, nil, 0o644) })
+	data, _ := filepath.Abs("testdata/graphql.json")
+	fakeCLI(t, "gh", `echo "$*" >> '`+ghLog+`'
+if [ "$1 $2" = "api graphql" ]; then
+  [ "$(grep -c 'api graphql' '`+ghLog+`')" = 2 ] && while [ ! -f '`+gate+`' ]; do sleep 0.02; done
+  cat '`+data+`'
+fi
+exit 0
+`)
+	fakeJira(t, `case "$*" in
+  "me") echo "dev@example.com" ;;
+  "issue list"*)
+    [ -f '`+moved+`' ] || printf 'EC-7\tShipped thing\tIn Review\n' ;;
+  "issue move EC-7 Done") touch '`+moved+`' ;;
+esac
+`)
+	fakeClaude(t)
+	r := start(t)
+	r.initializeRaw(t)
+	r.cards(t)                     // first refresh done: EC-7 shows Move to Done
+	r.action(t, 7, "work:refresh") // second graphql call: blocks on the gate
+	waitFor(t, "the slow refresh", func() bool { return strings.Count(string(mustRead(ghLog)), "api graphql") == 2 })
+	r.action(t, 8, "done:EC-7")
+	waitFor(t, "jira move", func() bool { return fileExists(moved) })
+	time.Sleep(200 * time.Millisecond)
+	os.WriteFile(gate, nil, 0o644)
+	waitFor(t, "the rerun", func() bool { return strings.Count(string(mustRead(ghLog)), "api graphql") == 3 })
+	r.until(t, func(m map[string]any) bool {
+		return m["method"] == "panel/render" && findID(render(t, m), "card:EC-7") == nil && find(render(t, m), "tabs") != nil &&
+			!strings.Contains(textOf(render(t, m)), "Loading…") && findID(render(t, m), "work:refresh") != nil
+	})
+	time.Sleep(300 * time.Millisecond)
+	if n := strings.Count(string(mustRead(ghLog)), "api graphql"); n != 3 {
+		t.Errorf("%d refreshes, want 3 (start, manual, one rerun)", n)
+	}
+}
+
+func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }

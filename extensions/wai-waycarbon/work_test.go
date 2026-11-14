@@ -194,3 +194,20 @@ esac
 		t.Errorf("failure: %v", err)
 	}
 }
+
+func TestToneBadges(t *testing.T) {
+	w := Work{NeedsYou: []PR{{Number: 1, Title: "t", URL: prURL + "1", Repo: "o/r", Mergeable: "CONFLICTING"}},
+		Cards: []CardRow{{Card: Card{Key: "EC-7", Summary: "s"}, MergedNoOpen: true}}}
+	var tree map[string]any
+	b, _ := json.Marshal(workTree(w, WorkState{Updated: time.Now()}))
+	json.Unmarshal(b, &tree)
+	for id, want := range map[string][2]string{"pr:" + prURL + "1": {"Conflict", "danger"}, "card:EC-7": {"PR merged", "warning"}} {
+		c := findID(tree, id)
+		if c["badge"] != nil {
+			t.Errorf("%s: a toned card has no header badge: %v", id, c["badge"])
+		}
+		if bd := find(c, "badge"); bd == nil || bd["text"] != want[0] || bd["tone"] != want[1] {
+			t.Errorf("%s: badge node %v, want %v", id, bd, want)
+		}
+	}
+}
