@@ -3178,6 +3178,7 @@ impl Workspace {
             Some(PanelIcon::Svg(path)) => svg()
                 .external_path(path.clone())
                 .size(px(15.))
+                .text_color(theme.foreground)
                 .into_any_element(),
             None => div()
                 .text_size(px(9.))
