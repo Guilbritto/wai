@@ -58,15 +58,12 @@ func (s *server) workBody() node {
 	return node{"type": "column", "children": kids}
 }
 
-func helpBody() node {
-	return node{"type": "text", "text": "Help requests need the WayCarbon relay, which is not set up yet.", "muted": true}
-}
-
 // paintAll is the only painter: the panel and the bar item. The caller holds smu.
 func (s *server) paintAll() {
 	c := s.counts
+	c.Help, c.Replies = s.helpCounts()
 	s.write(node{"jsonrpc": "2.0", "method": "panel/render", "params": node{"panel": panelID,
-		"tree": rootTree(s.workBody(), helpBody(), c.NeedsYou+c.Reviews+c.Cards, c.Help+c.Replies)}})
+		"tree": rootTree(s.workBody(), s.helpBody(), c.NeedsYou+c.Reviews+c.Cards, c.Help+c.Replies)}})
 	bar := node{"item": "attention"}
 	if n := c.total(); n > 0 {
 		bar = node{"item": "attention", "text": strconv.Itoa(n), "icon": "bell", "tone": "warning", "card": c.card()}

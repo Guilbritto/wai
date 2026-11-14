@@ -23,6 +23,10 @@ type message struct {
 	ID     json.RawMessage `json:"id,omitempty"`
 	Method string          `json:"method,omitempty"`
 	Params json.RawMessage `json:"params,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
 }
 
 type node = map[string]any
@@ -32,7 +36,11 @@ type server struct {
 	wmu    sync.Mutex   // serialises writes
 	out    io.Writer
 
+	pmu     sync.Mutex // guards pending
+	pending map[int64]chan message
+
 	smu        sync.Mutex // guards the rest
+	help       helpData
 	work       Work
 	wst        WorkState
 	refreshing bool
@@ -260,7 +268,9 @@ func (s *server) handle(m message) {
 		s.smu.Lock()
 		s.dataDir, s.project = p.DataDir, p.Project
 		s.smu.Unlock()
+		s.helpInit()
 		s.reply(m.ID, node{})
+		s.helpStart()
 		s.refreshWork()
 		s.wg.Add(3)
 		go func() {
@@ -293,10 +303,20 @@ func (s *server) handle(m message) {
 		s.call("panel/open", node{"panel": panelID})
 	case "panel/action":
 		var p struct {
-			Action string `json:"action_id"`
+			Action string         `json:"action_id"`
+			Values map[string]any `json:"values"`
 		}
 		json.Unmarshal(m.Params, &p)
 		s.reply(m.ID, nil)
+		values := map[string]string{}
+		for k, v := range p.Values {
+			if str, ok := v.(string); ok {
+				values[k] = str
+			}
+		}
+		if s.helpAction(p.Action, values) {
+			return
+		}
 		switch p.Action {
 		case "work:refresh":
 			s.refreshWork()
@@ -321,6 +341,8 @@ func (s *server) handle(m message) {
 		if ok {
 			s.call("sessions/open", node{"prompt": text, "send": false})
 		}
+	case "event/session_state":
+		s.sessionState(m.Params)
 	default:
 		if m.ID != nil {
 			s.write(node{"jsonrpc": "2.0", "id": m.ID, "error": node{"code": -32601, "message": "Method not found"}})
@@ -328,16 +350,20 @@ func (s *server) handle(m message) {
 	}
 }
 
-// run reads until EOF. Responses to our own calls (no method) are ignored.
+// run reads until EOF. Answers to our own requests go to their waiter; the rest are ignored.
 func run(in io.Reader, out io.Writer) {
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &server{ctx: ctx, out: out, lastBar: jsonString(node{"item": "attention"})}
+	s := &server{ctx: ctx, out: out, pending: map[int64]chan message{}, lastBar: jsonString(node{"item": "attention"})}
 	r := bufio.NewReaderSize(in, 1<<20)
 	for {
 		line, err := r.ReadBytes('\n')
 		var m message
-		if len(line) > 0 && json.Unmarshal(line, &m) == nil && m.Method != "" {
-			s.handle(m)
+		if len(line) > 0 && json.Unmarshal(line, &m) == nil {
+			if m.Method != "" {
+				s.handle(m)
+			} else if m.ID != nil {
+				s.deliver(m)
+			}
 		}
 		if err != nil {
 			cancel()

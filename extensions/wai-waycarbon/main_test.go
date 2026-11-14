@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"wai-waycarbon/helpapi"
 )
 
 // fakeJira puts a `jira` script first on PATH that only answers the exact argv the extension must use.
@@ -72,6 +74,8 @@ type rpc struct {
 	msgs chan map[string]any
 	done chan struct{}
 	in   *io.PipeWriter
+	// sessions, when set, is the JSON answer to every sessions/list request seen by until.
+	sessions string
 }
 
 func start(t *testing.T) *rpc {
@@ -109,6 +113,10 @@ func (r *rpc) until(t *testing.T, ok func(map[string]any) bool) map[string]any {
 	for {
 		select {
 		case m := <-r.msgs:
+			if m["method"] == "sessions/list" && r.sessions != "" {
+				id, _ := json.Marshal(m["id"])
+				r.send(`{"jsonrpc":"2.0","id":` + string(id) + `,"result":` + r.sessions + `}`)
+			}
 			if ok(m) {
 				return m
 			}
@@ -389,7 +397,9 @@ func TestBarItemFollowsCounts(t *testing.T) {
 	var out strings.Builder
 	s := &server{out: &out, lastBar: jsonString(node{"item": "attention"})}
 	s.smu.Lock()
-	s.counts = counts{NeedsYou: 2, Help: 1}
+	s.counts = counts{NeedsYou: 2}
+	s.help.auth = &auth{"t", "me"}
+	s.help.reqs = map[string]helpapi.Request{"r": {ID: "r", From: "ana", To: "me", State: helpapi.Waiting}}
 	s.paintAll() // must not deadlock on smu
 	s.smu.Unlock()
 	var bar map[string]any
@@ -409,7 +419,7 @@ func TestBarItemFollowsCounts(t *testing.T) {
 	}
 	out.Reset()
 	s.smu.Lock()
-	s.counts = counts{}
+	s.counts, s.help.reqs = counts{}, nil
 	s.paintAll()
 	s.smu.Unlock()
 	for _, l := range strings.Split(strings.TrimSpace(out.String()), "\n") {
