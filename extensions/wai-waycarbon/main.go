@@ -10,11 +10,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 )
 
 const panelID = "waycarbon"
@@ -32,12 +32,12 @@ type server struct {
 	wmu    sync.Mutex   // serialises writes
 	out    io.Writer
 
-	smu      sync.Mutex // guards the rest
-	gen      int        // the latest render; an older result is stale
-	cards    map[string]Card
-	cardList []Card
-	cardsErr error
-	loading  bool
+	smu        sync.Mutex // guards the rest
+	work       Work
+	wst        WorkState
+	refreshing bool
+	signCmd    *exec.Cmd // the running gh login
+	signKilled bool
 
 	ctx context.Context // cancelled at EOF; plugin work stops with it
 	wg  sync.WaitGroup  // plugin goroutines, drained before run returns
@@ -68,27 +68,138 @@ func (s *server) call(method string, params any) {
 	s.write(node{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 }
 
-// refreshWork shows Loading… now and the cards when jira answers, off the message loop.
+// refreshWork loads GitHub and Jira in parallel, off the caller. One refresh at a time: a request
+// while one runs is dropped.
 func (s *server) refreshWork() {
 	s.smu.Lock()
-	s.gen++
-	gen := s.gen
-	s.loading = true
+	if s.refreshing {
+		s.smu.Unlock()
+		return
+	}
+	s.refreshing = true
 	s.paintAll()
 	s.smu.Unlock()
+	s.wg.Add(1)
 	go func() {
-		cards, err := myCards()
+		defer s.wg.Done()
+		var snap Snapshot
+		var cards []Card
+		var ghErr, jiraErr error
+		var both sync.WaitGroup
+		both.Add(2)
+		go func() { defer both.Done(); snap, ghErr = fetchGitHub(s.ctx, org(), time.Now().AddDate(0, 0, -30)) }()
+		go func() { defer both.Done(); cards, jiraErr = myCards(s.ctx) }()
+		both.Wait()
+		st := WorkState{Login: snap.Login, Err: snap.Warn, Updated: time.Now()}
+		var nf ErrNotFound
+		switch {
+		case ghErr == nil:
+		case errors.As(ghErr, &nf):
+			st.GhMissing = true
+		case errors.Is(ghErr, errSignedOut):
+			st.GhSignedOut = true
+		default:
+			st.Err = ghErr.Error()
+		}
+		if jiraErr != nil {
+			if _, err := exec.LookPath("jira"); err != nil {
+				st.JiraMissing = true
+			} else {
+				st.JiraProblem = jiraErr.Error()
+			}
+		}
 		s.smu.Lock()
 		defer s.smu.Unlock()
-		if gen != s.gen {
+		st.SignIn = s.wst.SignIn
+		s.work, s.wst, s.refreshing = buildWork(snap, cards), st, false
+		s.counts.NeedsYou, s.counts.Reviews, s.counts.Cards = len(s.work.NeedsYou), len(s.work.Reviews), s.work.merged()
+		s.paintAll()
+	}()
+}
+
+// signIn runs gh's device login; its code and a Cancel show in the tab meanwhile.
+func (s *server) signIn() {
+	s.smu.Lock()
+	if s.signCmd != nil {
+		s.smu.Unlock()
+		return
+	}
+	cmd, codeCh, exitCh := ghLogin(s.ctx)
+	if cmd == nil {
+		err := <-exitCh
+		s.wst.SignIn = &GhSignIn{Err: err.Error()}
+		s.paintAll()
+		s.smu.Unlock()
+		return
+	}
+	s.signCmd, s.signKilled = cmd, false
+	s.wst.SignIn = &GhSignIn{}
+	s.paintAll()
+	s.smu.Unlock()
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		var err error
+		for exitCh != nil {
+			select {
+			case code, ok := <-codeCh:
+				if !ok {
+					codeCh = nil
+					continue
+				}
+				s.smu.Lock()
+				s.wst.SignIn.Code = code
+				s.paintAll()
+				s.smu.Unlock()
+			case err = <-exitCh:
+				exitCh = nil
+			}
+		}
+		s.smu.Lock()
+		s.wst.SignIn = nil
+		if err != nil && !s.signKilled {
+			s.wst.SignIn = &GhSignIn{Err: err.Error()}
+		}
+		s.signCmd = nil
+		s.paintAll()
+		s.smu.Unlock()
+		if err == nil {
+			s.refreshWork()
+		}
+	}()
+}
+
+func (s *server) cancelSignIn() {
+	s.smu.Lock()
+	defer s.smu.Unlock()
+	if s.signCmd != nil {
+		s.signKilled = true
+		s.signCmd.Process.Kill()
+	}
+}
+
+// moveDone moves a card whose PR merged, then refreshes.
+func (s *server) moveDone(key string) {
+	s.smu.Lock()
+	ok := false
+	for _, c := range s.work.Cards {
+		ok = ok || c.Key == key && c.MergedNoOpen
+	}
+	s.smu.Unlock()
+	if !ok || !keyRe.MatchString(key) {
+		return
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		if err := moveCard(s.ctx, key); err != nil {
+			s.smu.Lock()
+			s.wst.Err = "Could not move " + key + ": " + err.Error()
+			s.paintAll()
+			s.smu.Unlock()
 			return
 		}
-		s.cards = map[string]Card{}
-		for _, c := range cards {
-			s.cards[c.Key] = c
-		}
-		s.cardList, s.cardsErr, s.loading = cards, err, false
-		s.paintAll()
+		s.refreshWork()
 	}()
 }
 
@@ -127,49 +238,6 @@ func (s *server) installPluginClick() {
 	}()
 }
 
-func cardsTree(cards []Card, err error) node {
-	refresh := node{"type": "button", "id": "refresh", "label": "Refresh"}
-	switch {
-	case err != nil:
-		return node{"type": "column", "children": []node{{"type": "text", "text": err.Error()}, refresh}}
-	case len(cards) == 0:
-		return node{"type": "column", "children": []node{{"type": "text", "text": "No open cards assigned to you."}, refresh}}
-	}
-	items := make([]node, 0, len(cards))
-	for _, c := range cards {
-		title := c.Summary
-		if title == "" {
-			title = c.Key
-		}
-		item := node{"id": c.Key, "title": title}
-		if c.Status != "" {
-			item["subtitle"] = c.Status
-		}
-		items = append(items, item)
-	}
-	return node{"type": "column", "children": []node{
-		{"type": "row", "children": []node{
-			{"type": "text", "text": "My cards"},
-			{"type": "badge", "text": fmt.Sprintf("%d open", len(cards))}}},
-		{"type": "list", "fill": true, "items": items},
-		refresh}}
-}
-
-// prompt is the pre-filled session text; control characters of the summary become spaces.
-func prompt(c Card) string {
-	clean := strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return ' '
-		}
-		return r
-	}, c.Summary)
-	clean = strings.Join(strings.Fields(clean), " ")
-	if clean == "" {
-		return "Work on " + c.Key
-	}
-	return "Work on " + c.Key + ": " + clean
-}
-
 func (s *server) reply(id json.RawMessage, result any) {
 	s.write(node{"jsonrpc": "2.0", "id": id, "result": result})
 }
@@ -187,7 +255,20 @@ func (s *server) handle(m message) {
 		s.smu.Unlock()
 		s.reply(m.ID, node{})
 		s.refreshWork()
-		s.wg.Add(2)
+		s.wg.Add(3)
+		go func() {
+			defer s.wg.Done()
+			t := time.NewTicker(10 * time.Minute)
+			defer t.Stop()
+			for {
+				select {
+				case <-s.ctx.Done():
+					return
+				case <-t.C:
+					s.refreshWork()
+				}
+			}
+		}()
 		go func() { defer s.wg.Done(); s.checkPlugin() }()
 		go func() {
 			defer s.wg.Done()
@@ -210,18 +291,28 @@ func (s *server) handle(m message) {
 		json.Unmarshal(m.Params, &p)
 		s.reply(m.ID, nil)
 		switch p.Action {
-		case "refresh":
+		case "work:refresh":
 			s.refreshWork()
+			return
+		case "gh:signin":
+			s.signIn()
+			return
+		case "gh:cancel":
+			s.cancelSignIn()
 			return
 		case "plugin:install":
 			s.installPluginClick()
 			return
 		}
+		if key, ok := strings.CutPrefix(p.Action, "done:"); ok {
+			s.moveDone(key)
+			return
+		}
 		s.smu.Lock()
-		c, ok := s.cards[p.Action]
+		text, ok := s.work.clickPrompt(p.Action)
 		s.smu.Unlock()
 		if ok {
-			s.call("sessions/open", node{"prompt": prompt(c), "send": false})
+			s.call("sessions/open", node{"prompt": text, "send": false})
 		}
 	default:
 		if m.ID != nil {
@@ -233,7 +324,7 @@ func (s *server) handle(m message) {
 // run reads until EOF. Responses to our own calls (no method) are ignored.
 func run(in io.Reader, out io.Writer) {
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &server{ctx: ctx, out: out, cards: map[string]Card{}, lastBar: jsonString(node{"item": "attention"})}
+	s := &server{ctx: ctx, out: out, lastBar: jsonString(node{"item": "attention"})}
 	r := bufio.NewReaderSize(in, 1<<20)
 	for {
 		line, err := r.ReadBytes('\n')

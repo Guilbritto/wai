@@ -36,7 +36,7 @@ func rootTree(work, help node, workBadge, helpBadge int) node {
 		{"type": "tabs", "id": "tab", "tabs": []node{tab("work", "Work", workBadge, work), tab("help", "Help", helpBadge, help)}}}}
 }
 
-// workBody is the Work tab: the plugin alert, then the cards (or Loading…).
+// workBody is the Work tab: the plugin alert, then the work (or Loading…).
 func (s *server) workBody() node {
 	kids := []node{}
 	switch {
@@ -50,10 +50,10 @@ func (s *server) workBody() node {
 		}
 		kids = append(kids, node{"type": "button", "id": "plugin:install", "label": "Install plugin", "style": "primary"})
 	}
-	if s.loading {
+	if s.refreshing && s.wst.Updated.IsZero() {
 		kids = append(kids, node{"type": "text", "text": "Loading…", "muted": true})
 	} else {
-		kids = append(kids, cardsTree(s.cardList, s.cardsErr)["children"].([]node)...)
+		kids = append(kids, workTree(s.work, s.wst))
 	}
 	return node{"type": "column", "children": kids}
 }

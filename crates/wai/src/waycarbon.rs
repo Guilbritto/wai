@@ -29,7 +29,11 @@ const FAKE_CLAUDE: &str = r#"#!/bin/sh
 exit 0
 "#;
 
-const FAKE_GH: &str = "#!/bin/sh\nexit 0\n";
+/// Answers the GraphQL call with a viewer and no pull requests; `auth status` and the rest succeed.
+const FAKE_GH: &str = r#"#!/bin/sh
+[ "$1 $2" = "api graphql" ] && echo '{"data":{"viewer":{"login":"dev"}}}'
+exit 0
+"#;
 
 fn executable(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -104,26 +108,31 @@ fn my_cards_panel_renders_and_click_prefills(cx: &mut TestAppContext) {
     let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
     let panel = host.read_with(cx, |h, _| h.panels().first().map(|p| p.view.clone()));
     let panel = panel.expect("a tab for the WayCarbon panel");
-    let titles = |cx: &mut gpui_kit::VisualTestContext| {
+    // Card titles with their render index: the element id of a card is its pre-order position.
+    let cards = |cx: &mut gpui_kit::VisualTestContext| {
         let tree = panel.read_with(cx, |p, _| p.tree.clone());
-        let mut titles = Vec::new();
+        let mut cards = Vec::new();
         if let Some(Ok(tree)) = tree {
-            tree.walk(&mut |n| {
-                if let Node::List { items, .. } = n {
-                    titles.extend(items.iter().flatten().map(|i| i.title.to_string()));
+            let mut n = 0usize;
+            tree.walk(&mut |node| {
+                n += 1;
+                if let Node::Card {
+                    title: Some(title), ..
+                } = node
+                {
+                    cards.push((n, title.to_string()));
                 }
             });
         }
-        titles
+        cards
     };
-    wait_until(cx, "the cards", |cx| !titles(cx).is_empty());
-    assert_eq!(
-        titles(cx),
-        ["Fix the login timeout", "Add the export button"]
-    );
+    wait_until(cx, "the cards", |cx| !cards(cx).is_empty());
+    let titles: Vec<_> = cards(cx).into_iter().map(|(_, t)| t).collect();
+    assert_eq!(titles, ["Fix the login timeout", "Add the export button"]);
 
     click(("tab-panel", 0usize), cx);
-    click(("panel-item", 1usize), cx);
+    let (k, _) = cards(cx).remove(1);
+    click(("panel-card", k), cx);
     // Beside the focused (empty) pane: an extension's session never takes it (R61).
     wait_until(cx, "a pre-filled session", |cx| {
         workspace.read_with(cx, |w, _| {
@@ -132,7 +141,7 @@ fn my_cards_panel_renders_and_click_prefills(cx: &mut TestAppContext) {
     });
     let session = workspace.read_with(cx, |w, _| w.panes[1].session().cloned().unwrap());
     let draft = session.read_with(cx, |s, cx| s.draft(cx));
-    assert_eq!(draft, "Work on EC-102: Add the export button");
+    assert_eq!(draft, "/waycarbon:solve-card EC-102");
     assert!(
         session.read_with(cx, |s, _| s.model.items.is_empty()),
         "not sent"

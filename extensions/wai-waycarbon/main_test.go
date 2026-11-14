@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,15 @@ func fakeJira(t *testing.T, script string) {
 func fakeTools(t *testing.T) {
 	t.Helper()
 	fakeClaude(t)
+	fakeGh(t)
+}
+
+// fakeGh answers the GraphQL call with an empty viewer and `auth status` with success.
+func fakeGh(t *testing.T) {
+	t.Helper()
+	fakeCLI(t, "gh", `[ "$1 $2" = "api graphql" ] && echo '{"data":{"viewer":{"login":"dev"}}}'
+exit 0
+`)
 }
 
 const happyJira = happyJiraBody
@@ -53,16 +63,6 @@ func TestParsesJiraPlainOutput(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("card %d: got %v, want %v", i, got[i], want[i])
 		}
-	}
-}
-
-func TestPromptStripsControlCharacters(t *testing.T) {
-	got := prompt(Card{Key: "EC-9", Summary: "Fix\x1b[31m this\nnow\t\x00ok"})
-	if got != "Work on EC-9: Fix [31m this now ok" {
-		t.Errorf("got %q", got)
-	}
-	if got := prompt(Card{Key: "EC-9"}); got != "Work on EC-9" {
-		t.Errorf("got %q", got)
 	}
 }
 
@@ -126,6 +126,12 @@ func (r *rpc) reply(t *testing.T, id float64) map[string]any {
 func (r *rpc) initialize(t *testing.T) {
 	t.Helper()
 	fakeTools(t)
+	r.initializeRaw(t)
+}
+
+// initializeRaw sends initialize without installing any fake: the test did it.
+func (r *rpc) initializeRaw(t *testing.T) {
+	t.Helper()
 	r.send(`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocol":1,"ext_dir":"/x","data_dir":"` + t.TempDir() + `","project":""}}`)
 	if m := r.reply(t, 0); m["result"] == nil {
 		t.Fatalf("initialize reply: %v", m)
@@ -161,6 +167,21 @@ func workTab(t *testing.T, root map[string]any) map[string]any {
 }
 
 // find returns the first node of the type, depth first.
+func findID(n map[string]any, id string) map[string]any {
+	if n["id"] == id {
+		return n
+	}
+	for _, key := range []string{"children", "tabs"} {
+		kids, _ := n[key].([]any)
+		for _, k := range kids {
+			if f := findID(k.(map[string]any), id); f != nil {
+				return f
+			}
+		}
+	}
+	return nil
+}
+
 func find(n map[string]any, typ string) map[string]any {
 	if n["type"] == typ {
 		return n
@@ -181,17 +202,13 @@ func TestInitializeAndRender(t *testing.T) {
 	r := start(t)
 	r.initialize(t)
 
-	list := find(r.cards(t), "list")
-	if list == nil || list["fill"] != true {
-		t.Fatalf("want a filled list, got %v", list)
+	root := r.cards(t)
+	first := findID(root, "card:EC-1")
+	if first == nil || first["title"] != "Fix the login timeout" || first["subtitle"] != "EC-1 · In Progress" || first["badge"] != "In Progress" {
+		t.Fatalf("first card: %v", first)
 	}
-	items := list["items"].([]any)
-	if len(items) != 2 {
-		t.Fatalf("items: %v", items)
-	}
-	first := items[0].(map[string]any)
-	if first["id"] != "EC-1" || first["title"] != "Fix the login timeout" || first["subtitle"] != "In Progress" {
-		t.Errorf("first item: %v", first)
+	if findID(root, "card:EC-2") == nil {
+		t.Error("want a card for EC-2")
 	}
 }
 
@@ -201,14 +218,14 @@ func TestCardClickOpensSession(t *testing.T) {
 	r.initialize(t)
 	r.cards(t)
 
-	r.send(`{"jsonrpc":"2.0","id":7,"method":"panel/action","params":{"panel":"waycarbon","action_id":"EC-2","values":{}}}`)
+	r.send(`{"jsonrpc":"2.0","id":7,"method":"panel/action","params":{"panel":"waycarbon","action_id":"card:EC-2","values":{}}}`)
 	ack := r.reply(t, 7)
 	open := r.until(t, func(m map[string]any) bool { return m["method"] == "sessions/open" })
 	if ack["error"] != nil {
 		t.Errorf("panel/action not answered: %v", ack)
 	}
 	p := open["params"].(map[string]any)
-	if p["prompt"] != "Work on EC-2: Add the export button" || p["send"] != false {
+	if p["prompt"] != "/waycarbon:solve-card EC-2" || p["send"] != false {
 		t.Errorf("sessions/open params: %v", p)
 	}
 }
@@ -218,9 +235,9 @@ func TestRefreshAndUnknownMethod(t *testing.T) {
 	r := start(t)
 	r.initialize(t)
 	r.cards(t)
-	r.send(`{"jsonrpc":"2.0","id":3,"method":"panel/action","params":{"panel":"waycarbon","action_id":"refresh","values":{}}}`)
+	r.send(`{"jsonrpc":"2.0","id":3,"method":"panel/action","params":{"panel":"waycarbon","action_id":"work:refresh","values":{}}}`)
 	r.reply(t, 3)
-	if find(r.cards(t), "list") == nil {
+	if findID(r.cards(t), "card:EC-1") == nil {
 		t.Error("refresh must render the cards")
 	}
 	// A request gets -32601; a notification stays silent (the next answer is for id 5).
@@ -233,45 +250,31 @@ func TestRefreshAndUnknownMethod(t *testing.T) {
 	}
 }
 
-// A slow jira must not block the loop: Loading arrives at once and calls are answered meanwhile.
+// A slow jira must not block the loop: Loading arrives at once, calls are answered meanwhile, and a
+// refresh asked while one runs is dropped.
 func TestSlowJiraDoesNotBlock(t *testing.T) {
-	release := filepath.Join(t.TempDir(), "release")
+	dir := t.TempDir()
+	release, runs := filepath.Join(dir, "release"), filepath.Join(dir, "runs")
 	t.Cleanup(func() { os.WriteFile(release, nil, 0o644) })
-	fakeJira(t, "while [ ! -f '"+release+"' ]; do sleep 0.05; done\n"+happyJiraBody)
+	fakeJira(t, "echo \"$*\" >> '"+runs+"'\nwhile [ ! -f '"+release+"' ]; do sleep 0.05; done\n"+happyJiraBody)
 	r := start(t)
-	// A missing plugin gives an unmistakable repaint, so the test knows the plugin check is done.
-	fakeCLI(t, "claude", `echo '[]'`)
-	r.send(`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"data_dir":"` + t.TempDir() + `"}}`)
-	r.reply(t, 0)
+	fakeClaude(t)
+	fakeGh(t)
+	r.initializeRaw(t)
 	loading := func(m map[string]any) bool {
 		return m["method"] == "panel/render" && strings.Contains(textOf(render(t, m)), "Loading…")
 	}
 	r.until(t, loading)
-	r.send(`{"jsonrpc":"2.0","id":8,"method":"panel/action","params":{"panel":"waycarbon","action_id":"EC-1","values":{}}}`)
+	r.send(`{"jsonrpc":"2.0","id":8,"method":"panel/action","params":{"panel":"waycarbon","action_id":"card:EC-1","values":{}}}`)
 	r.reply(t, 8) // answered while jira runs
-	r.send(`{"jsonrpc":"2.0","id":9,"method":"panel/action","params":{"panel":"waycarbon","action_id":"refresh","values":{}}}`)
+	r.send(`{"jsonrpc":"2.0","id":9,"method":"panel/action","params":{"panel":"waycarbon","action_id":"work:refresh","values":{}}}`)
 	r.reply(t, 9)
-	r.until(t, loading)                // the newer refresh
-	time.Sleep(500 * time.Millisecond) // the plugin check repaints meanwhile; let it settle
-	for len(r.msgs) > 0 {
-		<-r.msgs
-	}
-	os.WriteFile(release, nil, 0o644)
-	hasList := func(m map[string]any) bool {
-		return m["method"] == "panel/render" && find(render(t, m), "list") != nil
-	}
-	r.until(t, hasList)
-	// The first refresh's result is stale: no second render with the cards follows.
 	time.Sleep(300 * time.Millisecond)
-	for {
-		select {
-		case m := <-r.msgs:
-			if hasList(m) {
-				t.Fatalf("a stale result was painted: %v", m)
-			}
-		default:
-			return
-		}
+	os.WriteFile(release, nil, 0o644)
+	r.cards(t)
+	time.Sleep(300 * time.Millisecond)
+	if n := strings.Count(string(mustRead(runs)), "me\n"); n != 1 {
+		t.Errorf("jira me ran %d times, want 1: the second refresh is dropped", n)
 	}
 }
 
@@ -350,6 +353,7 @@ func TestPluginMissingOffersInstall(t *testing.T) {
 	fakeJira(t, happyJira)
 	r := start(t)
 	fakeCLI(t, "claude", `echo '[]'`)
+	fakeGh(t)
 	r.send(`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"data_dir":"` + t.TempDir() + `"}}`)
 	m := r.until(t, func(m map[string]any) bool {
 		return m["method"] == "panel/render" && strings.Contains(textOf(render(t, m)), "The WayCarbon Claude plugin is not installed, so the /waycarbon commands will not work.")
@@ -433,6 +437,7 @@ func TestPluginInstallClick(t *testing.T) {
 esac
 exit 0
 `)
+	fakeGh(t)
 	r := start(t)
 	r.send(`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"data_dir":"` + t.TempDir() + `"}}`)
 	r.reply(t, 0)
@@ -481,3 +486,182 @@ exit 0
 }
 
 func mustRead(p string) []byte { b, _ := os.ReadFile(p); return b }
+
+// workFakes puts the fixture-backed gh and a jira with EC-7 (PR merged), EC-8 (open PR) and EC-5.
+func workFakes(t *testing.T) (ghLog, jiraLog string) {
+	t.Helper()
+	dir := t.TempDir()
+	ghLog, jiraLog = filepath.Join(dir, "gh.log"), filepath.Join(dir, "jira.log")
+	data, _ := filepath.Abs("testdata/graphql.json")
+	fakeCLI(t, "gh", `echo "$*" >> '`+ghLog+`'
+case "$1 $2" in
+  "api graphql") cat '`+data+`' ;;
+esac
+exit 0
+`)
+	fakeJira(t, `echo "$*" >> '`+jiraLog+`'
+case "$*" in
+  "me") echo "dev@example.com" ;;
+  "issue list -a dev@example.com -s~Done --plain --no-headers --columns key,summary,status")
+    printf 'EC-7\tShipped thing\tIn Review\nEC-8\tTwo parts\tIn Progress\nEC-5\tNothing yet\tTo Do\n' ;;
+  "issue move EC-7 Done") ;;
+  *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+`)
+	fakeClaude(t)
+	return
+}
+
+func (r *rpc) action(t *testing.T, id int, action string) {
+	t.Helper()
+	r.send(`{"jsonrpc":"2.0","id":` + strconv.Itoa(id) + `,"method":"panel/action","params":{"panel":"waycarbon","action_id":"` + action + `","values":{}}}`)
+	r.reply(t, float64(id))
+}
+
+func waitFor(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		if ok() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+func TestPRClickOpensSession(t *testing.T) {
+	workFakes(t)
+	r := start(t)
+	r.initializeRaw(t)
+	root := r.cards(t)
+	for _, id := range []string{"pr:" + prURL + "3", "review:" + prURL + "20", "card:EC-7", "card:EC-8", "card:EC-5"} {
+		if findID(root, id) == nil {
+			t.Errorf("no card %s", id)
+		}
+	}
+	if find(findID(root, "pr:"+prURL+"3"), "link") == nil {
+		t.Error("a PR card has an Open on GitHub link")
+	}
+	r.action(t, 7, "pr:"+prURL+"3")
+	open := r.until(t, func(m map[string]any) bool { return m["method"] == "sessions/open" })
+	p := open["params"].(map[string]any)
+	if p["prompt"] != "/waycarbon:fix-review "+prURL+"3" || p["send"] != false {
+		t.Errorf("sessions/open params: %v", p)
+	}
+}
+
+func TestBarCountsFromWork(t *testing.T) {
+	workFakes(t)
+	r := start(t)
+	r.initializeRaw(t)
+	m := r.until(t, func(m map[string]any) bool { return m["method"] == "item/update" })
+	bar := m["params"].(map[string]any)
+	// 4 needs you + 2 reviews + 1 card whose PR merged (EC-7).
+	if bar["text"] != "7" {
+		t.Errorf("bar: %v", bar)
+	}
+}
+
+func TestMoveToDone(t *testing.T) {
+	ghLog, jiraLog := workFakes(t)
+	r := start(t)
+	r.initializeRaw(t)
+	root := r.cards(t)
+	btn := findID(root, "done:EC-7")
+	if btn == nil || btn["type"] != "button" {
+		t.Fatalf("no Move to Done button: %v", btn)
+	}
+	if c, _ := btn["confirm"].(map[string]any); c["title"] != "Move EC-7 to Done?" {
+		t.Errorf("confirm: %v", btn["confirm"])
+	}
+	r.action(t, 7, "done:EC-7")
+	waitFor(t, "jira issue move", func() bool { return strings.Contains(string(mustRead(jiraLog)), "issue move EC-7 Done\n") })
+	waitFor(t, "a refresh after the move", func() bool { return strings.Count(string(mustRead(ghLog)), "api graphql") >= 2 })
+}
+
+func TestGhMissing(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	fakeJira(t, happyJira)
+	fakeClaude(t)
+	r := start(t)
+	r.initializeRaw(t)
+	root := r.cards(t)
+	if !strings.Contains(textOf(root), "GitHub CLI not found") {
+		t.Errorf("want the alert in %v", root)
+	}
+	if l := find(root, "log"); l == nil || l["text"] != "brew install gh" {
+		t.Errorf("want a log with brew install gh, got %v", l)
+	}
+	if findID(root, "card:EC-1") == nil {
+		t.Error("the jira cards must still render")
+	}
+}
+
+func TestGhSignIn(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "gh.log")
+	fakeCLI(t, "gh", `echo "$*" >> '`+log+`'
+case "$1 $2" in
+  "auth login")
+    echo '! First copy your one-time code: AB12-CD34' >&2
+    sleep 1
+    exit 0 ;;
+esac
+echo "gh: not logged in" >&2
+exit 1
+`)
+	fakeJira(t, happyJira)
+	fakeClaude(t)
+	r := start(t)
+	r.initializeRaw(t)
+	root := r.cards(t)
+	if findID(root, "gh:signin") == nil {
+		t.Fatalf("want a Sign in button: %v", root)
+	}
+	r.action(t, 7, "gh:signin")
+	m := r.until(t, func(m map[string]any) bool {
+		return m["method"] == "panel/render" && strings.Contains(textOf(render(t, m)), "AB12-CD34")
+	})
+	tree := render(t, m)
+	if l := find(tree, "link"); l == nil || l["url"] != "https://github.com/login/device" {
+		t.Errorf("want the device link: %v", l)
+	}
+	if find(tree, "spinner") == nil || findID(tree, "gh:cancel") == nil {
+		t.Error("want a spinner and Cancel")
+	}
+	r.action(t, 8, "gh:signin") // a second click while it runs does nothing
+	waitFor(t, "the refresh after sign-in", func() bool { return strings.Count(string(mustRead(log)), "api graphql") >= 2 })
+	if n := strings.Count(string(mustRead(log)), "auth login"); n != 1 {
+		t.Errorf("auth login ran %d times, want 1", n)
+	}
+	if got := calls(log); !strings.Contains(strings.Join(got, "\n"), "auth login --web --hostname github.com --git-protocol https --skip-ssh-key") {
+		t.Errorf("argv: %v", got)
+	}
+}
+
+func TestGhSignInCancel(t *testing.T) {
+	fakeCLI(t, "gh", `case "$1 $2" in
+  "auth login")
+    echo '! First copy your one-time code: AB12-CD34' >&2
+    exec sleep 30 ;;
+esac
+echo "gh: not logged in" >&2
+exit 1
+`)
+	fakeJira(t, happyJira)
+	fakeClaude(t)
+	r := start(t)
+	r.initializeRaw(t)
+	r.cards(t)
+	r.action(t, 7, "gh:signin")
+	r.until(t, func(m map[string]any) bool {
+		return m["method"] == "panel/render" && strings.Contains(textOf(render(t, m)), "AB12-CD34")
+	})
+	r.action(t, 8, "gh:cancel")
+	m := r.until(t, func(m map[string]any) bool {
+		return m["method"] == "panel/render" && findID(render(t, m), "gh:signin") != nil && find(render(t, m), "spinner") == nil
+	})
+	if strings.Contains(textOf(render(t, m)), "signal") {
+		t.Errorf("a cancel is not an error: %v", textOf(render(t, m)))
+	}
+}

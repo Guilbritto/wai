@@ -26,7 +26,7 @@ func (e ErrNotFound) Error() string { return e.Name + " not found" }
 var errSilent = errors.New("command failed without a message")
 
 // runCLI runs a program with argv only (never a shell), stdin null. A ctx without a deadline gets
-// 30 s. A failure carries the last non-empty line of stderr.
+// 30 s. A failure carries the last non-empty line of stderr, and the stdout printed before it.
 func runCLI(ctx context.Context, name string, args ...string) (string, error) {
 	path, err := exec.LookPath(name)
 	if err != nil {
@@ -48,9 +48,9 @@ func runCLI(ctx context.Context, name string, args ...string) (string, error) {
 			return "", Problem(name + " timed out")
 		}
 		if line := lastLine(stderr.String()); line != "" {
-			return "", errors.New(line)
+			return stdout.String(), errors.New(line)
 		}
-		return "", errSilent
+		return stdout.String(), errSilent
 	}
 	return stdout.String(), nil
 }

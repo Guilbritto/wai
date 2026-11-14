@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"regexp"
 	"strings"
 )
@@ -35,8 +36,8 @@ func parseCards(out string) []Card {
 }
 
 // jira runs the user's own CLI; it holds the credentials, we never see them.
-func jira(args ...string) (string, error) {
-	out, err := runCLI(context.Background(), "jira", args...)
+func jira(ctx context.Context, args ...string) (string, error) {
+	out, err := runCLI(ctx, "jira", args...)
 	var nf ErrNotFound
 	if errors.As(err, &nf) {
 		return "", Problem("jira CLI not found — install it and run jira init")
@@ -45,9 +46,9 @@ func jira(args ...string) (string, error) {
 }
 
 // myCards is R45: `jira me` first, then the open cards assigned to that user.
-func myCards() ([]Card, error) {
+func myCards(ctx context.Context) ([]Card, error) {
 	notLoggedIn := Problem("jira is not logged in — run jira init in a terminal")
-	me, err := jira("me")
+	me, err := jira(ctx, "me")
 	if err != nil {
 		if errors.Is(err, errSilent) {
 			return nil, notLoggedIn
@@ -62,7 +63,7 @@ func myCards() ([]Card, error) {
 	if user == "" {
 		return nil, notLoggedIn
 	}
-	out, err := jira("issue", "list", "-a", user, "-s~Done", "--plain", "--no-headers", "--columns", "key,summary,status")
+	out, err := jira(ctx, "issue", "list", "-a", user, "-s~Done", "--plain", "--no-headers", "--columns", "key,summary,status")
 	if err != nil {
 		if errors.Is(err, errSilent) {
 			return nil, Problem("jira issue list failed")
@@ -70,4 +71,14 @@ func myCards() ([]Card, error) {
 		return nil, Problem("jira issue list failed: " + err.Error())
 	}
 	return parseCards(out), nil
+}
+
+// moveCard moves a card to the done status (WAI_WAYCARBON_DONE, default Done).
+func moveCard(ctx context.Context, key string) error {
+	done := os.Getenv("WAI_WAYCARBON_DONE")
+	if done == "" {
+		done = "Done"
+	}
+	_, err := jira(ctx, "issue", "move", key, done)
+	return err
 }
