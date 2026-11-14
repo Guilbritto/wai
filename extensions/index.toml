@@ -43,3 +43,34 @@ sha256 = "d55c47a21af9346b9c223b9d276b589c28c342b3838d2e11bd2efb66cb43acf9"
 [extensions.packages.windows-x64]
 url = "https://github.com/Guilbritto/wai-usage/releases/download/v0.1.0/wai-usage-0.1.0-windows-x64.tar.gz"
 sha256 = "bcfa2120ab253ede81a0bfcf672c056ce66b383957359b6952ea3e97b1c3aa04"
+
+[[extensions]]
+id = "wai-rotinas"
+name = "Rotinas"
+version = "0.1.0"
+description = "Runs your own scripts on a schedule from rotinas.toml and tells you when their output changes"
+repository = "https://github.com/Guilbritto/wai"
+
+[extensions.packages.darwin-arm64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-rotinas-v0.1.0/wai-rotinas-0.1.0-darwin-arm64.tar.gz"
+sha256 = "6dd4662bacee4c88c6a8f306de43b6a2b4a485f6a8961835be0e4616e7681f1e"
+
+[extensions.packages.darwin-x64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-rotinas-v0.1.0/wai-rotinas-0.1.0-darwin-x64.tar.gz"
+sha256 = "28a3758638389119a35d68f454c92dde22c21c2155f81f151fbe939f80fe2da4"
+
+[extensions.packages.linux-arm64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-rotinas-v0.1.0/wai-rotinas-0.1.0-linux-arm64.tar.gz"
+sha256 = "738318f08d013ba4d487c47997f97ab54eaeae7b740f556ff7401d8582597507"
+
+[extensions.packages.linux-x64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-rotinas-v0.1.0/wai-rotinas-0.1.0-linux-x64.tar.gz"
+sha256 = "150bd91dc065b9bcae1bbd2adc4278a12d4823ee23a507c9770ca231d8b5ad52"
+
+[extensions.packages.windows-arm64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-rotinas-v0.1.0/wai-rotinas-0.1.0-windows-arm64.tar.gz"
+sha256 = "245dfbd030fd4780a38049cad7beee8d7f8924de5ab28b4e9b972708b2929bbe"
+
+[extensions.packages.windows-x64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-rotinas-v0.1.0/wai-rotinas-0.1.0-windows-x64.tar.gz"
+sha256 = "aecd5ab4762464d4d8dc2aaab524fbc803e4ff02ac4fd7f9766614b53005ba7e"
