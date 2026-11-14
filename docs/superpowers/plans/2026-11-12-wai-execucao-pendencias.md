@@ -38,11 +38,11 @@ Cada trilha faz merge da `development` no seu branch antes de entregar, para res
 
 ## Fase 0 — Só o dono (corre em paralelo com tudo)
 
-- [ ] **0.3** Desligar a Central de forma reversível (`launchctl bootout gui/$UID/com.waycarbon.central-ia` e o `.atualizar`); deixar instalada 2 semanas.
+- [ ] **0.3** (o dono não vai desligar ainda, 12/11) Desligar a Central de forma reversível (`launchctl bootout gui/$UID/com.waycarbon.central-ia` e o `.atualizar`); deixar instalada 2 semanas.
 - [ ] **1.4** Uma semana só no wai, anotando os tropeços no "Diário de tropeços" do plano mestre.
-- [ ] **0.9** Aprovar o desenho de grupos e renomear (lápis/duplo clique, grupos recolhíveis no Open, arrastar linha para o cabeçalho).
+- [x] **0.9** Aprovar o desenho de grupos e renomear (lápis/duplo clique, grupos recolhíveis no Open, arrastar linha para o cabeçalho). Aprovado em 12/11.
 - [ ] Julgar o vidro do balão fixo (alfa 0.72), prints em `.superpowers/sdd/master-onda-1/track-a-shots/`.
-- [ ] Pergunta 3: continua em `bypassPermissions`?
+- [x] Pergunta 3: continua em `bypassPermissions`? Sim (12/11).
 
 ## Fase 1 — Agora (4 trilhas)
 
@@ -81,16 +81,44 @@ Mexem em Settings, no `main.rs`, no ciclo de vida do app ou na barra lateral, os
 
 ## Fase 3 — Precisam de spec com o dono antes (superpowers:brainstorming)
 
-- **3.8** Atalhos customizáveis (ESTUDO §6).
-- **3.9** Projeto 3: servidor MCP `wai` + "Configure with AI".
-- Extensões do mapa do plano mestre (`wai-remoto` e as outras), começando pelo que a 2.5 destrava.
+- **3.8** Personalização: atalhos, fontes e temas (ampliado pelo dono). Spec aprovada: `docs/superpowers/specs/2026-11-12-wai-personalization-design.md`. Duas trilhas, nesta ordem: atalhos, depois aparência.
+- **3.9** Servidor MCP `wai`: em qualquer conversa a IA muda a configuração, com aviso e Undo. Só configuração por ora; sem botão "Configure with AI". Spec aprovada: `docs/superpowers/specs/2026-11-12-wai-mcp-server-design.md`. Vem depois das duas trilhas da 3.8.
+- Extensões do mapa do plano mestre (`wai-remoto` e as outras): nenhuma por ora (dono, 12/11). Voltar a elas quando for desligar a Central (0.3).
 
 ## Fase 4 — Windows (fim da fila)
+
+Dono, 12/11: ainda não sabe se algum colega vai usar no Windows; fica no fim. A CI continua compilando e testando no Windows.
 
 - **2.8** Primeira execução do `.exe`; `wai-rotinas` no Windows (hoje recusa todo script, R67). A CI já roda no remoto.
 - **3.15** Ícone no `wai.exe` (R64), filhos do `npx` sobrevivendo ao agente, `--prefix` do `wai-navegador` num prefixo do usuário (R71).
 
 ---
+
+## Respostas do dono (2026-11-12, rodada de perguntas)
+
+- **Central:** fica ligada por ora (0.3 adiada).
+- **0.9** aprovado.
+- **Pergunta 3:** continua em bypass.
+- **2.7** (Codex, Antigravity, Copilot): nenhum agora.
+- **Ajustes menores adiados** das trilhas áreas, barra lateral e Fase 2 núcleo (13 itens, mais o teste instável `sending_a_draft_starts_one_session_in_its_folder`): todos numa trilha só.
+- **Worktrees que sobraram:** removidas.
+  - `ci-windows` e `sidebar-redesign` já estavam mergeadas.
+  - `clear-command` tinha um `/clear` sem commit: virou o commit `3916ece` no branch `feat/clear-command`, a partir de `852c8e7`.
+  - A trilha de ajustes faz o merge da `development` nesse branch, roda a suíte e o leva para a `development` (dono, 12/11).
+- **Áreas de trabalho:** "My calls" 1–5 valem como estão; 6–10 o dono decide depois de usar.
+- **Vidro do balão fixo:** o dono vê no app e diz.
+- **Licença:** do dono, sem licença por ora.
+- **Repositório:** `Guilbritto/wai` fica público. Tornar privado quebraria a atualização automática, que baixa as releases sem login, e custaria minutos de CI.
+- **Assinatura Apple:** sem assinatura por ora.
+- **Bundle id:** `app.wai.ide`.
+- **`wai-waycarbon`:** pode ficar público.
+- **Login do Claude:** como o Zed e o VS Code.
+  - O wai nunca vê o token; o usuário entra no Claude Code sem modificação, ou usa chave de API, Bedrock ou Vertex pelo `~/.claude/settings.json`.
+  - Para uso interno, dispensa a confirmação com a Anthropic.
+  - Entra na trilha de ajustes:
+    - um botão **Sign in** em Settings > AI, que abre uma aba de terminal com o comando de login do agente;
+    - no guia do usuário, chave de API, Bedrock e a primeira abertura do app sem assinatura.
+- **Regra para escolhas de configuração, atalhos, tema e login:** ver como as outras IDEs fazem (Zed primeiro, depois VS Code) e fazer igual.
 
 ## Andamento (2026-11-12, fim do dia)
 

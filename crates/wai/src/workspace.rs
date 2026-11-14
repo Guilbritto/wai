@@ -288,11 +288,10 @@ pub struct Workspace {
     pub(crate) shown_area: Option<usize>,
     /// The Open row or group being renamed, with its input.
     pub(crate) renaming: Option<(Renamed, Entity<InputState>, Subscription)>,
-    /// The Sessions panel's filter; its text narrows Open and History.
+    /// The Sessions and History panels' filter; its text narrows their rows.
     pub(crate) sessions_filter: Entity<InputState>,
-    /// The Sessions panel's sections are folded; kept in `state.json`.
+    /// The Sessions panel's Open section is folded; kept in `state.json`.
     pub(crate) open_folded: bool,
-    pub(crate) history_folded: bool,
     /// The bar items the user hid, and the rail's order; kept in `state.json`.
     pub(crate) hidden: BTreeSet<String>,
     pub(crate) rail_order: Vec<String>,
@@ -506,7 +505,6 @@ impl Workspace {
             open_folded: false,
             hidden: BTreeSet::new(),
             rail_order: Vec::new(),
-            history_folded: false,
             approved,
             shell,
             asking: Vec::new(),
@@ -894,7 +892,6 @@ impl Workspace {
         self.agents_right = state.agents_right;
         self.agents_collapsed = state.agents_collapsed;
         self.open_folded = state.open_folded;
-        self.history_folded = state.history_folded;
         self.hidden = state.hidden;
         self.rail_order = state.rail_order;
         if let Some(ix) = state.shown_area.filter(|&ix| ix < self.work_areas.len()) {
@@ -1051,7 +1048,6 @@ impl Workspace {
             open_files: open_files.collect(),
             active_file,
             open_folded: self.open_folded,
-            history_folded: self.history_folded,
             hidden: self.hidden.clone(),
             rail_order: self.rail_order.clone(),
         };
@@ -4286,6 +4282,7 @@ pub(crate) mod tests {
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
         let first = pane_session(&workspace, 0, cx);
 
+        click("tab-history", cx);
         let from = center_of(("history", 1usize), cx);
         drag_to_pane(from, 0, 0.5, cx);
 
@@ -4484,6 +4481,7 @@ pub(crate) mod tests {
         });
         assert_eq!(history_rows(&workspace, cx), 0);
 
+        click("tab-history", cx);
         cx.update(|window, cx| window.click("all-projects", cx));
         assert_eq!(history_rows(&workspace, cx), 25);
     }
@@ -4538,6 +4536,7 @@ pub(crate) mod tests {
         let rows = load_history(&workspace, 3, cx);
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
 
+        click("tab-history", cx);
         // A history row's menu offers Fork, and so does an open session's row.
         menu_item(("history", 1usize), "Fork", cx);
         wait_until(cx, "the fork", |cx| {
@@ -4588,6 +4587,7 @@ pub(crate) mod tests {
         );
         let (workspace, cx) = open(cx, fake_settings(&flags));
         load_history(&workspace, 2, cx);
+        click("tab-history", cx);
 
         menu_item(("history", 0usize), "Fork", cx);
         wait_until(cx, "the notice", |cx| {

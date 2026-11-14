@@ -1,4 +1,4 @@
-//! The sidebar: the activity bar's panels (the open sessions with their status and the agent's
+//! The sidebar: the activity bar's panels (the open sessions with their status, the agent's
 //! history, the project's files, search, the agents, then each running extension's panels).
 
 use std::collections::HashMap;
@@ -50,6 +50,7 @@ pub(crate) const GROUP_COLORS: [fn() -> Hsla; 6] = [
 pub enum SidebarTab {
     #[default]
     Sessions,
+    History,
     Files,
     Search,
     Agents,
@@ -58,13 +59,20 @@ pub enum SidebarTab {
 }
 
 /// Each tab with its key (see `bars`), element id and label.
-pub(crate) const TABS: [(SidebarTab, &str, &str, &str, Lucide); 4] = [
+pub(crate) const TABS: [(SidebarTab, &str, &str, &str, Lucide); 5] = [
     (
         SidebarTab::Sessions,
         "wai.sessions",
         "tab-sessions",
         "Sessions",
         Lucide::MessageSquare,
+    ),
+    (
+        SidebarTab::History,
+        "wai.history",
+        "tab-history",
+        "History",
+        Lucide::RotateCcwClock,
     ),
     (
         SidebarTab::Files,
@@ -262,6 +270,7 @@ impl Workspace {
                 .children(shown.map(|p| p.view.clone()))
                 .into_any_element(),
             SidebarTab::Sessions => self.render_sessions(cx).into_any_element(),
+            SidebarTab::History => self.render_history(cx).into_any_element(),
             SidebarTab::Files => self.files.clone().into_any_element(),
             SidebarTab::Search => self.search.clone().into_any_element(),
             SidebarTab::Agents => self.render_agents(cx).into_any_element(),
@@ -541,16 +550,14 @@ impl Workspace {
     }
 
     /// The Sessions panel: its title row and filter, then the Open section (drafts and sessions
-    /// outside any group, then each group under its header) over History. A row keeps its index
-    /// in `sessions`, whichever group draws it. With text in the filter only matching titles show,
-    /// and Open, History and a group holding one show expanded without changing their own folded
-    /// state.
+    /// outside any group, then each group under its header). A row keeps its index in `sessions`,
+    /// whichever group draws it. With text in the filter only matching titles show, and Open and a
+    /// group holding one show expanded without changing their own folded state.
     fn render_sessions(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let filter = self.filter(cx);
         let filtering = !filter.is_empty();
         let open_folded = self.open_folded && !filtering;
-        let history_folded = self.history_folded && !filtering;
         let shown = |session: &Entity<ChatSession>| shows(&filter, session_title(session.read(cx)));
         let members = |group: Option<usize>| {
             (self.sessions.iter().enumerate()).filter(move |(_, session)| {
@@ -614,9 +621,8 @@ impl Workspace {
                 groups.extend(rows.map(IntoElement::into_any_element));
             }
         }
-        let no_match = filtering && !matched && self.listed_history(cx).is_empty();
+        let no_match = filtering && !matched;
         let count = self.drafts.len() + members(None).count();
-        let faint = faint(cx);
         let title = panel_title("Sessions", cx)
             .child(
                 title_button("sessions-new", IconName::Plus, "New session").on_click(
@@ -641,20 +647,6 @@ impl Workspace {
                     }),
                 ),
             );
-        let kbd = div()
-            .px(px(4.))
-            .rounded(px(5.))
-            .border_1()
-            .border_color(theme.border)
-            .text_size(px(10.))
-            .text_color(faint)
-            .child(FILTER_KEY);
-        let filter_field = div().id("sessions-filter").px(px(2.)).pb(px(4.)).child(
-            Input::new(&self.sessions_filter)
-                .small()
-                .prefix(Icon::new(IconName::Search).xsmall().text_color(faint))
-                .suffix(kbd),
-        );
         let open_header =
             section_header("open-section", "Open", count.to_string(), open_folded, cx)
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -669,26 +661,14 @@ impl Workspace {
         v_flex()
             .size_full()
             .child(title)
-            .child(filter_field.test_support())
-            .children(no_match.then(|| {
-                div()
-                    .id("sessions-no-match")
-                    .px(px(8.))
-                    .py(px(4.))
-                    .text_size(px(11.))
-                    .text_color(faint)
-                    .aria_label("No sessions match")
-                    .child("No sessions match")
-                    .test_support()
-            }))
+            .child(self.filter_field(cx))
+            .children(no_match.then(|| no_match_hint(cx)))
             .child(
-                // Sized to its rows, up to 60 % of the panel while History is open; then it
-                // scrolls, header included.
+                // Sized to its rows; then it scrolls, header included.
                 v_flex()
                     .id("open-list")
                     .min_h_0()
                     .overflow_y_scroll()
-                    .when(!history_folded, |el| el.max_h(relative(0.6)))
                     .child(
                         h_flex()
                             .id("work-areas-heading")
@@ -726,7 +706,42 @@ impl Workspace {
                     )
                     .when(!open_folded, |el| el.children(groups)),
             )
-            .child(self.history_section(history_folded, cx))
+            .child(
+                div()
+                    .id("sessions-blank")
+                    .flex_1()
+                    .min_h_0()
+                    .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                        if event.click_count() == 2 {
+                            this.new_session(&NewSession, window, cx);
+                        }
+                    }))
+                    .test_support(),
+            )
+    }
+
+    /// The filter field the Sessions and History panels share.
+    fn filter_field(&self, cx: &App) -> impl IntoElement + use<> {
+        let faint = faint(cx);
+        let kbd = div()
+            .px(px(4.))
+            .rounded(px(5.))
+            .border_1()
+            .border_color(cx.theme().border)
+            .text_size(px(10.))
+            .text_color(faint)
+            .child(FILTER_KEY);
+        div()
+            .id("sessions-filter")
+            .px(px(2.))
+            .pb(px(4.))
+            .child(
+                Input::new(&self.sessions_filter)
+                    .small()
+                    .prefix(Icon::new(IconName::Search).xsmall().text_color(faint))
+                    .suffix(kbd),
+            )
+            .test_support()
     }
 
     /// The Sessions filter's text, lowercased: rows show when their title holds it.
@@ -1191,82 +1206,53 @@ impl Workspace {
             })
     }
 
-    /// History under Open: its header with the All switch (today's All projects), then the
-    /// agent's sessions the filter leaves, lazily, or the hint to choose an AI. `folded` as drawn.
-    fn history_section(&self, folded: bool, cx: &Context<Self>) -> impl IntoElement + use<> {
+    /// The History panel: its title with the All projects switch and the shared filter, then the
+    /// agent's sessions the filter leaves, lazily, or the hint to choose an AI.
+    fn render_history(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let rows = self.listed_history(cx).len();
-        let scope = match self.all_projects {
-            true => "· all projects",
-            false => "· this project",
-        };
-        let header = section_header("history-section", "History", scope, folded, cx)
-            .on_click(cx.listener(|this, _, _, cx| {
-                if this.filtering(cx) {
-                    return;
-                }
-                this.history_folded = !this.history_folded;
-                this.save_state(cx);
-                cx.notify();
-            }))
-            .test_support();
+        let title = panel_title("History", cx).child(
+            Switch::new("all-projects")
+                .xsmall()
+                .label("All projects")
+                .checked(self.all_projects)
+                .on_click(cx.listener(|this, all: &bool, _, cx| {
+                    this.all_projects = *all;
+                    cx.notify();
+                })),
+        );
         v_flex()
-            .flex_1()
-            .min_h_0()
-            .mt(px(4.))
-            .child(
-                h_flex().pr(px(4.)).child(header).child(
-                    Switch::new("all-projects")
-                        .xsmall()
-                        .label("All")
-                        .checked(self.all_projects)
-                        .on_click(cx.listener(|this, all: &bool, _, cx| {
-                            this.all_projects = *all;
-                            cx.notify();
-                        })),
+            .size_full()
+            .child(title)
+            .child(self.filter_field(cx))
+            .children((self.filtering(cx) && rows == 0).then(|| no_match_hint(cx)))
+            .map(|el| match self.default_agent() {
+                None => el.child(
+                    div()
+                        .id("history-hint")
+                        .p_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Choose an AI in Settings to see its history.")
+                        .test_support(),
                 ),
-            )
-            .child(
-                v_flex()
-                    .id("sessions-blank")
+                // Only the visible rows render: an agent can hold thousands of sessions.
+                Some(_) => el.child(
+                    uniform_list(
+                        "history",
+                        rows,
+                        cx.processor(|this, range: Range<usize>, _, cx| {
+                            let rows = this.listed_history(cx);
+                            range
+                                .map(|ix| this.history_row(ix, rows[ix], cx))
+                                .collect::<Vec<_>>()
+                        }),
+                    )
                     .flex_1()
                     .min_h_0()
-                    .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                        if event.click_count() == 2 {
-                            this.new_session(&NewSession, window, cx);
-                        }
-                    }))
-                    .when(!folded, |el| {
-                        el.map(|el| match self.default_agent() {
-                            None => el.child(
-                                div()
-                                    .id("history-hint")
-                                    .p_2()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Choose an AI in Settings to see its history.")
-                                    .test_support(),
-                            ),
-                            // Only the visible rows render: an agent can hold thousands of sessions.
-                            Some(_) => el.child(
-                                uniform_list(
-                                    "history",
-                                    rows,
-                                    cx.processor(|this, range: Range<usize>, _, cx| {
-                                        let rows = this.listed_history(cx);
-                                        range
-                                            .map(|ix| this.history_row(ix, rows[ix], cx))
-                                            .collect::<Vec<_>>()
-                                    }),
-                                )
-                                .flex_1()
-                                .min_h_0()
-                                // The rows' 4 px inset (the mockup's `.r1` margin).
-                                .pl(px(4.)),
-                            ),
-                        })
-                    })
-                    .test_support(),
-            )
+                    // The rows' 4 px inset (the mockup's `.r1` margin).
+                    .pl(px(4.)),
+                ),
+            })
     }
 
     /// An open session's row (the mockup's `.r2`): the status dot, its title and how long it has
@@ -1664,6 +1650,19 @@ pub(crate) fn panel_title(label: &str, cx: &App) -> Div {
         .child(div().flex_1().child(label.to_uppercase()))
 }
 
+/// The line a filter that matches nothing shows.
+fn no_match_hint(cx: &App) -> impl IntoElement + use<> {
+    div()
+        .id("sessions-no-match")
+        .px(px(8.))
+        .py(px(4.))
+        .text_size(px(11.))
+        .text_color(faint(cx))
+        .aria_label("No sessions match")
+        .child("No sessions match")
+        .test_support()
+}
+
 /// Faint text: counts, times, the filter's key (the mockup's `--dim`).
 fn faint(cx: &App) -> Hsla {
     match cx.theme().is_dark() {
@@ -1998,9 +1997,9 @@ pub(crate) mod tests {
         });
     }
 
-    /// History is no tab: its rows and the "All projects" switch sit under the open list.
+    /// History has its own tab: its rows and the "All projects" switch show only there.
     #[gpui_kit::test]
-    fn history_is_a_section_of_sessions(cx: &mut TestAppContext) {
+    fn history_has_its_own_tab(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, history_settings(3));
         load_history(&workspace, 3, cx);
@@ -2010,7 +2009,9 @@ pub(crate) mod tests {
                 window.try_find(id).is_some()
             })
         };
-        assert!(!shown("tab-history".into(), cx));
+        assert!(!shown(("history-side", 0usize).into(), cx));
+        assert_eq!(label("tab-history", cx).as_deref(), Some("History"));
+        press("tab-history", cx);
         assert!(shown("all-projects".into(), cx));
         assert!(shown(("history-side", 0usize).into(), cx));
         press("tab-files", cx);
@@ -2064,6 +2065,7 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let (_workspace, cx) = open(cx, settings);
+        press("tab-history", cx);
         let hint = cx.update(|window, cx| {
             window.render_frame(cx);
             window.try_find("history-hint")
@@ -2089,7 +2091,7 @@ pub(crate) mod tests {
         });
     }
 
-    /// A double click under History opens a draft; one on a History row only opens that row.
+    /// A double click under the open rows opens a draft; one on a History row only opens that row.
     #[gpui_kit::test]
     fn double_click_on_the_empty_panel_opens_a_draft(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
@@ -2104,6 +2106,7 @@ pub(crate) mod tests {
             assert!(w.sessions.is_empty());
         });
 
+        press("tab-history", cx);
         cx.update(|window, cx| window.double_click(("history", 0usize), cx));
         cx.run_until_parked();
         workspace.read_with(cx, |w, _| {
@@ -2586,6 +2589,7 @@ pub(crate) mod tests {
             [named("A", &[]), named("B", &[&ids[1]])]
         );
 
+        press("tab-history", cx);
         assert!(label(("history", 0usize), cx).is_some());
         assert!(
             label(("history-fork", 0usize), cx).is_none(),
@@ -2765,7 +2769,7 @@ pub(crate) mod tests {
     }
 
     /// The filter narrows Open and History to matching titles and shows matching groups
-    /// expanded; Esc clears it and every group is folded as it was.
+    /// expanded; Esc clears it and every group is folded as it was. History shares it.
     #[gpui_kit::test]
     fn filter_narrows_open_and_history(cx: &mut TestAppContext) {
         let (workspace, cx) = with_sessions(3, cx);
@@ -2780,10 +2784,20 @@ pub(crate) mod tests {
         let open = |cx: &mut VisualTestContext| -> Vec<String> {
             (0..3).filter_map(|ix| label(open_row(ix), cx)).collect()
         };
+        let tab = |tab: SidebarTab, cx: &mut VisualTestContext| {
+            workspace.update(cx, |w, cx| {
+                w.sidebar_tab = tab;
+                cx.notify();
+            })
+        };
+        // Switched without a click, so the filter keeps the focus.
         let history = |cx: &mut VisualTestContext| -> Vec<String> {
-            (0..3usize)
+            tab(SidebarTab::History, cx);
+            let rows = (0..3usize)
                 .filter_map(|ix| label(("history", ix), cx))
-                .collect()
+                .collect();
+            tab(SidebarTab::Sessions, cx);
+            rows
         };
         assert_eq!(open(cx), ["Session 1", "Session 2"]);
 
@@ -2809,8 +2823,8 @@ pub(crate) mod tests {
         assert_eq!(label("sessions-no-match", cx), None);
     }
 
-    /// While the filter has text, folded Open and History show their matches and a group's
-    /// chevron does nothing; cleared, each is as folded as before.
+    /// While the filter has text, folded Open shows its matches and a group's chevron does
+    /// nothing; cleared, each is as folded as before.
     #[gpui_kit::test]
     fn filter_unfolds_sections_without_changing_them(cx: &mut TestAppContext) {
         let (workspace, cx) = with_sessions(2, cx);
@@ -2818,29 +2832,20 @@ pub(crate) mod tests {
         type_name("A", "enter", cx);
         menu_item(open_row(1), "Move to A", cx);
         press("open-section", cx);
-        press("history-section", cx);
         let state = |cx: &mut VisualTestContext| {
-            workspace.read_with(cx, |w, _| {
-                (w.open_folded, w.history_folded, w.groups[0].collapsed)
-            })
+            workspace.read_with(cx, |w, _| (w.open_folded, w.groups[0].collapsed))
         };
-        assert_eq!(state(cx), (true, true, false));
+        assert_eq!(state(cx), (true, false));
 
         cx.simulate_keystrokes("secondary-k");
         cx.simulate_input("session 1");
         assert_eq!(label(open_row(1), cx).as_deref(), Some("Session 1"));
-        assert_eq!(label(("history", 0usize), cx).as_deref(), Some("Session 1"));
         press(("group-toggle", 0usize), cx);
         assert_eq!(label(open_row(1), cx).as_deref(), Some("Session 1"));
-        assert_eq!(
-            state(cx),
-            (true, true, false),
-            "nothing written while filtering"
-        );
+        assert_eq!(state(cx), (true, false), "nothing written while filtering");
 
         cx.simulate_keystrokes("escape");
         assert_eq!(label(open_row(1), cx), None);
-        assert_eq!(label(("history", 0usize), cx), None);
     }
 
     /// Dragging an icon onto another puts it there, and a relaunch keeps the order.
@@ -2851,7 +2856,13 @@ pub(crate) mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
-        let order = ["wai.search", "wai.sessions", "wai.files", "wai.agents"];
+        let order = [
+            "wai.search",
+            "wai.sessions",
+            "wai.history",
+            "wai.files",
+            "wai.agents",
+        ];
         cx.executor().allow_parking();
         let (workspace, cx) = open_at(cx, fake_settings(""), Some(path.clone()));
         drag("tab-search", "tab-sessions", cx);
@@ -2875,11 +2886,17 @@ pub(crate) mod tests {
         drag("tab-sessions", "tab-files", cx);
         assert_eq!(
             workspace.read_with(cx, |w, _| w.rail_order.clone()),
-            ["wai.files", "wai.sessions", "wai.search", "wai.agents"]
+            [
+                "wai.history",
+                "wai.files",
+                "wai.sessions",
+                "wai.search",
+                "wai.agents"
+            ]
         );
     }
 
-    /// Open and History fold, and stay folded on a relaunch, as the groups keep their colours.
+    /// Open folds, and stays folded on a relaunch, as the groups keep their colours.
     #[gpui_kit::test]
     fn sections_fold_and_survive_a_relaunch(
         cx: &mut TestAppContext,
@@ -2899,22 +2916,20 @@ pub(crate) mod tests {
             type_name(name, "enter", cx);
         }
         let folded = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
-            workspace.read_with(cx, |w, _| (w.open_folded, w.history_folded))
+            workspace.read_with(cx, |w, _| w.open_folded)
         };
-        assert_eq!(folded(&workspace, cx), (false, false));
+        assert!(!folded(&workspace, cx));
         assert!(label(open_row(0), cx).is_some());
         press("open-section", cx);
         assert!(label(open_row(0), cx).is_none());
         assert!(label(group(0), cx).is_none());
-        press("history-section", cx);
-        assert_eq!(folded(&workspace, cx), (true, true));
-        let state = AppState::load(&path);
-        assert!(state.open_folded && state.history_folded);
+        assert!(folded(&workspace, cx));
+        assert!(AppState::load(&path).open_folded);
 
         relaunch.executor().allow_parking();
         let (workspace, cx) = open_at(relaunch, fake_settings(""), Some(path.clone()));
         launch(&workspace, cx);
-        assert_eq!(folded(&workspace, cx), (true, true));
+        assert!(folded(&workspace, cx));
         assert_eq!(colors(&workspace, cx), [0, 1]);
         assert!(label(open_row(0), cx).is_none());
         press("open-section", cx);
@@ -2990,6 +3005,7 @@ pub(crate) mod tests {
             ];
             cx.notify();
         });
+        press("tab-history", cx);
         let sidebar = cx.debug_bounds("sidebar").unwrap();
         reveal(("history-side", 0usize), cx);
         let (side, short) = cx.update(|window, cx| {
@@ -3005,11 +3021,10 @@ pub(crate) mod tests {
         );
     }
 
-    /// History takes the room left under Open and scrolls on its own: a long history keeps the
-    /// open rows in view and draws only the rows that fit.
+    /// A long history draws only the rows that fit.
     #[gpui_kit::test]
-    fn long_history_scrolls_under_open(cx: &mut TestAppContext) {
-        let (workspace, cx) = with_sessions(1, cx);
+    fn long_history_draws_only_rows_in_view(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
         cx.simulate_resize(size(px(1000.), px(600.)));
         workspace.update(cx, |w, cx| {
             let row = |ix: usize| SessionSummary {
@@ -3021,10 +3036,9 @@ pub(crate) mod tests {
             w.history = (0..80).map(|ix| (w.project.clone(), row(ix))).collect();
             cx.notify();
         });
+        press("tab-history", cx);
         cx.update(|window, cx| {
             window.render_frame(cx);
-            let open = window.find(open_row(0));
-            assert!(open.visible(), "the open row is in view: {open:?}");
             assert!(window.try_find(("history-side", 0usize)).is_some());
             assert!(
                 window.try_find(("history-side", 79usize)).is_none(),

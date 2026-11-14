@@ -523,9 +523,8 @@ pub struct AppState {
     pub work_areas: Vec<WorkArea>,
     /// The one on screen.
     pub shown_area: Option<usize>,
-    /// The Sessions panel's Open and History sections are folded.
+    /// The Sessions panel's Open section is folded.
     pub open_folded: bool,
-    pub history_folded: bool,
     /// Bar items the user hid, by key (`wai.files`, `<extension id>/<item id>`).
     pub hidden: BTreeSet<String>,
     /// The rail's keys in the user's order.
@@ -601,7 +600,6 @@ impl Default for AppState {
             work_areas: Vec::new(),
             shown_area: None,
             open_folded: false,
-            history_folded: false,
             hidden: BTreeSet::new(),
             rail_order: Vec::new(),
         }
@@ -1017,7 +1015,6 @@ mod tests {
                 color: 3,
             }],
             open_folded: true,
-            history_folded: true,
             last_models: [("claude".to_string(), "opus".to_string())].into(),
             last_bases: [(PathBuf::from("/tmp/proj"), "feature".to_string())].into(),
             modes_seen: [(
@@ -1062,7 +1059,7 @@ mod tests {
         assert_eq!(state.groups, []);
         assert_eq!(state.work_areas, []);
         assert_eq!(state.shown_area, None);
-        assert!(!state.open_folded && !state.history_folded);
+        assert!(!state.open_folded);
         assert!(state.hidden.is_empty() && state.rail_order.is_empty());
         std::fs::write(&path, r#"{"work_areas":[{"name":"A"}]}"#).unwrap();
         let area = WorkArea {

@@ -135,11 +135,13 @@ O que a Central tem e não vem para o núcleo, com a extensão candidata e o que
 
 Licença e dono do código; remoto e CI (0.2); publicar ou não o `wai-waycarbon`; certificados Apple/Windows; confirmação com a Anthropic sobre login por assinatura; bundle id final; `updates.repo`; revisão de segurança do `wai-remoto`.
 
+Respondidos em 12/11 (detalhes em `2026-11-12-wai-execucao-pendencias.md`, "Respostas do dono, rodada de perguntas"): licença do dono, sem licença por ora; repositório público; `wai-waycarbon` pode ficar público; sem certificados por ora; login como Zed e VS Code, sem consulta à Anthropic para uso interno; bundle id `app.wai.ide`; `updates.repo` = `Guilbritto/wai`. Fica em aberto só a revisão de segurança do `wai-remoto`, que não está na fila.
+
 ## Perguntas em aberto (mudam a ordem)
 
 1. ~~No terminal da Central, o que você faz?~~ Respondida em 12/11: os três (TUI do Claude, `/mcp`/`/plugin`, comandos próprios). A 3.3 sobe.
 2. ~~Primeiros colegas usam Mac ou Windows?~~ Respondida em 12/11: Mac; o dono testa no Windows também. 2.8 e 3.15 no fim da fila.
-3. Vai continuar em `bypassPermissions`? → se sim, 0.4 importa mais para colegas e pode ir para a Onda 2.
+3. ~~Vai continuar em `bypassPermissions`?~~ Respondida em 12/11: sim. A 0.4 importa mais para colegas.
 4. ~~Submodules no New worktree?~~ Respondida em 12/11: continua desligado. O worktree serve para mostrar onde a IA está trabalhando; quem decide é a IA. Vira o item 1.10 (pílulas seguem a IA) em `2026-11-12-wai-execucao-pendencias.md`.
 5. ~~Settings em modal (1.9): só formato ou completo?~~ Respondida em 11/11: completo, com "Coming soon" no que o wai ainda não faz.
 
