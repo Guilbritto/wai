@@ -121,6 +121,7 @@ O que a Central tem e não vem para o núcleo, com a extensão candidata e o que
 |---|---|---|---|---|
 | Acesso pelo celular | não existe no Mac | `wai-remoto` | os 5 pré-requisitos de `extensions/wai-remoto/DESIGN.md:105-115` (permissão `listen`; `sessions/read` + `event/session_update`; `event/permission_requested` + `permission/answer`; `sessions/cancel`; pasta de dados = 2.5) + revisão de segurança do dono | só desenho |
 | PDF da daily (Jira) | nunca configurado | `wai-waycarbon` (reescrito) ou script do usuário via `wai-rotinas` | pasta de dados (2.5); token fica no Keychain e é da extensão, não do núcleo | não iniciado |
+| Cockpit do WayCarbon (PRs, cards, pedir ajuda) | uso diário | `wai-waycarbon` 0.2 (abas Work e Help, contador na barra) | API 1.5: `tabs`, `requires.claude_plugins`, ícone SVG | 0.2 feito; pedidos de ajuda esperam a hospedagem do relay |
 | Rotinas silenciosas | 0 ligadas | `wai-rotinas` (já existe) | nada; falta dias úteis e Windows | existe, com lacunas |
 | Prévia do navegador / "assumir controle" | 4 aberturas | `wai-navegador` (hoje só sobe o MCP do Playwright; a janela do Chrome é a prévia) | nó de imagem em painel, se um dia quiser prévia dentro do wai | só MCP |
 | ▶ Rodar / modo "!" | 0 | extensão de comandos | ação em bloco de código contribuída por extensão + `terminal/type` exposto à extensão | — |
