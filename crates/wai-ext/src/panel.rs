@@ -16,7 +16,7 @@
 //! - Nodes are the tree's root, each element of a `children` array and each table cell that is
 //!   not a string. List items, select options, table columns and rows, `kv` items and menu items
 //!   are not nodes; each has its own cap, past which the rest are dropped.
-//! - `value` (input, select), `checked` (checkbox) and `open` (section) and `value` (tabs) are initial values: wai
+//! - `value` (input, select, tabs), `checked` (checkbox) and `open` (section) are initial values: wai
 //!   applies one when the node first appears or when the extension sends a different one;
 //!   otherwise what the user did stays. `fill` makes a list, table or log take the panel's
 //!   remaining height.
