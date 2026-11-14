@@ -85,13 +85,13 @@ mod net {
 }
 
 // ponytail: tests never reach the network; `https://test.invalid/<path>` reads the file at
-// `/<path>`, and any other URL fails.
+// `<path>` (`tests::url`), and any other URL fails.
 #[cfg(test)]
 mod net {
     use super::*;
 
     fn file(url: &str) -> anyhow::Result<&Path> {
-        let path = url.strip_prefix("https://test.invalid");
+        let path = url.strip_prefix("https://test.invalid/");
         path.map(Path::new)
             .ok_or_else(|| anyhow::anyhow!("offline in tests"))
     }
@@ -119,11 +119,17 @@ pub(crate) mod tests {
 
     pub(crate) const SHA: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
+    /// The URL tests read `path` from. After the host's `/`, so that a Windows path (`C:\…`) is
+    /// not read as part of the host.
+    pub(crate) fn url(path: &Path) -> String {
+        format!("https://test.invalid/{}", path.display())
+    }
+
     /// An index at `dir/<name>`, as the URL tests read it from.
     pub(crate) fn index(dir: &Path, name: &str, text: &str) -> String {
         let path = dir.join(name);
         std::fs::write(&path, text).unwrap();
-        format!("https://test.invalid{}", path.display())
+        url(&path)
     }
 
     pub(crate) fn entry(id: &str, version: &str, url: &str, sha256: &str) -> String {
@@ -149,7 +155,7 @@ pub(crate) mod tests {
             &(entry("two", "9", "https://evil/2", SHA)
                 + &entry("three", "1", "https://e.com/3", SHA)),
         );
-        let missing = format!("https://test.invalid{}", tmp.path().join("none").display());
+        let missing = url(&tmp.path().join("none"));
         let got = fetch_all(&[a, b, missing.clone()]);
         let ids: Vec<_> = (got.entries.iter())
             .map(|e| (e.listing.id.as_str(), e.listing.version.as_str()))

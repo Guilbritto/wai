@@ -1105,7 +1105,7 @@ pub(crate) mod tests {
             .args(["-czf", &format!("{name}.tar.gz"), "-C", name, "."])
             .status();
         assert!(packed.unwrap().success());
-        let url = format!("https://test.invalid{}", archive.display());
+        let url = crate::marketplace::tests::url(&archive);
         (url, wai_ext::sha256_file(&archive).unwrap())
     }
 
