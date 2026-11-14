@@ -205,3 +205,34 @@ func TestReloadKeepsWaitingRequests(t *testing.T) {
 		t.Fatalf("mode: %v %v", fi, err)
 	}
 }
+
+func TestSweepDropsExpiredTokens(t *testing.T) {
+	s, c, path := newStore(t)
+	s.PutUser(1, "alice")
+	old, fresh := [32]byte{1}, [32]byte{2}
+	s.AddToken(old, 1)
+	c.add(helpapi.TokenLife - time.Hour)
+	s.AddToken(fresh, 1)
+	c.add(2 * time.Hour)
+	s.Sweep()
+	if len(s.d.Tokens) != 1 {
+		t.Fatalf("tokens after sweep: %d", len(s.d.Tokens))
+	}
+	s2, _ := OpenStore(path, c.now)
+	if _, ok := s2.TokenUser(fresh); !ok || len(s2.d.Tokens) != 1 {
+		t.Fatal("sweep not persisted or fresh token lost")
+	}
+}
+
+func TestCancelAccepted(t *testing.T) {
+	s, _, _ := newStore(t)
+	r, _ := s.Create(alice, bob, helpapi.Project{}, "x")
+	s.Act(2, r.ID, "accept", "")
+	got, err := s.Act(1, r.ID, "cancel", "")
+	if err != nil || got.State != helpapi.Cancelled {
+		t.Fatalf("cancel accepted: %+v %v", got, err)
+	}
+	if _, err := s.Act(1, r.ID, "cancel", ""); !errors.Is(err, ErrBadState) {
+		t.Fatalf("cancel twice: %v", err)
+	}
+}

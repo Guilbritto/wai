@@ -78,10 +78,23 @@ func (s *Store) save() error {
 		return err
 	}
 	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
 		return err
 	}
 	if err := os.Chmod(tmp, 0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, s.path)
@@ -122,11 +135,25 @@ func (s *Store) Users() []User {
 	return out
 }
 
-func (s *Store) AddToken(hash [32]byte, userID int64) {
+func (s *Store) AddToken(hash [32]byte, userID int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.d.Tokens[hex.EncodeToString(hash[:])] = token{userID, s.now().Add(helpapi.TokenLife)}
-	s.saveLogged()
+	k := hex.EncodeToString(hash[:])
+	old, had := s.d.Tokens[k]
+	s.d.Tokens[k] = token{userID, s.now().Add(helpapi.TokenLife)}
+	if err := s.save(); err != nil {
+		s.restoreToken(k, old, had)
+		return err
+	}
+	return nil
+}
+
+func (s *Store) restoreToken(k string, old token, had bool) {
+	if had {
+		s.d.Tokens[k] = old
+	} else {
+		delete(s.d.Tokens, k)
+	}
 }
 
 func (s *Store) TokenUser(hash [32]byte) (User, bool) {
@@ -140,11 +167,17 @@ func (s *Store) TokenUser(hash [32]byte) (User, bool) {
 	return u, ok
 }
 
-func (s *Store) DropToken(hash [32]byte) {
+func (s *Store) DropToken(hash [32]byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.d.Tokens, hex.EncodeToString(hash[:]))
-	s.saveLogged()
+	k := hex.EncodeToString(hash[:])
+	old, had := s.d.Tokens[k]
+	delete(s.d.Tokens, k)
+	if err := s.save(); err != nil {
+		s.restoreToken(k, old, had)
+		return err
+	}
+	return nil
 }
 
 func (s *Store) Create(from, to User, p helpapi.Project, text string) (helpapi.Request, error) {
@@ -284,6 +317,12 @@ func (s *Store) Sweep() (expired []helpapi.Request) {
 		}
 	}
 	changed := len(expired) > 0 || len(kept) != len(s.d.Requests)
+	for k, t := range s.d.Tokens {
+		if !now.Before(t.Expires) {
+			delete(s.d.Tokens, k)
+			changed = true
+		}
+	}
 	s.d.Requests = kept
 	if changed {
 		s.saveLogged()
