@@ -407,7 +407,7 @@ impl SettingsView {
         let order: Vec<String> = all.iter().map(|g| g.title.clone()).collect();
         let groups = filter(all, query);
         v_flex()
-            .gap_3()
+            .gap(px(18.))
             .children(learn_more)
             .children(problems)
             .children(groups.into_iter().enumerate().map(|(ix, group)| {
@@ -474,9 +474,12 @@ impl SettingsView {
                     .disabled(true)
             }));
         let rows = open.then(|| {
-            v_flex().children(group.rows.iter().map(|row| self.claude_row(row, muted, cx)))
+            let rows: Vec<_> = (group.rows.iter())
+                .map(|row| self.claude_row(row, muted, cx))
+                .collect();
+            super::card(rows, cx)
         });
-        v_flex().gap_1().child(header).children(rows)
+        v_flex().gap_2().child(header).children(rows)
     }
 
     fn claude_row(&self, row: &Row, muted: Hsla, cx: &mut Context<Self>) -> Div {
@@ -556,40 +559,33 @@ impl SettingsView {
             }
             Control::Soon => h_flex().child(aurora::soon(cx)),
         };
-        h_flex()
-            .justify_between()
-            .items_center()
-            .gap_4()
-            .py_2()
-            .child(
-                v_flex()
-                    .min_w_0()
-                    .gap(px(2.))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(clamp(&row.name, 80)),
-                            )
-                            .children(row.badge.clone().map(|b| aurora::badge(clamp(&b, 80), cx))),
-                    )
-                    .children(row.path.clone().map(|p| {
-                        div()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_xs()
-                            .text_color(muted)
-                            .child(p)
-                    }))
-                    .children(
-                        (row.summary.as_deref())
-                            .map(|s| div().text_color(muted).child(clamp(s, 160))),
-                    )
-                    .children(status),
-            )
-            .child(control)
+        super::setting(
+            v_flex()
+                .gap(px(2.))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(clamp(&row.name, 80)),
+                        )
+                        .children(row.badge.clone().map(|b| aurora::badge(clamp(&b, 80), cx))),
+                )
+                .children(row.path.clone().map(|p| {
+                    div()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .text_xs()
+                        .text_color(muted)
+                        .child(p)
+                }))
+                .children(
+                    (row.summary.as_deref()).map(|s| div().text_color(muted).child(clamp(s, 160))),
+                )
+                .children(status),
+            control,
+        )
     }
 }
 

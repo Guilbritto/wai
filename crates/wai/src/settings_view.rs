@@ -196,20 +196,142 @@ pub(crate) fn open_modal(view: Entity<SettingsView>, window: &mut Window, cx: &m
             .close_button(false)
             .entrance(DialogEntrance::None)
             .p_0()
-            .child(view.clone())
+            // Not `child`: the dialog puts children in a scroll area as tall as they are, so the
+            // whole modal would scroll. The content slot has the dialog's height; the nav and the
+            // page scroll on their own inside it.
+            .content({
+                let view = view.clone();
+                move |content, _, _| content.overflow_hidden().child(view.clone())
+            })
     });
 }
 
-/// Every row with its section and label: what the search matches.
-const ROWS: [(Section, &str); 7] = [
-    (Section::Appearance, "Theme"),
-    (Section::Conversation, "Processing"),
-    (Section::Terminal, "Shell"),
-    (Section::Updates, "Automatic updates"),
-    (Section::Updates, "Version"),
-    (Section::Updates, "Diagnostics"),
-    (Section::Updates, "Repository"),
+/// Every row with its section, the card it sits in (titled unless empty) and its label: the
+/// label is what the search matches.
+const ROWS: [(Section, &str, &str); 7] = [
+    (Section::Appearance, "", "Theme"),
+    (Section::Conversation, "", "Processing"),
+    (Section::Terminal, "", "Shell"),
+    (Section::Updates, "", "Automatic updates"),
+    (Section::Updates, "", "Version"),
+    (Section::Updates, "Troubleshooting", "Diagnostics"),
+    (Section::Updates, "Troubleshooting", "Repository"),
 ];
+
+/// The page's column (padding included) and the width of a select or text field in it.
+const COLUMN: f32 = 760.;
+const FIELD: f32 = 240.;
+
+/// `inner` as the page's column, centered.
+fn column(inner: Div) -> Div {
+    h_flex()
+        .w_full()
+        .flex_none()
+        .justify_center()
+        .child(inner.w_full().max_w(px(COLUMN)).px(px(32.)))
+}
+
+/// Hairlines between rows and around the header.
+fn divider(cx: &App) -> Hsla {
+    if cx.theme().is_dark() {
+        aurora::borda()
+    } else {
+        cx.theme().border
+    }
+}
+
+/// Rows in a card, a hairline between them: glass in dark mode, the theme's tokens in light.
+pub(crate) fn card(rows: impl IntoIterator<Item = Div>, cx: &App) -> Div {
+    let theme = cx.theme();
+    let fill = if theme.is_dark() {
+        aurora::vidro()
+    } else {
+        theme.background
+    };
+    let line = divider(cx).opacity(0.6);
+    v_flex()
+        .rounded(px(12.))
+        .border_1()
+        .border_color(divider(cx))
+        .bg(fill)
+        .overflow_hidden()
+        .children(rows.into_iter().enumerate().map(|(ix, row)| match ix {
+            0 => row,
+            _ => row.border_t_1().border_color(line),
+        }))
+}
+
+/// `body` under its small-capitals title; no title when `title` is empty.
+fn titled(title: &str, body: Div) -> Div {
+    v_flex()
+        .gap_2()
+        .children((!title.is_empty()).then(|| {
+            div()
+                .pl(px(2.))
+                .text_size(px(11.))
+                .text_color(aurora::nevoa_2())
+                .child(title.to_uppercase())
+        }))
+        .child(body)
+}
+
+/// What a row is on the left, its control on the right: every control ends on the card's edge.
+fn grid(left: impl IntoElement, control: impl IntoElement) -> Div {
+    h_flex()
+        .items_center()
+        .gap(px(24.))
+        .child(div().flex_1().min_w_0().child(left))
+        .child(
+            h_flex()
+                .flex_none()
+                .justify_end()
+                .items_center()
+                .gap_2()
+                .child(control),
+        )
+}
+
+/// A row of a card.
+pub(crate) fn setting(left: impl IntoElement, control: impl IntoElement) -> Div {
+    grid(left, control).px_4().py(px(12.)).min_h(px(56.))
+}
+
+/// A line under an agent's header, indented past its radio.
+fn sub_setting(left: impl IntoElement, control: impl IntoElement, cx: &App) -> Div {
+    sub_fill(grid(left, control), cx)
+}
+
+fn sub_fill(el: Div, cx: &App) -> Div {
+    let fill = if cx.theme().is_dark() {
+        hsla(0., 0., 0., 0.12)
+    } else {
+        cx.theme().muted.opacity(0.4)
+    };
+    el.pl(px(44.)).pr_4().py(px(10.)).bg(fill)
+}
+
+/// A row's name and, under it, what it does.
+fn named(label: impl Into<SharedString>, hint: Option<SharedString>, cx: &App) -> Div {
+    v_flex()
+        .gap(px(2.))
+        .child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(cx.theme().foreground)
+                .child(label.into()),
+        )
+        .children(hint.map(|h| {
+            div()
+                .text_size(px(12.5))
+                .text_color(cx.theme().muted_foreground)
+                .child(h)
+        }))
+}
+
+/// A select or text field, as wide as every other one.
+fn field(control: impl IntoElement) -> Div {
+    div().w(px(FIELD)).child(control)
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum RowStatus {
@@ -658,20 +780,16 @@ impl SettingsView {
     fn row(
         &self,
         label: &'static str,
+        hint: &'static str,
         selector: &'static str,
         control: impl IntoElement,
         cx: &App,
     ) -> Div {
-        h_flex()
+        setting(named(label, Some(hint.into()), cx), control)
             .debug_selector(move || selector.into())
-            .justify_between()
-            .items_center()
-            .gap_4()
-            .py_2()
-            .child(div().text_color(cx.theme().foreground).child(label))
-            .child(div().w(px(260.)).flex_none().child(control))
     }
 
+    /// A card: the radio, status and Test, then the agent's own lines indented under it.
     fn agent_row(&self, row: &AgentRow, cx: &mut Context<Self>) -> Div {
         let id = row.id.clone();
         let test = row.id.clone();
@@ -687,10 +805,13 @@ impl SettingsView {
         let warn = warning(row).map(|w| div().text_color(cx.theme().warning).child(w));
         let selector = format!("settings-agent-{}", row.id);
         let test_selector = format!("settings-test-{}", row.id);
+        // Under the name, past the radio.
+        let indent = px(24.);
         let adapter = row.adapter.as_ref().map(|a| {
             let selector = format!("settings-adapter-{}", row.id);
             div()
                 .debug_selector(move || selector)
+                .pl(indent)
                 .text_size(px(12.))
                 .text_color(muted)
                 .child(format!("Adapter {a}"))
@@ -699,119 +820,137 @@ impl SettingsView {
             let selector = format!("settings-adapter-note-{}", row.id);
             div()
                 .debug_selector(move || selector)
+                .pl(indent)
                 .text_size(px(12.))
                 .text_color(muted)
                 .child(note.clone())
         });
-        v_flex()
-            .py_2()
+        let tone = match row.status {
+            RowStatus::Ready => cx.theme().success,
+            RowStatus::SignedOut => cx.theme().warning,
+            RowStatus::Failed(_) | RowStatus::CliNotFound => cx.theme().danger,
+            _ => muted,
+        };
+        let name = v_flex()
+            .gap(px(2.))
             .child(
                 h_flex()
-                    .justify_between()
+                    .gap_2()
                     .items_center()
-                    .gap_4()
                     .child(
-                        div().debug_selector(move || selector).child(
-                            Radio::new(SharedString::from(format!("agent-{}", row.id)))
-                                .label(title)
-                                .checked(row.is_default)
-                                .disabled(off)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.change(Change::DefaultAgent(id.clone()), cx)
-                                })),
-                        ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(div().text_color(muted).child(row.status.text(login)))
+                        div()
+                            .debug_selector(move || selector)
+                            .font_weight(FontWeight::SEMIBOLD)
                             .child(
-                                div().debug_selector(move || test_selector).child(
-                                    Button::new(SharedString::from(format!("test-{}", row.id)))
-                                        .small()
-                                        .label("Test")
-                                        .on_click(cx.listener(move |_, _, _, cx| {
-                                            cx.emit(SettingsEvent::Test(test.clone()))
-                                        })),
-                                ),
+                                Radio::new(SharedString::from(format!("agent-{}", row.id)))
+                                    .label(title)
+                                    .checked(row.is_default)
+                                    .disabled(off)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.change(Change::DefaultAgent(id.clone()), cx)
+                                    })),
                             ),
+                    )
+                    .children(
+                        row.is_default
+                            .then(|| aurora::pill(cx).h(px(20.)).child("Default")),
                     ),
             )
             .children(adapter)
-            .children(adapter_note)
-            .children(install)
-            .children(warn)
-            .child(self.default_model(row, cx))
-            .children(row.extension.is_none().then(|| self.advanced(row, cx)))
+            .children(adapter_note);
+        let status = h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(div().size(px(7.)).rounded_full().bg(tone))
+                    .child(div().text_color(tone).child(row.status.text(login))),
+            )
+            .child(
+                div().debug_selector(move || test_selector).child(
+                    Button::new(SharedString::from(format!("test-{}", row.id)))
+                        .small()
+                        .label("Test")
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(SettingsEvent::Test(test.clone()))
+                        })),
+                ),
+            );
+        let mut lines = vec![setting(name, status)];
+        lines.extend(warn.map(|w| sub_setting(w, div(), cx)));
+        lines.extend(install.map(|i| sub_setting(i, div(), cx)));
+        lines.push(self.default_model(row, cx));
+        if row.extension.is_none() {
+            lines.extend(self.advanced(row, cx));
+        }
+        card(lines, cx)
     }
 
     fn default_model(&self, row: &AgentRow, cx: &mut Context<Self>) -> Div {
         let selector = format!("settings-model-{}", row.id);
         let control = match (row.models.is_empty(), self.models.get(&row.id)) {
-            (false, Some(select)) => div().w(px(260.)).child(
+            (false, Some(select)) => field(
                 Select::new(select)
                     .small()
                     .disabled(self.data.error.is_some()),
             ),
-            _ => div()
-                .text_color(cx.theme().muted_foreground)
-                .child("Start a session or press Test to see the models."),
-        };
-        h_flex()
-            .debug_selector(move || selector)
-            .gap_4()
-            .items_center()
-            .child(
+            _ => field(
                 div()
+                    .text_size(px(12.))
                     .text_color(cx.theme().muted_foreground)
-                    .child("Default model"),
-            )
-            .child(control)
+                    .child("Start a session or press Test to see the models."),
+            ),
+        };
+        sub_setting(div().child("Default model"), control, cx).debug_selector(move || selector)
     }
 
     /// Folded: the command, which Enter asks to run.
-    fn advanced(&self, row: &AgentRow, cx: &mut Context<Self>) -> Div {
+    fn advanced(&self, row: &AgentRow, cx: &mut Context<Self>) -> Vec<Div> {
         let open = self.advanced.as_deref() == Some(row.id.as_str());
         let id = row.id.clone();
-        let selector = format!("settings-command-{}", row.id);
-        let command = open.then(|| {
-            h_flex()
+        let muted = cx.theme().muted_foreground;
+        let toggle = h_flex()
+            .id(ElementId::Name(format!("advanced-{}", row.id).into()))
+            .gap_1()
+            .items_center()
+            .cursor_pointer()
+            .text_size(px(12.5))
+            .text_color(muted)
+            .hover(|el| el.text_color(cx.theme().foreground))
+            .child(
+                gpui_kit::component::Icon::new(if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .small(),
+            )
+            .child("Advanced")
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_advanced(&id, cx)))
+            .test_support();
+        let mut lines = vec![sub_setting(h_flex().child(toggle), div(), cx)];
+        if open {
+            let selector = format!("settings-command-{}", row.id);
+            let command = h_flex()
                 .debug_selector(move || selector)
-                .gap_4()
+                .gap(px(24.))
                 .items_center()
-                .child(
-                    div()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Command"),
-                )
+                .child(div().w(px(110.)).flex_none().child("Command"))
                 .child(
                     div().flex_1().child(
                         Input::new(&self.command)
                             .small()
                             .disabled(self.data.error.is_some()),
                     ),
-                )
-        });
-        v_flex()
-            .child(
-                h_flex().child(
-                    Button::new(SharedString::from(format!("advanced-{}", row.id)))
-                        .ghost()
-                        .small()
-                        .icon(if open {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .label("Advanced")
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_advanced(&id, cx))),
-                ),
-            )
-            .children(command)
+                );
+            lines.push(sub_fill(command, cx));
+        }
+        lines
     }
 
-    /// The version, what the last check found, and the one button that fits it.
+    /// The version and what the last check found on the left; the one button that fits it.
     fn version_row(&self, cx: &mut Context<Self>) -> Div {
         let status = &self.data.update;
         let (label, page) = match status {
@@ -839,20 +978,21 @@ impl SettingsView {
                 .label("Check now")
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::CheckUpdates)))
         });
+        let muted = cx.theme().muted_foreground;
         let color = |status: &UpdateStatus| match status {
             UpdateStatus::Failed(_) => cx.theme().danger,
-            _ => cx.theme().muted_foreground,
+            _ => muted,
         };
         let text = |id: &'static str, line: String, color| {
             div()
                 .id(id)
                 .aria_label(line.clone())
                 .test_support()
-                .text_size(px(12.))
+                .text_size(px(12.5))
                 .text_color(color)
                 .child(line)
         };
-        let line = status
+        let status_line = status
             .line()
             .map(|line| text("settings-update-status", line, color(status)));
         // `Available` already carries the sentence; otherwise it shows on its own.
@@ -862,15 +1002,16 @@ impl SettingsView {
         );
         let blocker = (self.data.update_blocker.clone())
             .filter(|_| !shown)
-            .map(|why| text("settings-update-blocker", why, cx.theme().muted_foreground));
-        let control = v_flex()
-            .gap_1()
-            .items_end()
-            .child(div().child(crate::bars::version()))
-            .children(line)
-            .children(blocker)
-            .child(h_flex().gap_2().children(check).child(button));
-        self.row("Version", "settings-update", control, cx)
+            .map(|why| text("settings-update-blocker", why, muted));
+        let left = named(
+            "Version",
+            Some(format!("wai {}", crate::bars::version()).into()),
+            cx,
+        )
+        .children(status_line)
+        .children(blocker);
+        setting(left, h_flex().gap_2().children(check).child(button))
+            .debug_selector(|| "settings-update".into())
     }
 
     fn rows(&self, label: &str, cx: &mut Context<Self>) -> Div {
@@ -878,52 +1019,52 @@ impl SettingsView {
         match label {
             "Theme" => self.row(
                 "Theme",
+                "Dark or light.",
                 "settings-theme",
-                Select::new(&self.theme).small().disabled(off),
+                field(Select::new(&self.theme).small().disabled(off)),
                 cx,
             ),
             "Processing" => self.row(
                 "Processing",
+                "How the agent's steps show while it works.",
                 "settings-processing",
-                Select::new(&self.processing).small().disabled(off),
+                field(Select::new(&self.processing).small().disabled(off)),
                 cx,
             ),
             "Shell" => self.row(
                 "Shell",
+                "Leave it empty for the system default.",
                 "settings-shell",
-                Input::new(&self.shell).small().disabled(off),
+                field(Input::new(&self.shell).small().disabled(off)),
                 cx,
             ),
             "Automatic updates" => self.row(
                 "Automatic updates",
+                "Look for a new release each time wai opens.",
                 "settings-updates-check",
-                h_flex().justify_end().child(
-                    Switch::new("settings-updates-switch")
-                        .checked(self.data.settings.updates.check)
-                        .disabled(off)
-                        .on_click(cx.listener(|this, on: &bool, _, cx| {
-                            this.change(Change::UpdatesCheck(*on), cx)
-                        })),
-                ),
+                Switch::new("settings-updates-switch")
+                    .checked(self.data.settings.updates.check)
+                    .disabled(off)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        this.change(Change::UpdatesCheck(*on), cx)
+                    })),
                 cx,
             ),
             "Version" => self.version_row(cx),
             "Diagnostics" => self.row(
                 "Diagnostics",
+                "What wai and its agents report, ready to paste in an issue.",
                 "settings-diagnostics",
-                h_flex().justify_end().child(
-                    Button::new("settings-diagnostics-copy")
-                        .label("Copy diagnostics")
-                        .on_click(
-                            cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::CopyDiagnostics)),
-                        ),
-                ),
+                Button::new("settings-diagnostics-copy")
+                    .label("Copy diagnostics")
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::CopyDiagnostics))),
                 cx,
             ),
             _ => self.row(
                 "Repository",
+                "The GitHub repository wai's releases come from.",
                 "settings-updates-repo",
-                Input::new(&self.repo).small().disabled(off),
+                field(Input::new(&self.repo).small().disabled(off)),
                 cx,
             ),
         }
@@ -937,11 +1078,24 @@ impl Render for SettingsView {
         }
         let query = self.search.read(cx).value().trim().to_lowercase();
         let (warning, danger) = (cx.theme().warning, cx.theme().danger);
-        let (muted, faint) = (cx.theme().muted_foreground, aurora::nevoa_2());
+        let muted = cx.theme().muted_foreground;
+        let dark = cx.theme().is_dark();
+        let faint = if dark { aurora::nevoa_2() } else { muted };
         let section = self.section;
-        let rows: Vec<_> = (ROWS.iter())
-            .filter(|(s, label)| *s == section && label.to_lowercase().contains(&query))
-            .map(|(_, label)| *label)
+        // Rows with the same card title share a card.
+        let mut cards: Vec<(&str, Vec<Div>)> = Vec::new();
+        for (_, title, label) in ROWS
+            .iter()
+            .filter(|(s, _, label)| *s == section && label.to_lowercase().contains(&query))
+        {
+            let row = self.rows(label, cx);
+            match cards.last_mut() {
+                Some((t, rows)) if t == title => rows.push(row),
+                _ => cards.push((title, vec![row])),
+            }
+        }
+        let cards: Vec<_> = (cards.into_iter())
+            .map(|(title, rows)| titled(title, card(rows, cx)))
             .collect();
         let ai = section == Section::Ai;
         let extensions = section == Section::Extensions;
@@ -963,83 +1117,106 @@ impl Render for SettingsView {
         } else {
             Vec::new()
         };
+        let agents = (!agents.is_empty()).then(|| {
+            titled(
+                "Agents",
+                v_flex()
+                    .gap(px(10.))
+                    .children(agents.iter().map(|a| self.agent_row(a, cx))),
+            )
+        });
         let project = ai
             .then(|| self.data.project_default.as_deref().map(agent_label))
             .flatten()
-            .map(|a| div().child(format!("This project uses {a}.")));
+            .map(|a| {
+                div()
+                    .text_color(muted)
+                    .child(format!("This project uses {a}."))
+            });
         let notice = ai
             .then(|| self.notice())
             .flatten()
             .map(|n| div().text_color(warning).child(n));
-        let advanced =
-            (ai && "settings.toml".contains(&query)).then(|| {
+        let advanced = (ai && "settings.toml".contains(&query)).then(|| {
+            let file = setting(
+                named(
+                    "settings.toml",
+                    Some("Everything above, as a file".into()),
+                    cx,
+                ),
+                Button::new("settings-open-file")
+                    .label("Open")
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::OpenFile))),
+            );
+            titled("Advanced", card([file], cx))
+        });
+        let soon = if dark { aurora::ambar() } else { warning };
+        let nav_fill = if dark {
+            white().opacity(0.018)
+        } else {
+            cx.theme().muted.opacity(0.3)
+        };
+        let nav: Vec<_> = NAV
+            .iter()
+            .map(|(label, sections)| {
                 v_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .font_family(DISPLAY_FONT)
-                            .text_size(px(16.))
-                            .font_weight(FontWeight::BOLD)
-                            .child("Advanced"),
-                    )
+                    .gap(px(2.))
                     .child(
                         h_flex()
-                            .justify_between()
-                            .items_center()
-                            .gap_4()
-                            .py_2()
-                            .child(v_flex().child(div().child("settings.toml")).child(
-                                div().text_color(muted).child("Everything above, as a file"),
-                            ))
-                            .child(
-                                Button::new("settings-open-file")
-                                    .small()
-                                    .label("Open")
-                                    .on_click(
-                                        cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::OpenFile)),
-                                    ),
-                            ),
+                            .gap_1()
+                            .px(px(10.))
+                            .pt(px(14.))
+                            .pb(px(6.))
+                            .text_size(px(11.))
+                            .text_color(faint)
+                            .children(
+                                (*label == "Claude")
+                                    .then(|| div().text_color(aurora::brasa()).child("✳")),
+                            )
+                            .child(label.to_uppercase()),
                     )
-            });
-        let nav = NAV.iter().map(|(label, sections)| {
-            v_flex()
-                .gap_1()
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .px_2()
-                        .pt_3()
-                        .pb_1()
-                        .text_size(px(11.))
-                        .text_color(faint)
-                        .children(
-                            (*label == "Claude")
-                                .then(|| div().text_color(aurora::brasa()).child("✳")),
-                        )
-                        .child(label.to_uppercase()),
-                )
-                .children(sections.iter().map(|&s| {
-                    let count = self.nav_count(s, cx);
-                    aurora::tab(s == section, cx)
-                        .id(ElementId::Name(format!("settings-nav-{}", s.key()).into()))
-                        .px_2()
-                        .py_1()
-                        .rounded(px(8.))
-                        .cursor_pointer()
-                        .justify_between()
-                        .child(s.title())
-                        .children(count.map(|n| div().text_color(faint).child(n.to_string())))
-                        .children(s.is_soon().then(|| div().text_color(faint).child("Soon")))
-                        .on_click(cx.listener(move |this, _, window, cx| this.show(s, window, cx)))
-                        .test_support()
-                }))
-        });
+                    .children(sections.iter().map(|&s| {
+                        let count = self.nav_count(s, cx);
+                        aurora::tab(s == section, cx)
+                            .id(ElementId::Name(format!("settings-nav-{}", s.key()).into()))
+                            .h(px(30.))
+                            .px(px(10.))
+                            .gap_2()
+                            .items_center()
+                            .rounded(px(8.))
+                            .cursor_pointer()
+                            .child(div().flex_1().min_w_0().child(s.title()))
+                            .children(
+                                s.is_soon().then(|| {
+                                    div().text_size(px(10.)).text_color(soon).child("Soon")
+                                }),
+                            )
+                            .children(count.map(|n| {
+                                div()
+                                    .min_w(px(22.))
+                                    .text_right()
+                                    .text_color(faint)
+                                    .child(n.to_string())
+                            }))
+                            .on_click(
+                                cx.listener(move |this, _, window, cx| this.show(s, window, cx)),
+                            )
+                            .test_support()
+                    }))
+            })
+            .collect();
         let banner = self.banner().map(|text| {
             h_flex()
+                .mt_3()
                 .justify_between()
                 .items_center()
+                .gap_4()
                 .px_3()
                 .py_2()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(danger.opacity(0.4))
+                .bg(danger.opacity(0.08))
                 .text_color(danger)
                 .child(text)
                 .child(
@@ -1049,6 +1226,66 @@ impl Render for SettingsView {
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::OpenFile))),
                 )
         });
+        // The page's header stays put; only what is under it scrolls.
+        let header = column(
+            v_flex()
+                .pt(px(28.))
+                .pb(px(16.))
+                .child(
+                    h_flex()
+                        .items_start()
+                        .gap_4()
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .font_family(DISPLAY_FONT)
+                                        .text_size(px(24.))
+                                        .font_weight(FontWeight::BOLD)
+                                        .child(section.title()),
+                                )
+                                .child(div().text_color(muted).child(section.description())),
+                        )
+                        .children(self.claude_actions(section, cx)),
+                )
+                .children(banner)
+                .children(
+                    (!extensions && !soon_page)
+                        .then(|| div().mt(px(14.)).child(Input::new(&self.search).small())),
+                ),
+        );
+        let body = column(
+            v_flex()
+                .pt(px(4.))
+                .pb(px(40.))
+                .gap(px(22.))
+                .children(notice)
+                .children(project)
+                .children(agents)
+                .children(cards)
+                .children(soon_page.then(|| {
+                    v_flex()
+                        .debug_selector(|| "settings-soon-page".into())
+                        .items_center()
+                        .gap_2()
+                        .py(px(40.))
+                        .child(aurora::soon(cx))
+                        .child(
+                            div()
+                                .font_family(DISPLAY_FONT)
+                                .text_size(px(20.))
+                                .font_weight(FontWeight::BOLD)
+                                .child("Not in wai yet"),
+                        )
+                        .child(div().text_color(muted).child(soon_text(section)))
+                }))
+                .children(claude_page.then(|| self.claude_page(section, &query, cx)))
+                .children(advanced)
+                .children(extensions.then(|| self.data.extensions.clone()).flatten()),
+        );
         v_flex()
             .size_full()
             .debug_selector(|| "settings-modal".into())
@@ -1094,79 +1331,36 @@ impl Render for SettingsView {
                     ),
             )
             .child(
+                // Stretched, not centered: the nav and the page are as tall as the modal and
+                // scroll on their own.
                 h_flex()
                     .flex_1()
                     .min_h_0()
+                    .items_stretch()
                     .child(
                         v_flex()
                             .id("settings-nav")
-                            .w(px(230.))
+                            .w(px(232.))
                             .flex_none()
                             .overflow_y_scroll()
-                            .p_2()
-                            .gap_1()
+                            .pt(px(10.))
+                            .px(px(10.))
+                            .pb(px(16.))
+                            .border_r_1()
+                            .border_color(divider(cx))
+                            .bg(nav_fill)
                             .children(nav),
                     )
                     .child(
-                        v_flex()
-                            .id("settings-content")
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_y_scroll()
-                            .p(px(30.))
-                            .gap_4()
-                            .child(
-                                h_flex()
-                                    .items_start()
-                                    .gap_4()
-                                    .child(
-                                        v_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .gap_1()
-                                            .child(
-                                                div()
-                                                    .font_family(DISPLAY_FONT)
-                                                    .text_size(px(26.))
-                                                    .font_weight(FontWeight::BOLD)
-                                                    .child(section.title()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_color(muted)
-                                                    .child(section.description()),
-                                            ),
-                                    )
-                                    .children(self.claude_actions(section, cx)),
-                            )
-                            .children(banner)
-                            .children(
-                                (!extensions && !soon_page)
-                                    .then(|| Input::new(&self.search).small()),
-                            )
-                            .children(notice)
-                            .children(project)
-                            .children(agents.iter().map(|a| self.agent_row(a, cx)))
-                            .children(rows.into_iter().map(|label| self.rows(label, cx)))
-                            .children(soon_page.then(|| {
-                                v_flex()
-                                    .debug_selector(|| "settings-soon-page".into())
-                                    .items_center()
-                                    .gap_2()
-                                    .py(px(40.))
-                                    .child(aurora::soon(cx))
-                                    .child(
-                                        div()
-                                            .font_family(DISPLAY_FONT)
-                                            .text_size(px(20.))
-                                            .font_weight(FontWeight::BOLD)
-                                            .child("Not in wai yet"),
-                                    )
-                                    .child(div().text_color(muted).child(soon_text(section)))
-                            }))
-                            .children(claude_page.then(|| self.claude_page(section, &query, cx)))
-                            .children(advanced)
-                            .children(extensions.then(|| self.data.extensions.clone()).flatten()),
+                        v_flex().flex_1().min_w_0().child(header).child(
+                            v_flex()
+                                .id("settings-content")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .child(body)
+                                .test_support(),
+                        ),
                     ),
             )
     }
@@ -1389,7 +1583,9 @@ mod tests {
             w.open_settings(Section::Ai, None, window, cx)
         });
         cx.update(|window, cx| {
-            window.render_frame(cx);
+            // The page scrolls under its header; `fake` is the last card.
+            let delta = gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-2000.)));
+            window.scroll("settings-content", delta, cx);
             window.click("advanced-fake", cx);
         });
         cx.run_until_parked();
@@ -1421,6 +1617,50 @@ mod tests {
             super::modal_size(vp, true),
             gpui_kit::size(gpui_kit::px(1376.), gpui_kit::px(876.))
         );
+    }
+
+    /// A page taller than the modal scrolls inside it: the dialog's own scroll never moves the
+    /// nav with the page.
+    #[gpui_kit::test]
+    fn tall_page_keeps_the_modal_height(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = fake_ws(cx, "");
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Ai, None, window, cx)
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        let viewport = cx.update(|window, _| window.viewport_size());
+        let modal = cx.debug_bounds("settings-modal").unwrap();
+        assert!(
+            modal.size.height <= super::modal_size(viewport, false).height,
+            "{modal:?} in {viewport:?}"
+        );
+        // The page scrolls inside the modal instead of spilling past it.
+        let page = cx.update(|window, _| window.find("settings-content").bounds());
+        assert!(page.bottom() <= modal.bottom(), "{page:?} in {modal:?}");
+    }
+
+    /// However wide the modal, the rows keep to one 760 px column and their controls end on one
+    /// edge.
+    #[gpui_kit::test]
+    fn rows_share_one_column(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Updates, None, window, cx)
+        });
+        click("settings-maximize", cx);
+        cx.update(|window, cx| window.render_frame(cx));
+        let rows = [
+            "settings-updates-check",
+            "settings-update",
+            "settings-diagnostics",
+            "settings-updates-repo",
+        ]
+        .map(|s| cx.debug_bounds(s).unwrap_or_else(|| panic!("{s}")));
+        for row in &rows[1..] {
+            assert_eq!(row.right(), rows[0].right());
+            assert_eq!(row.size.width, rows[0].size.width);
+        }
+        assert!(rows[0].size.width <= px(696.), "{:?}", rows[0].size.width);
     }
 
     #[gpui_kit::test]
