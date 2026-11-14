@@ -9,6 +9,7 @@ mod aurora;
 mod bars;
 mod chat;
 mod claude_config;
+mod claude_plugins;
 mod diagnostics;
 mod editor;
 mod elsewhere;

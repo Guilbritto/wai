@@ -20,10 +20,11 @@ use gpui_kit::*;
 // consent dialog.
 use wai_ext::index::Listing;
 use wai_ext::panel::clamp;
-use wai_ext::{ExtId, ExtStore, Installed, Permission, Source, Staged};
+use wai_ext::{ExtId, ExtStore, Installed, Permission, RequiredPlugin, Source, Staged};
 use wai_settings::Settings;
 
 use crate::aurora;
+use crate::claude_plugins::{self, INSTALL_TIMEOUT};
 use crate::ext_host::{ExtHost, ExtStatus};
 use crate::marketplace::{self, Entry, Listings};
 
@@ -232,6 +233,12 @@ impl ExtensionsView {
                 .collect::<Vec<_>>();
             lines.push(format!("Bar items: {}", titles.join(", ")));
         }
+        for p in &m.requires.claude_plugins {
+            let (name, marketplace) = (clamp(&p.name, NAME_CHARS), clamp(&p.marketplace, 300));
+            lines.push(format!(
+                "Install Claude Code plugin {name} from {marketplace}"
+            ));
+        }
         let pending = Pending(Some(staged), cx.background_executor().clone());
         let pending = Rc::new(RefCell::new(pending));
         let this = cx.entity().downgrade();
@@ -300,6 +307,7 @@ impl ExtensionsView {
     ) {
         let name = clamp(&staged.manifest().name, NAME_CHARS);
         let granted = staged.manifest().permissions.clone();
+        let required = staged.manifest().requires.claude_plugins.clone();
         let result = if updating {
             let id = staged.manifest().id.clone();
             self.host.update(cx, |host, cx| host.stop(&id, cx));
@@ -314,6 +322,7 @@ impl ExtensionsView {
         self.sync_host(cx);
         let notice = match result {
             Ok(()) => {
+                self.install_required(required, window, cx);
                 let did = if updating { "Updated" } else { "Installed" };
                 Notification::success(format!("{did} {name}"))
             }
@@ -324,6 +333,47 @@ impl ExtensionsView {
         };
         window.push_notification(notice, cx);
         cx.notify();
+    }
+
+    /// After the extension is committed: installs the Claude Code plugins it requires, off the
+    /// main thread. The extension stays installed whatever happens here.
+    fn install_required(
+        &mut self,
+        required: Vec<RequiredPlugin>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if required.is_empty() {
+            return;
+        }
+        let dir = self.config_dir.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            for p in required {
+                let (dir, plugin) = (dir.clone(), p.clone());
+                let done = cx
+                    .background_spawn(async move {
+                        let claude = wai_settings::find_program(Path::new("claude"))
+                            .ok_or_else(|| "claude is not on PATH".to_string())?;
+                        claude_plugins::install(&claude, &plugin, &dir, INSTALL_TIMEOUT)
+                    })
+                    .await;
+                let name = clamp(&p.name, NAME_CHARS);
+                cx.update(|window, cx| {
+                    let notice = match done {
+                        Ok(()) => {
+                            Notification::success(format!("Installed Claude Code plugin {name}"))
+                        }
+                        Err(e) => Notification::error(format!(
+                            "Could not install Claude Code plugin {name}: {e}"
+                        ))
+                        .autohide(false),
+                    };
+                    window.push_notification(notice, cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// Reads the indexes again: the official one, then the user's settings' (never a project's).
@@ -407,32 +457,41 @@ impl ExtensionsView {
             _ => None,
         };
         // Never installed silently: typed into the terminal, and the user presses Enter.
-        let plugins = (ext.manifest.contributes.claude_plugins.iter())
+        let plugin_row = |p: usize, label: String, command: Option<String>| {
+            let id = ElementId::Name(format!("ext-plugin:{}:{p}", ext.manifest.id.as_str()).into());
+            let row = h_flex().gap_2().text_xs().child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(format!("Claude Code plugin {label}")),
+            );
+            match command {
+                Some(command) => row.child(
+                    Button::new(id)
+                        .xsmall()
+                        .label("Install in terminal")
+                        .on_click(
+                            cx.listener(move |_, _, _, cx| cx.emit(InstallPlugin(command.clone()))),
+                        ),
+                ),
+                None => row.child(div().text_color(theme.danger).child("Invalid name")),
+            }
+        };
+        let required = (ext.manifest.requires.claude_plugins.iter()).map(|p| {
+            (
+                clamp(&p.name, NAME_CHARS),
+                Some(claude_plugins::terminal_line(p)),
+            )
+        });
+        let suggested = (ext.manifest.contributes.claude_plugins.iter())
+            .map(|name| (clamp(name, NAME_CHARS), plugin_install(name)));
+        let plugins = required
+            .chain(suggested)
             .filter(|_| ext.enabled)
             .take(PLUGINS_SHOWN)
             .enumerate()
-            .map(|(p, name)| {
-                let id =
-                    ElementId::Name(format!("ext-plugin:{}:{p}", ext.manifest.id.as_str()).into());
-                let row = h_flex().gap_2().text_xs().child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .child(format!("Claude Code plugin {}", clamp(name, NAME_CHARS))),
-                );
-                match plugin_install(name) {
-                    Some(command) => row.child(
-                        Button::new(id)
-                            .xsmall()
-                            .label("Install in terminal")
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.emit(InstallPlugin(command.clone()))
-                            })),
-                    ),
-                    None => row.child(div().text_color(theme.danger).child("Invalid name")),
-                }
-            });
+            .map(|(p, (label, command))| plugin_row(p, label, command));
         v_flex()
             .gap_1()
             .py_2()
@@ -681,20 +740,23 @@ impl Render for ExtensionsView {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::cell::RefCell;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
     use std::time::Duration;
 
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{ElementId, Entity, TestAppContext, VisualTestContext};
     #[cfg(unix)]
-    use wai_ext::{ExtId, ExtStore};
+    use wai_ext::ExtId;
+    use wai_ext::ExtStore;
     use wai_ext::{Installed, MANIFEST_FILE, Permission, Source, staging_dir};
     use wai_settings::Settings;
 
     use wai_ext::panel::clamp;
 
-    use super::{ExtensionsView, LIMITATION, plugin_install};
+    use super::{ExtensionsView, InstallPlugin, LIMITATION, plugin_install};
     #[cfg(unix)]
     use crate::ext_host::ExtStatus;
     use crate::settings_view::Section;
@@ -1356,6 +1418,75 @@ pub(crate) mod tests {
         }
         assert!(plugin_install(&"a".repeat(214)).is_some());
         assert_eq!(plugin_install(&"a".repeat(215)), None);
+    }
+
+    /// A required plugin is named in the consent dialog and listed, with its terminal command,
+    /// under the installed extension.
+    #[gpui_kit::test]
+    fn consent_lists_required_plugins(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = format!(
+            "api = \"1.5\"\n{MANIFEST}[[requires.claude_plugins]]\nname = \"waycarbon\"\n\
+             marketplace = \"waycarbon/claude-code\"\n"
+        );
+        let src = sample_with(&tmp.path().join("src"), &manifest);
+        let config = tmp.path().join("config");
+        let (workspace, cx) = workspace(&config, cx);
+        click("sidebar-extensions", cx);
+        let view = workspace.read_with(cx, |w, _| w.extensions.clone());
+        let view = view.expect("the Extensions view");
+        review(&view, &src, cx);
+        assert!(consent(cx), "no consent dialog");
+        cx.update(|window, cx| window.render_frame(cx));
+        let says = "consent: Install Claude Code plugin waycarbon from waycarbon/claude-code";
+        assert!(
+            cx.debug_bounds(says).is_some(),
+            "the dialog does not name the plugin"
+        );
+        // Not Install: that would run the real `claude`.
+        click("consent-cancel", cx);
+    }
+
+    /// The installed extension lists its required plugin first, typed without Enter.
+    #[gpui_kit::test]
+    fn required_plugin_row_emits_the_terminal_line(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = format!(
+            "api = \"1.5\"\n{MANIFEST}[[requires.claude_plugins]]\nname = \"waycarbon\"\n\
+             marketplace = \"waycarbon/claude-code\"\n"
+        );
+        let src = sample_with(&tmp.path().join("src"), &manifest);
+        let config = tmp.path().join("config");
+        let mut store = ExtStore::open(&config);
+        let staged = store.stage(&Source::Folder(src)).unwrap();
+        let granted = staged.manifest().permissions.clone();
+        store.commit(staged, granted).unwrap();
+        let (workspace, cx) = workspace(&config, cx);
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.show_extensions(window, cx);
+            })
+        });
+        let view = workspace
+            .read_with(cx, |w, _| w.extensions.clone())
+            .unwrap();
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let seen = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, e: &InstallPlugin, _| {
+                seen.borrow_mut().push(e.0.clone())
+            })
+            .detach()
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        click(ElementId::Name("ext-plugin:sample:0".into()), cx);
+        assert_eq!(
+            *events.borrow(),
+            ["claude plugin install waycarbon --marketplace waycarbon/claude-code"]
+        );
     }
 
     /// Never installed silently: "Install in terminal" shows the terminal and types the command

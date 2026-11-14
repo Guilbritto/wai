@@ -53,6 +53,7 @@ title = "Pull requests"
 | `contributes.agents` | array of tables | `name`, `command`. Needs `process` |
 | `contributes.mcp_servers` | array of tables | `name`, `command`, optional `args` (array), optional `env` (table of strings). Needs `process` |
 | `contributes.claude_plugins` | array of strings | Claude Code plugin names to suggest |
+| `requires.claude_plugins` | array of tables | `name`, `marketplace` (`owner/repo` or an `https://` URL). At most 5. API 1.5. Installed after consent, see [Installing and consent](#installing-and-consent) |
 | `contributes.panels` | array of tables | `id`, `title`, optional `icon`, optional `location`. See [Panels](#panels). Needs `panels` |
 | `contributes.items` | array of tables | `id`, `bar` (`"top"` or `"bottom"`), `title`. At most 3. See [Bar items](#bar-items). Needs `bar` |
 | `contributes.themes` | array of strings | Accepted, but not used in this version |
@@ -93,8 +94,14 @@ Calls in both directions are checked against what the user **granted** at instal
 
 - **Sources.** Users install from a folder, from a git URL (`https://…` or `git@host:path`), or from an index's listing. wai copies the folder, clones the repository with depth 1, or downloads the listing's package for the user's platform and checks it against the SHA-256 the index pins, then unpacks it into a staging area and reads the manifest. A package whose manifest id is not its listing's id is refused.
 - **The consent dialog.** It lists every permission in plain words, then the warning `wai cannot restrict files or network access in this version; only install extensions you trust.`, the source, and the description.
+  - A required Claude Code plugin is one more line: `Install Claude Code plugin <name> from <marketplace>`.
   - Nothing is installed or run before **Install**.
   - Consent is all or nothing: the extension gets exactly what it asks for.
+- **Required Claude plugins.** After **Install** (and **Update**) commits the extension, wai runs, off the main thread, `claude plugin install <name> --marketplace <marketplace> --scope user --json` for each one.
+  - It skips a plugin that `claude plugin list --json` already shows (an id starting with `<name>@`).
+  - stdin is closed, `GIT_TERMINAL_PROMPT=0` is set so a private marketplace never waits for a password, the working folder is the config folder, and it is killed after 5 minutes.
+  - wai never passes `-y`: a plugin that runs a command its marketplace declares needs a person to confirm, so `claude` refuses without a terminal and wai reports a failure. **Install in terminal** then runs it with the user at the prompt.
+  - A notification says `Installed Claude Code plugin <name>` or `Could not install Claude Code plugin <name>: <reason>`. The extension stays installed and enabled either way.
 - **What a stage refuses:**
   - symbolic links anywhere in the folder;
   - anything that is not a regular file or a folder;
@@ -466,8 +473,8 @@ A card with one block:
   - `command` is one program, with no arguments. A wrapper script is the usual way to pass arguments.
   - The agent starts from the config folder, like any agent.
 - **MCP servers** are passed to every session wai starts, loads or forks, for every agent. The agent starts them over stdio in the project folder, with your `args` and `env`.
-- **Claude plugins** are listed under the extension in the Extensions view with **Install in terminal**.
-  - That types `claude plugin install <name>` into wai's terminal **without pressing Enter**, so the user confirms.
+- **Claude plugins** are listed under the extension in the Extensions view with **Install in terminal**, required ones (`requires.claude_plugins`) first.
+  - That types `claude plugin install <name>` (for a required one, with `--marketplace <marketplace>`) into wai's terminal **without pressing Enter**, so the user confirms.
   - A name outside `[A-Za-z0-9._@/-]`, longer than 214 characters, or starting with `-` shows `Invalid name`.
   - The view lists up to 20.
 
@@ -487,7 +494,7 @@ Agents and MCP servers come only from enabled extensions that were granted `proc
 - **Pinned packages:** a package from an index downloads over https only (redirects too), at most 100 MB, and must match the SHA-256 the index lists. A user's own index cannot replace an id the official index lists, and a project cannot add an index.
 - **Bounded input:** message size, render rate, notification and session-open rates, panel tree size and text length are all capped, and panel trees are parsed off the UI thread. A broken or hostile panel shows as unsupported or `Panel too large`; it cannot crash wai.
 - **Clean stops:** an extension's whole process tree dies with it.
-- **Claude plugins** are never installed without the user pressing Enter.
+- **Claude plugins** are never installed without the user's consent: a required plugin is named in the consent dialog and installed when the user presses Install; a suggested one is typed into the terminal for the user to run.
 
 **What v1 does not isolate:**
 - **Your rights:** the extension's process runs as you. It can read and write any file you can, use the network, read the environment it inherits, and start any program.
