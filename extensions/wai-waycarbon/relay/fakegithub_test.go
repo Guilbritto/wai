@@ -159,5 +159,5 @@ func newTestServer(t *testing.T, f *fakeGitHub) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Server{store: st, gh: NewGitHub(cfg, f.srv.Client()), cfg: cfg, now: time.Now}
+	return NewServer(st, NewGitHub(cfg, f.srv.Client()), cfg)
 }

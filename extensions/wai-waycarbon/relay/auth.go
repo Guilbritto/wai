@@ -18,6 +18,13 @@ type Server struct {
 	gh    *GitHub
 	cfg   Config
 	now   func() time.Time
+	hub   *Hub
+}
+
+func NewServer(store *Store, gh *GitHub, cfg Config) *Server {
+	s := &Server{store: store, gh: gh, cfg: cfg, now: time.Now, hub: NewHub()}
+	s.hub.onToggle = s.broadcastPeople
+	return s
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -35,6 +42,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /auth/device", s.deviceStart)
 	mux.HandleFunc("POST /auth/device/poll", s.devicePoll)
 	mux.HandleFunc("POST /auth/signout", s.signout)
+	s.apiRoutes(mux)
 	return mux
 }
 

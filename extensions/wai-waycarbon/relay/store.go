@@ -189,6 +189,29 @@ func (s *Store) DropToken(hash [32]byte) error {
 	return nil
 }
 
+// DropUserTokens signs a user out everywhere (used when they leave the org).
+func (s *Store) DropUserTokens(userID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dropped := map[string]token{}
+	for k, t := range s.d.Tokens {
+		if t.UserID == userID {
+			dropped[k] = t
+			delete(s.d.Tokens, k)
+		}
+	}
+	if len(dropped) == 0 {
+		return nil
+	}
+	if err := s.save(); err != nil {
+		for k, t := range dropped {
+			s.d.Tokens[k] = t
+		}
+		return err
+	}
+	return nil
+}
+
 func (s *Store) Create(from, to User, p helpapi.Project, text string) (helpapi.Request, error) {
 	if len(text) > helpapi.MaxText {
 		return helpapi.Request{}, ErrTooLong

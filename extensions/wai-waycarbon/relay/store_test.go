@@ -242,3 +242,24 @@ func TestCancelAccepted(t *testing.T) {
 		t.Fatalf("cancel twice: %v", err)
 	}
 }
+
+func TestDropUserTokens(t *testing.T) {
+	s, _, _ := newStore(t)
+	s.PutUser(1, "alice")
+	s.PutUser(2, "bob")
+	s.AddToken([32]byte{1}, 1)
+	s.AddToken([32]byte{2}, 1)
+	s.AddToken([32]byte{3}, 2)
+	if err := s.DropUserTokens(1); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.TokenUser([32]byte{1}); ok {
+		t.Fatal("alice token survives")
+	}
+	if _, ok := s.TokenUser([32]byte{2}); ok {
+		t.Fatal("alice token survives")
+	}
+	if _, ok := s.TokenUser([32]byte{3}); !ok {
+		t.Fatal("bob token dropped")
+	}
+}
