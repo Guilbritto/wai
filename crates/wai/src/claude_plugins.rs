@@ -1,8 +1,10 @@
 //! Installs the Claude Code plugins an extension requires, with the user's `claude` CLI, after
 //! the user pressed Install. Argv only, no shell, never `-y`.
 
+use std::io::Read as _;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use wai_ext::RequiredPlugin;
@@ -41,30 +43,68 @@ fn command(claude: &Path, cwd: &Path) -> Command {
     cmd
 }
 
-/// The ids `claude plugin list --json` shows; empty on any failure.
+const LIST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Longest wait for the captured text once `claude` has exited.
+const CAPTURE_WAIT: Duration = Duration::from_secs(2);
+const CAPTURE_BYTES: u64 = 64 * 1024;
+
+/// The ids `claude plugin list --json` shows; empty on any failure or hang.
 pub fn installed(claude: &Path, cwd: &Path) -> Vec<String> {
-    let out = command(claude, cwd)
-        .args(["plugin", "list", "--json"])
-        .stderr(Stdio::null())
-        .output();
-    let Some(out) = out.ok().filter(|o| o.status.success()) else {
+    let mut list = command(claude, cwd);
+    list.args(["plugin", "list", "--json"]);
+    let Ok((status, stdout, _)) = run(list, LIST_TIMEOUT) else {
         return Vec::new();
     };
-    let list: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let list: Vec<serde_json::Value> = match status.success() {
+        true => serde_json::from_str(&stdout).unwrap_or_default(),
+        false => Vec::new(),
+    };
     (list.iter())
         .filter_map(|p| p.get("id")?.as_str().map(String::from))
         .collect()
 }
 
-fn read(pipe: Option<impl std::io::Read + Send + 'static>) -> std::thread::JoinHandle<String> {
+/// Sends what the pipe holds (at most 64 KiB) when it closes. The receiver waits a bounded time:
+/// a grandchild may keep the pipe open after `claude` exits.
+fn capture(pipe: Option<impl std::io::Read + Send + 'static>) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut text = String::new();
-        if let Some(mut pipe) = pipe {
-            // The output is small; a read error leaves what came so far.
-            pipe.read_to_string(&mut text).ok();
+        let mut bytes = Vec::new();
+        if let Some(pipe) = pipe {
+            // A read error leaves what came so far.
+            pipe.take(CAPTURE_BYTES).read_to_end(&mut bytes).ok();
         }
-        text
-    })
+        tx.send(String::from_utf8_lossy(&bytes).into_owned()).ok();
+    });
+    rx
+}
+
+/// Runs `cmd` with both outputs captured; kills it at `timeout`.
+fn run(mut cmd: Command, timeout: Duration) -> Result<(ExitStatus, String, String), String> {
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run claude: {e}"))?;
+    let (stdout, stderr) = (capture(child.stdout.take()), capture(child.stderr.take()));
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                child.kill().ok();
+                child.wait().ok();
+                return Err(format!("no answer in {} minutes", timeout.as_secs() / 60));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => {
+                child.kill().ok();
+                return Err(e.to_string());
+            }
+        }
+    };
+    let text = |rx: mpsc::Receiver<String>| rx.recv_timeout(CAPTURE_WAIT).unwrap_or_default();
+    Ok((status, text(stdout), text(stderr)))
 }
 
 /// Blocking: run it on a background thread.
@@ -81,26 +121,9 @@ pub fn install(
     {
         return Ok(());
     }
-    let mut child = (command(claude, cwd).args(install_args(p)))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("could not run claude: {e}"))?;
-    let (stdout, stderr) = (read(child.stdout.take()), read(child.stderr.take()));
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() >= deadline => {
-                // Not joined: a grandchild may still hold the pipes open.
-                child.kill().ok();
-                child.wait().ok();
-                return Err(format!("no answer in {} minutes", timeout.as_secs() / 60));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(e) => return Err(e.to_string()),
-        }
-    };
+    let mut cmd = command(claude, cwd);
+    cmd.args(install_args(p));
+    let (status, stdout, stderr) = run(cmd, timeout)?;
     if status.success() {
         return Ok(());
     }
@@ -108,10 +131,6 @@ pub fn install(
         let line = text.lines().rev().find(|l| !l.trim().is_empty());
         line.map(|l| clamp(l, REASON_CHARS))
     };
-    let (stdout, stderr) = (
-        stdout.join().unwrap_or_default(),
-        stderr.join().unwrap_or_default(),
-    );
     Err(last(stderr)
         .or_else(|| last(stdout))
         .unwrap_or_else(|| format!("claude exited with {status}")))
@@ -186,7 +205,7 @@ mod tests {
         let claude = fake(tmp.path(), "[]", "sleep 30");
         let start = Instant::now();
         let result = install(&claude, &plugin(), tmp.path(), Duration::from_millis(300));
-        assert!(result.is_err());
+        assert!(result.unwrap_err().starts_with("no answer in"));
         assert!(start.elapsed() < Duration::from_secs(5));
     }
 }

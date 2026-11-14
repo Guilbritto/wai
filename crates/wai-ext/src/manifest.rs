@@ -104,12 +104,15 @@ pub fn plugin_name_ok(name: &str) -> bool {
     (1..=214).contains(&name.len()) && name_part(name)
 }
 
-/// `owner/repo`, or `https://` followed by a URL without whitespace or control characters.
+/// `owner/repo`, or `https://` followed by URL characters only: the marketplace is typed into a
+/// shell by "Install in terminal", so no `;`, `|`, `&`, `$`, backtick, quote, `?` or `#`.
 pub fn marketplace_ok(source: &str) -> bool {
     if let Some(rest) = source.strip_prefix("https://") {
         return !rest.is_empty()
             && source.len() <= 2048
-            && !source.chars().any(|c| c.is_whitespace() || c.is_control());
+            && rest
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._~:/@%+=,-".contains(&b));
     }
     source
         .split_once('/')

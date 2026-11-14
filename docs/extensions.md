@@ -53,7 +53,7 @@ title = "Pull requests"
 | `contributes.agents` | array of tables | `name`, `command`. Needs `process` |
 | `contributes.mcp_servers` | array of tables | `name`, `command`, optional `args` (array), optional `env` (table of strings). Needs `process` |
 | `contributes.claude_plugins` | array of strings | Claude Code plugin names to suggest |
-| `requires.claude_plugins` | array of tables | `name`, `marketplace` (`owner/repo` or an `https://` URL). At most 5. API 1.5. Installed after consent, see [Installing and consent](#installing-and-consent) |
+| `requires.claude_plugins` | array of tables | `name`, `marketplace` (`owner/repo` or an `https://` URL of letters, digits and `._~:/@%+=,-`). At most 5. API 1.5. Installed after consent, see [Installing and consent](#installing-and-consent) |
 | `contributes.panels` | array of tables | `id`, `title`, optional `icon`, optional `location`. See [Panels](#panels). Needs `panels` |
 | `contributes.items` | array of tables | `id`, `bar` (`"top"` or `"bottom"`), `title`. At most 3. See [Bar items](#bar-items). Needs `bar` |
 | `contributes.themes` | array of strings | Accepted, but not used in this version |
