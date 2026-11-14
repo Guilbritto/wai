@@ -101,7 +101,7 @@ pub const MAX_REQUIRED_PLUGINS: usize = 5;
 
 /// `[A-Za-z0-9._-]`, 1-214 chars, no leading `-`.
 pub fn plugin_name_ok(name: &str) -> bool {
-    (1..=214).contains(&name.len()) && !name.starts_with('-') && name.bytes().all(repo_byte)
+    (1..=214).contains(&name.len()) && name_part(name)
 }
 
 /// `owner/repo`, or `https://` followed by a URL without whitespace or control characters.
@@ -111,10 +111,17 @@ pub fn marketplace_ok(source: &str) -> bool {
             && source.len() <= 2048
             && !source.chars().any(|c| c.is_whitespace() || c.is_control());
     }
-    let part = |s: &str| !s.is_empty() && !s.starts_with('-') && s.bytes().all(repo_byte);
     source
         .split_once('/')
-        .is_some_and(|(o, r)| part(o) && part(r))
+        .is_some_and(|(o, r)| name_part(o) && name_part(r))
+}
+
+/// Not empty, not leading `-`, not only dots (the claude CLI would read `.`/`..` as a path).
+fn name_part(s: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with('-')
+        && !s.bytes().all(|b| b == b'.')
+        && s.bytes().all(repo_byte)
 }
 
 fn repo_byte(b: u8) -> bool {
