@@ -7,8 +7,10 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func call(h http.Handler, method, path, bearer, body string) *httptest.ResponseRecorder {
@@ -108,8 +110,9 @@ func TestInstallationTokenIsCached(t *testing.T) {
 
 func TestTokenNotLogged(t *testing.T) {
 	var buf bytes.Buffer
+	old := log.Writer()
 	log.SetOutput(&buf)
-	defer log.SetOutput(log.Writer())
+	defer log.SetOutput(old)
 	s := newTestServer(t, newFakeGitHub(t))
 	h := s.Routes()
 	body := `{"device_code":"` + fakeDevice + `"}`
@@ -125,5 +128,24 @@ func TestTokenNotLogged(t *testing.T) {
 		if strings.Contains(buf.String(), secret) {
 			t.Fatalf("log leaks %q: %s", secret, buf.String())
 		}
+	}
+}
+
+func TestUserSaveFailureIsA500WithoutToken(t *testing.T) {
+	s := newTestServer(t, newFakeGitHub(t))
+	st, err := OpenStore(filepath.Join(t.TempDir(), "missing", "relay.json"), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.store = st
+	h := s.Routes()
+	body := `{"device_code":"` + fakeDevice + `"}`
+	call(h, "POST", "/auth/device/poll", "", body)
+	w := call(h, "POST", "/auth/device/poll", "", body)
+	if w.Code != 500 || strings.TrimSpace(w.Body.String()) != `{"error":"internal error"}` {
+		t.Fatalf("got %d %s", w.Code, w.Body)
+	}
+	if len(st.Users()) != 0 {
+		t.Fatal("user kept after failed save")
 	}
 }

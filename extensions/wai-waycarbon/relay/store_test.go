@@ -160,7 +160,9 @@ func TestOpenOrderAndScope(t *testing.T) {
 
 func TestTokens(t *testing.T) {
 	s, c, _ := newStore(t)
-	s.PutUser(1, "Alice")
+	if err := s.PutUser(1, "Alice"); err != nil {
+		t.Fatal(err)
+	}
 	h := [32]byte{1}
 	s.AddToken(h, 1)
 	if u, ok := s.TokenUser(h); !ok || u.Login != "Alice" {
@@ -183,7 +185,9 @@ func TestTokens(t *testing.T) {
 
 func TestReloadKeepsWaitingRequests(t *testing.T) {
 	s, _, path := newStore(t)
-	s.PutUser(1, "alice")
+	if err := s.PutUser(1, "alice"); err != nil {
+		t.Fatal(err)
+	}
 	s.AddToken([32]byte{9}, 1)
 	r1, _ := s.Create(alice, bob, helpapi.Project{}, "one")
 	r2, _ := s.Create(alice, carol, helpapi.Project{}, "two")
@@ -208,7 +212,9 @@ func TestReloadKeepsWaitingRequests(t *testing.T) {
 
 func TestSweepDropsExpiredTokens(t *testing.T) {
 	s, c, path := newStore(t)
-	s.PutUser(1, "alice")
+	if err := s.PutUser(1, "alice"); err != nil {
+		t.Fatal(err)
+	}
 	old, fresh := [32]byte{1}, [32]byte{2}
 	s.AddToken(old, 1)
 	c.add(helpapi.TokenLife - time.Hour)

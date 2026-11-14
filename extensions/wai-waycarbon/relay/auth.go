@@ -102,7 +102,11 @@ func (s *Server) devicePoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tok := base64.RawURLEncoding.EncodeToString(raw)
-	s.store.PutUser(id, login)
+	if err := s.store.PutUser(id, login); err != nil {
+		log.Printf("auth: store user %s: %v", login, err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	if err := s.store.AddToken(sha256.Sum256([]byte(tok)), id); err != nil {
 		log.Printf("auth: store token for %s: %v", login, err)
 		writeErr(w, http.StatusInternalServerError, "internal error")

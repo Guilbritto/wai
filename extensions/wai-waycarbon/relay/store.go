@@ -106,11 +106,20 @@ func (s *Store) saveLogged() {
 	}
 }
 
-func (s *Store) PutUser(id int64, login string) {
+func (s *Store) PutUser(id int64, login string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	old, had := s.d.Users[id]
 	s.d.Users[id] = User{ID: id, Login: login, LastSeen: s.now()}
-	s.saveLogged()
+	if err := s.save(); err != nil {
+		if had {
+			s.d.Users[id] = old
+		} else {
+			delete(s.d.Users, id)
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Store) UserByLogin(login string) (User, bool) {
