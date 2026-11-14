@@ -18,28 +18,28 @@ id = "wai-usage"
 name = "Usage"
 version = "0.1.0"
 description = "Your Claude plan's usage limits in the bottom bar"
-repository = "https://github.com/Guilbritto/wai"
+repository = "https://github.com/Guilbritto/wai-usage"
 
 [extensions.packages.darwin-arm64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-usage-v0.1.0/wai-usage-0.1.0-darwin-arm64.tar.gz"
-sha256 = "40be0ea7eb39c973ed962a7b1dd353333ca082ca7ffa09f15bc3f48844b1377a"
+url = "https://github.com/Guilbritto/wai-usage/releases/download/v0.1.0/wai-usage-0.1.0-darwin-arm64.tar.gz"
+sha256 = "4101cbbb935b44c931264d0426ace861c47fd6e6a6ddf3afb3b00b10f89521ee"
 
 [extensions.packages.darwin-x64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-usage-v0.1.0/wai-usage-0.1.0-darwin-x64.tar.gz"
-sha256 = "1233f68c591d0897251985592c46c2b9c96e6c02b0856dccee71eab261b87bd4"
+url = "https://github.com/Guilbritto/wai-usage/releases/download/v0.1.0/wai-usage-0.1.0-darwin-x64.tar.gz"
+sha256 = "824caf3e0b5255c33482497bf77a5bcc96b66e8dfea27ca222af2b0fcf74e066"
 
 [extensions.packages.linux-arm64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-usage-v0.1.0/wai-usage-0.1.0-linux-arm64.tar.gz"
-sha256 = "166a9b4dc7c971e4652af20edbe8aea443c40337c1ddc13a328dbfc2f59b4919"
+url = "https://github.com/Guilbritto/wai-usage/releases/download/v0.1.0/wai-usage-0.1.0-linux-arm64.tar.gz"
+sha256 = "93b48498afa46cbdb243104e74e02127b42eb732c31c061f17e7f1eb83b88bd1"
 
 [extensions.packages.linux-x64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-usage-v0.1.0/wai-usage-0.1.0-linux-x64.tar.gz"
-sha256 = "0030311fa13442d0558f165e2a1e048fe441ffc43a534d909c8b1583dc2bf7ed"
+url = "https://github.com/Guilbritto/wai-usage/releases/download/v0.1.0/wai-usage-0.1.0-linux-x64.tar.gz"
+sha256 = "0d27f4e93bb7ba17b23e124e620dbdcbcef2aec7b738e91a617c8c2fb04ce5a2"
 
 [extensions.packages.windows-arm64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-usage-v0.1.0/wai-usage-0.1.0-windows-arm64.tar.gz"
-sha256 = "1aebdaa0356312699cf36613d02900d6bcf30f6de556433b9c2e930f335ce802"
+url = "https://github.com/Guilbritto/wai-usage/releases/download/v0.1.0/wai-usage-0.1.0-windows-arm64.tar.gz"
+sha256 = "d55c47a21af9346b9c223b9d276b589c28c342b3838d2e11bd2efb66cb43acf9"
 
 [extensions.packages.windows-x64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-usage-v0.1.0/wai-usage-0.1.0-windows-x64.tar.gz"
-sha256 = "6e18edca401947cfc26f6835791e1a4a07ac8328b6f759051a7e216e9277d6a8"
+url = "https://github.com/Guilbritto/wai-usage/releases/download/v0.1.0/wai-usage-0.1.0-windows-x64.tar.gz"
+sha256 = "bcfa2120ab253ede81a0bfcf672c056ce66b383957359b6952ea3e97b1c3aa04"
