@@ -3,7 +3,7 @@
 A wai extension for the WayCarbon team (0.2, extension API 1.5). It contributes:
 
 - three session templates (front, BFF, Go service) that carry the team's conventions: `feat:`/`fix:`/`refactor:` commits without a scope, `Refs: EC-XXXX`, branches from `development`, PR titles ending with the EC key;
-- the `beehive-waycarbon` Claude plugin, and a requirement on the `waycarbon` Claude plugin (`waycarbon/claude-code`): installing the extension asks before installing it;
+- a requirement on the `waycarbon` Claude plugin (`waycarbon/claude-code`): installing the extension asks before installing it;
 - a **WayCarbon** panel with two tabs, **Work** and **Help**;
 - a bar item with a counter of what needs you, and a card with the count per group.
 
@@ -22,7 +22,7 @@ cd extensions/wai-waycarbon
 go build -o bin/wai-waycarbon .
 ```
 
-Then in wai: Extensions, install from folder, pick this folder, and review the consent (the permissions it asks for and the `waycarbon` plugin to install).
+Then in wai: Extensions, install from folder, pick this folder, and review the consent: the permissions `process`, `panels`, `bar`, `sessions:control`, `sessions:read`, `notify` and `network` (for the relay), and the `waycarbon` plugin to install.
 
 ## CLIs and tokens
 
