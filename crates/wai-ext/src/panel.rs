@@ -10,13 +10,13 @@
 //! - `text` (and `markdown`, `alert`, a multiline input's `value`) keep at most `TEXT_CHARS`
 //!   characters; a `log` keeps its last `LOG_CHARS`. Every other string is one line of at most
 //!   `LINE_CHARS` characters.
-//! - Ids are 1 to `MAX_ID` bytes. Buttons, form fields and sections share one set of ids: a
+//! - Ids are 1 to `MAX_ID` bytes. Buttons, form fields, sections and tabs share one set of ids: a
 //!   repeated id makes that node `Unsupported`. List item, card, table row and menu item ids may
 //!   repeat.
 //! - Nodes are the tree's root, each element of a `children` array and each table cell that is
 //!   not a string. List items, select options, table columns and rows, `kv` items and menu items
 //!   are not nodes; each has its own cap, past which the rest are dropped.
-//! - `value` (input, select), `checked` (checkbox) and `open` (section) are initial values: wai
+//! - `value` (input, select), `checked` (checkbox) and `open` (section) and `value` (tabs) are initial values: wai
 //!   applies one when the node first appears or when the extension sends a different one;
 //!   otherwise what the user did stays. `fill` makes a list, table or log take the panel's
 //!   remaining height.
@@ -34,6 +34,7 @@ pub const CARD_NODES: usize = 200;
 pub const TEXT_CHARS: usize = 10_000;
 pub const LINE_CHARS: usize = 500;
 pub const MAX_ID: usize = 256;
+pub const MAX_TABS: usize = 10;
 /// A select's menu draws every option.
 pub const MAX_OPTIONS: usize = 100;
 pub const MAX_COLUMNS: usize = 20;
@@ -113,6 +114,12 @@ pub enum Node {
         badge: Option<Arc<str>>,
         children: Vec<Node>,
     },
+    /// `value`: the id of the tab selected at first; the first tab when absent or unknown.
+    Tabs {
+        id: String,
+        value: Option<String>,
+        tabs: Vec<Tab>,
+    },
     /// A broken row is `None`.
     Table {
         columns: Vec<Column>,
@@ -190,6 +197,14 @@ pub struct Confirm {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Tab {
+    pub id: String,
+    pub title: Arc<str>,
+    pub badge: Option<Arc<str>>,
+    pub children: Vec<Node>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Column {
     pub title: Arc<str>,
     /// In pixels; columns without one share the rest.
@@ -252,6 +267,11 @@ impl Node {
             | Node::Card { children, .. }
             | Node::Section { children, .. } => {
                 for child in children {
+                    child.walk(f);
+                }
+            }
+            Node::Tabs { tabs, .. } => {
+                for child in tabs.iter().flat_map(|tab| &tab.children) {
                     child.walk(f);
                 }
             }
@@ -473,9 +493,54 @@ impl Parser {
                     children: self.children(o, depth)?.unwrap_or_default(),
                 })
             }
+            "tabs" => self.tabs(o, depth)?,
             "table" => self.table(o, depth)?,
             _ => self.leaf(kind, o),
         })
+    }
+
+    fn tabs(&mut self, o: &Map<String, Value>, depth: usize) -> Result<Option<Node>, TooLarge> {
+        let Some(id) = id(o) else {
+            return Ok(None);
+        };
+        let Some(raw) = o.get("tabs").and_then(Value::as_array) else {
+            return Ok(None);
+        };
+        if raw.is_empty() || raw.len() > MAX_TABS {
+            return Ok(None);
+        }
+        // Each tab whole and its id its own, before the node takes its id or reads a child.
+        let mut seen = HashSet::new();
+        let mut heads = Vec::new();
+        for tab in raw {
+            let Some(t) = tab.as_object() else {
+                return Ok(None);
+            };
+            let (Some(tab_id), Some(title)) = (self::id(t), line(t, "title")) else {
+                return Ok(None);
+            };
+            if !t.get("children").is_some_and(Value::is_array) || !seen.insert(tab_id.clone()) {
+                return Ok(None);
+            }
+            heads.push((t, tab_id, title));
+        }
+        if !self.ids.insert(id.clone()) {
+            return Ok(None);
+        }
+        let mut tabs = Vec::new();
+        for (t, tab_id, title) in heads {
+            tabs.push(Tab {
+                id: tab_id,
+                title,
+                badge: line(t, "badge"),
+                children: self.children(t, depth)?.unwrap_or_default(),
+            });
+        }
+        Ok(Some(Node::Tabs {
+            id,
+            value: str_field(o, "value").map(str::to_owned),
+            tabs,
+        }))
     }
 
     fn table(&mut self, o: &Map<String, Value>, depth: usize) -> Result<Option<Node>, TooLarge> {
@@ -1545,6 +1610,77 @@ mod tests {
         assert!(text.starts_with('…') && text.ends_with(".é\nend"));
         assert_eq!(tail("abc", 3), "abc");
         assert_eq!(tail("abcd", 3), "…bcd");
+    }
+
+    #[test]
+    fn tabs_parse() {
+        let tree = json!({"type": "tabs", "id": "t", "value": "help", "tabs": [
+            {"id": "work", "title": "Work", "badge": "3", "children": [{"type": "text", "text": "a"}]},
+            {"id": "help", "title": "Help", "children": []},
+        ]});
+        let Ok(Node::Tabs { id, value, tabs }) = parse(&tree) else {
+            panic!("not tabs")
+        };
+        assert_eq!((id.as_str(), value.as_deref()), ("t", Some("help")));
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[0].badge.as_deref(), Some("3"));
+        assert_eq!(tabs[0].children.len(), 1);
+        assert!(tabs[1].badge.is_none());
+    }
+
+    #[test]
+    fn broken_tabs_are_unsupported() {
+        let tab = |id: &str| json!({"id": id, "title": id, "children": []});
+        let many: Vec<_> = (0..=MAX_TABS).map(|n| tab(&n.to_string())).collect();
+        let cases = [
+            json!({"type": "tabs", "tabs": [tab("a")]}),
+            json!({"type": "tabs", "id": "t", "tabs": "a"}),
+            json!({"type": "tabs", "id": "t", "tabs": []}),
+            json!({"type": "tabs", "id": "t", "tabs": many}),
+            json!({"type": "tabs", "id": "t", "tabs": [{"id": "a", "children": []}]}),
+            json!({"type": "tabs", "id": "t", "tabs": [{"id": "a", "title": "A"}]}),
+            json!({"type": "tabs", "id": "t", "tabs": [tab("a"), tab("a")]}),
+        ];
+        for case in cases {
+            assert_eq!(parse(&case), Ok(Node::Unsupported), "{case}");
+        }
+        let Ok(Node::Column(children)) = parse(&json!({"type": "column", "children": [
+            {"type": "button", "id": "b", "label": "B"},
+            {"type": "tabs", "id": "b", "tabs": [tab("a")]},
+            {"type": "tabs", "id": "t", "tabs": [tab("a")]},
+            {"type": "tabs", "id": "t", "tabs": [tab("a")]},
+        ]})) else {
+            panic!("not a column")
+        };
+        assert_eq!(children[1], Node::Unsupported);
+        assert!(matches!(&children[2], Node::Tabs { .. }));
+        assert_eq!(children[3], Node::Unsupported);
+    }
+
+    #[test]
+    fn tabs_children_count_toward_limits() {
+        let texts = vec![json!({"type": "text", "text": "t"}); MAX_NODES];
+        let tree = json!({"type": "tabs", "id": "t", "tabs": [
+            {"id": "a", "title": "A", "children": []},
+            {"id": "b", "title": "B", "children": texts},
+        ]});
+        assert_eq!(parse(&tree), Err(TooLarge));
+    }
+
+    #[test]
+    fn walk_visits_every_tab() {
+        let tree = parse(&json!({"type": "tabs", "id": "t", "tabs": [
+            {"id": "a", "title": "A", "children": []},
+            {"id": "b", "title": "B", "children": [{"type": "text", "text": "hidden"}]},
+        ]}))
+        .unwrap();
+        let mut seen = Vec::new();
+        tree.walk(&mut |n| {
+            if let Node::Text { text, .. } = n {
+                seen.push(text.to_string())
+            }
+        });
+        assert_eq!(seen, ["hidden"]);
     }
 
     #[test]

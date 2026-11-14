@@ -27,7 +27,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::{Map, Value};
-use wai_ext::panel::{ButtonStyle, Column, Confirm, Item, Node, TableRow, Tone, TooLarge};
+use wai_ext::panel::{ButtonStyle, Column, Confirm, Item, Node, Tab, TableRow, Tone, TooLarge};
 
 use crate::aurora;
 use crate::sidebar::ROW_HEIGHT;
@@ -113,8 +113,8 @@ pub struct ExtPanel {
     /// What was typed and the placeholder shown, per input id. Kept across renders while the id
     /// stays an input.
     pub(crate) inputs: HashMap<String, (Field, Arc<str>)>,
-    /// Each select's choice, each checkbox's state and each section's openness, per id; kept the
-    /// same way.
+    /// Each select's choice, each checkbox's state, each section's openness and each tabs'
+    /// selected tab, per id; kept the same way.
     values: HashMap<String, Value>,
     /// The initial value the extension last sent, per field id. Only a different one replaces
     /// what the user did.
@@ -153,6 +153,7 @@ impl ExtPanel {
                     Node::Select { id, value, .. } => (id, value.as_deref().map(Value::from)),
                     Node::Checkbox { id, checked, .. } => (id, checked.map(Value::Bool)),
                     Node::Section { id, open, .. } => (id, open.map(Value::Bool)),
+                    Node::Tabs { id, value, .. } => (id, value.as_deref().map(Value::from)),
                     _ => return,
                 };
                 fields.insert(id.as_str());
@@ -268,6 +269,7 @@ impl ExtPanel {
                         (id, chosen.map_or(Value::Null, |o| Value::from(&**o)))
                     }
                     Node::Checkbox { id, .. } => (id, Value::Bool(self.checked(id))),
+                    Node::Tabs { id, tabs, .. } => (id, Value::from(&*self.selected(id, tabs).id)),
                     _ => return,
                 };
                 form.insert(id.clone(), value);
@@ -285,6 +287,13 @@ impl ExtPanel {
 
     fn checked(&self, id: &str) -> bool {
         self.values.get(id) == Some(&Value::Bool(true))
+    }
+
+    /// The tab chosen, while it is still offered; else the first.
+    fn selected<'a>(&self, id: &str, tabs: &'a [Tab]) -> &'a Tab {
+        let chosen = self.values.get(id).and_then(Value::as_str);
+        let offered = chosen.and_then(|c| tabs.iter().find(|t| t.id == c));
+        offered.unwrap_or(&tabs[0])
     }
 
     /// A section is open unless closed.
@@ -589,6 +598,71 @@ impl ExtPanel {
                     .child(own(header, at))
                     .children(body)
                     .into_any_element()
+            }
+            Node::Tabs { id, tabs, .. } => {
+                let current = self.selected(id, tabs).id.clone();
+                let bar = h_flex()
+                    .gap_1()
+                    .flex_wrap()
+                    .children(tabs.iter().map(|tab| {
+                        let on = tab.id == current;
+                        let (field, choice) = (id.clone(), tab.id.clone());
+                        h_flex()
+                            .id(name("panel-tab", &format!("{id}:{}", tab.id)))
+                            .gap_1()
+                            .px_2()
+                            .py_0p5()
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(transparent_black())
+                            .cursor_pointer()
+                            .text_sm()
+                            .when(on, |el| el.font_weight(FontWeight::SEMIBOLD))
+                            .when(!on, |el| el.text_color(muted))
+                            .role(Role::Tab)
+                            .aria_label(SharedString::from(&tab.title))
+                            .aria_selected(on)
+                            .focus_visible(move |el| el.border_color(ring))
+                            .tab_index(0)
+                            .child(SharedString::from(&tab.title))
+                            .children(
+                                (tab.badge.as_ref())
+                                    .map(|b| Tag::secondary().small().child(SharedString::from(b))),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set(field.clone(), Value::from(choice.as_str()), cx)
+                            }))
+                            .test_support()
+                    }));
+                let inner = At {
+                    column: at.column,
+                    row: false,
+                    click: at.click,
+                };
+                let mut fills = false;
+                let mut body = Vec::new();
+                for tab in tabs {
+                    if tab.id == current {
+                        for child in &tab.children {
+                            let (element, grows) = self.node(child, inner, n, window, cx);
+                            fills |= grows;
+                            body.push(element);
+                        }
+                    } else {
+                        // What follows keeps its numbers, so its element state.
+                        *n += tab.children.iter().map(size).sum::<usize>();
+                    }
+                }
+                let element = (v_flex().gap_2())
+                    .when(fills, |el| el.flex_1().min_h_0())
+                    .child(own(bar, at))
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .when(fills, |el| el.flex_1().min_h_0())
+                            .children(body),
+                    );
+                return (element.into_any_element(), fills);
             }
             Node::Alert { tone, title, text } => {
                 let variant = match tone {
@@ -915,6 +989,7 @@ fn size(node: &Node) -> usize {
         | Node::Row(children)
         | Node::Card { children, .. }
         | Node::Section { children, .. } => children.iter().map(size).sum(),
+        Node::Tabs { tabs, .. } => tabs.iter().flat_map(|t| &t.children).map(size).sum(),
         _ => 0,
     }
 }
@@ -1580,6 +1655,119 @@ mod tests {
         assert!(inner(cx), "a different `open` opens it");
         click(name("panel-button:after"), cx);
         assert_eq!(*actions.borrow(), [("after".to_string(), json!({}))]);
+    }
+
+    fn tabs_tree(value: Option<&str>) -> Value {
+        json!({"type": "tabs", "id": "t", "value": value, "tabs": [
+            {"id": "work", "title": "Work", "badge": "3", "children": [
+                {"type": "button", "id": "in-work", "label": "Work button"},
+            ]},
+            {"id": "help", "title": "Help", "children": [
+                {"type": "input", "id": "q", "placeholder": "q"},
+                {"type": "button", "id": "in-help", "label": "Help button"},
+            ]},
+        ]})
+    }
+
+    /// Switching tabs is local: it shows the tab's children and sends nothing.
+    #[gpui_kit::test]
+    fn tabs_switch_locally(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        show(&panel, tabs_tree(None), cx);
+        assert!(shown(name("panel-button:in-work"), cx));
+        assert!(!shown(name("panel-button:in-help"), cx));
+        click(name("panel-tab:t:help"), cx);
+        frame(cx);
+        assert!(shown(name("panel-button:in-help"), cx));
+        assert!(!shown(name("panel-button:in-work"), cx));
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn tab_value_reaches_the_form(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        show(&panel, tabs_tree(None), cx);
+        click(name("panel-tab:t:help"), cx);
+        frame(cx);
+        click(name("panel-button:in-help"), cx);
+        assert_eq!(
+            *actions.borrow(),
+            [("in-help".to_string(), json!({"q": "", "t": "help"}))]
+        );
+    }
+
+    /// A hidden tab keeps what was typed in it, and its fields still go with an action.
+    #[gpui_kit::test]
+    fn typed_text_survives_a_tab_switch(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        show(&panel, tabs_tree(Some("help")), cx);
+        let input = panel.read_with(cx, |p, _| p.inputs.get("q").map(|(f, _)| f.clone()));
+        cx.update(|window, cx| input.unwrap().set_value("typed", window, cx));
+        click(name("panel-tab:t:work"), cx);
+        frame(cx);
+        show(&panel, tabs_tree(Some("help")), cx);
+        click(name("panel-button:in-work"), cx);
+        assert_eq!(
+            *actions.borrow(),
+            [("in-work".to_string(), json!({"q": "typed", "t": "work"}))]
+        );
+        click(name("panel-tab:t:help"), cx);
+        frame(cx);
+        let typed = panel.read_with(cx, |p, _| p.inputs.get("q").map(|(f, _)| f.clone()));
+        assert_eq!(cx.update(|_, cx| typed.unwrap().value(cx)), "typed");
+    }
+
+    /// `value` selects a tab when it first appears or changes; otherwise the user's choice stays.
+    #[gpui_kit::test]
+    fn tabs_value_is_an_initial_value(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let on_help = |cx: &mut VisualTestContext| {
+            frame(cx);
+            shown(name("panel-button:in-help"), cx)
+        };
+        show(&panel, tabs_tree(Some("help")), cx);
+        assert!(on_help(cx));
+        click(name("panel-tab:t:work"), cx);
+        assert!(!on_help(cx));
+        show(&panel, tabs_tree(Some("help")), cx);
+        assert!(!on_help(cx), "the same `value` keeps the user's choice");
+        show(&panel, tabs_tree(Some("work")), cx);
+        assert!(!on_help(cx));
+        show(&panel, tabs_tree(Some("help")), cx);
+        assert!(on_help(cx), "a different `value` selects it");
+    }
+
+    #[gpui_kit::test]
+    fn fill_through_tabs(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        let items: Vec<_> = (0..200)
+            .map(|n| json!({"id": n.to_string(), "title": "t"}))
+            .collect();
+        let tree = |fill: bool| {
+            json!({"type": "tabs", "id": "t", "tabs": [
+                {"id": "a", "title": "A", "children": [
+                    {"type": "list", "fill": fill, "items": items},
+                ]},
+            ]})
+        };
+        show(&panel, tree(false), cx);
+        assert!(shown(("panel-item", 11usize), cx) && !shown(("panel-item", 30usize), cx));
+        show(&panel, tree(true), cx);
+        assert!(
+            shown(("panel-item", 30usize), cx),
+            "the list fills the panel"
+        );
     }
 
     /// A following log shows its last line as it grows, unless the user scrolled up.
