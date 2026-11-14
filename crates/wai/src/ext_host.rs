@@ -1634,9 +1634,7 @@ pub(crate) mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let svg = "<svg viewBox=\"0 0 24 24\"><path d=\"M3 3h18v18H3z\"/></svg>";
-        std::fs::write(dir.join("icon.svg"), svg).unwrap();
-        std::fs::write(dir.join("big.svg"), vec![b' '; 33 * 1024]).unwrap();
-        std::fs::write(tmp.path().join("x.svg"), svg).unwrap();
+        std::fs::write(dir.join("x.svg"), svg).unwrap();
         std::fs::create_dir(dir.join("ext")).unwrap();
         let ext = dir.join("ext");
         std::fs::write(ext.join("icon.svg"), svg).unwrap();

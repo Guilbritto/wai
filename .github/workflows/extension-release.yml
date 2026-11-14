@@ -37,15 +37,15 @@ jobs:
         working-directory: ${{ inputs.path }}
         run: |
           python3 - >> "$GITHUB_OUTPUT" <<'EOF'
-          import tomllib
+          import re, tomllib
           m = tomllib.load(open("wai-extension.toml", "rb"))
           command = (m.get("process") or {}).get("command", "")
           print(f"id={m['id']}")
           print(f"version={m['version']}")
           print(f"command={command if '/' in command else ''}")
           icons = [(p.get("icon") or "") for p in (m.get("contributes") or {}).get("panels", [])]
-          icons = [i for i in icons if i.endswith(".svg") and ".." not in i and not i.startswith("/")]
-          print(f"icons={' '.join(i for i in icons if ' ' not in i)}")
+          safe = lambda i: re.fullmatch(r"[A-Za-z0-9._/-]+", i) and i.endswith(".svg") and ".." not in i.split("/") and i[0] not in "/-"
+          print(f"icons={' '.join(i for i in icons if safe(i))}")
           EOF
       - name: Check the tag
         env:
@@ -71,6 +71,7 @@ jobs:
           set -euo pipefail
           dist="$RUNNER_TEMP/dist"
           mkdir -p "$dist"
+          root="$(realpath .)"
           pack() { # platform [program]
             stage="$RUNNER_TEMP/stage-$1"
             mkdir -p "$stage"
@@ -79,9 +80,9 @@ jobs:
               if [ -f "$f" ]; then cp "$f" "$stage/"; fi
             done
             for f in $ICONS; do
-              if [ -f "$f" ]; then
-                mkdir -p "$stage/$(dirname "$f")"
-                cp "$f" "$stage/$f"
+              if [ ! -L "$f" ] && [ -f "$f" ] && [[ "$(realpath -- "$f")" == "$root"/* ]]; then
+                mkdir -p -- "$stage/$(dirname -- "$f")"
+                cp -- "$f" "$stage/$f"
               fi
             done
             if [ -n "${2:-}" ]; then
