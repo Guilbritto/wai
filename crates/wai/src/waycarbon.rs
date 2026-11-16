@@ -131,6 +131,8 @@ fn my_cards_panel_renders_and_click_prefills(cx: &mut TestAppContext) {
     assert_eq!(titles, ["Fix the login timeout", "Add the export button"]);
 
     click(("tab-panel", 0usize), cx);
+    // The cards sit in the Jira tab; Work opens first.
+    click("panel-tab:tab:jira", cx);
     let (k, _) = cards(cx).remove(1);
     click(("panel-card", k), cx);
     // Beside the focused (empty) pane: an extension's session never takes it (R61).
