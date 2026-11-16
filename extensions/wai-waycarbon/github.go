@@ -19,6 +19,7 @@ type PR struct {
 	Draft                    bool
 	Review                   string // reviewDecision
 	Mergeable                string
+	MergeState               string // mergeStateStatus: BLOCKED when something required stops the merge
 	CI                       string // statusCheckRollup.state, or ""
 	Labels                   []string
 	Merged                   bool
@@ -52,23 +53,24 @@ fragment pr on PullRequest {
   number title url isDraft headRefName
   author { login }
   repository { nameWithOwner }
-  reviewDecision mergeable
+  reviewDecision mergeable mergeStateStatus
   latestReviews(last: 20) { nodes { state submittedAt author { login } } }
   labels(first: 10) { nodes { name } }
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
 }`
 
 type gqlPR struct {
-	Number         int
-	Title, URL     string
-	IsDraft        bool
-	HeadRefName    string
-	Author         *struct{ Login string }
-	Repository     *struct{ NameWithOwner string }
-	ReviewDecision string
-	Mergeable      string
-	Labels         *struct{ Nodes []*struct{ Name string } }
-	LatestReviews  *struct {
+	Number           int
+	Title, URL       string
+	IsDraft          bool
+	HeadRefName      string
+	Author           *struct{ Login string }
+	Repository       *struct{ NameWithOwner string }
+	ReviewDecision   string
+	Mergeable        string
+	MergeStateStatus string
+	Labels           *struct{ Nodes []*struct{ Name string } }
+	LatestReviews    *struct {
 		Nodes []*struct {
 			State       string
 			SubmittedAt time.Time
@@ -88,7 +90,7 @@ func (g *gqlPR) pr(merged bool) (PR, bool) {
 		return PR{}, false
 	}
 	p := PR{Number: g.Number, Title: g.Title, URL: g.URL, Branch: g.HeadRefName, Draft: g.IsDraft,
-		Review: g.ReviewDecision, Mergeable: g.Mergeable, Merged: merged}
+		Review: g.ReviewDecision, Mergeable: g.Mergeable, MergeState: g.MergeStateStatus, Merged: merged}
 	if g.Repository != nil {
 		p.Repo = g.Repository.NameWithOwner
 	}

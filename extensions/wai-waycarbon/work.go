@@ -25,6 +25,9 @@ func reasonOf(p PR) Reason {
 	switch {
 	case p.Mergeable == "CONFLICTING":
 		return Conflict
+	// A failing check that is not required (SonarCloud) leaves an approved PR UNSTABLE or BEHIND: it still merges.
+	case p.Review == "APPROVED" && !p.Draft && (p.MergeState == "UNSTABLE" || p.MergeState == "BEHIND"):
+		return ReadyToMerge
 	case p.CI == "FAILURE" || p.CI == "ERROR":
 		return CIFailed
 	case p.Review == "CHANGES_REQUESTED":
@@ -169,7 +172,7 @@ func promptFor(action, arg string) string {
 	case "changes":
 		return "/waycarbon:fix-review " + arg
 	case "merge":
-		return "Merge " + arg + " once its checks pass, then move its Jira card."
+		return "Merge " + arg + " once its required checks pass, then move its Jira card."
 	case "review":
 		return "/waycarbon:code-review " + arg
 	case "solve":

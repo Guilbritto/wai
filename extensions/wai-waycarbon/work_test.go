@@ -101,7 +101,7 @@ func TestPrompts(t *testing.T) {
 		promptFor("conflict", u):   "Resolve the merge conflicts on " + u + ".",
 		promptFor("ci", u):         "The CI fails on " + u + ". Find out why and fix it.",
 		promptFor("changes", u):    "/waycarbon:fix-review " + u,
-		promptFor("merge", u):      "Merge " + u + " once its checks pass, then move its Jira card.",
+		promptFor("merge", u):      "Merge " + u + " once its required checks pass, then move its Jira card.",
 		promptFor("review", u):     "/waycarbon:code-review " + u,
 		promptFor("solve", "EC-1"): "/waycarbon:solve-card EC-1",
 		promptFor("deploy", ""):    "/waycarbon:deploy",
@@ -298,6 +298,14 @@ func TestReviewsDecideAndNotify(t *testing.T) {
 	}
 	if reasonOf(PR{Review: "APPROVED", CI: "FAILURE"}) != CIFailed || reasonOf(PR{Review: "APPROVED", Draft: true}) != Waiting {
 		t.Error("a failing CI or a draft still wins over an approval")
+	}
+	if reasonOf(PR{Review: "APPROVED", CI: "FAILURE", MergeState: "BLOCKED"}) != CIFailed {
+		t.Error("a failing required check blocks the merge")
+	}
+	for _, ms := range []string{"UNSTABLE", "BEHIND"} {
+		if reasonOf(PR{Review: "APPROVED", CI: "FAILURE", MergeState: ms}) != ReadyToMerge {
+			t.Errorf("a failing optional check (%s) must not hide the approval", ms)
+		}
 	}
 	if reasonOf(PR{Review: "REVIEW_REQUIRED", LastReview: Review{State: "APPROVED"}}) != Waiting {
 		t.Error("a required second approval keeps the PR waiting")
