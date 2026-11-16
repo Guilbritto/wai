@@ -56,6 +56,7 @@ type server struct {
 	installing       bool
 	pluginErr        string
 	counts           counts
+	reviews          map[string]time.Time // newest review per PR of mine; nil until GitHub first loads
 	lastBar          string
 }
 
@@ -122,6 +123,16 @@ func (s *server) refreshWork() {
 		st.SignIn, st.Search = s.wst.SignIn, s.wst.Search
 		s.work, s.wst, s.refreshing = buildWork(snap, cards), st, false
 		s.counts.NeedsYou, s.counts.Reviews, s.counts.Cards = len(s.work.NeedsYou), s.work.requested(), s.work.merged()
+		if ghErr == nil {
+			// ponytail: the first load only records, so starting wai does not replay old reviews.
+			first := s.reviews == nil
+			if first {
+				s.reviews = map[string]time.Time{}
+			}
+			if prs := newReviews(s.reviews, snap.Mine); !first && len(prs) > 0 {
+				s.notify(reviewNote(prs))
+			}
+		}
 		s.paintAll()
 		again := s.again && s.ctx.Err() == nil
 		s.again = false

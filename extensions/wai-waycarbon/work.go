@@ -29,13 +29,14 @@ func reasonOf(p PR) Reason {
 		return CIFailed
 	case p.Review == "CHANGES_REQUESTED":
 		return ChangesRequested
-	case p.Review == "APPROVED" && p.CI == "SUCCESS" && !p.Draft:
+	// Approved is enough: a failing CI is caught above, a running one is the merge's to wait for.
+	case p.Review == "APPROVED" && !p.Draft:
 		return ReadyToMerge
 	}
 	return Waiting
 }
 
-var badges = map[Reason]string{Conflict: "Conflict", CIFailed: "CI failed", ChangesRequested: "Changes requested", ReadyToMerge: "Ready to merge"}
+var badges = map[Reason]string{Conflict: "Conflict", CIFailed: "CI failed", ChangesRequested: "Changes requested", ReadyToMerge: "Approved"}
 
 var prKeyRe = regexp.MustCompile(`[A-Z][A-Z0-9]+-[0-9]+`)
 
@@ -132,6 +133,32 @@ func (w Work) requested() (n int) {
 	return n
 }
 
+// newReviews are my PRs with a review newer than seen has for them; seen, the newest review time per
+// PR URL, is updated. A PR seen for the first time counts every review as new.
+func newReviews(seen map[string]time.Time, mine []PR) (out []PR) {
+	for _, p := range mine {
+		if at := p.LastReview.At; at.After(seen[p.URL]) {
+			seen[p.URL] = at
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+var reviewVerbs = map[string]string{"APPROVED": "approved", "CHANGES_REQUESTED": "requested changes on", "COMMENTED": "commented on"}
+
+// reviewNote is one notification for them all: wai drops a second one within 2 s.
+func reviewNote(prs []PR) (title, body string) {
+	var lines []string
+	for _, p := range prs {
+		lines = append(lines, fmt.Sprintf("@%s %s #%d", p.LastReview.By, reviewVerbs[p.LastReview.State], p.Number))
+	}
+	if len(prs) == 1 {
+		return oneLine(lines[0]), oneLine(prs[0].Title)
+	}
+	return plural(len(prs), "PR") + " reviewed", oneLine(strings.Join(lines, ", "))
+}
+
 // promptFor is the text a click pre-fills; it carries only a URL or a Jira key.
 func promptFor(action, arg string) string {
 	switch action {
@@ -142,7 +169,7 @@ func promptFor(action, arg string) string {
 	case "changes":
 		return "/waycarbon:fix-review " + arg
 	case "merge":
-		return "Merge " + arg + ", then move its Jira card."
+		return "Merge " + arg + " once its checks pass, then move its Jira card."
 	case "review":
 		return "/waycarbon:code-review " + arg
 	case "solve":

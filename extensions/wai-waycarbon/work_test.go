@@ -101,7 +101,7 @@ func TestPrompts(t *testing.T) {
 		promptFor("conflict", u):   "Resolve the merge conflicts on " + u + ".",
 		promptFor("ci", u):         "The CI fails on " + u + ". Find out why and fix it.",
 		promptFor("changes", u):    "/waycarbon:fix-review " + u,
-		promptFor("merge", u):      "Merge " + u + ", then move its Jira card.",
+		promptFor("merge", u):      "Merge " + u + " once its checks pass, then move its Jira card.",
 		promptFor("review", u):     "/waycarbon:code-review " + u,
 		promptFor("solve", "EC-1"): "/waycarbon:solve-card EC-1",
 		promptFor("deploy", ""):    "/waycarbon:deploy",
@@ -274,5 +274,48 @@ func TestJiraTabByStatus(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "In Progress:2,To Do:1" {
 		t.Errorf("sections: %v", got)
+	}
+}
+
+// reviewedJSON is one PR of mine in a repo without required reviews: felipe approved, then the author
+// replied, and the CI still runs.
+func reviewedJSON(at string) string {
+	return `{"data":{"viewer":{"login":"dev"},"mine":{"nodes":[{"number":12,"title":"EC-12 approved, CI running",
+  "url":"https://github.com/waycarbon/front/pull/12","author":{"login":"dev"},"reviewDecision":null,"mergeable":"MERGEABLE",
+  "latestReviews":{"nodes":[{"state":"APPROVED","submittedAt":"` + at + `","author":{"login":"felipe"}},
+    {"state":"COMMENTED","submittedAt":"2026-11-16T15:00:00Z","author":{"login":"dev"}},{"state":"PENDING","submittedAt":null,"author":{"login":"ana"}}]},
+  "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"PENDING"}}}]}}]}}}`
+}
+
+func TestReviewsDecideAndNotify(t *testing.T) {
+	s, err := parseSnapshot(reviewedJSON("2026-11-16T14:00:00Z"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := s.Mine[0]
+	if p.Review != "APPROVED" || reasonOf(p) != ReadyToMerge || p.LastReview.By != "felipe" || p.LastReview.State != "APPROVED" {
+		t.Fatalf("an approval decides a repo without a reviewDecision, the author's reply does not count: %+v", p)
+	}
+	if reasonOf(PR{Review: "APPROVED", CI: "FAILURE"}) != CIFailed || reasonOf(PR{Review: "APPROVED", Draft: true}) != Waiting {
+		t.Error("a failing CI or a draft still wins over an approval")
+	}
+	if reasonOf(PR{Review: "REVIEW_REQUIRED", LastReview: Review{State: "APPROVED"}}) != Waiting {
+		t.Error("a required second approval keeps the PR waiting")
+	}
+
+	seen := map[string]time.Time{}
+	if got := newReviews(seen, s.Mine); len(got) != 1 {
+		t.Fatalf("a first review is new: %v", got)
+	}
+	if got := newReviews(seen, s.Mine); len(got) != 0 {
+		t.Errorf("the same review again is not: %v", got)
+	}
+	title, body := reviewNote([]PR{p})
+	if title != "@felipe approved #12" || body != "EC-12 approved, CI running" {
+		t.Errorf("note: %q %q", title, body)
+	}
+	q := PR{Number: 13, LastReview: Review{By: "ana", State: "CHANGES_REQUESTED"}}
+	if title, body := reviewNote([]PR{p, q}); title != "2 PRs reviewed" || body != "@felipe approved #12, @ana requested changes on #13" {
+		t.Errorf("notes: %q %q", title, body)
 	}
 }

@@ -812,3 +812,34 @@ esac
 		t.Errorf("Clear brings back the statuses and empties the field: %v", findID(root, "jira:q"))
 	}
 }
+
+// A review that lands between two refreshes sends one notification; the first load sends none.
+func TestNewReviewNotifies(t *testing.T) {
+	data := filepath.Join(t.TempDir(), "graphql.json")
+	os.WriteFile(data, []byte(reviewedJSON("2026-11-16T14:00:00Z")), 0o644)
+	fakeCLI(t, "gh", `[ "$1 $2" = "api graphql" ] && cat '`+data+`'
+exit 0
+`)
+	fakeJira(t, happyJira)
+	fakeClaude(t)
+	r := start(t)
+	r.initializeRaw(t)
+	early := false
+	m := r.until(t, func(m map[string]any) bool {
+		early = early || m["method"] == "notify"
+		return m["method"] == "panel/render" && !strings.Contains(textOf(render(t, m)), "Loading…")
+	})
+	if early {
+		t.Error("the first load must not notify")
+	}
+	if c := findID(findID(render(t, m), "needs"), "pr:https://github.com/waycarbon/front/pull/12"); c == nil || !strings.Contains(jsonString(c), "Approved") {
+		t.Fatalf("an approved PR with CI running needs you: %v", c)
+	}
+
+	os.WriteFile(data, []byte(reviewedJSON("2026-11-16T16:00:00Z")), 0o644)
+	r.action(t, 8, "work:refresh")
+	m = r.until(t, func(m map[string]any) bool { return m["method"] == "notify" })
+	if p := m["params"].(map[string]any); p["title"] != "@felipe approved #12" {
+		t.Errorf("notify: %v", p)
+	}
+}

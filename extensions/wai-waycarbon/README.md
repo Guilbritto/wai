@@ -1,6 +1,6 @@
 # wai-waycarbon
 
-A wai extension for the WayCarbon team (0.4, extension API 1.5). It contributes:
+A wai extension for the WayCarbon team (0.5, extension API 1.5). It contributes:
 
 - three session templates (front, BFF, Go service) that carry the team's conventions: `feat:`/`fix:`/`refactor:` commits without a scope, `Refs: EC-XXXX`, branches from `development`, PR titles ending with the EC key;
 - a requirement on the `waycarbon` Claude plugin (`waycarbon/claude-code`): installing the extension asks before installing it;
@@ -9,7 +9,7 @@ A wai extension for the WayCarbon team (0.4, extension API 1.5). It contributes:
 
 ## Work tab
 
-An inbox of what needs you now: your PRs with a merge conflict, failing CI, requested changes or ready to merge, the reviews requested of you, and the cards whose PRs all merged (Move to Done, after a confirmation). Clicking one opens a session with the matching prompt pre-filled (not sent): `/waycarbon:code-review`, `/waycarbon:fix-review`, `/waycarbon:recheck-review`, `/waycarbon:solve-card`, `/waycarbon:deploy`, or a plain sentence for conflicts, CI and merging. A prompt carries only PR URLs or a Jira key. If the `waycarbon` plugin is missing, the tab says so and offers Install plugin; signing in to GitHub happens here too.
+An inbox of what needs you now: your PRs with a merge conflict, failing CI, requested changes or an approval (even while the CI still runs; in a repo that does not require reviews, the reviews themselves decide), the reviews requested of you, and the cards whose PRs all merged (Move to Done, after a confirmation). Clicking one opens a session with the matching prompt pre-filled (not sent): `/waycarbon:code-review`, `/waycarbon:fix-review`, `/waycarbon:recheck-review`, `/waycarbon:solve-card`, `/waycarbon:deploy`, or a plain sentence for conflicts, CI and merging. A prompt carries only PR URLs or a Jira key. When someone else approves, requests changes on or comments on one of your PRs, a notification says who and which PR, at the next refresh (every 10 minutes, or Refresh); the first load after wai starts notifies nothing. If the `waycarbon` plugin is missing, the tab says so and offers Install plugin; signing in to GitHub happens here too.
 
 ## Jira tab
 

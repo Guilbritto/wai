@@ -22,6 +22,13 @@ type PR struct {
 	CI                       string // statusCheckRollup.state, or ""
 	Labels                   []string
 	Merged                   bool
+	LastReview               Review // the newest review by someone other than the author
+}
+
+// Review is one submitted review: approved, changes requested or commented.
+type Review struct {
+	By, State string
+	At        time.Time
 }
 
 // Snapshot is one GitHub refresh. Warn is a GraphQL error that came with usable data.
@@ -43,8 +50,10 @@ const query = `query($mine: String!, $requested: String!, $queue: String!, $merg
 }
 fragment pr on PullRequest {
   number title url isDraft headRefName
+  author { login }
   repository { nameWithOwner }
   reviewDecision mergeable
+  latestReviews(last: 20) { nodes { state submittedAt author { login } } }
   labels(first: 10) { nodes { name } }
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
 }`
@@ -54,11 +63,19 @@ type gqlPR struct {
 	Title, URL     string
 	IsDraft        bool
 	HeadRefName    string
+	Author         *struct{ Login string }
 	Repository     *struct{ NameWithOwner string }
 	ReviewDecision string
 	Mergeable      string
 	Labels         *struct{ Nodes []*struct{ Name string } }
-	Commits        *struct {
+	LatestReviews  *struct {
+		Nodes []*struct {
+			State       string
+			SubmittedAt time.Time
+			Author      *struct{ Login string }
+		}
+	}
+	Commits *struct {
 		Nodes []*struct {
 			Commit *struct{ StatusCheckRollup *struct{ State string } }
 		}
@@ -81,6 +98,29 @@ func (g *gqlPR) pr(merged bool) (PR, bool) {
 				p.Labels = append(p.Labels, l.Name)
 			}
 		}
+	}
+	// A repo that does not require reviews has no reviewDecision: the reviews decide it, as on GitHub.
+	approved, changes := false, false
+	if g.LatestReviews != nil {
+		for _, r := range g.LatestReviews.Nodes {
+			if r == nil || r.Author == nil || g.Author != nil && r.Author.Login == g.Author.Login {
+				continue
+			}
+			switch r.State {
+			case "APPROVED", "CHANGES_REQUESTED", "COMMENTED":
+			default:
+				continue
+			}
+			approved, changes = approved || r.State == "APPROVED", changes || r.State == "CHANGES_REQUESTED"
+			if r.SubmittedAt.After(p.LastReview.At) {
+				p.LastReview = Review{By: r.Author.Login, State: r.State, At: r.SubmittedAt}
+			}
+		}
+	}
+	if p.Review == "" && changes {
+		p.Review = "CHANGES_REQUESTED"
+	} else if p.Review == "" && approved {
+		p.Review = "APPROVED"
 	}
 	if g.Commits != nil {
 		for _, c := range g.Commits.Nodes {
