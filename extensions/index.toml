@@ -78,30 +78,30 @@ sha256 = "aecd5ab4762464d4d8dc2aaab524fbc803e4ff02ac4fd7f9766614b53005ba7e"
 [[extensions]]
 id = "wai-waycarbon"
 name = "WayCarbon"
-version = "0.4.0"
+version = "0.5.0"
 description = "What needs you at WayCarbon: PRs, reviews, Jira cards and help requests, one click from the right /waycarbon command"
 repository = "https://github.com/Guilbritto/wai"
 
 [extensions.packages.darwin-arm64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.4.0/wai-waycarbon-0.4.0-darwin-arm64.tar.gz"
-sha256 = "c132ecda6b330abab3f8a070792491e39f8df864448dd5ebf34e0ae4eeb3bd3f"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.5.0/wai-waycarbon-0.5.0-darwin-arm64.tar.gz"
+sha256 = "c40ca7b7525e1c99d1b73023fb7a4ad827ad507886374944c89be14c134e4fa5"
 
 [extensions.packages.darwin-x64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.4.0/wai-waycarbon-0.4.0-darwin-x64.tar.gz"
-sha256 = "871bb7d342f3782c22f02a01cf453d5913c37623f54358e4c2bc18a8311fa735"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.5.0/wai-waycarbon-0.5.0-darwin-x64.tar.gz"
+sha256 = "b50a87c1e1354c0c412a3c526523305da42ab1fe9597c011e08d69a111ef5c92"
 
 [extensions.packages.linux-arm64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.4.0/wai-waycarbon-0.4.0-linux-arm64.tar.gz"
-sha256 = "5f11377e67767d5a80e0a92cc1fb4259823922cfb9ca7747b9d886484ffa6218"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.5.0/wai-waycarbon-0.5.0-linux-arm64.tar.gz"
+sha256 = "ad743caef192f8017bb48a4a8b1c3c7b07f1177ca2318ed70652e6df5f4eb5e2"
 
 [extensions.packages.linux-x64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.4.0/wai-waycarbon-0.4.0-linux-x64.tar.gz"
-sha256 = "d6a62ae4baa29b5bc7af61a1b2eec471634742b10daadc4ceecd4bdb8de1b6c2"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.5.0/wai-waycarbon-0.5.0-linux-x64.tar.gz"
+sha256 = "ec21f43e7715f4e9365016066f5b3c05d4b3df76efd65e8e03bb0c26e320aa25"
 
 [extensions.packages.windows-arm64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.4.0/wai-waycarbon-0.4.0-windows-arm64.tar.gz"
-sha256 = "8b6772a70e7f0e1c2d545d1444c46754fb4f8b62305348aa72e7532fde232a9f"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.5.0/wai-waycarbon-0.5.0-windows-arm64.tar.gz"
+sha256 = "e2bd601b7c3510660dd2d1c1a242e30a6cfdbe6e7871d811e574d8ad323937ef"
 
 [extensions.packages.windows-x64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.4.0/wai-waycarbon-0.4.0-windows-x64.tar.gz"
-sha256 = "9505e86789020127e093c18bdd1c335f90bf507e539bb64d78666284c31b9657"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.5.0/wai-waycarbon-0.5.0-windows-x64.tar.gz"
+sha256 = "5529db2952070e19c2ba9e8e574c7271a1dbd37ec63e5fdd710b3f1995787a98"
