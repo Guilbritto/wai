@@ -1,6 +1,7 @@
-//! R68 (macOS): an app opened from Finder, the Dock or Launchpad gets launchd's PATH,
-//! `/usr/bin:/bin:/usr/sbin:/sbin`, with no `npx` or `node`. wai then takes PATH from the user's
-//! login shell before anything reads it. A terminal launch keeps the terminal's.
+//! R68 (macOS): an app opened from Finder, the Dock or Launchpad gets launchd's environment: PATH
+//! `/usr/bin:/bin:/usr/sbin:/sbin`, with no `npx` or `node`, and nothing the rc files export (a
+//! `JIRA_API_TOKEN` the `jira` CLI needs). wai then takes the environment from the user's login
+//! shell before anything reads it, as VS Code and Zed do. A terminal launch keeps the terminal's.
 //! R69: the shell's answer is cached in the config dir. A launch uses the cache and refreshes it in
 //! the background for the next one; only a launch without a usable cache waits for the shell.
 
@@ -17,10 +18,13 @@ const MARKER: &str = "_WAI_LOGIN_PATH_7c1e_";
 const TIMEOUT: Duration = Duration::from_secs(3);
 const CAP: u64 = 64 * 1024;
 const CACHE: &str = "shell-path";
+/// The shell's own state, not the user's: never imported. TERM is what says "started from a
+/// terminal" here and to the programs wai runs.
+const SHELL_OWN: [&str; 5] = ["PWD", "OLDPWD", "SHLVL", "_", "TERM"];
 
-/// Sets PATH from the cache or the login shell when wai was not started from a terminal (no
-/// `TERM`). Must run before any thread exists. On failure PATH stays as launched, and one line
-/// says why.
+/// Sets the environment from the cache or the login shell when wai was not started from a
+/// terminal (no `TERM`). Must run before any thread exists. On failure the environment stays as
+/// launched, and one line says why.
 pub fn import() {
     if std::env::var_os("TERM").is_some() {
         return;
@@ -29,34 +33,36 @@ pub fn import() {
     let dir = wai_settings::config_dir();
     let current = std::env::var_os("PATH").unwrap_or_default();
     let start = Instant::now();
-    let (path, cached) = match resolve(&shell, &dir, &current, TIMEOUT) {
+    let (vars, cached) = match resolve(&shell, &dir, &current, TIMEOUT) {
         Ok(found) => found,
         Err(e) => {
             return eprintln!(
-                "wai: kept the launch PATH, none from {}: {e}",
+                "wai: kept the launch environment, none from {}: {e}",
                 shell.display()
             );
         }
     };
-    let n = std::env::split_paths(&path).count();
+    let n = vars.len();
     match cached {
-        true => eprintln!("wai: PATH from cache ({n} entries)"),
+        true => eprintln!("wai: environment from cache ({n} variables)"),
         false => {
             let ms = start.elapsed().as_millis();
-            eprintln!("wai: PATH from login shell ({n} entries, {ms} ms)");
+            eprintln!("wai: environment from login shell ({n} variables, {ms} ms)");
         }
     }
-    // SAFETY: `main` calls this first, before any thread exists, and the refresh below starts
-    // after this line, so nothing can read or write the environment concurrently.
-    unsafe { std::env::set_var("PATH", path) };
+    for (name, value) in vars {
+        // SAFETY: `main` calls this first, before any thread exists, and the refresh below starts
+        // after this loop, so nothing can read or write the environment concurrently.
+        unsafe { std::env::set_var(name, value) };
+    }
     if cached {
-        // ponytail: the refreshed PATH is for the next launch; this one keeps the cached PATH
-        // (no `set_var` once threads run). A quit during the refresh orphans the shell; it ends
+        // ponytail: the refreshed environment is for the next launch; this one keeps the cached
+        // one (no `set_var` once threads run). A quit during the refresh orphans the shell; it ends
         // when its rc does.
         std::thread::spawn(move || {
             if let Err(e) = ask_shell(&shell, &dir, &current, TIMEOUT) {
                 eprintln!(
-                    "wai: PATH cache not refreshed from {}: {e}",
+                    "wai: environment cache not refreshed from {}: {e}",
                     shell.display()
                 );
             }
@@ -64,22 +70,27 @@ pub fn import() {
     }
 }
 
-/// The PATH to set and whether it came from the cache (no wait) rather than the shell, asked now.
+/// The variables to set and whether they came from the cache (no wait) rather than the shell,
+/// asked now.
 fn resolve(
     shell: &Path,
     dir: &Path,
     current: &OsStr,
     timeout: Duration,
-) -> Result<(OsString, bool), String> {
-    if let Some(path) = read_cache(&dir.join(CACHE)).and_then(|p| merged(&p, current)) {
-        return Ok((path, true));
+) -> Result<(Vec<(String, OsString)>, bool), String> {
+    if let Some(vars) = read_cache(&dir.join(CACHE)).and_then(|t| environment(&t, current)) {
+        return Ok((vars, true));
     }
     let found = ask_shell(shell, dir, current, timeout)?;
-    Ok((merged(&found, current).ok_or("no absolute folder")?, false))
+    Ok((
+        environment(&found, current).ok_or("no absolute PATH folder")?,
+        false,
+    ))
 }
 
-/// The login shell's PATH, cached for the next launch. A cache that cannot be written only costs
-/// speed, so that is one line, not an error. Never touches this process's environment.
+/// The login shell's environment (`env -0` output), cached for the next launch. A cache that
+/// cannot be written only costs speed, so that is one line, not an error. Never touches this
+/// process's environment.
 fn ask_shell(
     shell: &Path,
     dir: &Path,
@@ -87,8 +98,8 @@ fn ask_shell(
     timeout: Duration,
 ) -> Result<String, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let found = login_path(shell, dir, launch, timeout)?;
-    merged(&found, OsStr::new("")).ok_or("no absolute folder")?;
+    let found = login_env(shell, dir, launch, timeout)?;
+    environment(&found, OsStr::new("")).ok_or("no absolute PATH folder")?;
     let cache = dir.join(CACHE);
     if let Err(e) = write_cache(&cache, &found) {
         eprintln!("wai: cannot write {}: {e}", cache.display());
@@ -96,8 +107,8 @@ fn ask_shell(
     Ok(found)
 }
 
-/// The cached PATH, if only this user could have written it: their regular file (not a symlink),
-/// not group or world writable, at most `CAP`.
+/// The cached environment, if only this user could have written it: their regular file (not a
+/// symlink), not group or world writable, at most `CAP`.
 // ponytail: checked by path, then read. Whoever could swap it in between can already write the
 // config dir, settings.toml included.
 fn read_cache(cache: &Path) -> Option<String> {
@@ -109,10 +120,11 @@ fn read_cache(cache: &Path) -> Option<String> {
     std::fs::read_to_string(cache).ok()
 }
 
-/// Replaces `cache` at once: a new 0600 file beside it, then a rename.
-// ponytail: no fsync. A crash can leave the cache empty; it names no folder, so that launch asks
-// the shell.
-fn write_cache(cache: &Path, path: &str) -> std::io::Result<()> {
+/// Replaces `cache` at once: a new 0600 file beside it (it holds the tokens the rc files export),
+/// then a rename.
+// ponytail: no fsync. A crash can leave the cache empty; it has no PATH, so that launch asks the
+// shell.
+fn write_cache(cache: &Path, text: &str) -> std::io::Result<()> {
     let tmp = cache.with_file_name(format!(".{CACHE}-{}.tmp", std::process::id()));
     let mut file = File::options()
         .write(true)
@@ -120,7 +132,7 @@ fn write_cache(cache: &Path, path: &str) -> std::io::Result<()> {
         .mode(0o600)
         .open(&tmp)?;
     let written = file
-        .write_all(path.as_bytes())
+        .write_all(text.as_bytes())
         .and_then(|()| std::fs::rename(&tmp, cache));
     if written.is_err() {
         std::fs::remove_file(&tmp).ok();
@@ -135,21 +147,21 @@ fn shell(var: Option<OsString>) -> PathBuf {
         .unwrap_or_else(|| "/bin/zsh".into())
 }
 
-/// The PATH `shell -i -l -c` sees after its rc files, run from `dir` (the config dir, never a
-/// repository: R18) and started with the `launch` PATH: an imported one would carry a cached
-/// folder into every refresh, so one that is gone would never leave. A hung shell is killed with
-/// whatever it started at `timeout`.
-fn login_path(
+/// The environment `shell -i -l -c` has after its rc files, as `env -0` prints it, run from `dir`
+/// (the config dir, never a repository: R18) and started with the `launch` PATH: an imported one
+/// would carry a cached folder into every refresh, so one that is gone would never leave. A hung
+/// shell is killed with whatever it started at `timeout`.
+fn login_env(
     shell: &Path,
     dir: &Path,
     launch: &OsStr,
     timeout: Duration,
 ) -> Result<String, String> {
-    // The marker in two halves, so an echo of this command line prints none. `printenv`, not
-    // `"$PATH"`: fish joins a quoted list with spaces.
+    // The marker in two halves, so an echo of this command line prints none. `env -0`: a value may
+    // hold a newline, never a NUL.
     let (head, tail) = MARKER.split_at(MARKER.len() / 2);
     let mark = format!("printf '%s%s' {head} {tail}");
-    let print = format!("{mark}; /usr/bin/printenv PATH; {mark}");
+    let print = format!("{mark}; /usr/bin/env -0; {mark}");
     // A file, not a pipe: no reader thread before `set_var`, and nothing an rc file leaves running
     // can hold a read open. Unlinked at once; the open handles keep it.
     let name = dir.join(format!(".login-path-{}", std::process::id()));
@@ -193,7 +205,28 @@ fn login_path(
     let text = String::from_utf8_lossy(&text);
     between_markers(&text)
         .map(str::to_string)
-        .ok_or_else(|| "no marked PATH in its output".into())
+        .ok_or_else(|| "no marked environment in its output".into())
+}
+
+/// The variables in `env -0` output but the shell's own, PATH first and merged with `current`.
+/// `None` without a PATH holding an absolute folder, as in an older wai's PATH-only cache.
+fn environment(text: &str, current: &OsStr) -> Option<Vec<(String, OsString)>> {
+    let mut vars = vec![(String::new(), OsString::new())];
+    for entry in text.split('\0') {
+        // ponytail: a non-UTF-8 variable came through `from_utf8_lossy` changed; it is dropped.
+        let Some((name, value)) = entry
+            .split_once('=')
+            .filter(|_| !entry.contains('\u{FFFD}'))
+        else {
+            continue;
+        };
+        if name == "PATH" {
+            vars[0] = (name.to_string(), merged(value, current)?);
+        } else if !name.is_empty() && !SHELL_OWN.contains(&name) {
+            vars.push((name.to_string(), value.into()));
+        }
+    }
+    (!vars[0].0.is_empty()).then_some(vars)
 }
 
 /// The text between exactly two markers: rc files may print around them, never a third one.
@@ -258,6 +291,37 @@ mod tests {
     }
 
     #[test]
+    fn the_shell_environment_is_taken_but_its_own_variables() {
+        let env = |text, current: &str| environment(text, current.as_ref());
+        let text = "_=/usr/bin/env\0JIRA_API_TOKEN=a=b\0PWD=/x\0PATH=/opt/bin:rel\0\
+                    MULTI=one\ntwo\0OLDPWD=/y\0SHLVL=2\0TERM=xterm\0=x\0\0";
+        assert_eq!(
+            env(text, "/usr/bin"),
+            Some(vec![
+                ("PATH".into(), "/opt/bin:/usr/bin".into()),
+                ("JIRA_API_TOKEN".into(), "a=b".into()),
+                ("MULTI".into(), "one\ntwo".into()),
+            ])
+        );
+        // An older wai's PATH-only cache, no PATH, or no absolute folder: not an environment.
+        assert_eq!(env("/opt/bin:/usr/bin", "/usr/bin"), None);
+        assert_eq!(env("HOME=/h\0", "/usr/bin"), None);
+        assert_eq!(env("PATH=bin:.\0", "/usr/bin"), None);
+        // A value `from_utf8_lossy` changed is dropped, not imported wrong.
+        assert_eq!(
+            env("PATH=/a\0X=\u{FFFD}\0", ""),
+            Some(vec![("PATH".into(), "/a".into())])
+        );
+    }
+
+    /// The value of `name` in `vars`.
+    fn var<'a>(vars: &'a [(String, OsString)], name: &str) -> Option<&'a OsStr> {
+        vars.iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_os_str())
+    }
+
+    #[test]
     fn shell_is_an_absolute_executable_else_zsh() {
         let zsh = PathBuf::from("/bin/zsh");
         assert_eq!(shell(Some("/bin/sh".into())), PathBuf::from("/bin/sh"));
@@ -268,18 +332,23 @@ mod tests {
     }
 
     #[test]
-    fn login_shell_runs_in_the_given_dir_and_its_path_is_read_through_noise() {
+    fn login_shell_runs_in_the_given_dir_and_its_environment_is_read_through_noise() {
         let bin = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         let body = r#"echo "rc noise $*"
 [ "$1 $2 $3" = "-i -l -c" ] || exit 9
 PATH="$(pwd -P)/bin:/usr/bin:/bin"; export PATH
+FROM_RC="line one
+line two"; export FROM_RC
 eval "$4"
 echo "logout noise""#;
         let shell = fake_shell(bin.path(), body);
-        let found = login_path(&shell, cwd.path(), LAUNCH.as_ref(), PATIENCE).unwrap();
+        let found = login_env(&shell, cwd.path(), LAUNCH.as_ref(), PATIENCE).unwrap();
+        let vars = environment(&found, "".as_ref()).unwrap();
         let cwd_real = wai_settings::canonical(cwd.path());
-        assert_eq!(found, format!("{}/bin:/usr/bin:/bin", cwd_real.display()));
+        let path = format!("{}/bin:/usr/bin:/bin", cwd_real.display());
+        assert_eq!(var(&vars, "PATH"), Some(path.as_ref()));
+        assert_eq!(var(&vars, "FROM_RC"), Some("line one\nline two".as_ref()));
         // The output file is gone (R18: and it lives in the config dir, never a repository).
         assert_eq!(std::fs::read_dir(cwd.path()).unwrap().count(), 0);
     }
@@ -294,7 +363,7 @@ echo "logout noise""#;
         // The first exec of a new file can wait seconds under load: warm it outside the clock.
         assert!(Command::new(&shell).arg("warm").status().unwrap().success());
         let start = Instant::now();
-        let found = login_path(
+        let found = login_env(
             &shell,
             dir.path(),
             LAUNCH.as_ref(),
@@ -326,7 +395,7 @@ echo "logout noise""#;
         // The first exec of a new file can wait seconds under load (macOS checks it), past any
         // deadline here: run it once first, so the job surely starts before the kill.
         assert!(Command::new(&shell).arg("warm").status().unwrap().success());
-        let found = login_path(&shell, cfg.path(), LAUNCH.as_ref(), Duration::from_secs(1));
+        let found = login_env(&shell, cfg.path(), LAUNCH.as_ref(), Duration::from_secs(1));
         assert!(
             found.as_ref().is_err_and(|e| e.contains("no answer")),
             "{found:?}"
@@ -339,11 +408,14 @@ echo "logout noise""#;
         assert_eq!(size(), before, "the background job outlived the shell");
     }
 
-    /// A fake login shell in its own dir that puts `/shell/bin` before the PATH it inherits, as a
-    /// `.zprofile` does, and leaves `ran` there; and an empty config dir.
+    /// A fake login shell in its own dir that puts `/shell/bin` before the PATH it inherits and
+    /// exports a token, as rc files do, and leaves `ran` there; and an empty config dir.
     fn harness() -> (tempfile::TempDir, PathBuf, tempfile::TempDir) {
         let bin = tempfile::tempdir().unwrap();
-        let body = "/usr/bin/touch \"$(/usr/bin/dirname \"$0\")/ran\"\nPATH=\"/shell/bin:$PATH\"; export PATH\neval \"$4\"";
+        let body = "/usr/bin/touch \"$(/usr/bin/dirname \"$0\")/ran\"\n\
+                    PATH=\"/shell/bin:$PATH\"; export PATH\n\
+                    JIRA_API_TOKEN=t; export JIRA_API_TOKEN\n\
+                    eval \"$4\"";
         let shell = fake_shell(bin.path(), body);
         (bin, shell, tempfile::tempdir().unwrap())
     }
@@ -363,53 +435,76 @@ echo "logout noise""#;
     #[test]
     fn a_trusted_cache_is_used_and_the_shell_is_not_asked() {
         let (bin, shell, cfg) = harness();
-        write_cache_file(&cfg.path().join(CACHE), "/cached/bin:/usr/bin", 0o600);
-        let found = resolve(&shell, cfg.path(), LAUNCH.as_ref(), PATIENCE).unwrap();
-        assert_eq!(found, ("/cached/bin:/usr/bin:/bin".into(), true));
+        let text = "PATH=/cached/bin:/usr/bin\0JIRA_API_TOKEN=cached\0";
+        write_cache_file(&cfg.path().join(CACHE), text, 0o600);
+        let (vars, cached) = resolve(&shell, cfg.path(), LAUNCH.as_ref(), PATIENCE).unwrap();
+        assert!(cached);
+        assert_eq!(
+            var(&vars, "PATH"),
+            Some("/cached/bin:/usr/bin:/bin".as_ref())
+        );
+        assert_eq!(var(&vars, "JIRA_API_TOKEN"), Some("cached".as_ref()));
         assert!(!bin.path().join("ran").exists());
     }
 
-    #[test]
-    fn without_a_cache_the_shell_is_asked_and_its_path_cached() {
-        let (bin, shell, cfg) = harness();
-        let found = resolve(&shell, cfg.path(), LAUNCH.as_ref(), PATIENCE).unwrap();
-        assert_eq!(found, ("/shell/bin:/usr/bin:/bin".into(), false));
-        assert!(bin.path().join("ran").exists());
-        let cache = cfg.path().join(CACHE);
-        assert_eq!(
-            std::fs::read_to_string(&cache).unwrap(),
-            "/shell/bin:/usr/bin:/bin"
-        );
-        assert_eq!(mode(&cache), 0o600);
+    /// The shell's answer: its PATH and the token it exports, asked now.
+    fn asked(found: (Vec<(String, OsString)>, bool), path: &str) {
+        let (vars, cached) = found;
+        assert!(!cached);
+        assert_eq!(var(&vars, "PATH"), Some(path.as_ref()));
+        assert_eq!(var(&vars, "JIRA_API_TOKEN"), Some("t".as_ref()));
+    }
+
+    /// The cache holds the shell's environment, `env -0` style, mode 0600.
+    fn cached_from_shell(cache: &Path, path: &str) {
+        let text = std::fs::read_to_string(cache).unwrap();
+        assert!(text.contains(&format!("PATH={path}\0")), "{text:?}");
+        assert!(text.contains("JIRA_API_TOKEN=t\0"), "{text:?}");
+        assert_eq!(mode(cache), 0o600);
     }
 
     #[test]
-    fn an_untrusted_cache_is_ignored_and_the_shell_is_asked() {
-        let oversized = "/a:".repeat(CAP as usize / 3 + 1);
-        for case in ["group-writable", "world-writable", "symlink", "oversized"] {
+    fn without_a_cache_the_shell_is_asked_and_its_environment_cached() {
+        let (bin, shell, cfg) = harness();
+        let found = resolve(&shell, cfg.path(), LAUNCH.as_ref(), PATIENCE).unwrap();
+        asked(found, "/shell/bin:/usr/bin:/bin");
+        assert!(bin.path().join("ran").exists());
+        cached_from_shell(&cfg.path().join(CACHE), "/shell/bin:/usr/bin:/bin");
+    }
+
+    #[test]
+    fn an_untrusted_or_path_only_cache_is_ignored_and_the_shell_is_asked() {
+        let cached = "PATH=/cached/bin\0";
+        let oversized = format!("PATH={}\0", "/a:".repeat(CAP as usize / 3 + 1));
+        let cases = [
+            "group-writable",
+            "world-writable",
+            "symlink",
+            "oversized",
+            "path-only",
+        ];
+        for case in cases {
             let (bin, shell, cfg) = harness();
             let cache = cfg.path().join(CACHE);
             let target = bin.path().join("elsewhere");
             match case {
-                "group-writable" => write_cache_file(&cache, "/cached/bin", 0o620),
-                "world-writable" => write_cache_file(&cache, "/cached/bin", 0o602),
+                "group-writable" => write_cache_file(&cache, cached, 0o620),
+                "world-writable" => write_cache_file(&cache, cached, 0o602),
                 "symlink" => {
-                    write_cache_file(&target, "/cached/bin", 0o600);
+                    write_cache_file(&target, cached, 0o600);
                     std::os::unix::fs::symlink(&target, &cache).unwrap();
                 }
-                _ => write_cache_file(&cache, &oversized, 0o600),
+                "oversized" => write_cache_file(&cache, &oversized, 0o600),
+                // What an older wai cached: the PATH alone.
+                _ => write_cache_file(&cache, "/cached/bin:/usr/bin", 0o600),
             }
             let found = resolve(&shell, cfg.path(), LAUNCH.as_ref(), PATIENCE).unwrap();
-            assert_eq!(found, ("/shell/bin:/usr/bin:/bin".into(), false), "{case}");
+            asked(found, "/shell/bin:/usr/bin:/bin");
             assert!(bin.path().join("ran").exists(), "{case}");
             // Replaced by a trusted one; a symlink's target is left alone.
-            assert_eq!(
-                std::fs::read_to_string(&cache).unwrap(),
-                "/shell/bin:/usr/bin:/bin"
-            );
-            assert_eq!(mode(&cache), 0o600, "{case}");
+            cached_from_shell(&cache, "/shell/bin:/usr/bin:/bin");
             if case == "symlink" {
-                assert_eq!(std::fs::read_to_string(&target).unwrap(), "/cached/bin");
+                assert_eq!(std::fs::read_to_string(&target).unwrap(), cached);
             }
         }
     }
@@ -418,21 +513,17 @@ echo "logout noise""#;
     fn a_refresh_replaces_the_cache_atomically_with_mode_0600() {
         let (_bin, shell, cfg) = harness();
         let cache = cfg.path().join(CACHE);
-        write_cache_file(&cache, "/old/bin", 0o600);
+        write_cache_file(&cache, "PATH=/old/bin\0", 0o600);
         let mut old = std::fs::File::open(&cache).unwrap();
-        assert_eq!(
-            ask_shell(&shell, cfg.path(), "/launch/bin".as_ref(), PATIENCE).unwrap(),
-            "/shell/bin:/launch/bin"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&cache).unwrap(),
-            "/shell/bin:/launch/bin"
-        );
-        assert_eq!(mode(&cache), 0o600);
+        let found = ask_shell(&shell, cfg.path(), "/launch/bin".as_ref(), PATIENCE).unwrap();
+        let vars = environment(&found, "".as_ref()).unwrap();
+        assert_eq!(var(&vars, "PATH"), Some("/shell/bin:/launch/bin".as_ref()));
+        assert_eq!(std::fs::read_to_string(&cache).unwrap(), found);
+        cached_from_shell(&cache, "/shell/bin:/launch/bin");
         // A rename, not a rewrite: the old file is untouched, and no temp file is left.
         let mut text = String::new();
         old.read_to_string(&mut text).unwrap();
-        assert_eq!(text, "/old/bin");
+        assert_eq!(text, "PATH=/old/bin\0");
         let names: Vec<_> = std::fs::read_dir(cfg.path())
             .unwrap()
             .map(|e| e.unwrap().file_name())

@@ -464,13 +464,14 @@ wai looks up a bare program name such as `npx` itself.
 - The same rule applies to MCP servers and extension programs.
 - A command that is not found fails with `<command> is not on PATH`.
 
-**The app launched from Finder, the Dock or Launchpad** gets macOS's default `PATH`, `/usr/bin:/bin:/usr/sbin:/sbin`, which has neither `npx` nor `node`. So on macOS, when wai was not started from a terminal (no `TERM`), it uses your login shell's `PATH` instead:
+**The app launched from Finder, the Dock or Launchpad** gets macOS's default `PATH`, `/usr/bin:/bin:/usr/sbin:/sbin`, which has neither `npx` nor `node`, and none of the variables your shell exports, such as the `JIRA_API_TOKEN` the `jira` CLI needs. So on macOS, when wai was not started from a terminal (no `TERM`), it uses your login shell's environment instead, as VS Code and Zed do:
 - It asks `$SHELL -i -l`, or zsh if `SHELL` is not an absolute program. The shell runs from the config folder and starts from macOS's `PATH`. Your `.zprofile` and `.zshrc` apply as in a terminal.
-- It imports `PATH` only. The new `PATH` is the shell's absolute folders, then those of macOS's it lacks. Relative entries are dropped.
-- It caches the answer in `~/.config/wai/shell-path`. A launch that finds the cache uses it at once, then asks the shell again in the background for the next launch. **So wai sees a `PATH` change, such as a new Node version, one launch late:** the first launch after the change still uses the cache. To pick a change up at once, delete that file or start wai from a terminal.
+- It imports every variable the shell has, except the shell's own `PWD`, `OLDPWD`, `SHLVL`, `_` and `TERM`. Agents, MCP servers, extensions and terminals inherit them.
+- The new `PATH` is the shell's absolute folders, then those of macOS's it lacks. Relative entries are dropped. A shell with no absolute `PATH` folder gives nothing.
+- It caches the answer in `~/.config/wai/shell-path`, mode 0600, since it holds the tokens your shell exports. A launch that finds the cache uses it at once, then asks the shell again in the background for the next launch. **So wai sees a change, such as a new Node version or token, one launch late:** the first launch after the change still uses the cache. To pick a change up at once, delete that file or start wai from a terminal.
 - wai uses the cache only if it is a regular file of yours, not a symlink, not writable by group or others and at most 64 KB. Otherwise it asks the shell as on a first launch.
-- It logs `wai: PATH from cache (<n> entries)`, or `wai: PATH from login shell (<n> entries, <ms> ms)` on a launch that waited for the shell. Only a launch without a usable cache waits, as long as your `.zshrc` takes. A Finder launch sends these lines nowhere; to see them, run `env -u TERM /Applications/wai.app/Contents/MacOS/wai` in a terminal.
-- With no usable cache, if the shell gives no `PATH` within 3 seconds, wai stops it, keeps macOS's `PATH` and logs `wai: kept the launch PATH, none from <shell>: <reason>`.
+- It logs `wai: environment from cache (<n> variables)`, or `wai: environment from login shell (<n> variables, <ms> ms)` on a launch that waited for the shell. Only a launch without a usable cache waits, as long as your `.zshrc` takes. A Finder launch sends these lines nowhere; to see them, run `env -u TERM /Applications/wai.app/Contents/MacOS/wai` in a terminal.
+- With no usable cache, if the shell gives no environment within 3 seconds, wai stops it, keeps macOS's and logs `wai: kept the launch environment, none from <shell>: <reason>`.
 
 Started from a terminal (`open /Applications/wai.app`, or `wai` on your `PATH`), wai skips this and uses the terminal's environment.
 
