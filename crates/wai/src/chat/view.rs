@@ -170,6 +170,8 @@ pub struct ChatSession {
     pub(super) menu_ix: usize,
     pub(super) menu_scroll: ScrollHandle,
     pub(super) menu_closed: bool,
+    /// The sent message ↑ put back in the prompt box, by its place among those sent.
+    pub(super) recalled: Option<usize>,
     pub(super) registry: WeakEntity<AgentRegistry>,
     /// Per `Agent`/`Thought` row.
     pub(super) texts: HashMap<usize, Markdown>,
@@ -273,6 +275,7 @@ impl ChatSession {
             menu_ix: 0,
             menu_scroll: ScrollHandle::new(),
             menu_closed: false,
+            recalled: None,
             registry,
             texts: HashMap::new(),
             sub_texts: HashMap::new(),
@@ -2126,6 +2129,49 @@ mod tests {
         cx.simulate_keystrokes("down");
         assert_eq!(agents_at(&session, cx), (None, None));
         assert_eq!(typed(&session, cx), "x");
+    }
+
+    /// ↑ from an empty prompt recalls the messages sent, newest first, caret at the end (a
+    /// multi-line one is walked up first), without the `Attached:` line; ↓ walks back to an empty
+    /// box; once the recalled text is edited, ↑ is the caret's again.
+    #[gpui_kit::test]
+    fn arrow_up_recalls_the_messages_sent(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        session.update(cx, |s, cx| {
+            for text in [
+                "one",
+                "two\nlines",
+                "Attached: a.png",
+                "three\nAttached: b.png",
+            ] {
+                s.model.items.push(ChatItem::User { text: text.into() });
+            }
+            s.sync_rows(None, cx);
+        });
+
+        cx.simulate_keystrokes("up");
+        assert_eq!(typed(&session, cx), "three");
+        cx.simulate_keystrokes("up");
+        assert_eq!(typed(&session, cx), "two\nlines");
+        cx.simulate_keystrokes("up");
+        assert_eq!(
+            typed(&session, cx),
+            "two\nlines",
+            "the caret went up a line"
+        );
+        cx.simulate_keystrokes("up up");
+        assert_eq!(typed(&session, cx), "one", "the oldest stays");
+        cx.simulate_keystrokes("down");
+        assert_eq!(typed(&session, cx), "two\nlines");
+        cx.simulate_keystrokes("down down");
+        assert_eq!(typed(&session, cx), "");
+
+        cx.simulate_keystrokes("up");
+        cx.simulate_input("!");
+        cx.simulate_keystrokes("up");
+        assert_eq!(typed(&session, cx), "three!");
     }
 
     /// A click on a subagent's row opens its drawer, a second click closes it, and so does a

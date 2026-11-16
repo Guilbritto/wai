@@ -7,7 +7,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use gpui_kit::component::attachment::{Attachment as Chip, AttachmentContent, AttachmentTitle};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::Textarea;
+use gpui_kit::component::input::{MoveDown, MoveUp, Position, Textarea};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{Select, SelectDelegate, SelectState};
 use gpui_kit::component::{
@@ -102,6 +102,20 @@ impl Message {
             .trim_start()
             .to_string()
     }
+}
+
+/// The messages sent, oldest first, as typed: without the `Attached:` line `shown` adds, and
+/// none that only attached files. ponytail: a typed line starting `Attached: ` is cut too; keep
+/// the typed text per row if that bites.
+fn sent(items: &[ChatItem]) -> Vec<&str> {
+    (items.iter())
+        .filter_map(|item| match item {
+            ChatItem::User { text } | ChatItem::Steered { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .map(|t| t.rsplit_once("\nAttached: ").map_or(t, |(t, _)| t))
+        .filter(|t| !t.is_empty() && !t.starts_with("Attached: "))
+        .collect()
 }
 
 /// What `attachment` sends: an image goes as its file to an agent that takes no images.
@@ -599,7 +613,55 @@ impl ChatSession {
                 )
                 .children(self.render_menu(cx)),
         );
+        let prompt = prompt
+            .capture_action(
+                cx.listener(|this, _: &MoveUp, window, cx| this.recall(true, window, cx)),
+            )
+            .capture_action(
+                cx.listener(|this, _: &MoveDown, window, cx| this.recall(false, window, cx)),
+            );
         self.agent_keys(self.menu_keys(prompt, cx), cx)
+    }
+
+    /// ↑ in an empty prompt box puts the last message sent back in it, caret at its end, and each
+    /// further ↑ the one before; ↓ walks forward again, past the newest to an empty box. Only
+    /// while the box holds nothing or the recalled message unedited, the caret on its first (↑)
+    /// or last (↓) line, and neither the `/` menu nor the agent list has the keys.
+    fn recall(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.input.read(cx);
+        if !input.focus_handle(cx).is_focused(window)
+            || self.agent_cursor.is_some()
+            || !self.attachments.is_empty()
+            || self.menu(cx).is_some()
+        {
+            return;
+        }
+        let value = input.value();
+        let line = input.cursor_position().line as usize;
+        let sent = sent(&self.model.items);
+        let at = self
+            .recalled
+            .filter(|&ix| sent.get(ix) == Some(&value.as_ref()));
+        let target = match (back, at) {
+            (true, Some(ix)) if line == 0 => ix.checked_sub(1),
+            (true, None) if value.is_empty() => sent.len().checked_sub(1),
+            (false, Some(ix)) if line + 1 == value.split('\n').count() => Some(ix + 1),
+            _ => None,
+        };
+        let Some(ix) = target else {
+            return;
+        };
+        let text = sent.get(ix).map_or_else(String::new, |t| t.to_string());
+        self.recalled = (ix < sent.len()).then_some(ix);
+        // A recalled `/command` does not open the menu until the user types.
+        self.menu_closed = true;
+        let last = text.split('\n').count() as u32 - 1;
+        self.input.update(cx, |input, cx| {
+            input.set_value(text, window, cx);
+            input.set_cursor_position(Position::new(last, u32::MAX), window, cx);
+        });
+        cx.stop_propagation();
+        cx.notify();
     }
 
     /// The folder, branch and agent, as read-only chips on the box's top edge.
