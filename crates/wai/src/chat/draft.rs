@@ -5,7 +5,7 @@ use gpui_kit::component::attachment::{Attachment as Chip, AttachmentContent, Att
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
+use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
@@ -197,7 +197,9 @@ impl SelectItem for Pick {
     }
 }
 
-type Menu = Entity<SelectState<Vec<Pick>>>;
+// `Vec` ignores the search box; `SearchableVec` filters with `Pick::matches`.
+type Picks = SearchableVec<Pick>;
+type Menu = Entity<SelectState<Picks>>;
 
 /// The agent's mark, as the mockup draws it; an agent without one shows none.
 fn glyph(agent: &str) -> Lead {
@@ -273,7 +275,7 @@ impl DraftView {
         });
         let menu = |searchable, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| {
-                SelectState::new(Vec::<Pick>::new(), None, window, cx).searchable(searchable)
+                SelectState::new(Picks::from(Vec::new()), None, window, cx).searchable(searchable)
             })
         };
         let (folders, agents, models) = (
@@ -295,7 +297,7 @@ impl DraftView {
             cx.subscribe_in(
                 &folders,
                 window,
-                |this, _, event: &SelectEvent<Vec<Pick>>, window, cx| {
+                |this, _, event: &SelectEvent<Picks>, window, cx| {
                     let SelectEvent::Confirm(Some(value)) = event else {
                         return;
                     };
@@ -306,17 +308,17 @@ impl DraftView {
                     }
                 },
             ),
-            cx.subscribe(&agents, |this, _, event: &SelectEvent<Vec<Pick>>, cx| {
+            cx.subscribe(&agents, |this, _, event: &SelectEvent<Picks>, cx| {
                 if let SelectEvent::Confirm(Some(agent)) = event {
                     this.set_agent(agent.clone(), cx);
                 }
             }),
-            cx.subscribe(&places, |this, _, event: &SelectEvent<Vec<Pick>>, cx| {
+            cx.subscribe(&places, |this, _, event: &SelectEvent<Picks>, cx| {
                 if let SelectEvent::Confirm(Some(place)) = event {
                     this.set_worktree(place == WORKTREE, cx);
                 }
             }),
-            cx.subscribe(&branches, |this, _, event: &SelectEvent<Vec<Pick>>, cx| {
+            cx.subscribe(&branches, |this, _, event: &SelectEvent<Picks>, cx| {
                 let SelectEvent::Confirm(Some(value)) = event else {
                     return;
                 };
@@ -324,12 +326,12 @@ impl DraftView {
                 let stay = value == CURRENT || (!this.worktree && Some(value) == current);
                 this.set_branch((!stay).then(|| value.clone()), cx);
             }),
-            cx.subscribe(&models, |this, _, event: &SelectEvent<Vec<Pick>>, cx| {
+            cx.subscribe(&models, |this, _, event: &SelectEvent<Picks>, cx| {
                 if let SelectEvent::Confirm(Some(model)) = event {
                     this.set_model(Some(model.clone()), cx);
                 }
             }),
-            cx.subscribe(&modes, |this, _, event: &SelectEvent<Vec<Pick>>, cx| {
+            cx.subscribe(&modes, |this, _, event: &SelectEvent<Picks>, cx| {
                 if let SelectEvent::Confirm(Some(mode)) = event {
                     this.set_mode(Some(mode.clone()), cx);
                 }
@@ -607,7 +609,7 @@ impl DraftView {
         items.push(Pick::new(CLONE, "Clone repository…"));
         let current = self.folder.to_string_lossy().into_owned();
         self.folders.update(cx, |select, cx| {
-            select.set_items(items, window, cx);
+            select.set_items(items.into(), window, cx);
             select.set_selected_value(&current, window, cx);
         });
 
@@ -623,7 +625,7 @@ impl DraftView {
         ));
         let current = self.agent.clone();
         self.agents.update(cx, |select, cx| {
-            select.set_items(items, window, cx);
+            select.set_items(items.into(), window, cx);
             select.set_selected_value(&current, window, cx);
         });
 
@@ -639,7 +641,7 @@ impl DraftView {
         )));
         let current = self.model.clone();
         self.models.update(cx, |select, cx| {
-            select.set_items(items, window, cx);
+            select.set_items(items.into(), window, cx);
             match &current {
                 Some(model) => select.set_selected_value(model, window, cx),
                 None => select.set_selected_index(None, window, cx),
@@ -655,7 +657,7 @@ impl DraftView {
             .collect();
         let current = self.mode.clone();
         self.modes.update(cx, |select, cx| {
-            select.set_items(items, window, cx);
+            select.set_items(items.into(), window, cx);
             match &current {
                 Some(mode) => select.set_selected_value(mode, window, cx),
                 None => select.set_selected_index(None, window, cx),
@@ -735,7 +737,7 @@ impl DraftView {
         };
         let current = if self.worktree { WORKTREE } else { LOCAL };
         self.places.update(cx, |select, cx| {
-            select.set_items(vec![local, new], window, cx);
+            select.set_items(vec![local, new].into(), window, cx);
             select.set_selected_value(&current.to_string(), window, cx);
         });
 
@@ -747,7 +749,7 @@ impl DraftView {
             (None, false) => CURRENT.to_string(),
         };
         self.branches.update(cx, |select, cx| {
-            select.set_items(items, window, cx);
+            select.set_items(items.into(), window, cx);
             select.set_selected_value(&selected, window, cx);
         });
     }
@@ -1131,13 +1133,28 @@ impl Render for DraftView {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    use gpui_kit::component::select::SelectDelegate as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{TestAppContext, VisualTestContext, px, size};
 
-    use super::DraftView;
+    use super::{DraftView, Pick, Picks};
     use crate::app::NewSession;
     use crate::git::Repo;
     use crate::workspace::tests::{fake_settings, open};
+
+    /// The menus' search box filters their rows.
+    #[gpui_kit::test]
+    fn search_filters_the_menu(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        cx.update(|window, cx| {
+            let rows = ["/p/alpha", "/p/beta"].map(|p| Pick::folder(Path::new(p)));
+            let mut picks = Picks::from(rows.to_vec());
+            picks.perform_search("bet", window, cx).detach();
+            assert_eq!(picks.items_count(0), 1);
+        });
+    }
 
     /// In a narrow pane a long branch name shrinks its chip: no chip leaves the composer.
     #[gpui_kit::test]
