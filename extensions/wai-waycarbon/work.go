@@ -202,6 +202,27 @@ func (w Work) clickPrompt(id string) (string, bool) {
 	return "", false
 }
 
+// CardSearch is the Jira tab's search: running (Busy), failed (Err) or done (Cards).
+type CardSearch struct {
+	Query, Err string
+	Busy       bool
+	Cards      []Card
+}
+
+// clickPrompt: a found card that is not one of mine opens solve-card; mine go through Work.clickPrompt.
+func (cs *CardSearch) clickPrompt(id string) (string, bool) {
+	key, ok := strings.CutPrefix(id, "card:")
+	if cs == nil || !ok {
+		return "", false
+	}
+	for _, c := range cs.Cards {
+		if c.Key == key {
+			return promptFor("solve", key), true
+		}
+	}
+	return "", false
+}
+
 // GhSignIn is a sign-in in progress (Code, once gh printed it) or one that failed (Err).
 type GhSignIn struct{ Code, Err string }
 
@@ -209,6 +230,7 @@ type WorkState struct {
 	GhMissing, GhSignedOut, JiraMissing bool
 	JiraProblem                         string
 	SignIn                              *GhSignIn
+	Search                              *CardSearch
 	Err                                 string
 	Login                               string
 	Updated                             time.Time
@@ -407,10 +429,56 @@ func workTree(w Work, st WorkState) node {
 	return node{"type": "column", "children": kids}
 }
 
-// jiraTree is the Jira tab: my cards by status, statuses in the order jira lists them.
+// searchRow is the search field; its value follows the search shown, so Clear empties it.
+func searchRow(cs *CardSearch) node {
+	q := ""
+	if cs != nil {
+		q = cs.Query
+	}
+	kids := []node{{"type": "input", "id": "jira:q", "placeholder": "Search any card: EC-1234 or text", "value": q},
+		{"type": "button", "id": "jira:search", "label": "Search", "icon": "search"}}
+	if cs != nil {
+		kids = append(kids, node{"type": "button", "id": "jira:clear", "label": "Clear"})
+	}
+	return node{"type": "row", "children": kids}
+}
+
+// searchTree is the search's results in place of the statuses; a card of mine keeps its PR and Move to Done.
+func searchTree(w Work, cs *CardSearch) []node {
+	switch {
+	case cs.Busy:
+		return []node{{"type": "spinner", "label": "Searching…"}}
+	case cs.Err != "":
+		return []node{{"type": "alert", "tone": "danger", "text": oneLine(cs.Err)}}
+	case len(cs.Cards) == 0:
+		return []node{{"type": "text", "text": "No card matches " + oneLine(cs.Query) + ".", "muted": true}}
+	}
+	mine := map[string]CardRow{}
+	for _, c := range w.Cards {
+		mine[c.Key] = c
+	}
+	var rows []node
+	for _, c := range cs.Cards {
+		row, ok := mine[c.Key]
+		if !ok {
+			row = CardRow{Card: c}
+		}
+		rows = append(rows, cardRow(row, ""))
+	}
+	return []node{section("jira:results", "Results", true, rows)}
+}
+
+// jiraTree is the Jira tab: my cards by status, statuses in the order jira lists them, or a search's results.
 func jiraTree(w Work, st WorkState) node {
-	kids := append([]node{headRow(fmt.Sprintf("%d cards assigned to you · updated %s", len(w.Cards), st.Updated.Format("15:04")), "jira:refresh")},
-		jiraProblems(st)...)
+	probs := jiraProblems(st)
+	kids := append([]node{headRow(fmt.Sprintf("%d cards assigned to you · updated %s", len(w.Cards), st.Updated.Format("15:04")), "jira:refresh"),
+		searchRow(st.Search)}, probs...)
+	if st.Search != nil {
+		return node{"type": "column", "children": append(kids, searchTree(w, st.Search)...)}
+	}
+	if len(w.Cards) == 0 && len(probs) == 0 {
+		return node{"type": "column", "children": append(kids, node{"type": "text", "text": "No cards assigned to you.", "muted": true})}
+	}
 	var order []string
 	by := map[string][]node{}
 	for _, c := range w.Cards {
@@ -425,9 +493,6 @@ func jiraTree(w Work, st WorkState) node {
 			title = "No status"
 		}
 		kids = append(kids, section("jira:"+s, title, true, by[s]))
-	}
-	if len(kids) == 1 {
-		kids = append(kids, node{"type": "text", "text": "No cards assigned to you.", "muted": true})
 	}
 	return node{"type": "column", "children": kids}
 }

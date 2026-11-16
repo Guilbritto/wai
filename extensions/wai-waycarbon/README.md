@@ -1,6 +1,6 @@
 # wai-waycarbon
 
-A wai extension for the WayCarbon team (0.3, extension API 1.5). It contributes:
+A wai extension for the WayCarbon team (0.4, extension API 1.5). It contributes:
 
 - three session templates (front, BFF, Go service) that carry the team's conventions: `feat:`/`fix:`/`refactor:` commits without a scope, `Refs: EC-XXXX`, branches from `development`, PR titles ending with the EC key;
 - a requirement on the `waycarbon` Claude plugin (`waycarbon/claude-code`): installing the extension asks before installing it;
@@ -14,6 +14,8 @@ An inbox of what needs you now: your PRs with a merge conflict, failing CI, requ
 ## Jira tab
 
 Your open Jira cards, grouped by status, each with its first open PR. Clicking a card works as on the Work tab.
+
+**Search** finds any card of the project, Done included: by key (`EC-1234`, any case) or by text, as Jira's search box does (`jira issue list <text>`), at most 50. The results replace the statuses until **Clear**; clicking a card that is not yours opens `/waycarbon:solve-card`.
 
 ## PRs tab
 

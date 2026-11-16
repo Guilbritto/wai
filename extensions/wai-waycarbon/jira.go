@@ -64,14 +64,42 @@ func myCards(ctx context.Context) ([]Card, error) {
 	if user == "" {
 		return nil, notLoggedIn
 	}
-	out, err := jira(ctx, "issue", "list", "-a", user, "-s~Done", "--plain", "--no-headers", "--columns", "key,summary,status")
+	cards, err := listCards(ctx, "-a", user, "-s~Done", "--plain", "--no-headers", "--columns", "key,summary,status")
 	if err != nil {
 		if errors.Is(err, errSilent) {
 			return nil, Problem("jira issue list failed")
 		}
 		return nil, Problem("jira issue list failed: " + err.Error())
 	}
+	return cards, nil
+}
+
+// listCards runs `jira issue list`. jira exits 1 with "No result found" when nothing matches: no cards.
+func listCards(ctx context.Context, args ...string) ([]Card, error) {
+	out, err := jira(ctx, append([]string{"issue", "list"}, args...)...)
+	if err != nil && strings.Contains(err.Error(), "No result found") {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	return parseCards(out), nil
+}
+
+// searchCards finds any card of the project, Done included: by key when q is one, else by text as
+// Jira's search box does. At most 50.
+func searchCards(ctx context.Context, q string) ([]Card, error) {
+	args := []string{"--plain", "--no-headers", "--columns", "key,summary,status", "--paginate", "50"}
+	if k := strings.ToUpper(q); keyRe.MatchString(k) {
+		args = append(args, "-q", "key = "+k)
+	} else {
+		args = append(args, "--", q)
+	}
+	cards, err := listCards(ctx, args...)
+	if errors.Is(err, errSilent) {
+		return nil, Problem("jira search failed")
+	}
+	return cards, err
 }
 
 // moveCard moves a card to the done status (WAI_WAYCARBON_DONE, default Done).

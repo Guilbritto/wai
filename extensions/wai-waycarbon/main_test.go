@@ -750,3 +750,65 @@ func TestPanelIdsAreUnique(t *testing.T) {
 		}
 	}
 }
+
+// Search finds any card by text or key, a found card opens solve-card, and Clear brings the statuses back.
+func TestJiraSearch(t *testing.T) {
+	fakeJira(t, `
+case "$*" in
+  "me") echo "dev@example.com" ;;
+  "issue list -a dev@example.com -s~Done --plain --no-headers --columns key,summary,status")
+    printf 'EC-1\tFix the login timeout\tIn Progress\n' ;;
+  "issue list --plain --no-headers --columns key,summary,status --paginate 50 -- -export button")
+    printf 'EC-9\tAdd the export button\t\t\tDone\n' ;;
+  "issue list --plain --no-headers --columns key,summary,status --paginate 50 -q key = EC-1")
+    printf 'EC-1\tFix the login timeout\tIn Progress\n' ;;
+  "issue list --plain --no-headers --columns key,summary,status --paginate 50 -- nothing")
+    echo "No result found for given query in project EC" >&2; exit 1 ;;
+  *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+`)
+	r := start(t)
+	r.initialize(t)
+	r.cards(t)
+	search := func(id int, q string) map[string]any {
+		t.Helper()
+		r.send(`{"jsonrpc":"2.0","id":` + strconv.Itoa(id) + `,"method":"panel/action","params":{"panel":"waycarbon","action_id":"jira:search","values":{"jira:q":"` + q + `"}}}`)
+		r.reply(t, float64(id))
+		m := r.until(t, func(m map[string]any) bool {
+			return m["method"] == "panel/render" && find(render(t, m), "spinner") == nil
+		})
+		return render(t, m)
+	}
+
+	root := search(10, "  -export button ")
+	if c := findID(root, "card:EC-9"); c == nil || c["badge"] != "Done" {
+		t.Fatalf("want EC-9 found by text: %v", c)
+	}
+	if findID(root, "jira:In Progress") != nil {
+		t.Error("results replace the statuses")
+	}
+	if q := findID(root, "jira:q"); q["value"] != "-export button" {
+		t.Errorf("the field keeps the query: %v", q)
+	}
+	r.action(t, 11, "card:EC-9")
+	open := r.until(t, func(m map[string]any) bool { return m["method"] == "sessions/open" })
+	if p := open["params"].(map[string]any); p["prompt"] != "/waycarbon:solve-card EC-9" {
+		t.Errorf("found card click: %v", p)
+	}
+
+	if findID(search(12, "ec-1"), "card:EC-1") == nil {
+		t.Error("want EC-1 found by key")
+	}
+	if !strings.Contains(textOf(search(13, "nothing")), "No card matches nothing.") {
+		t.Error("want the no-match text")
+	}
+
+	r.action(t, 14, "jira:clear")
+	m := r.until(t, func(m map[string]any) bool {
+		return m["method"] == "panel/render" && findID(render(t, m), "jira:clear") == nil
+	})
+	root = render(t, m)
+	if findID(root, "jira:In Progress") == nil || findID(root, "jira:q")["value"] != "" {
+		t.Errorf("Clear brings back the statuses and empties the field: %v", findID(root, "jira:q"))
+	}
+}

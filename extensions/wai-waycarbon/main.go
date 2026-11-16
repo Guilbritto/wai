@@ -119,7 +119,7 @@ func (s *server) refreshWork() {
 			}
 		}
 		s.smu.Lock()
-		st.SignIn = s.wst.SignIn
+		st.SignIn, st.Search = s.wst.SignIn, s.wst.Search
 		s.work, s.wst, s.refreshing = buildWork(snap, cards), st, false
 		s.counts.NeedsYou, s.counts.Reviews, s.counts.Cards = len(s.work.NeedsYou), s.work.requested(), s.work.merged()
 		s.paintAll()
@@ -215,6 +215,37 @@ func (s *server) moveDone(key string) {
 			return
 		}
 		s.refreshWork()
+	}()
+}
+
+// search runs a card search off the caller; an empty query clears it. A newer search or Clear
+// drops an older one's results.
+func (s *server) search(q string) {
+	q = strings.TrimSpace(q)
+	s.smu.Lock()
+	defer s.smu.Unlock()
+	if q == "" {
+		s.wst.Search = nil
+		s.paintAll()
+		return
+	}
+	cs := &CardSearch{Query: q, Busy: true}
+	s.wst.Search = cs
+	s.paintAll()
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		cards, err := searchCards(s.ctx, q)
+		s.smu.Lock()
+		defer s.smu.Unlock()
+		if s.wst.Search != cs {
+			return
+		}
+		s.wst.Search = &CardSearch{Query: q, Cards: cards}
+		if err != nil {
+			s.wst.Search.Err = err.Error()
+		}
+		s.paintAll()
 	}()
 }
 
@@ -330,6 +361,12 @@ func (s *server) handle(m message) {
 		case "plugin:install":
 			s.installPluginClick()
 			return
+		case "jira:search":
+			s.search(values["jira:q"])
+			return
+		case "jira:clear":
+			s.search("")
+			return
 		}
 		if key, ok := strings.CutPrefix(strings.TrimPrefix(p.Action, "inbox:"), "done:"); ok {
 			s.moveDone(key)
@@ -337,6 +374,9 @@ func (s *server) handle(m message) {
 		}
 		s.smu.Lock()
 		text, ok := s.work.clickPrompt(p.Action)
+		if !ok {
+			text, ok = s.wst.Search.clickPrompt(p.Action)
+		}
 		s.smu.Unlock()
 		if ok {
 			s.call("sessions/open", node{"prompt": text, "send": false})
