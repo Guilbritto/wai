@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -209,5 +210,69 @@ func TestToneBadges(t *testing.T) {
 		if bd := find(c, "badge"); bd == nil || bd["text"] != want[0] || bd["tone"] != want[1] {
 			t.Errorf("%s: badge node %v, want %v", id, bd, want)
 		}
+	}
+}
+
+func asMap(n node) map[string]any {
+	var m map[string]any
+	b, _ := json.Marshal(n)
+	json.Unmarshal(b, &m)
+	return m
+}
+
+func TestPRsTabGroupsByCard(t *testing.T) {
+	w := buildWork(Snapshot{
+		Mine: []PR{
+			{Number: 1, Title: "EC-1 proto", URL: prURL + "1", Mergeable: "CONFLICTING"},
+			{Number: 2, Title: "service part", Branch: "feat/EC-1-service", URL: prURL + "2"},
+			{Number: 3, Title: "bump deps", URL: prURL + "3"},
+			{Number: 4, Title: "EC-2 alone", URL: prURL + "4"},
+		},
+		Requested: []PR{{Number: 20, Title: "EC-9 a", URL: prURL + "20"}, {Number: 21, Title: "EC-9 b", URL: prURL + "21"}},
+	}, []Card{{"EC-1", "Filter by user", "In Progress"}})
+	tree := asMap(prsTree(w, WorkState{Updated: time.Now()}))
+	for id, want := range map[string]string{
+		"prs:mine:EC-1": "EC-1 · Filter by user|2 PRs|true|Review all 2",
+		"prs:mine:EC-2": "EC-2 · EC-2 alone|1 PR|false|",
+		"prs:mine:none": "No card|1 PR|false|",
+		"prs:req:EC-9":  "EC-9 · EC-9 a|2 PRs|true|Review all 2",
+	} {
+		g := findID(tree, id)
+		if g == nil {
+			t.Errorf("no group %s", id)
+			continue
+		}
+		label := ""
+		if b := find(g, "button"); b != nil {
+			label = b["label"].(string)
+		}
+		if got := fmt.Sprintf("%v|%v|%v|%s", g["title"], g["badge"], g["open"], label); got != want {
+			t.Errorf("%s: got %q, want %q", id, got, want)
+		}
+	}
+	head := "Review the 2 PRs of EC-1 as one change: run /waycarbon:code-review on each, then check they fit each other (proto, service, BFF and front contracts).\n"
+	if got, ok := w.clickPrompt("reviewall:mine:EC-1"); !ok || got != head+prURL+"1\n"+prURL+"2" {
+		t.Errorf("review all: %q %v", got, ok)
+	}
+	if _, ok := w.clickPrompt("reviewall:req:EC-9"); !ok {
+		t.Error("review all of the requested EC-9")
+	}
+	for _, id := range []string{"reviewall:mine:EC-2", "reviewall:mine:", "reviewall:req:EC-1", "reviewall:queue:EC-9", "reviewall:"} {
+		if got, ok := w.clickPrompt(id); ok {
+			t.Errorf("%s must not open a session, got %q", id, got)
+		}
+	}
+}
+
+func TestJiraTabByStatus(t *testing.T) {
+	w := buildWork(Snapshot{}, []Card{{"EC-1", "a", "In Progress"}, {"EC-2", "b", "To Do"}, {"EC-3", "c", "In Progress"}})
+	var got []string
+	for _, k := range asMap(jiraTree(w, WorkState{Updated: time.Now()}))["children"].([]any) {
+		if s := k.(map[string]any); s["type"] == "section" {
+			got = append(got, fmt.Sprintf("%v:%v", s["title"], s["badge"]))
+		}
+	}
+	if strings.Join(got, ",") != "In Progress:2,To Do:1" {
+		t.Errorf("sections: %v", got)
 	}
 }

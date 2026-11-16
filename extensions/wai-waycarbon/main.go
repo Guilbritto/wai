@@ -121,7 +121,7 @@ func (s *server) refreshWork() {
 		s.smu.Lock()
 		st.SignIn = s.wst.SignIn
 		s.work, s.wst, s.refreshing = buildWork(snap, cards), st, false
-		s.counts.NeedsYou, s.counts.Reviews, s.counts.Cards = len(s.work.NeedsYou), len(s.work.Reviews), s.work.merged()
+		s.counts.NeedsYou, s.counts.Reviews, s.counts.Cards = len(s.work.NeedsYou), s.work.requested(), s.work.merged()
 		s.paintAll()
 		again := s.again && s.ctx.Err() == nil
 		s.again = false
@@ -318,7 +318,7 @@ func (s *server) handle(m message) {
 			return
 		}
 		switch p.Action {
-		case "work:refresh":
+		case "work:refresh", "jira:refresh", "prs:refresh":
 			s.refreshWork()
 			return
 		case "gh:signin":
@@ -331,7 +331,7 @@ func (s *server) handle(m message) {
 			s.installPluginClick()
 			return
 		}
-		if key, ok := strings.CutPrefix(p.Action, "done:"); ok {
+		if key, ok := strings.CutPrefix(strings.TrimPrefix(p.Action, "inbox:"), "done:"); ok {
 			s.moveDone(key)
 			return
 		}

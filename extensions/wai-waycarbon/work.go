@@ -122,6 +122,16 @@ func (w Work) merged() (n int) {
 	return n
 }
 
+// requested counts the reviews asked of the user; the team queue does not count.
+func (w Work) requested() (n int) {
+	for _, p := range w.Reviews {
+		if p.Requested {
+			n++
+		}
+	}
+	return n
+}
+
 // promptFor is the text a click pre-fills; it carries only a URL or a Jira key.
 func promptFor(action, arg string) string {
 	switch action {
@@ -165,6 +175,15 @@ func (w Work) clickPrompt(id string) (string, bool) {
 		for _, p := range w.Reviews {
 			if p.URL == rest {
 				return promptFor("review", p.URL), true
+			}
+		}
+	case "reviewall":
+		sec, key, _ := strings.Cut(rest, ":")
+		for _, s := range w.prSections() {
+			for _, g := range groupByCard(s.PRs) {
+				if s.ID == sec && g.Key != "" && g.Key == key && len(g.PRs) > 1 {
+					return reviewAllPrompt(g.Key, g.PRs), true
+				}
 			}
 		}
 	case "card":
@@ -231,7 +250,9 @@ func section(id, title string, open bool, kids []node) node {
 	return node{"type": "section", "id": id, "title": title, "open": open, "badge": strconv.Itoa(len(kids)), "children": kids}
 }
 
-func cardRow(c CardRow) node {
+// cardRow is a Jira card; its Move to Done button id is done:KEY with the prefix in front, so the
+// same card can show on two tabs.
+func cardRow(c CardRow, prefix string) node {
 	title := oneLine(c.Summary)
 	if title == "" {
 		title = c.Key
@@ -241,11 +262,17 @@ func cardRow(c CardRow) node {
 	case c.MergedNoOpen:
 		n["children"] = []node{{"type": "row", "children": []node{
 			{"type": "badge", "text": "PR merged", "tone": "warning"},
-			{"type": "button", "id": "done:" + c.Key, "label": "Move to Done",
+			{"type": "button", "id": prefix + "done:" + c.Key, "label": "Move to Done",
 				"confirm": node{"title": "Move " + c.Key + " to Done?"}}}}}
 	case len(c.Open) > 0:
-		n["badge"] = "#" + strconv.Itoa(c.Open[0].Number)
-		n["children"] = []node{ghLink(c.Open[0].URL)}
+		p := c.Open[0]
+		n["children"] = []node{ghLink(p.URL)}
+		if r := reasonOf(p); tones[r] != "" {
+			n["children"] = []node{{"type": "row", "children": []node{
+				{"type": "badge", "text": "#" + strconv.Itoa(p.Number) + " " + badges[r], "tone": tones[r]}, ghLink(p.URL)}}}
+		} else {
+			n["badge"] = "#" + strconv.Itoa(p.Number)
+		}
 	default:
 		n["badge"] = oneLine(c.Status)
 	}
@@ -282,62 +309,239 @@ func problems(st WorkState) []node {
 		kids = append(kids, node{"type": "alert", "tone": "warning", "text": "Signed out of GitHub"},
 			node{"type": "button", "id": "gh:signin", "label": "Sign in with GitHub", "style": "primary"})
 	}
+	return append(kids, jiraProblems(st)...)
+}
+
+// jiraProblems hold no buttons, so the Work and Jira tabs can both show them.
+func jiraProblems(st WorkState) []node {
 	switch {
 	case st.JiraMissing:
-		kids = append(kids, node{"type": "alert", "tone": "warning", "text": "jira CLI not found"},
-			node{"type": "log", "text": "brew install ankitpokhrel/jira-cli/jira-cli", "follow": false},
-			node{"type": "text", "text": "Then run jira init in a terminal.", "muted": true})
+		return []node{{"type": "alert", "tone": "warning", "text": "jira CLI not found"},
+			{"type": "log", "text": "brew install ankitpokhrel/jira-cli/jira-cli", "follow": false},
+			{"type": "text", "text": "Then run jira init in a terminal.", "muted": true}}
 	case st.JiraProblem != "":
-		kids = append(kids, node{"type": "alert", "tone": "warning", "text": oneLine(st.JiraProblem)})
+		return []node{{"type": "alert", "tone": "warning", "text": oneLine(st.JiraProblem)}}
+	}
+	return nil
+}
+
+// ghProblems are the GitHub alerts for the PRs tab; signing in stays on the Work tab.
+func ghProblems(st WorkState) []node {
+	var kids []node
+	if st.Err != "" {
+		kids = append(kids, node{"type": "alert", "tone": "danger", "text": oneLine(st.Err)})
+	}
+	switch {
+	case st.GhMissing:
+		kids = append(kids, node{"type": "alert", "tone": "warning", "text": "GitHub CLI not found"})
+	case st.GhSignedOut:
+		kids = append(kids, node{"type": "alert", "tone": "warning", "text": "Signed out of GitHub: sign in on the Work tab"})
 	}
 	return kids
 }
 
-func workTree(w Work, st WorkState) node {
+// headRow is the muted "updated" line with a Refresh button; each tab needs its own button id.
+func headRow(text, id string) node {
+	return node{"type": "row", "children": []node{
+		{"type": "text", "text": text, "muted": true},
+		{"type": "button", "id": id, "label": "Refresh", "icon": "refresh-cw"}}}
+}
+
+func (st WorkState) head() string {
 	head := "updated " + st.Updated.Format("15:04")
 	if st.Login != "" {
 		head = "@" + oneLine(st.Login) + " · " + head
 	}
-	kids := []node{{"type": "row", "children": []node{
-		{"type": "text", "text": head, "muted": true},
-		{"type": "button", "id": "work:refresh", "label": "Refresh", "icon": "refresh-cw"}}}}
-	kids = append(kids, problems(st)...)
-	var needs, reviews, cards, waiting []node
-	for _, p := range w.NeedsYou {
-		needs = append(needs, prCard("pr:"+p.URL, p, badges[reasonOf(p)], tones[reasonOf(p)]))
+	return head
+}
+
+// mineCard is a PR of mine: its reason, or its state while it waits on others.
+func mineCard(p PR) node {
+	if r := reasonOf(p); r != Waiting {
+		return prCard("pr:"+p.URL, p, badges[r], tones[r])
 	}
+	state := p.CI
+	if p.Draft {
+		state = "Draft"
+	}
+	if state == "" {
+		state = "Waiting"
+	}
+	return prCard("pr:"+p.URL, p, oneLine(strings.ToUpper(state[:1])+strings.ToLower(state[1:])), "")
+}
+
+func reviewCard(p ReviewPR) node {
+	if p.Requested {
+		return prCard("review:"+p.URL, p.PR, "Requested", "")
+	}
+	return prCard("review:"+p.URL, p.PR, "Review", "")
+}
+
+// workTree is the Work tab, an inbox: what needs the user now, from GitHub and Jira.
+func workTree(w Work, st WorkState) node {
+	kids := append([]node{headRow(st.head(), "work:refresh")}, problems(st)...)
+	var needs []node
+	for _, p := range w.NeedsYou {
+		needs = append(needs, mineCard(p))
+	}
+	queue := 0
 	for _, p := range w.Reviews {
-		badge := "Review"
 		if p.Requested {
-			badge = "Requested"
+			needs = append(needs, reviewCard(p))
+		} else {
+			queue++
 		}
-		reviews = append(reviews, prCard("review:"+p.URL, p.PR, badge, ""))
 	}
 	for _, c := range w.Cards {
-		cards = append(cards, cardRow(c))
+		if c.MergedNoOpen {
+			needs = append(needs, cardRow(c, "inbox:"))
+		}
 	}
-	for _, p := range w.Waiting {
-		state := p.CI
-		if p.Draft {
-			state = "Draft"
-		}
-		if state == "" {
-			state = "Waiting"
-		}
-		waiting = append(waiting, prCard("pr:"+p.URL, p, oneLine(strings.ToUpper(state[:1])+strings.ToLower(state[1:])), ""))
+	if len(needs) > 0 {
+		kids = append(kids, section("needs", "Needs you", true, needs))
+	} else {
+		kids = append(kids, node{"type": "text", "text": "Nothing needs you right now.", "muted": true})
 	}
-	for _, s := range []struct {
-		id, title string
-		open      bool
-		kids      []node
-	}{{"needs", "Needs you", true, needs}, {"reviews", "Review requests", true, reviews},
-		{"cards", "My cards", true, cards}, {"waiting", "Waiting on others", false, waiting}} {
-		if len(s.kids) > 0 {
-			kids = append(kids, section(s.id, s.title, s.open, s.kids))
+	kids = append(kids, node{"type": "text", "muted": true,
+		"text": fmt.Sprintf("Jira: %d cards · PRs: %d waiting, %d in the team queue", len(w.Cards), len(w.Waiting), queue)})
+	return node{"type": "column", "children": kids}
+}
+
+// jiraTree is the Jira tab: my cards by status, statuses in the order jira lists them.
+func jiraTree(w Work, st WorkState) node {
+	kids := append([]node{headRow(fmt.Sprintf("%d cards assigned to you · updated %s", len(w.Cards), st.Updated.Format("15:04")), "jira:refresh")},
+		jiraProblems(st)...)
+	var order []string
+	by := map[string][]node{}
+	for _, c := range w.Cards {
+		if by[c.Status] == nil {
+			order = append(order, c.Status)
 		}
+		by[c.Status] = append(by[c.Status], cardRow(c, ""))
+	}
+	for _, s := range order {
+		title := oneLine(s)
+		if title == "" {
+			title = "No status"
+		}
+		kids = append(kids, section("jira:"+s, title, true, by[s]))
 	}
 	if len(kids) == 1 {
-		kids = append(kids, node{"type": "text", "text": "Nothing needs you right now.", "muted": true})
+		kids = append(kids, node{"type": "text", "text": "No cards assigned to you.", "muted": true})
+	}
+	return node{"type": "column", "children": kids}
+}
+
+// prGroup is the PRs of one Jira card; Key is "" for PRs that name no card.
+type prGroup struct {
+	Key string
+	PRs []PR
+}
+
+// groupByCard groups PRs by their first Jira key, in the order they come; PRs with none go last.
+func groupByCard(prs []PR) []prGroup {
+	var out []prGroup
+	var none []PR
+	at := map[string]int{}
+	for _, p := range prs {
+		keys := keysOf(p)
+		if len(keys) == 0 {
+			none = append(none, p)
+			continue
+		}
+		i, ok := at[keys[0]]
+		if !ok {
+			i, at[keys[0]] = len(out), len(out)
+			out = append(out, prGroup{Key: keys[0]})
+		}
+		out[i].PRs = append(out[i].PRs, p)
+	}
+	if len(none) > 0 {
+		out = append(out, prGroup{PRs: none})
+	}
+	return out
+}
+
+type prSection struct {
+	ID, Title string
+	Open      bool
+	PRs       []PR
+	Card      func(PR) node
+}
+
+// prSections are the PRs tab: mine, the reviews asked of me, the team queue.
+func (w Work) prSections() []prSection {
+	var req, queue []PR
+	for _, p := range w.Reviews {
+		if p.Requested {
+			req = append(req, p.PR)
+		} else {
+			queue = append(queue, p.PR)
+		}
+	}
+	return []prSection{
+		{"mine", "Mine", true, append(append([]PR(nil), w.NeedsYou...), w.Waiting...), mineCard},
+		{"req", "Review requests", true, req, func(p PR) node { return reviewCard(ReviewPR{p, true}) }},
+		{"queue", "Team queue", false, queue, func(p PR) node { return reviewCard(ReviewPR{p, false}) }},
+	}
+}
+
+// reviewAllPrompt asks one session to review a card's PRs together: each one, then how they fit.
+func reviewAllPrompt(key string, prs []PR) string {
+	text := fmt.Sprintf("Review the %d PRs of %s as one change: run /waycarbon:code-review on each, "+
+		"then check they fit each other (proto, service, BFF and front contracts).", len(prs), key)
+	for _, p := range prs {
+		text += "\n" + p.URL
+	}
+	return text
+}
+
+func plural(n int, one string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return strconv.Itoa(n) + " " + one + "s"
+}
+
+// prsTree is the PRs tab: each section groups its PRs by Jira card, and a card with several PRs
+// gets a Review all button.
+func prsTree(w Work, st WorkState) node {
+	kids := append([]node{headRow(st.head(), "prs:refresh")}, ghProblems(st)...)
+	summary := map[string]string{}
+	for _, c := range w.Cards {
+		summary[c.Key] = c.Summary
+	}
+	for _, s := range w.prSections() {
+		if len(s.PRs) == 0 {
+			continue
+		}
+		var groups []node
+		for _, g := range groupByCard(s.PRs) {
+			var cards []node
+			open := s.ID == "req"
+			for _, p := range g.PRs {
+				cards = append(cards, s.Card(p))
+				open = open || s.ID == "mine" && reasonOf(p) != Waiting
+			}
+			title, id := "No card", "none"
+			if g.Key != "" {
+				title, id = g.Key+" · "+summary[g.Key], g.Key
+				if summary[g.Key] == "" {
+					title = g.Key + " · " + g.PRs[0].Title
+				}
+			}
+			if g.Key != "" && len(g.PRs) > 1 {
+				cards = append(cards, node{"type": "button", "id": "reviewall:" + s.ID + ":" + g.Key,
+					"label": fmt.Sprintf("Review all %d", len(g.PRs)), "style": "primary"})
+			}
+			groups = append(groups, node{"type": "section", "id": "prs:" + s.ID + ":" + id, "title": oneLine(title),
+				"open": open, "badge": plural(len(g.PRs), "PR"), "children": cards})
+		}
+		kids = append(kids, node{"type": "section", "id": "prs:" + s.ID, "title": s.Title, "open": s.Open,
+			"badge": strconv.Itoa(len(s.PRs)), "children": groups})
+	}
+	if len(kids) == 1 {
+		kids = append(kids, node{"type": "text", "text": "No open PRs.", "muted": true})
 	}
 	return node{"type": "column", "children": kids}
 }

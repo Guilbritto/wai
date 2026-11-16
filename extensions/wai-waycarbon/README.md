@@ -1,15 +1,23 @@
 # wai-waycarbon
 
-A wai extension for the WayCarbon team (0.2, extension API 1.5). It contributes:
+A wai extension for the WayCarbon team (0.3, extension API 1.5). It contributes:
 
 - three session templates (front, BFF, Go service) that carry the team's conventions: `feat:`/`fix:`/`refactor:` commits without a scope, `Refs: EC-XXXX`, branches from `development`, PR titles ending with the EC key;
 - a requirement on the `waycarbon` Claude plugin (`waycarbon/claude-code`): installing the extension asks before installing it;
-- a **WayCarbon** panel with two tabs, **Work** and **Help**;
+- a **WayCarbon** panel with four tabs, **Work**, **Jira**, **PRs** and **Help**;
 - a bar item with a counter of what needs you, and a card with the count per group.
 
 ## Work tab
 
-Shows your open PRs, review requests and Jira cards, and flags what needs you: merge conflicts, failing CI, requested changes, PRs ready to merge, cards with every PR merged. Clicking one opens a session with the matching prompt pre-filled (not sent): `/waycarbon:code-review`, `/waycarbon:fix-review`, `/waycarbon:recheck-review`, `/waycarbon:solve-card`, `/waycarbon:deploy`, or a plain sentence for conflicts, CI and merging. A prompt carries only a PR URL or a Jira key. A card can be moved to Done after a confirmation. If the `waycarbon` plugin is missing, the tab says so and offers Install plugin.
+An inbox of what needs you now: your PRs with a merge conflict, failing CI, requested changes or ready to merge, the reviews requested of you, and the cards whose PRs all merged (Move to Done, after a confirmation). Clicking one opens a session with the matching prompt pre-filled (not sent): `/waycarbon:code-review`, `/waycarbon:fix-review`, `/waycarbon:recheck-review`, `/waycarbon:solve-card`, `/waycarbon:deploy`, or a plain sentence for conflicts, CI and merging. A prompt carries only PR URLs or a Jira key. If the `waycarbon` plugin is missing, the tab says so and offers Install plugin; signing in to GitHub happens here too.
+
+## Jira tab
+
+Your open Jira cards, grouped by status, each with its first open PR. Clicking a card works as on the Work tab.
+
+## PRs tab
+
+Your open PRs, the reviews requested of you and the team queue (the `review` label), each grouped by Jira card: the first EC key in a PR's title or branch, or "No card". A card with two or more PRs has **Review all N**, which opens one session whose prompt asks to run `/waycarbon:code-review` on each PR and then check they fit each other.
 
 ## Help tab
 

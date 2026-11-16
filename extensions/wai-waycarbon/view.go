@@ -4,7 +4,7 @@ import (
 	"strconv"
 )
 
-// counts are what needs the user, per group; Tasks that load PRs and help requests set them.
+// counts are what needs the user, per group; Reviews leaves out the team queue. Tasks that load PRs and help requests set them.
 type counts struct{ NeedsYou, Reviews, Cards, Help, Replies int }
 
 func (c counts) total() int { return c.NeedsYou + c.Reviews + c.Cards + c.Help + c.Replies }
@@ -31,15 +31,15 @@ func tab(id, title string, badge int, body node) node {
 	return t
 }
 
-func rootTree(work, help node, workBadge, helpBadge int) node {
-	return node{"type": "column", "children": []node{
-		{"type": "tabs", "id": "tab", "tabs": []node{tab("work", "Work", workBadge, work), tab("help", "Help", helpBadge, help)}}}}
+func rootTree(tabs ...node) node {
+	return node{"type": "column", "children": []node{{"type": "tabs", "id": "tab", "tabs": tabs}}}
 }
 
-// workBody is the Work tab: the plugin alert, then the work (or Loading…).
-func (s *server) workBody() node {
+// body is a tab under Loading… until the first refresh; the Work tab also shows the plugin alert.
+func (s *server) body(tree func(Work, WorkState) node, plugin bool) node {
 	kids := []node{}
 	switch {
+	case !plugin:
 	case s.installing:
 		kids = append(kids, node{"type": "spinner", "label": "Installing the WayCarbon plugin…"})
 	case s.pluginMissing:
@@ -53,7 +53,7 @@ func (s *server) workBody() node {
 	if s.refreshing && s.wst.Updated.IsZero() {
 		kids = append(kids, node{"type": "text", "text": "Loading…", "muted": true})
 	} else {
-		kids = append(kids, workTree(s.work, s.wst))
+		kids = append(kids, tree(s.work, s.wst))
 	}
 	return node{"type": "column", "children": kids}
 }
@@ -63,7 +63,10 @@ func (s *server) paintAll() {
 	c := s.counts
 	c.Help, c.Replies = s.helpCounts()
 	s.write(node{"jsonrpc": "2.0", "method": "panel/render", "params": node{"panel": panelID,
-		"tree": rootTree(s.workBody(), s.helpBody(), c.NeedsYou+c.Reviews+c.Cards, c.Help+c.Replies)}})
+		"tree": rootTree(tab("work", "Work", c.NeedsYou+c.Reviews+c.Cards, s.body(workTree, true)),
+			tab("jira", "Jira", c.Cards, s.body(jiraTree, false)),
+			tab("prs", "PRs", c.NeedsYou+c.Reviews, s.body(prsTree, false)),
+			tab("help", "Help", c.Help+c.Replies, s.helpBody()))}})
 	bar := node{"item": "attention"}
 	if n := c.total(); n > 0 {
 		bar = node{"item": "attention", "text": strconv.Itoa(n), "icon": "bell", "tone": "warning", "card": c.card()}

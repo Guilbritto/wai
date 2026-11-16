@@ -233,7 +233,7 @@ func helpRPC(t *testing.T, signedIn bool, sessions string) (*rpc, string) {
 func helpTab(t *testing.T, m map[string]any) map[string]any {
 	t.Helper()
 	tabs := find(render(t, m), "tabs")["tabs"].([]any)
-	return map[string]any{"type": "column", "children": tabs[1].(map[string]any)["children"]}
+	return map[string]any{"type": "column", "children": tabs[3].(map[string]any)["children"]}
 }
 
 // helpUntil waits for a render whose Help tab satisfies ok, and returns that tab.

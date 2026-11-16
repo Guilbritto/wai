@@ -157,7 +157,7 @@ func render(t *testing.T, m map[string]any) map[string]any {
 	return p["tree"].(map[string]any)
 }
 
-// work returns the Work tab's children as a column, once the cards are no longer loading.
+// cards returns the panel tree, all tabs, once the cards are no longer loading.
 func (r *rpc) cards(t *testing.T) map[string]any {
 	t.Helper()
 	m := r.until(t, func(m map[string]any) bool {
@@ -166,13 +166,7 @@ func (r *rpc) cards(t *testing.T) map[string]any {
 		}
 		return !strings.Contains(textOf(render(t, m)), "Loading…")
 	})
-	return workTab(t, render(t, m))
-}
-
-func workTab(t *testing.T, root map[string]any) map[string]any {
-	t.Helper()
-	tabs := find(root, "tabs")["tabs"].([]any)
-	return map[string]any{"type": "column", "children": tabs[0].(map[string]any)["children"]}
+	return render(t, m)
 }
 
 // find returns the first node of the type, depth first.
@@ -344,7 +338,7 @@ func TestInitializeRendersTabs(t *testing.T) {
 	for _, tb := range tabs["tabs"].([]any) {
 		ids = append(ids, tb.(map[string]any)["id"].(string))
 	}
-	if strings.Join(ids, ",") != "work,help" {
+	if strings.Join(ids, ",") != "work,jira,prs,help" {
 		t.Errorf("tab ids: %v", ids)
 	}
 }
@@ -569,8 +563,8 @@ func TestBarCountsFromWork(t *testing.T) {
 	r.initializeRaw(t)
 	m := r.until(t, func(m map[string]any) bool { return m["method"] == "item/update" })
 	bar := m["params"].(map[string]any)
-	// 4 needs you + 2 reviews + 1 card whose PR merged (EC-7).
-	if bar["text"] != "7" {
+	// 4 needs you + 1 review request (the team queue does not count) + 1 card whose PR merged (EC-7).
+	if bar["text"] != "6" {
 		t.Errorf("bar: %v", bar)
 	}
 }
@@ -580,14 +574,17 @@ func TestMoveToDone(t *testing.T) {
 	r := start(t)
 	r.initializeRaw(t)
 	root := r.cards(t)
-	btn := findID(root, "done:EC-7")
-	if btn == nil || btn["type"] != "button" {
-		t.Fatalf("no Move to Done button: %v", btn)
+	// The card shows on the Work and Jira tabs; button ids are unique across the tree.
+	for _, id := range []string{"inbox:done:EC-7", "done:EC-7"} {
+		btn := findID(root, id)
+		if btn == nil || btn["type"] != "button" {
+			t.Fatalf("no Move to Done button %s: %v", id, btn)
+		}
+		if c, _ := btn["confirm"].(map[string]any); c["title"] != "Move EC-7 to Done?" {
+			t.Errorf("confirm: %v", btn["confirm"])
+		}
 	}
-	if c, _ := btn["confirm"].(map[string]any); c["title"] != "Move EC-7 to Done?" {
-		t.Errorf("confirm: %v", btn["confirm"])
-	}
-	r.action(t, 7, "done:EC-7")
+	r.action(t, 7, "inbox:done:EC-7")
 	waitFor(t, "jira issue move", func() bool { return strings.Contains(string(mustRead(jiraLog)), "issue move EC-7 Done\n") })
 	waitFor(t, "a refresh after the move", func() bool { return strings.Count(string(mustRead(ghLog)), "api graphql") >= 2 })
 }
@@ -721,3 +718,35 @@ esac
 }
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
+
+// The panel drops a button, section or tab whose id repeats anywhere in the tree, across tabs.
+func TestPanelIdsAreUnique(t *testing.T) {
+	workFakes(t)
+	r := start(t)
+	r.initializeRaw(t)
+	seen := map[string]bool{}
+	var walk func(n map[string]any)
+	walk = func(n map[string]any) {
+		switch n["type"] {
+		case "button", "input", "select", "checkbox", "section", "tabs", nil:
+			if id, _ := n["id"].(string); id != "" {
+				if seen[id] {
+					t.Errorf("repeated id %q", id)
+				}
+				seen[id] = true
+			}
+		}
+		for _, key := range []string{"children", "tabs"} {
+			kids, _ := n[key].([]any)
+			for _, k := range kids {
+				walk(k.(map[string]any))
+			}
+		}
+	}
+	walk(r.cards(t))
+	for _, id := range []string{"work", "jira", "prs", "help", "work:refresh", "jira:refresh", "prs:refresh", "prs:mine:EC-8", "prs:queue:none"} {
+		if !seen[id] {
+			t.Errorf("no %q in the tree", id)
+		}
+	}
+}
