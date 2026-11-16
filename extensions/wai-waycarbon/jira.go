@@ -13,8 +13,9 @@ type Card struct{ Key, Summary, Status string }
 
 var keyRe = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[0-9]+$`)
 
-// parseCards reads tab-separated `key summary status` lines. Lines whose first column is not an
-// issue key (warnings, blanks) are dropped; an empty summary column is kept as empty.
+// parseCards reads tab-separated `key summary status` lines. jira pads the columns with extra tabs
+// to align them, so the status is the last column. Lines whose first column is not an issue key
+// (warnings, blanks) are dropped; an empty summary column is kept as empty.
 func parseCards(out string) []Card {
 	var cards []Card
 	for _, line := range strings.Split(out, "\n") {
@@ -28,7 +29,7 @@ func parseCards(out string) []Card {
 			c.Summary = strings.TrimSpace(cols[1])
 		}
 		if len(cols) > 2 {
-			c.Status = strings.TrimSpace(cols[2])
+			c.Status = strings.TrimSpace(cols[len(cols)-1])
 		}
 		cards = append(cards, c)
 	}

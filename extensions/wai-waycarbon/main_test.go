@@ -50,13 +50,14 @@ esac
 `
 
 func TestParsesJiraPlainOutput(t *testing.T) {
-	out := "WARN: config is old\nEC-1\tFix the login timeout\tIn Progress\r\n\n  \nEC-2\tSummary with  spaces\tTo Do\nbroken line\nEC-3\tNo status\nEC-4\t\tTo Do\nec-5\tlower\tTo Do\nEC-\tx\ty\n"
+	out := "WARN: config is old\nEC-1\tFix the login timeout\tIn Progress\r\n\n  \nEC-2\tSummary with  spaces\tTo Do\nbroken line\nEC-3\tNo status\nEC-4\t\tTo Do\nec-5\tlower\tTo Do\nEC-\tx\ty\nEC-6\tPadded to align\t\t\t\tCode Review\n"
 	got := parseCards(out)
 	want := []Card{
 		{"EC-1", "Fix the login timeout", "In Progress"},
 		{"EC-2", "Summary with  spaces", "To Do"},
 		{"EC-3", "No status", ""},
 		{"EC-4", "", "To Do"},
+		{"EC-6", "Padded to align", "Code Review"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
