@@ -1024,17 +1024,13 @@ mod tests {
         assert_eq!(item_tooltip(&item), "PRs — Bars");
     }
 
-    /// Hiding a top-bar button removes it, not its shortcut.
+    /// Hiding a top-bar button removes it.
     #[gpui_kit::test]
     fn top_bar_buttons_hide(cx: &mut TestAppContext) {
-        let (workspace, cx) = open(cx, fake_settings(""));
+        let (_, cx) = open(cx, fake_settings(""));
         assert!(label("topbar-terminal", cx).is_some());
         menu_item("topbar", "Terminal", cx);
         assert!(label("topbar-terminal", cx).is_none());
-        menu_item("topbar", "New session", cx);
-        assert!(label("sidebar-new", cx).is_none());
-        cx.simulate_keystrokes("secondary-n");
-        workspace.read_with(cx, |w, _| assert_eq!(w.drafts.len(), 1));
     }
 
     #[test]

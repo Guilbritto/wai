@@ -1295,10 +1295,9 @@ pub(crate) mod tests {
             label(("topbar-item", 3usize), cx).is_some()
         });
         assert!(label(("topbar-item", 4usize), cx).is_none());
-        let new = cx.debug_bounds("sidebar-new").expect("new session drawn");
-        assert!(new.right() <= px(900.), "{new:?}");
         let status = cx.debug_bounds("topbar-status").expect("status drawn");
         let actions = cx.debug_bounds("topbar-actions").expect("actions drawn");
+        assert!(actions.right() <= px(900.), "{actions:?}");
         assert!(status.right() < actions.left(), "{status:?} {actions:?}");
     }
 

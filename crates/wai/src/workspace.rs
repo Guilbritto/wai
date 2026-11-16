@@ -2080,6 +2080,12 @@ impl Workspace {
         if let Pane::Editor(pane) = &self.panes[ix] {
             return pane.update(cx, |p, cx| p.close(p.active, window, cx));
         }
+        // A draft never sent was no session: it goes, not to the Open list.
+        if let Some(draft) = self.panes[ix].draft().cloned()
+            && draft.read(cx).starting.is_none()
+        {
+            return self.close_draft(&draft, window, cx);
+        }
         if let Some(session) = self.panes[ix].session() {
             let id = session.read(cx).id.clone();
             if let Some(area) = self.shown_area
@@ -3121,24 +3127,27 @@ impl Workspace {
             .items_center()
             .justify_center()
             .gap_3()
-            .child(img(BRAND.clone()).size(px(48.)).rounded(px(12.)))
-            .child(
-                div()
-                    .font_family(aurora::DISPLAY_FONT)
-                    .text_size(px(20.))
-                    .font_weight(FontWeight::BOLD)
-                    .child("Start a session"),
-            )
-            .child(aurora::pill(cx).child(START_KEY))
-            .child(
-                Button::new(("new-session", ix))
-                    .primary()
-                    .label("New session")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.focused_pane = ix;
-                        this.new_session(&NewSession, window, cx);
-                    })),
-            )
+            // The start hint only while no session is open; then an empty pane stays blank.
+            .when(self.sessions.is_empty(), |el| {
+                el.child(img(BRAND.clone()).size(px(48.)).rounded(px(12.)))
+                    .child(
+                        div()
+                            .font_family(aurora::DISPLAY_FONT)
+                            .text_size(px(20.))
+                            .font_weight(FontWeight::BOLD)
+                            .child("Start a session"),
+                    )
+                    .child(aurora::pill(cx).child(START_KEY))
+                    .child(
+                        Button::new(("new-session", ix))
+                            .primary()
+                            .label("New session")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.focused_pane = ix;
+                                this.new_session(&NewSession, window, cx);
+                            })),
+                    )
+            })
             .children(problem.map(|p| div().max_w(px(480.)).text_color(theme.danger).child(p)))
             // In a split, its × drops it; a lone empty pane has nothing to close.
             .when(self.panes.len() > 1, |el| {
@@ -3718,7 +3727,7 @@ pub(crate) mod tests {
             })
         };
 
-        click("sidebar-new", cx);
+        click("sessions-new", cx);
         assert_eq!(drafts(cx), 1);
         assert!(untouched(cx));
 
@@ -3746,6 +3755,32 @@ pub(crate) mod tests {
         assert_eq!(drafts(cx), 4);
         assert_eq!(last(cx), "Review");
         assert!(untouched(cx));
+    }
+
+    /// ⌘W on a draft never sent discards it: no session, nothing left in the Open list.
+    #[gpui_kit::test]
+    fn closing_a_blank_draft_discards_it(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, fake_settings(""));
+        cx.simulate_keystrokes("secondary-n secondary-w");
+        workspace.read_with(cx, |w, _| {
+            assert!(w.drafts.is_empty());
+            assert!(matches!(w.panes[..], [Pane::Empty(None)]));
+        });
+    }
+
+    /// The start hint shows only while no session is open; then an empty pane is blank.
+    #[gpui_kit::test]
+    fn empty_pane_hint_only_without_sessions(cx: &mut TestAppContext) {
+        use crate::sidebar::tests::label;
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        assert!(label(("new-session", 0usize), cx).is_some());
+        start_now(&workspace, cx);
+        workspace.update(cx, |w, cx| {
+            w.panes.push(Pane::Empty(None));
+            cx.notify();
+        });
+        assert!(label(("new-session", 1usize), cx).is_none());
     }
 
     #[gpui_kit::test]
@@ -4690,7 +4725,7 @@ pub(crate) mod tests {
         assert!(dark.debug_bounds("aurora-backdrop").is_some());
     }
 
-    /// At 900 px, with a 60-character project name and 4 panes, the project name gives way and
+    /// At 760 px, with a 60-character project name and 4 panes, the project name gives way and
     /// every action stays inside the window, clear of the status.
     #[gpui_kit::test]
     fn top_bar_fits_narrow_window(cx: &mut TestAppContext) {
@@ -4708,17 +4743,16 @@ pub(crate) mod tests {
             chip.size.width
         };
         let wide = chip_width(size(px(1400.), px(900.)), cx);
-        let narrow = chip_width(size(px(900.), px(700.)), cx);
+        let narrow = chip_width(size(px(760.), px(700.)), cx);
 
         assert!(
             narrow < wide,
-            "the name truncates: {narrow:?} at 900 px, {wide:?} at 1400 px"
+            "the name truncates: {narrow:?} at 760 px, {wide:?} at 1400 px"
         );
         assert!(crate::sidebar::tests::label("bottombar-version", cx).is_some());
-        let new = cx.debug_bounds("sidebar-new").expect("new session drawn");
-        assert!(new.right() <= px(900.), "{new:?}");
         let status = cx.debug_bounds("topbar-status").expect("status drawn");
         let actions = cx.debug_bounds("topbar-actions").expect("actions drawn");
+        assert!(actions.right() <= px(760.), "{actions:?}");
         assert!(status.right() < actions.left(), "{status:?} {actions:?}");
     }
 

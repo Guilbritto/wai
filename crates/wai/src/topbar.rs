@@ -12,7 +12,7 @@ use gpui_kit::*;
 use wai_ext::Bar;
 use wai_ext::panel::clamp;
 
-use crate::app::{NewSession, OpenPalette, ToggleAgents, ToggleTerminal};
+use crate::app::{OpenPalette, ToggleAgents, ToggleTerminal};
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::bars::{TOP_ITEMS, drawn, ext_item, hide_entries, hide_menu};
 use crate::chat::TurnState;
@@ -159,14 +159,6 @@ impl Workspace {
                         this.toggle_agents(&ToggleAgents, window, cx)
                     }))
             });
-        let new = Button::new("sidebar-new")
-            .debug_selector(|| "sidebar-new".into())
-            .primary()
-            .small()
-            .icon(IconName::Plus)
-            .label("New session")
-            .tooltip("New session")
-            .on_click(cx.listener(|this, _, window, cx| this.new_session(&NewSession, window, cx)));
         let right = h_flex()
             .debug_selector(|| "topbar-actions".into())
             // The title bar moves the window on a press anywhere in it, then a 1 px move, and
@@ -177,8 +169,7 @@ impl Workspace {
             .children(self.templates_menu(cx))
             .children(self.shown("wai.palette").then_some(palette))
             .children(self.shown("wai.terminal").then_some(terminal))
-            .children(agents.filter(|_| self.shown("wai.agents-toggle")))
-            .children(self.shown("wai.new-session").then_some(new));
+            .children(agents.filter(|_| self.shown("wai.agents-toggle")));
         let mut own = vec![
             ("wai.status", "Agent status"),
             ("wai.palette", "Command palette"),
@@ -188,7 +179,6 @@ impl Workspace {
         if self.agents_right {
             own.push(("wai.agents-toggle", "Agents panel"));
         }
-        own.push(("wai.new-session", "New session"));
         let entries = hide_entries(&own, &items);
         let (hidden, workspace) = (self.hidden.clone(), cx.entity().downgrade());
 
