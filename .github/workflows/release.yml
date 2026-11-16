@@ -2,6 +2,9 @@ name: release
 on:
   push:
     branches: [main]
+    # Extensions ship on their own `<id>-v*` tags (extensions.yml); a push touching only them, or
+    # the index wai reads from main, is not a wai release.
+    paths-ignore: ['extensions/**']
   workflow_dispatch:
 
 permissions:

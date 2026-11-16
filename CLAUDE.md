@@ -6,6 +6,8 @@ CI publishes releases; nobody bumps a version by hand. Every push to `main` runs
 
 To release: another session may also commit here, so run `git log --oneline -5 development` first and release only what is merged into `development`. Merge into `development`, fast-forward `main` (`git branch -f main development`, only when `main` is an ancestor of `development`), and push both. Commits are `feat:`/`fix:` (they decide the version), no scope, no Co-Authored-By.
 
+Extensions (`extensions/**`, including `index.toml`) never trigger a wai release: they ship on their own `<id>-v<version>` tags. Commit them as `chore:`, so a later wai release doesn't pick them up as `feat:`/`fix:` and bump its version.
+
 ## Install a local build on this Mac
 
 For testing a build, not for releasing. The installed wai updates itself from releases; a local build goes to `~/Applications/wai.app`.
