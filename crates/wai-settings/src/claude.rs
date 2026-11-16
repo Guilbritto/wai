@@ -2012,7 +2012,8 @@ l: https://l.test (SSE) - ⊘ Disabled for this project (re-enable via /mcp)\n";
         let start = std::time::Instant::now();
         let r = set_plugin_enabled(t.path(), "a@m", true, stamp_of(&p));
         assert!(matches!(r, Err(WriteError::Busy)));
-        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        // About 1 s of retries; the bound only proves it gives up, with room for a slow CI runner.
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
         assert_eq!(fs::read_to_string(&p).unwrap(), "{}");
         assert!(lock.exists());
     }
