@@ -398,7 +398,7 @@ impl ExtPanel {
                         .when(at.row, |el| el.min_h_full())
                 })
                 .when(fills, |el| el.flex_1().min_h_0())
-                .when(at.row, |el| el.flex_1())
+                .when(at.row, |el| el.flex_1().min_w_0())
                 .when_some(width, |el, w| el.w(px(w)).flex_none()),
             (false, true) => h_flex().gap_2().flex_1().min_h_0().items_stretch(),
             (false, false) => h_flex().gap_2().flex_wrap(),
@@ -443,6 +443,7 @@ impl ExtPanel {
                     .id(("panel-strip", k))
                     .w(px(28.))
                     .flex_none()
+                    .self_stretch()
                     .items_center()
                     .py_2()
                     .gap_2()
@@ -2070,6 +2071,91 @@ mod tests {
         let rest = bounds(("panel-fill", 1), cx);
         let width = cx.update(|window, _| window.viewport_size().width);
         assert!(rest.size.width > width - px(80.), "{rest:?} of {width:?}");
+    }
+
+    /// The Jira board: strips, then wide columns that share what the 300 px detail leaves.
+    fn board_tree() -> Value {
+        let long = "Relatorio quebra com escopo vazio e ainda tem muito mais texto aqui";
+        let mut cols: Vec<Value> = (0..6)
+            .map(|i| {
+                json!({"type": "column", "collapsed": true, "title": format!("Empty {i}"),
+                       "badge": "0", "children": []})
+            })
+            .collect();
+        cols.extend((0..4).map(|i| {
+            json!({"type": "column", "title": format!("Col {i}"), "badge": "1", "children": [
+                {"type": "card", "id": format!("sel:jira:card:{i}"), "children": [
+                    {"type": "text", "text": long, "style": "strong"}]}]})
+        }));
+        json!({"type": "column", "children": [{"type": "row", "fill": true, "children": [
+            {"type": "column", "children": [{"type": "row", "fill": true, "children": cols}]},
+            {"type": "column", "framed": true, "width": 300, "children": [
+                {"type": "text", "text": "detail"}]},
+        ]}]})
+    }
+
+    fn board_window(cx: &mut TestAppContext) -> (Entity<ExtPanel>, &mut VisualTestContext) {
+        cx.update(|cx| app::init(&Settings::default(), cx));
+        let options = gpui_kit::WindowOptions {
+            window_bounds: Some(gpui_kit::WindowBounds::Windowed(gpui_kit::Bounds {
+                origin: point(px(0.), px(0.)),
+                size: gpui_kit::size(px(1320.), px(620.)),
+            })),
+            ..Default::default()
+        };
+        let (window, panel) = cx
+            .update(|cx| {
+                gpui_kit::open_window(options, cx, |_, cx| {
+                    cx.new(|_| ExtPanel::new("Cards".into()))
+                })
+            })
+            .expect("open window");
+        let cx = Box::leak(Box::new(VisualTestContext::from_window(window, cx)));
+        (panel, cx)
+    }
+
+    /// Wide columns in a fill row shrink to share the width: all of them end left of the detail,
+    /// and a card's summary wraps inside its column.
+    #[gpui_kit::test]
+    fn board_columns_share_the_width_left_of_the_detail(cx: &mut TestAppContext) {
+        let (panel, cx) = board_window(cx);
+        show(&panel, board_tree(), cx);
+        let frames: Vec<_> = (1..200usize)
+            .filter_map(|k| cx.update(|window, _| window.try_find(("panel-frame", k))))
+            .map(|e| e.bounds())
+            .collect();
+        let detail = frames
+            .iter()
+            .find(|b| b.size.width == px(300.))
+            .expect("detail frame");
+        let cols: Vec<_> = frames.iter().filter(|b| b.size.width != px(300.)).collect();
+        assert_eq!(cols.len(), 4, "{frames:?}");
+        let strips: Vec<_> = (1..200usize)
+            .filter_map(|k| cx.update(|window, _| window.try_find(("panel-strip", k))))
+            .map(|e| e.bounds())
+            .collect();
+        assert_eq!(strips.len(), 6);
+        let last = strips.iter().map(|b| b.right()).max().unwrap();
+        assert!(last <= detail.left(), "strip {last:?} under detail {detail:?}");
+        for c in cols {
+            assert!(c.right() <= detail.left(), "{c:?} under detail {detail:?}");
+            assert!(c.size.width < px(300.), "{c:?} does not wrap");
+        }
+    }
+
+    /// A collapsed column in a fill row is as tall as the row, its count at the top.
+    #[gpui_kit::test]
+    fn collapsed_strip_fills_the_row_height(cx: &mut TestAppContext) {
+        let (panel, cx) = board_window(cx);
+        show(&panel, board_tree(), cx);
+        let strip = cx.update(|window, _| window.find(("panel-strip", 5usize)).bounds());
+        let top = (1..200usize)
+            .filter_map(|k| cx.update(|window, _| window.try_find(("panel-frame", k))))
+            .map(|e| e.bounds())
+            .next()
+            .unwrap();
+        assert_eq!(strip.top(), top.top(), "{strip:?} vs {top:?}");
+        assert_eq!(strip.size.height, top.size.height, "{strip:?} vs {top:?}");
     }
 
     /// A framed column in a fill row stretches to its height, so its spacer pins what follows
