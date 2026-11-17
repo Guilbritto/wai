@@ -4,7 +4,7 @@ An extension is a folder with a `wai-extension.toml` manifest. It can be manifes
 
 Users install an extension from a folder, from a git URL, or from the Extensions page's **Available** list, which downloads a prebuilt package from an index. Anyone can publish one: see [Publishing](#publishing).
 
-This guide describes API version 1.7 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
+This guide describes API version 1.8 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
 - `wai-navegador` is manifest-only;
 - `wai-rotinas` and `wai-bichinho` are written in Go; `wai-bichinho` draws beside the prompt box, without a frame (API 1.7).
 
@@ -45,7 +45,7 @@ title = "Pull requests"
 | `name` | string | Shown in the extension list and the consent dialog |
 | `version` | string | Free form. wai shows it; it does not compare versions |
 | `description` | string, optional | Shown last in the consent dialog, cut to fit |
-| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.7)`. Set it to `"1.7"` when you use `events/emit`, an `events:<id>` permission or a panel's `frame`, a `plain` list, list item `icon`, `tone`, `selected`, `lead`, `note` or `indent`, a `text` `style`, a `column` `framed`, `title`, `badge`, `tone` or `collapsed`, `tabs` `style` or a tab `tone`, `select` `segmented`, `input` `icon`, `submit` or `clear`, `button` `icon_only`, or `link` `icon` or `icon_only`, to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
+| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.8)`. Set it to `"1.8"` when you use a `plain` list, list item `icon`, `tone`, `selected`, `lead`, `note` or `indent`, a `text` `style`, a `column` `framed`, `title`, `badge`, `tone` or `collapsed`, `tabs` `style` or a tab `tone`, `select` `segmented`, `input` `icon`, `submit` or `clear`, `button` `icon_only`, or `link` `icon` or `icon_only`, to `"1.7"` when you use `events/emit`, an `events:<id>` permission or a panel's `frame`, to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
 | `permissions` | array of strings | See [Permissions](#permissions). An unknown permission is refused |
 | `process.command` | string | See [Commands and paths](#commands-and-paths). Needs `process` |
 | `process.args` | array of strings, optional | Arguments, passed as given (no shell) |
@@ -155,7 +155,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 
 | Method | Kind | Params | Notes |
 |---|---|---|---|
-| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.7", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
+| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.8", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
 | `command/run` | request | `{"id": "<command id>"}` | The user ran one of your commands without `prompt` from the palette. wai ignores the answer |
 | `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item, card, table row, button or menu item was clicked (after its confirmation, if it has one). `action_id` is its `id`. `values` has every form field in the panel by id: inputs and paths as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels` |
 | `item/action` | request | `{"item": "<item id>"}` | The user clicked one of your bar items. wai ignores the answer. The usual reply is a `panel/open` or a `sessions/open`. Needs `bar` |
@@ -166,7 +166,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `event/ext` | notification | `{"source", "name", "data"}` | An event another extension emitted. API 1.7. Needs `events:<source>` |
 
 - Paths are absolute, and on Windows they never carry the `\\?\` prefix.
-- Answer `initialize` before anything else. API 1.1 to 1.7 only add fields and methods; ignore the ones you do not know.
+- Answer `initialize` before anything else. API 1.1 to 1.8 only add fields and methods; ignore the ones you do not know.
 
 ### Extension → host
 
@@ -253,11 +253,11 @@ A tree is JSON nodes. Every field without `?` is required.
 
 | `type` | Fields | Notes |
 |---|---|---|
-| `column` | `children` (array of nodes), `width`? (px), `framed`?, `title`?, `badge`?, `tone`?, `collapsed`? (bool) | Stacks children vertically. `width` (API 1.6, 24 to 2,000) fixes its width in a row; without it, the columns of a row share the width left. `framed` (API 1.7): rounded, 1 px border, glass background, 12 px padding, at least as tall as the space it gets, so a `spacer` in it pins what follows to the bottom. `title` (API 1.7): a header with a 3 px accent bar in `tone` (default `neutral`, violet), the title as an uppercase label and the `badge` pill at the right; implies `framed`. `collapsed` (API 1.7): a 28 px strip with the `badge` and the title's letters stacked vertically; its children are not drawn, its `width` is ignored; implies `framed` |
+| `column` | `children` (array of nodes), `width`? (px), `framed`?, `title`?, `badge`?, `tone`?, `collapsed`? (bool) | Stacks children vertically. `width` (API 1.6, 24 to 2,000) fixes its width in a row; without it, the columns of a row share the width left. `framed` (API 1.8): rounded, 1 px border, glass background, 12 px padding, at least as tall as the space it gets, so a `spacer` in it pins what follows to the bottom. `title` (API 1.8): a header with a 3 px accent bar in `tone` (default `neutral`, violet), the title as an uppercase label and the `badge` pill at the right; implies `framed`. `collapsed` (API 1.8): a 28 px strip with the `badge` and the title's letters stacked vertically; its children are not drawn, its `width` is ignored; implies `framed` |
 | `row` | `children` (array of nodes), `fill`? (bool) | Places children side by side; they wrap when there is no room. `fill` (API 1.6): when every node above it is a `column`, the row takes the height left and each child scrolls on its own (a list beside a detail); anywhere else it is a plain row |
 | `card` | `id`?, `title`?, `subtitle`?, `badge`?, `icon`?, `selected`? (bool), `children`? | A bordered card: a header (icon, title, subtitle, badge), then its children. With `id`, the whole card is clickable (also with Enter or Space) and sends `panel/action` with that `id`. Card ids may repeat. `selected` (API 1.6) draws it highlighted, for the item a detail shows |
 | `section` | `id`, `title`, `open`? (bool, default `true`), `badge`?, `children` | A block the user can collapse. `open` is an initial value (see the rules) |
-| `tabs` | `id`, `value`?, `style`?, `tabs` (array of `{"id", "title", "badge"?, "tone"?, "children"}`) | A tab bar; the selected tab's `children` show below it. At most 10 tabs. `value` is the initial tab id (default the first), an initial value (see the rules). The selected tab id is sent in `values` under the node's `id`. API 1.5. `style` (API 1.7) `"segmented"` draws the bar as a rounded box of pills, the selected one violet-tinted with a violet border. A tab's `tone` (API 1.7) is its badge's tone, in both styles |
+| `tabs` | `id`, `value`?, `style`?, `tabs` (array of `{"id", "title", "badge"?, "tone"?, "children"}`) | A tab bar; the selected tab's `children` show below it. At most 10 tabs. `value` is the initial tab id (default the first), an initial value (see the rules). The selected tab id is sent in `values` under the node's `id`. API 1.5. `style` (API 1.8) `"segmented"` draws the bar as a rounded box of pills, the selected one violet-tinted with a violet border. A tab's `tone` (API 1.8) is its badge's tone, in both styles |
 | `divider` | | A horizontal line |
 | `spacer` | | In a row, takes the free space: what follows goes to the end |
 
@@ -272,11 +272,11 @@ A tree is JSON nodes. Every field without `?` is required.
 
 | `type` | Fields | Notes |
 |---|---|---|
-| `text` | `text`, `muted`? (bool), `mono`? (bool), `style`? | Up to 10,000 characters; `\n` breaks the line. `mono`: monospace. `style` (API 1.7): `strong` (semibold 13 px), `heading` (semibold 16 px) or `label` (uppercase, 10.5 px, bold, muted); combines with `mono` and `muted` |
+| `text` | `text`, `muted`? (bool), `mono`? (bool), `style`? | Up to 10,000 characters; `\n` breaks the line. `mono`: monospace. `style` (API 1.8): `strong` (semibold 13 px), `heading` (semibold 16 px) or `label` (uppercase, 10.5 px, bold, muted); combines with `mono` and `muted` |
 | `markdown` | `text` | Up to 10,000 characters |
 | `badge` | `text`, `tone`? | |
 | `icon` | `name`, `tone`? | An unknown name shows as `Unsupported element` |
-| `link` | `text`, `url`, `icon`?, `icon_only`? (bool) | Opens `url` in the default browser; its tooltip shows the URL. With `icon` (API 1.7) it is drawn as a button showing the icon and the text, with the URL as tooltip; with `icon_only` too, only the icon, with `text` as tooltip and accessible label. Only `https://` and `http://` URLs, of at most 2,048 characters; anything else is unsupported. Sends no action |
+| `link` | `text`, `url`, `icon`?, `icon_only`? (bool) | Opens `url` in the default browser; its tooltip shows the URL. With `icon` (API 1.8) it is drawn as a button showing the icon and the text, with the URL as tooltip; with `icon_only` too, only the icon, with `text` as tooltip and accessible label. Only `https://` and `http://` URLs, of at most 2,048 characters; anything else is unsupported. Sends no action |
 | `alert` | `tone`, `title`?, `text` | A coloured notice. `tone` is `info`, `success`, `warning` or `danger`. `text` wraps, up to 10,000 characters |
 | `kv` | `items` (array of `{"key", "value"}`) | Keys and values side by side, one line each. At most 200 items |
 | `progress` | `value` (number) | From 0 to 1, clamped |
@@ -286,7 +286,7 @@ A tree is JSON nodes. Every field without `?` is required.
 
 | `type` | Fields | Notes |
 |---|---|---|
-| `list` | `items`, `fill`? (bool), `plain`? (bool) | Items: `{"id", "title", "subtitle"?, "badge"?, "icon"?, "tone"?, "selected"?, "lead"?, "note"?, "indent"?}`; clicking one sends `panel/action` with its `id`. At least 160 px wide. `plain` (API 1.7): rows are borderless and transparent (violet on hover or when selected) instead of glass cards, 32 px tall. Item fields (API 1.7): `icon` is a Lucide name drawn before the text in the item's `tone` (an unknown name is dropped); `tone` colors the icon and the badge (the badge stays neutral without it); `selected` (bool) draws a violet border and the hover background; `lead` is muted 12 px text before the title on the same line; `note` is muted text after the title on the same line (title and note truncate together); `indent` (bool) insets the row 16 px, for a child under a group row |
+| `list` | `items`, `fill`? (bool), `plain`? (bool) | Items: `{"id", "title", "subtitle"?, "badge"?, "icon"?, "tone"?, "selected"?, "lead"?, "note"?, "indent"?}`; clicking one sends `panel/action` with its `id`. At least 160 px wide. `plain` (API 1.8): rows are borderless and transparent (violet on hover or when selected) instead of glass cards, 32 px tall. Item fields (API 1.8): `icon` is a Lucide name drawn before the text in the item's `tone` (an unknown name is dropped); `tone` colors the icon and the badge (the badge stays neutral without it); `selected` (bool) draws a violet border and the hover background; `lead` is muted 12 px text before the title on the same line; `note` is muted text after the title on the same line (title and note truncate together); `indent` (bool) insets the row 16 px, for a child under a group row |
 | `table` | `columns` (array of `{"title", "width"?}`), `rows` (array of `{"id"?, "cells"}`), `fill`? | `width` is in pixels; columns without one share the rest. A cell is a string (one line) or a `text`, `badge`, `link`, `icon`, `button`, `menu`, `spinner` or `progress` node; any other node is unsupported. Extra cells are dropped, missing ones are blank. A row with `id` is clickable and sends `panel/action` with that `id` (row ids may repeat). At most 20 columns and 1,000 rows; the rest are dropped |
 | `log` | `text`, `follow`? (bool, default `true`), `fill`? | Monospace output, one line per line, with a **Copy** button. Keeps the **last** 100,000 characters, and ANSI escape codes (colours) are removed. With `follow` it stays at the bottom as you re-render it, unless the user scrolled up |
 
@@ -296,10 +296,10 @@ Without `fill`, a list, table or log shows 12 rows (lines) and scrolls the rest.
 
 | `type` | Fields | Notes |
 |---|---|---|
-| `button` | `id`, `label`, `style`?, `icon`?, `icon_only`? (bool), `disabled`? (bool), `confirm`? | `style`: `primary`, `danger`, or default. Clicking sends `panel/action` with its `id`. `icon_only` (API 1.7): only the icon, with `label` as tooltip and accessible label; it needs `icon`, else it is ignored |
+| `button` | `id`, `label`, `style`?, `icon`?, `icon_only`? (bool), `disabled`? (bool), `confirm`? | `style`: `primary`, `danger`, or default. Clicking sends `panel/action` with its `id`. `icon_only` (API 1.8): only the icon, with `label` as tooltip and accessible label; it needs `icon`, else it is ignored |
 | `menu` | `label`?, `icon`? (default `ellipsis`), `items` (array of `{"id", "label", "danger"?, "confirm"?}`) | A button that opens a dropdown. Picking an item sends `panel/action` with the item's `id` (item ids may repeat). At most 50 items |
-| `input` | `id`, `placeholder`, `value`?, `multiline`? (bool), `rows`? (number), `icon`?, `submit`? (bool), `clear`? (bool) | A text field. With `multiline`, a text area of `rows` lines (default 4, at most 20). Its value arrives in `values`. `icon` (API 1.7) draws a Lucide icon inside the field, at the left. `submit` (API 1.7, one-line inputs only): Enter sends `panel/action` with the input's `id`, and so does clearing it with the × of `clear`. `clear` (API 1.7) shows an × inside the field only while it has text; clicking it empties the field |
-| `select` | `id`, `options` (array of strings), `value`?, `segmented`? (bool) | At most 100 options; with no choice, the first. `segmented` (API 1.7) draws the options as a segmented control; choosing one sends `panel/action` with the select's `id` and the choice in `values[id]`. A plain dropdown sends nothing |
+| `input` | `id`, `placeholder`, `value`?, `multiline`? (bool), `rows`? (number), `icon`?, `submit`? (bool), `clear`? (bool) | A text field. With `multiline`, a text area of `rows` lines (default 4, at most 20). Its value arrives in `values`. `icon` (API 1.8) draws a Lucide icon inside the field, at the left. `submit` (API 1.8, one-line inputs only): Enter sends `panel/action` with the input's `id`, and so does clearing it with the × of `clear`. `clear` (API 1.8) shows an × inside the field only while it has text; clicking it empties the field |
+| `select` | `id`, `options` (array of strings), `value`?, `segmented`? (bool) | At most 100 options; with no choice, the first. `segmented` (API 1.8) draws the options as a segmented control; choosing one sends `panel/action` with the select's `id` and the choice in `values[id]`. A plain dropdown sends nothing |
 | `path` | `id`, `pick` (`"file"` or `"folder"`), `placeholder`?, `value`?, `editable`? (bool, default true) | A file or folder path, chosen with the system picker or dropped from Finder. Editable, it is also a text field; with `editable: false`, only the picker sets it. It shows your home folder as `~`; its value arrives in `values` as the full path (`""` when empty). API 1.6 |
 | `checkbox` | `id`, `label`, `checked`? (bool) | |
 

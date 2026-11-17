@@ -2,7 +2,7 @@ id = "wai-storybook"
 name = "Storybook"
 version = "0.1.0"
 description = "Development only, never published: every panel and bar-item component of the extension API, live, with its JSON"
-api = "1.7"
+api = "1.8"
 permissions = ["process", "panels", "bar"]
 
 [process]
