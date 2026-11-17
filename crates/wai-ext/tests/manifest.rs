@@ -265,6 +265,10 @@ fn panel_icon_and_location() {
         two("prompt", "prompt"),
         Err(ManifestError::Unknown(_))
     ));
+    assert!(!panel("").unwrap().contributes.panels[0].wide);
+    assert!(panel("wide=true\n").unwrap().contributes.panels[0].wide);
+    let wide_main = panel("wide=true\nlocation=\"main\"\n").unwrap_err();
+    assert!(wide_main.to_string().contains("wide"), "{wide_main}");
 }
 
 #[test]
@@ -453,6 +457,7 @@ fn svg_icon_paths() {
         icon: Some(icon.into()),
         location: Default::default(),
         width: None,
+        wide: false,
     };
     assert_eq!(spec("icon.svg").svg_icon(), Some(Path::new("icon.svg")));
     assert_eq!(

@@ -86,6 +86,8 @@ pub struct Panel {
     pub location: PanelLocation,
     /// A prompt panel's width in px.
     pub width: Option<u16>,
+    /// A sidebar panel shown in the main area's place (`Workspace::wide_shown`).
+    pub wide: bool,
     pub view: Entity<ExtPanel>,
     /// Its clicks, sent to the extension as `panel/action`.
     _actions: Subscription,
@@ -424,6 +426,7 @@ impl ExtHost {
             icon: panel_icon(spec, &installed.dir),
             location: spec.location,
             width: spec.width,
+            wide: spec.wide,
             view,
             _actions: actions,
         }
@@ -1801,8 +1804,21 @@ pub(crate) mod tests {
         Entity<crate::ext_panel::ExtPanel>,
         &'a mut VisualTestContext,
     ) {
+        start_manifest(tmp, PANELS, flags, cx)
+    }
+
+    fn start_manifest<'a>(
+        tmp: &Path,
+        manifest: &str,
+        flags: &str,
+        cx: &'a mut TestAppContext,
+    ) -> (
+        Entity<Workspace>,
+        Entity<crate::ext_panel::ExtPanel>,
+        &'a mut VisualTestContext,
+    ) {
         let config = tmp.join("config");
-        install(tmp, &config, PANELS, flags, "");
+        install(tmp, &config, manifest, flags, "");
         let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
         let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
         wait_until(cx, "the panels", |cx| {
@@ -1915,6 +1931,60 @@ pub(crate) mod tests {
             workspace.read_with(cx, |w, _| (w.panes.len(), w.focused_pane)),
             (2, 0)
         );
+    }
+
+    /// A wide panel's icon hides the main area while it is shown; its icon again, another tab, a
+    /// session starting or a main panel opening bring the main area back, on the Sessions tab.
+    #[gpui_kit::test]
+    fn wide_panel_takes_the_main_area(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+        use crate::sidebar::SidebarTab;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wide = PANELS.replace(
+            "icon = \"no-such-icon\"\n",
+            "icon = \"no-such-icon\"\nwide = true\n",
+        );
+        let (workspace, view, cx) = start_manifest(tmp.path(), &wide, "--panel", cx);
+        let main = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.render_frame(cx));
+            cx.debug_bounds("pane-0").is_some()
+        };
+        let tab = |cx: &mut VisualTestContext| workspace.read_with(cx, |w, _| w.sidebar_tab);
+        assert!(main(cx));
+
+        click(("tab-panel", 1usize), cx);
+        assert!(matches!(tab(cx), SidebarTab::Panel(_)));
+        assert!(!main(cx), "a wide panel hides the main area");
+        assert!(cx.debug_bounds("sidebar").is_some());
+        click(("tab-panel", 1usize), cx);
+        assert_eq!(tab(cx), SidebarTab::Sessions);
+        assert!(main(cx));
+
+        click(("tab-panel", 1usize), cx);
+        click("tab-sessions", cx);
+        assert!(main(cx));
+
+        // ⌘B hides the wide panel and shows the main area, without a special case.
+        click(("tab-panel", 1usize), cx);
+        cx.simulate_keystrokes("secondary-b");
+        assert!(main(cx));
+        cx.simulate_keystrokes("secondary-b");
+        assert!(!main(cx));
+
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.start_session("fake".into(), None, false, None, window, cx)
+            })
+        });
+        assert_eq!(tab(cx), SidebarTab::Sessions);
+        assert!(main(cx));
+
+        click(("tab-panel", 1usize), cx);
+        click(("tab-panel", 0usize), cx);
+        assert_eq!(tab(cx), SidebarTab::Sessions);
+        assert_eq!(panes_of(&workspace, &view, cx), 1);
     }
 
     /// Hiding the selected sidebar panel's icon shows the sessions; a main panel's pane stays.

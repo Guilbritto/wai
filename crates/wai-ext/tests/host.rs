@@ -31,6 +31,7 @@ fn installed(dir: &Path, args: &[&str], granted: Vec<Permission>) -> Installed {
                 icon: None,
                 location: PanelLocation::Sidebar,
                 width: None,
+                wide: false,
             }],
             items: vec![ItemSpec {
                 id: "prs".into(),

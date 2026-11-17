@@ -374,7 +374,10 @@ impl Workspace {
                     // As in VS Code: the selected tab's icon hides the sidebar, or shows it.
                     // A double click's second click shows it again.
                     let selected = this.sidebar_tab == tab;
-                    if selected && (event.click_count() == 1 || this.sidebar_hidden) {
+                    // A wide panel's icon goes back to the sessions it hides.
+                    if selected && event.click_count() == 1 && this.wide_shown(cx) {
+                        this.show_tab(SidebarTab::Sessions, cx);
+                    } else if selected && (event.click_count() == 1 || this.sidebar_hidden) {
                         this.toggle_sidebar(&ToggleSidebar, window, cx);
                     } else {
                         this.show_tab(tab, cx);

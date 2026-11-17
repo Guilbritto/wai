@@ -1907,6 +1907,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.leave_wide(cx);
         let shown = (self.panes.iter()).position(|p| matches!(p, Pane::Extension(v) if *v == view));
         let ix = shown.unwrap_or_else(|| {
             let ix = self.session_pane();
@@ -1964,6 +1965,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.leave_wide(cx);
         let (ext, reply) = by.map_or((None, None), |(ext, reply)| (Some(ext), reply));
         let refuse = |reply: Option<Reply>, why: &str| {
             if let Some(reply) = reply {
@@ -2230,13 +2232,11 @@ impl Workspace {
         self.save_state(cx);
     }
 
-    /// Whether the main area (panes and terminal) is drawn: not while it is closed with only the
-    /// empty pane.
     /// The prompt panels (API 1.6) go to the focused pane's session or draft, the first of each
     /// location in the extensions' order; extensions hear which session that is. The global
     /// changes only when they do: the sessions' prompt boxes read it.
     fn sync_prompt_slots(&mut self, cx: &mut Context<Self>) {
-        let pane = (self.main_shown())
+        let pane = (self.main_shown(cx))
             .then(|| self.panes.get(self.focused_pane))
             .flatten();
         let owner = pane.and_then(|pane| match pane {
@@ -2272,8 +2272,27 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn main_shown(&self) -> bool {
-        !(self.main_closed && matches!(self.panes[..], [Pane::Empty(None)]))
+    /// Whether the main area (panes and terminal) is drawn: not while it is closed with only the
+    /// empty pane, nor while the sidebar shows a wide panel.
+    pub(crate) fn main_shown(&self, cx: &App) -> bool {
+        !(self.main_closed && matches!(self.panes[..], [Pane::Empty(None)])) && !self.wide_shown(cx)
+    }
+
+    /// Whether the sidebar shows a wide panel, which takes the main area's place.
+    pub(crate) fn wide_shown(&self, cx: &App) -> bool {
+        !self.sidebar_hidden && self.wide_tab(self.sidebar_tab, cx)
+    }
+
+    fn wide_tab(&self, tab: SidebarTab, cx: &App) -> bool {
+        (self.ext_host.read(cx).panels().iter())
+            .any(|p| p.wide && tab == SidebarTab::Panel(p.view.entity_id()))
+    }
+
+    /// Something opens in the main area: a wide panel gives way to the Sessions tab.
+    fn leave_wide(&mut self, cx: &App) {
+        if self.wide_shown(cx) {
+            self.sidebar_tab = SidebarTab::Sessions;
+        }
     }
 
     fn dirty_tabs(&self, cx: &App) -> Vec<Entity<FileEditor>> {
@@ -3460,7 +3479,7 @@ impl Render for Workspace {
                 .debug_selector(|| "agents-panel".into())
         });
         // `close_main` and `toggle_sidebar` keep one of the two.
-        let main_shown = self.main_shown();
+        let main_shown = self.main_shown(cx);
         let sidebar_shown = !self.sidebar_hidden || !main_shown;
         let sidebar = sidebar_shown.then(|| {
             let sidebar =

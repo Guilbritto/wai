@@ -145,6 +145,9 @@ pub struct PanelSpec {
     /// A prompt panel's width in px, clamped to [`PROMPT_WIDTH`].
     #[serde(default)]
     pub width: Option<u16>,
+    /// A sidebar panel that takes the main area's place while it is shown.
+    #[serde(default)]
+    pub wide: bool,
 }
 
 impl PanelSpec {
@@ -456,6 +459,12 @@ pub fn parse_manifest(text: &str, _ext_dir: &Path) -> Result<Manifest, ManifestE
         if p.location.in_prompt() && c.panels[..i].iter().any(|o| o.location == p.location) {
             return Err(ManifestError::Unknown(format!(
                 "panel {:?}: one panel per prompt location",
+                p.id
+            )));
+        }
+        if p.wide && p.location != PanelLocation::Sidebar {
+            return Err(ManifestError::Unknown(format!(
+                "panel {:?} is wide, which only a sidebar panel can be",
                 p.id
             )));
         }
