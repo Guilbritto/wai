@@ -6,7 +6,7 @@ Users install an extension from a folder, from a git URL, or from the Extensions
 
 This guide describes API version 1.8 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
 - `wai-navegador` is manifest-only;
-- `wai-rotinas` and `wai-bichinho` are written in Go; `wai-bichinho` draws beside the prompt box, without a frame (API 1.7).
+- `wai-rotinas` and `wai-bichinho` are written in Go; `wai-bichinho` draws beside the prompt box, without a frame (API 1.7), and speaks in a `bubble` (API 1.8).
 
 ## The manifest
 

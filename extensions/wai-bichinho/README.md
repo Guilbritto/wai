@@ -9,7 +9,7 @@ cd extensions/wai-bichinho
 go build -o bin/wai-bichinho .
 ```
 
-Then in wai: Extensions, install from folder, pick this folder, and review the consent (`process`, `panels`, `sessions:read`, `events:wai-waycarbon`). It needs a wai with extension API 1.7.
+Then in wai: Extensions, install from folder, pick this folder, and review the consent (`process`, `panels`, `sessions:read`, `events:wai-waycarbon`). It needs a wai with extension API 1.8.
 
 ## Playing
 
@@ -20,6 +20,9 @@ Then in wai: Extensions, install from folder, pick this folder, and review the c
 - **Care.** It goes from full to starving in 8 hours and loses its affection in a day: **Feed** and **Pet** it from the ⋯ menu or its card. It never dies.
 - **Moods.** It works along with the focused session, shouts when any session needs you, frowns at an error, and falls asleep after 20 minutes without activity.
 - **PRs.** With wai-waycarbon installed, it hears its `prs.mine` event: it flashes when one of your PRs is approved or needs a fix (conflict, failing CI, requested changes), then shows how many to fix or merge. Without wai-waycarbon it just never hears it.
+- **Talking.** It speaks in a small speech bubble with a tail, in Brazilian Portuguese. It speaks when it hatches, finds an egg, levels up, is petted or fed, when a session needs you or hits an error, when a PR is approved or needs a fix, and now and then when a turn ends, it gets hungry or lonely, or it wakes up. The bubble waits while the mouse is over it, dims while the prompt box has text, and closes on a click. The `needs_you` line sticks until you deal with it and shrinks to a bouncing "!" after a few seconds.
+
+**Agent and privacy.** The lines come from fixed pt-BR pools. When the `claude` CLI is installed, it also asks Claude to write fresh pools in a personality built from the pet's stats, using `claude -p --safe-mode` with no tools and no saved session. It sends only the pet's name, species, stats, level, mood and its diary (the last 15 of its 30 notes, with dates); it never sends your sessions, prompts, files or PR URLs, and the persona tells the model never to mention your email, account or personal data. Pools refresh at most every 6 hours, with a 30 minute backoff after a failure: about 4 small calls a day at most, each capped at $0.10. Without `claude`, or when it fails, the pet keeps its fixed lines.
 
 The pet shows only beside the focused pane's prompt box, and hides in narrow panes. **Open card** (or the paw in the activity bar) opens its card in the sidebar: stats, care, renaming, the collection and past pets.
 
