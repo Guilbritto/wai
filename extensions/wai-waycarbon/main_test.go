@@ -1009,3 +1009,61 @@ esac
 		t.Error("Todos os meus is the active toggle")
 	}
 }
+
+// A move that fails while a refresh runs keeps its error past that refresh, only in the card's detail;
+// the next refresh clears it.
+func TestMoveErrorOutlivesRefresh(t *testing.T) {
+	ghLog, _ := workFakes(t)
+	gate := filepath.Join(t.TempDir(), "gate")
+	t.Cleanup(func() { os.WriteFile(gate, nil, 0o644) })
+	data, _ := filepath.Abs("testdata/graphql.json")
+	issue, _ := filepath.Abs("testdata/prdetail.json")
+	fakeCLI(t, "gh", `echo "$*" >> '`+ghLog+`'
+case "$*" in
+  *" mine="*)
+    [ "$(grep -c ' mine=' '`+ghLog+`')" = 2 ] && while [ ! -f '`+gate+`' ]; do sleep 0.02; done
+    cat '`+data+`' ;;
+  "api graphql"*) cat '`+issue+`' ;;
+esac
+exit 0
+`)
+	const failed = "Could not move EC-8 to Test: transition not allowed"
+	detail := func(key string) func(map[string]any) bool { // the card's detail, loaded
+		return func(root map[string]any) bool {
+			jira := findID(root, "jira")
+			return findID(jira, "act:jira:solve:"+key) != nil && findID(jira, "jira:subtasks") != nil
+		}
+	}
+	r := start(t)
+	r.initializeRaw(t)
+	r.cards(t)
+	r.action(t, 6, "sel:jira:card:EC-8")
+	r.tree(t, detail("EC-8"))
+	r.action(t, 7, "jira:refresh")
+	waitFor(t, "the slow refresh", func() bool { return refreshes(ghLog) == 2 })
+	r.action(t, 8, "move:EC-8:Test")
+	r.tree(t, func(root map[string]any) bool { return strings.Contains(jsonString(findID(root, "jira")), failed) })
+	os.WriteFile(gate, nil, 0o644)
+	// The refresh's end clears the details, so the card loads again.
+	root := r.tree(t, func(root map[string]any) bool {
+		return strings.Contains(jsonString(findID(root, "jira")), "Loading the card…")
+	})
+	if !strings.Contains(jsonString(root), failed) {
+		t.Errorf("the refresh that ran during the move cleared its error")
+	}
+	r.action(t, 9, "sel:jira:card:EC-5")
+	if root := r.tree(t, detail("EC-5")); strings.Contains(jsonString(root), failed) {
+		t.Errorf("EC-8's error shows in EC-5's detail")
+	}
+	r.action(t, 10, "sel:jira:card:EC-8")
+	if root := r.tree(t, detail("EC-8")); !strings.Contains(jsonString(root), failed) {
+		t.Errorf("EC-8's error is gone before a later refresh")
+	}
+	r.action(t, 11, "jira:refresh")
+	root = r.tree(t, func(root map[string]any) bool {
+		return strings.Contains(jsonString(findID(root, "jira")), "Loading the card…")
+	})
+	if strings.Contains(jsonString(root), failed) {
+		t.Errorf("a refresh after the failure kept its error")
+	}
+}

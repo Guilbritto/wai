@@ -197,7 +197,7 @@ func (s *server) cardDetail(id string) []node {
 		head["badge"] = oneLine(c.Status)
 	}
 	kids := []node{head, {"type": "row", "children": actions}}
-	if s.moveErr != "" {
+	if s.moveErr != "" && s.moveKey == c.Key {
 		kids = append(kids, alert("danger", s.moveErr))
 	}
 	switch {

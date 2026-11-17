@@ -62,7 +62,8 @@ type server struct {
 	prSearch    *PRSearch
 	prDetails   map[string]*detail[PRDetail] // by PR URL; a refresh clears them
 	cardDetails map[string]*detail[cardData] // by card key
-	moveErr     string
+	moveKey     string                       // the card whose last move failed (moveErr says why), shown in its detail
+	moveErr     string                       // a refresh that starts after the failure clears it
 }
 
 func newServer(ctx context.Context, out io.Writer) *server {
@@ -98,6 +99,7 @@ func (s *server) refreshWork() {
 		return
 	}
 	s.refreshing = true
+	seen := s.moveErr
 	s.paintAll()
 	s.smu.Unlock()
 	s.wg.Add(1)
@@ -137,7 +139,9 @@ func (s *server) refreshWork() {
 		s.work, s.wst, s.sprint, s.refreshing = buildWork(snap, cards), st, sprint, false
 		clear(s.prDetails)
 		clear(s.cardDetails)
-		s.moveErr = ""
+		if s.moveErr == seen {
+			s.moveErr = ""
+		}
 		s.counts.NeedsYou, s.counts.Reviews, s.counts.Cards = len(s.work.NeedsYou), s.work.requested(), s.work.merged()
 		if ghErr == nil {
 			// ponytail: the first load only records, so starting wai does not replay old reviews.
@@ -255,7 +259,7 @@ func (s *server) move(key, status string) {
 		defer s.wg.Done()
 		err := moveTo(s.ctx, key, status)
 		s.smu.Lock()
-		s.moveErr = ""
+		s.moveKey, s.moveErr = key, ""
 		if err != nil {
 			s.moveErr = "Could not move " + key + " to " + status + ": " + err.Error()
 		}
