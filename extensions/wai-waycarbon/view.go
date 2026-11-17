@@ -4,10 +4,10 @@ import (
 	"strconv"
 )
 
-// counts are what needs the user, per group; Reviews leaves out the team queue. Tasks that load PRs and help requests set them.
-type counts struct{ NeedsYou, Reviews, Cards, Help, Replies int }
+// counts are what needs the user, per group; Reviews leaves out the team queue. The refresh sets them.
+type counts struct{ NeedsYou, Reviews, Cards int }
 
-func (c counts) total() int { return c.NeedsYou + c.Reviews + c.Cards + c.Help + c.Replies }
+func (c counts) total() int { return c.NeedsYou + c.Reviews + c.Cards }
 
 // card is a kv of the non-zero groups.
 func (c counts) card() node {
@@ -15,7 +15,7 @@ func (c counts) card() node {
 	for _, g := range []struct {
 		key string
 		n   int
-	}{{"Needs you", c.NeedsYou}, {"Review requests", c.Reviews}, {"Cards to update", c.Cards}, {"Help requests", c.Help}, {"Replies to send", c.Replies}} {
+	}{{"Needs you", c.NeedsYou}, {"Review requests", c.Reviews}, {"Cards to update", c.Cards}} {
 		if g.n > 0 {
 			items = append(items, node{"key": g.key, "value": strconv.Itoa(g.n)})
 		}
@@ -61,12 +61,10 @@ func (s *server) body(tree func(Work, WorkState) node, plugin bool) node {
 // paintAll is the only painter: the panel and the bar item. The caller holds smu.
 func (s *server) paintAll() {
 	c := s.counts
-	c.Help, c.Replies = s.helpCounts()
 	s.write(node{"jsonrpc": "2.0", "method": "panel/render", "params": node{"panel": panelID,
 		"tree": rootTree(tab("work", "Work", c.NeedsYou+c.Reviews+c.Cards, s.body(workTree, true)),
 			tab("jira", "Jira", c.Cards, s.body(jiraTree, false)),
-			tab("prs", "PRs", c.NeedsYou+c.Reviews, s.body(prsTree, false)),
-			tab("help", "Help", c.Help+c.Replies, s.helpBody()))}})
+			tab("prs", "PRs", c.NeedsYou+c.Reviews, s.body(prsTree, false)))}})
 	bar := node{"item": "attention"}
 	if n := c.total(); n > 0 {
 		bar = node{"item": "attention", "text": strconv.Itoa(n), "icon": "bell", "tone": "warning", "card": c.card()}

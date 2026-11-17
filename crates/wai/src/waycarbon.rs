@@ -57,12 +57,6 @@ fn build(tmp: &Path) -> Option<std::path::PathBuf> {
             files.push(name);
         }
     }
-    for entry in std::fs::read_dir(from.join("helpapi")).unwrap().flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with(".go") && !name.ends_with("_test.go") {
-            files.push(format!("helpapi/{name}"));
-        }
-    }
     for file in files {
         let to = src.join(&file);
         std::fs::create_dir_all(to.parent().unwrap()).unwrap();

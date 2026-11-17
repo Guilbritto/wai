@@ -2,8 +2,8 @@ id = "wai-waycarbon"
 name = "WayCarbon"
 version = "0.5.1"
 api = "1.5"
-description = "What needs you at WayCarbon: PRs, reviews, Jira cards and help requests, one click from the right /waycarbon command"
-permissions = ["process", "panels", "bar", "sessions:control", "sessions:read", "notify", "network"]
+description = "What needs you at WayCarbon: PRs, reviews and Jira cards, one click from the right /waycarbon command"
+permissions = ["process", "panels", "bar", "sessions:control", "notify"]
 
 [process]
 command = "bin/wai-waycarbon"

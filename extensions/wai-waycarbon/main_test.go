@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"wai-waycarbon/helpapi"
 )
 
 // fakeJira puts a `jira` script first on PATH that only answers the exact argv the extension must use.
@@ -75,8 +73,6 @@ type rpc struct {
 	msgs chan map[string]any
 	done chan struct{}
 	in   *io.PipeWriter
-	// sessions, when set, is the JSON answer to every sessions/list request seen by until.
-	sessions string
 }
 
 func start(t *testing.T) *rpc {
@@ -114,10 +110,6 @@ func (r *rpc) until(t *testing.T, ok func(map[string]any) bool) map[string]any {
 	for {
 		select {
 		case m := <-r.msgs:
-			if m["method"] == "sessions/list" && r.sessions != "" {
-				id, _ := json.Marshal(m["id"])
-				r.send(`{"jsonrpc":"2.0","id":` + string(id) + `,"result":` + r.sessions + `}`)
-			}
 			if ok(m) {
 				return m
 			}
@@ -338,7 +330,7 @@ func TestInitializeRendersTabs(t *testing.T) {
 	for _, tb := range tabs["tabs"].([]any) {
 		ids = append(ids, tb.(map[string]any)["id"].(string))
 	}
-	if strings.Join(ids, ",") != "work,jira,prs,help" {
+	if strings.Join(ids, ",") != "work,jira,prs" {
 		t.Errorf("tab ids: %v", ids)
 	}
 }
@@ -392,9 +384,7 @@ func TestBarItemFollowsCounts(t *testing.T) {
 	var out strings.Builder
 	s := &server{out: &out, lastBar: jsonString(node{"item": "attention"})}
 	s.smu.Lock()
-	s.counts = counts{NeedsYou: 2}
-	s.help.auth = &auth{"t", "me"}
-	s.help.reqs = map[string]helpapi.Request{"r": {ID: "r", From: "ana", To: "me", State: helpapi.Waiting}}
+	s.counts = counts{NeedsYou: 2, Cards: 1}
 	s.paintAll() // must not deadlock on smu
 	s.smu.Unlock()
 	var bar map[string]any
@@ -409,12 +399,12 @@ func TestBarItemFollowsCounts(t *testing.T) {
 		t.Fatalf("bar: %v", bar)
 	}
 	items := bar["card"].(map[string]any)["items"].([]any)
-	if len(items) != 2 || items[0].(map[string]any)["key"] != "Needs you" || items[1].(map[string]any)["key"] != "Help requests" {
+	if len(items) != 2 || items[0].(map[string]any)["key"] != "Needs you" || items[1].(map[string]any)["key"] != "Cards to update" {
 		t.Errorf("card: %v", items)
 	}
 	out.Reset()
 	s.smu.Lock()
-	s.counts, s.help.reqs = counts{}, nil
+	s.counts = counts{}
 	s.paintAll()
 	s.smu.Unlock()
 	for _, l := range strings.Split(strings.TrimSpace(out.String()), "\n") {
@@ -744,7 +734,7 @@ func TestPanelIdsAreUnique(t *testing.T) {
 		}
 	}
 	walk(r.cards(t))
-	for _, id := range []string{"work", "jira", "prs", "help", "work:refresh", "jira:refresh", "prs:refresh", "prs:mine:EC-8", "prs:queue:none"} {
+	for _, id := range []string{"work", "jira", "prs", "work:refresh", "jira:refresh", "prs:refresh", "prs:mine:EC-8", "prs:queue:none"} {
 		if !seen[id] {
 			t.Errorf("no %q in the tree", id)
 		}
