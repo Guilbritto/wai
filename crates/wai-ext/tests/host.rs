@@ -356,6 +356,7 @@ fn text(text: &str) -> panel::Node {
         text: text.into(),
         muted: false,
         mono: false,
+        style: panel::TextStyle::Plain,
     }
 }
 

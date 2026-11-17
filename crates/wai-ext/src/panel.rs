@@ -59,6 +59,12 @@ pub enum Node {
     Column {
         children: Vec<Node>,
         width: Option<f32>,
+        /// Already true when `title` or `collapsed` is given.
+        framed: bool,
+        title: Option<Arc<str>>,
+        badge: Option<Arc<str>>,
+        tone: Tone,
+        collapsed: bool,
     },
     /// `fill`: below columns only, it takes the height left and each child scrolls on its own.
     Row {
@@ -69,6 +75,7 @@ pub enum Node {
         text: Arc<str>,
         muted: bool,
         mono: bool,
+        style: TextStyle,
     },
     Markdown(Arc<str>),
     /// A broken item is `None`. `subtitles`: some item has one, so rows take two lines.
@@ -76,6 +83,7 @@ pub enum Node {
         items: Arc<[Option<Item>]>,
         subtitles: bool,
         fill: bool,
+        plain: bool,
     },
     Button {
         id: String,
@@ -84,6 +92,8 @@ pub enum Node {
         icon: Option<Arc<str>>,
         disabled: bool,
         confirm: Option<Confirm>,
+        /// False without `icon`.
+        icon_only: bool,
     },
     /// `rows`: a multiline input's height in lines; `None` for one line.
     Input {
@@ -91,11 +101,16 @@ pub enum Node {
         placeholder: Arc<str>,
         value: Option<Arc<str>>,
         rows: Option<u8>,
+        icon: Option<Arc<str>>,
+        /// False when `rows` is `Some`.
+        submit: bool,
+        clear: bool,
     },
     Select {
         id: String,
         options: Vec<Arc<str>>,
         value: Option<Arc<str>>,
+        segmented: bool,
     },
     Checkbox {
         id: String,
@@ -139,6 +154,7 @@ pub enum Node {
         id: String,
         value: Option<String>,
         tabs: Vec<Tab>,
+        segmented: bool,
     },
     /// A broken row is `None`.
     Table {
@@ -162,6 +178,8 @@ pub enum Node {
     Link {
         text: Arc<str>,
         url: Arc<str>,
+        icon: Option<Arc<str>>,
+        icon_only: bool,
     },
     Icon {
         name: Arc<str>,
@@ -187,6 +205,21 @@ pub struct Item {
     pub title: Arc<str>,
     pub subtitle: Option<Arc<str>>,
     pub badge: Option<Arc<str>>,
+    pub icon: Option<Arc<str>>,
+    pub tone: Tone,
+    pub selected: bool,
+    pub lead: Option<Arc<str>>,
+    pub note: Option<Arc<str>>,
+    pub indent: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TextStyle {
+    #[default]
+    Plain,
+    Strong,
+    Heading,
+    Label,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -228,6 +261,7 @@ pub struct Tab {
     pub id: String,
     pub title: Arc<str>,
     pub badge: Option<Arc<str>>,
+    pub tone: Tone,
     pub children: Vec<Node>,
 }
 
@@ -266,9 +300,22 @@ pub fn parse(tree: &Value) -> Result<Node, TooLarge> {
 fn card(tree: &Value) -> Option<Node> {
     fn display(node: Node) -> Node {
         match node {
-            Node::Column { children, width } => Node::Column {
+            Node::Column {
+                children,
+                width,
+                framed,
+                title,
+                badge,
+                tone,
+                collapsed,
+            } => Node::Column {
                 children: children.into_iter().map(display).collect(),
                 width,
+                framed,
+                title,
+                badge,
+                tone,
+                collapsed,
             },
             Node::Row { children, fill } => Node::Row {
                 children: children.into_iter().map(display).collect(),
@@ -497,10 +544,19 @@ impl Parser {
         depth: usize,
     ) -> Result<Option<Node>, TooLarge> {
         Ok(match kind {
-            "column" => self.children(o, depth)?.map(|children| Node::Column {
-                children,
-                width: (o.get("width").and_then(Value::as_f64))
-                    .map(|w| w.clamp(MIN_WIDTH, MAX_WIDTH) as f32),
+            "column" => self.children(o, depth)?.map(|children| {
+                let title = line(o, "title");
+                let collapsed = flag(o, "collapsed").unwrap_or(false);
+                Node::Column {
+                    children,
+                    width: (o.get("width").and_then(Value::as_f64))
+                        .map(|w| w.clamp(MIN_WIDTH, MAX_WIDTH) as f32),
+                    framed: flag(o, "framed").unwrap_or(false) || title.is_some() || collapsed,
+                    title,
+                    badge: line(o, "badge"),
+                    tone: tone(o).unwrap_or_default(),
+                    collapsed,
+                }
             }),
             "row" => self.children(o, depth)?.map(|children| Node::Row {
                 children,
@@ -574,6 +630,7 @@ impl Parser {
                 id: tab_id,
                 title,
                 badge: line(t, "badge"),
+                tone: tone(t).unwrap_or_default(),
                 children: self.children(t, depth)?.unwrap_or_default(),
             });
         }
@@ -581,6 +638,7 @@ impl Parser {
             id,
             value: str_field(o, "value").map(str::to_owned),
             tabs,
+            segmented: str_field(o, "style") == Some("segmented"),
         }))
     }
 
@@ -632,6 +690,7 @@ impl Parser {
                 text: clamp(text, LINE_CHARS).into(),
                 muted: false,
                 mono: false,
+                style: TextStyle::Plain,
             });
         }
         let kind = value.get("type").and_then(Value::as_str);
@@ -649,6 +708,12 @@ impl Parser {
                 text: text()?,
                 muted: flag(o, "muted").unwrap_or(false),
                 mono: flag(o, "mono").unwrap_or(false),
+                style: match str_field(o, "style") {
+                    Some("strong") => TextStyle::Strong,
+                    Some("heading") => TextStyle::Heading,
+                    Some("label") => TextStyle::Label,
+                    _ => TextStyle::Plain,
+                },
             },
             "markdown" => Node::Markdown(text()?),
             "badge" => Node::Badge {
@@ -664,20 +729,25 @@ impl Parser {
                     items,
                     subtitles,
                     fill: flag(o, "fill").unwrap_or(false),
+                    plain: flag(o, "plain").unwrap_or(false),
                 }
             }
-            "button" => Node::Button {
-                id: id(o)?,
-                label: line(o, "label")?,
-                style: match str_field(o, "style") {
-                    Some("primary") => ButtonStyle::Primary,
-                    Some("danger") => ButtonStyle::Danger,
-                    _ => ButtonStyle::Default,
-                },
-                icon: icon(o),
-                disabled: flag(o, "disabled").unwrap_or(false),
-                confirm: confirm(o)?,
-            },
+            "button" => {
+                let icon = icon(o);
+                Node::Button {
+                    id: id(o)?,
+                    label: line(o, "label")?,
+                    style: match str_field(o, "style") {
+                        Some("primary") => ButtonStyle::Primary,
+                        Some("danger") => ButtonStyle::Danger,
+                        _ => ButtonStyle::Default,
+                    },
+                    icon_only: icon.is_some() && flag(o, "icon_only").unwrap_or(false),
+                    icon,
+                    disabled: flag(o, "disabled").unwrap_or(false),
+                    confirm: confirm(o)?,
+                }
+            }
             "input" => {
                 let rows = flag(o, "multiline").unwrap_or(false).then(|| {
                     let rows = o.get("rows").and_then(Value::as_u64);
@@ -692,7 +762,10 @@ impl Parser {
                         Some(_) => str_field(o, "value").map(|t| cut(t, TEXT_CHARS).into()),
                         None => line(o, "value"),
                     },
+                    submit: rows.is_none() && flag(o, "submit").unwrap_or(false),
                     rows,
+                    icon: icon(o),
+                    clear: flag(o, "clear").unwrap_or(false),
                 }
             }
             "select" => {
@@ -702,6 +775,7 @@ impl Parser {
                     id: id(o)?,
                     options: options.collect::<Option<_>>()?,
                     value: line(o, "value"),
+                    segmented: flag(o, "segmented").unwrap_or(false),
                 }
             }
             "path" => Node::Path {
@@ -730,10 +804,15 @@ impl Parser {
                 title: line(o, "title"),
                 text: text()?,
             },
-            "link" => Node::Link {
-                text: line(o, "text")?,
-                url: str_field(o, "url").filter(|url| web_url(url))?.into(),
-            },
+            "link" => {
+                let icon = icon(o);
+                Node::Link {
+                    text: line(o, "text")?,
+                    url: str_field(o, "url").filter(|url| web_url(url))?.into(),
+                    icon_only: icon.is_some() && flag(o, "icon_only").unwrap_or(false),
+                    icon,
+                }
+            }
             "icon" => Node::Icon {
                 name: str_field(o, "name").filter(|n| icon_name(n))?.into(),
                 tone: tone(o).unwrap_or_default(),
@@ -787,6 +866,12 @@ fn item(value: &Value) -> Option<Item> {
         title: line(o, "title")?,
         subtitle: line(o, "subtitle"),
         badge: line(o, "badge"),
+        icon: icon(o),
+        tone: tone(o).unwrap_or_default(),
+        selected: flag(o, "selected").unwrap_or(false),
+        lead: line(o, "lead"),
+        note: line(o, "note"),
+        indent: flag(o, "indent").unwrap_or(false),
     })
 }
 
@@ -856,6 +941,11 @@ mod tests {
         Node::Column {
             children,
             width: None,
+            framed: false,
+            title: None,
+            badge: None,
+            tone: Tone::Neutral,
+            collapsed: false,
         }
     }
 
@@ -888,6 +978,7 @@ mod tests {
             text: s.into(),
             muted: false,
             mono: false,
+            style: TextStyle::Plain,
         }
     }
 
@@ -956,6 +1047,7 @@ mod tests {
                     text: "Hello".into(),
                     muted: true,
                     mono: false,
+                    style: TextStyle::Plain,
                 },
                 Node::Badge {
                     text: "3".into(),
@@ -970,17 +1062,30 @@ mod tests {
                         title: "First".into(),
                         subtitle: Some("sub".into()),
                         badge: Some("new".into()),
+                        icon: None,
+                        tone: Tone::Neutral,
+                        selected: false,
+                        lead: None,
+                        note: None,
+                        indent: false,
                     }),
                     Some(Item {
                         id: "b".into(),
                         title: "Second".into(),
                         subtitle: None,
                         badge: None,
+                        icon: None,
+                        tone: Tone::Neutral,
+                        selected: false,
+                        lead: None,
+                        note: None,
+                        indent: false,
                     }),
                 ]
                 .into(),
                 subtitles: true,
                 fill: true,
+                plain: false,
             },
             Node::Button {
                 id: "go".into(),
@@ -989,6 +1094,7 @@ mod tests {
                 icon: None,
                 disabled: false,
                 confirm: None,
+                icon_only: false,
             },
             Node::Button {
                 id: "rm".into(),
@@ -997,6 +1103,7 @@ mod tests {
                 icon: None,
                 disabled: false,
                 confirm: None,
+                icon_only: false,
             },
             Node::Button {
                 id: "plain".into(),
@@ -1005,17 +1112,22 @@ mod tests {
                 icon: None,
                 disabled: false,
                 confirm: None,
+                icon_only: false,
             },
             Node::Input {
                 id: "q".into(),
                 placeholder: "Search".into(),
                 value: Some("rust".into()),
                 rows: None,
+                icon: None,
+                submit: false,
+                clear: false,
             },
             Node::Select {
                 id: "scope".into(),
                 options: vec!["Mine".into(), "All".into()],
                 value: Some("All".into()),
+                segmented: false,
             },
             Node::Checkbox {
                 id: "done".into(),
@@ -1027,11 +1139,15 @@ mod tests {
                 placeholder: "No value".into(),
                 value: None,
                 rows: None,
+                icon: None,
+                submit: false,
+                clear: false,
             },
             Node::Select {
                 id: "s2".into(),
                 options: vec!["Mine".into()],
                 value: None,
+                segmented: false,
             },
             Node::Checkbox {
                 id: "c2".into(),
@@ -1061,7 +1177,7 @@ mod tests {
         let items = vec![json!({"id": "i", "title": "t"}); 10 * MAX_NODES];
         let list = parse(&json!({"type": "list", "items": items}));
         assert!(
-            matches!(list, Ok(Node::List { items, subtitles: false, fill: false }) if items.len() == 10 * MAX_NODES)
+            matches!(list, Ok(Node::List { items, subtitles: false, fill: false, .. }) if items.len() == 10 * MAX_NODES)
         );
     }
 
@@ -1151,12 +1267,19 @@ mod tests {
             icon: None,
             disabled: false,
             confirm: None,
+            icon_only: false,
         };
         let item = Item {
             id: "a".into(),
             title: "A".into(),
             subtitle: None,
             badge: None,
+            icon: None,
+            tone: Tone::Neutral,
+            selected: false,
+            lead: None,
+            note: None,
+            indent: false,
         };
         assert_eq!(
             children(tree),
@@ -1168,6 +1291,7 @@ mod tests {
                     items: vec![Some(item)].into(),
                     subtitles: false,
                     fill: false,
+                    plain: false,
                 },
                 Node::Progress(1.),
                 Node::Progress(0.),
@@ -1177,11 +1301,15 @@ mod tests {
                     placeholder: "P".into(),
                     value: None,
                     rows: None,
+                    icon: None,
+                    submit: false,
+                    clear: false,
                 },
                 Node::Select {
                     id: "s".into(),
                     options: vec!["a".into()],
                     value: None,
+                    segmented: false,
                 },
                 Node::Checkbox {
                     id: "c2".into(),
@@ -1194,6 +1322,9 @@ mod tests {
                     placeholder: "P".into(),
                     value: Some("two lines".into()),
                     rows: None,
+                    icon: None,
+                    submit: false,
+                    clear: false,
                 },
             ]
         );
@@ -1237,6 +1368,7 @@ mod tests {
                     icon: None,
                     disabled: false,
                     confirm: None,
+                    icon_only: false,
                 },
                 Node::Unsupported,
                 Node::Unsupported,
@@ -1245,6 +1377,7 @@ mod tests {
                     id: "y".into(),
                     options: vec![],
                     value: None,
+                    segmented: false,
                 },
                 row(vec![Node::Unsupported]),
             ]
@@ -1317,6 +1450,7 @@ mod tests {
             icon: None,
             disabled: false,
             confirm: None,
+            icon_only: false,
         }
     }
 
@@ -1369,6 +1503,7 @@ mod tests {
                     text: "body".into(),
                     muted: false,
                     mono: true,
+                    style: TextStyle::Plain,
                 }],
             },
             Node::Card {
@@ -1406,6 +1541,8 @@ mod tests {
                             Node::Link {
                                 text: "Fix".into(),
                                 url: "https://example.com/pr/1".into(),
+                                icon: None,
+                                icon_only: false,
                             },
                         ],
                     }),
@@ -1467,18 +1604,25 @@ mod tests {
                 icon: Some("trash-2".into()),
                 disabled: true,
                 confirm: Some(confirm),
+                icon_only: false,
             },
             Node::Input {
                 id: "notes".into(),
                 placeholder: "Notes".into(),
                 value: Some("a\nb".into()),
                 rows: Some(DEFAULT_INPUT_ROWS),
+                icon: None,
+                submit: false,
+                clear: false,
             },
             Node::Input {
                 id: "big".into(),
                 placeholder: "Big".into(),
                 value: None,
                 rows: Some(MAX_INPUT_ROWS),
+                icon: None,
+                submit: false,
+                clear: false,
             },
             Node::Badge {
                 text: "late".into(),
@@ -1555,6 +1699,9 @@ mod tests {
                     placeholder: "P".into(),
                     value: Some("a\nb".into()),
                     rows: Some(DEFAULT_INPUT_ROWS),
+                    icon: None,
+                    submit: false,
+                    clear: false,
                 },
                 // Without `multiline`, `rows` means nothing and the value is one line.
                 Node::Input {
@@ -1562,6 +1709,9 @@ mod tests {
                     placeholder: "P".into(),
                     value: Some("a b".into()),
                     rows: None,
+                    icon: None,
+                    submit: false,
+                    clear: false,
                 },
                 Node::Badge {
                     text: "t".into(),
@@ -1688,7 +1838,10 @@ mod tests {
             {"id": "work", "title": "Work", "badge": "3", "children": [{"type": "text", "text": "a"}]},
             {"id": "help", "title": "Help", "children": []},
         ]});
-        let Ok(Node::Tabs { id, value, tabs }) = parse(&tree) else {
+        let Ok(Node::Tabs {
+            id, value, tabs, ..
+        }) = parse(&tree)
+        else {
             panic!("not tabs")
         };
         assert_eq!((id.as_str(), value.as_deref()), ("t", Some("help")));
@@ -1848,6 +2001,11 @@ mod tests {
         assert_eq!(
             parse(&tree),
             Ok(Node::Column {
+                framed: false,
+                title: None,
+                badge: None,
+                tone: Tone::Neutral,
+                collapsed: false,
                 children: vec![
                     path("dir", Pick::Folder, None, Some("~/src"), false),
                     path("dump", Pick::File, Some("Dump"), None, true),
@@ -1875,7 +2033,10 @@ mod tests {
             {"type": "card", "id": "c", "selected": true},
             {"type": "card", "id": "d"},
         ]});
-        let Ok(Node::Column { children, width }) = parse(&tree) else {
+        let Ok(Node::Column {
+            children, width, ..
+        }) = parse(&tree)
+        else {
             panic!("a column")
         };
         assert_eq!(width, None);
@@ -1902,5 +2063,182 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parses_list_item_extras() {
+        let tree = json!({"type": "list", "items": [
+            {"id": "a", "title": "A", "icon": "git-branch", "tone": "warning", "selected": true,
+             "lead": "EC-1", "note": "2d", "indent": true},
+            {"id": "b", "title": "B", "icon": "No Such!"},
+        ]});
+        let Ok(Node::List { items, .. }) = parse(&tree) else {
+            panic!("not a list")
+        };
+        let a = items[0].as_ref().unwrap();
+        assert_eq!(a.icon.as_deref(), Some("git-branch"));
+        assert_eq!(a.tone, Tone::Warning);
+        assert!(a.selected && a.indent);
+        assert_eq!(
+            (a.lead.as_deref(), a.note.as_deref()),
+            (Some("EC-1"), Some("2d"))
+        );
+        let b = items[1].as_ref().unwrap();
+        assert_eq!(b.icon, None);
+        assert_eq!(b.tone, Tone::Neutral);
+    }
+
+    #[test]
+    fn parses_text_style() {
+        let style = |s: &str| match parse(&json!({"type": "text", "text": "a", "style": s})) {
+            Ok(Node::Text { style, .. }) => style,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(style("label"), TextStyle::Label);
+        assert_eq!(style("strong"), TextStyle::Strong);
+        assert_eq!(style("heading"), TextStyle::Heading);
+        assert_eq!(style("huge"), TextStyle::Plain);
+    }
+
+    #[test]
+    fn title_or_collapsed_implies_framed() {
+        let framed = |tree: Value| match parse(&tree) {
+            Ok(Node::Column { framed, .. }) => framed,
+            other => panic!("{other:?}"),
+        };
+        assert!(framed(
+            json!({"type": "column", "title": "A", "children": []})
+        ));
+        assert!(framed(
+            json!({"type": "column", "collapsed": true, "children": []})
+        ));
+        assert!(!framed(json!({"type": "column", "children": []})));
+    }
+
+    #[test]
+    fn parses_segmented_and_input_extras() {
+        let tree = json!({"type": "column", "children": [
+            {"type": "tabs", "id": "t", "style": "segmented", "tabs": [
+                {"id": "a", "title": "A", "tone": "warning", "children": []}]},
+            {"type": "select", "id": "s", "options": ["a"], "segmented": true},
+            {"type": "input", "id": "i", "placeholder": "p", "icon": "search", "submit": true, "clear": true},
+            {"type": "input", "id": "m", "placeholder": "p", "multiline": true, "submit": true},
+        ]});
+        let Ok(Node::Column { children, .. }) = parse(&tree) else {
+            panic!("not a column")
+        };
+        let Node::Tabs {
+            segmented, tabs, ..
+        } = &children[0]
+        else {
+            panic!("not tabs")
+        };
+        assert!(*segmented);
+        assert_eq!(tabs[0].tone, Tone::Warning);
+        assert!(matches!(
+            &children[1],
+            Node::Select {
+                segmented: true,
+                ..
+            }
+        ));
+        let Node::Input {
+            icon,
+            submit,
+            clear,
+            ..
+        } = &children[2]
+        else {
+            panic!("not an input")
+        };
+        assert_eq!(icon.as_deref(), Some("search"));
+        assert!(*submit && *clear);
+        assert!(matches!(&children[3], Node::Input { submit: false, .. }));
+    }
+
+    #[test]
+    fn icon_only_needs_an_icon() {
+        let tree = json!({"type": "column", "children": [
+            {"type": "button", "id": "b", "label": "B", "icon_only": true},
+            {"type": "button", "id": "c", "label": "C", "icon": "x", "icon_only": true},
+            {"type": "link", "text": "L", "url": "https://a.b", "icon": "external-link", "icon_only": true},
+            {"type": "link", "text": "L", "url": "https://a.b", "icon_only": true},
+        ]});
+        let Ok(Node::Column { children, .. }) = parse(&tree) else {
+            panic!("not a column")
+        };
+        assert!(matches!(
+            &children[0],
+            Node::Button {
+                icon_only: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &children[1],
+            Node::Button {
+                icon_only: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &children[2],
+            Node::Link {
+                icon: Some(_),
+                icon_only: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &children[3],
+            Node::Link {
+                icon: None,
+                icon_only: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn old_trees_parse_unchanged() {
+        let tree = json!({"type": "column", "children": [
+            {"type": "text", "text": "a"},
+            {"type": "list", "items": [{"id": "a", "title": "A"}]},
+            {"type": "tabs", "id": "t", "tabs": [{"id": "a", "title": "A", "children": []}]},
+        ]});
+        let expected = col(vec![
+            text("a"),
+            Node::List {
+                items: vec![Some(Item {
+                    id: "a".into(),
+                    title: "A".into(),
+                    subtitle: None,
+                    badge: None,
+                    icon: None,
+                    tone: Tone::Neutral,
+                    selected: false,
+                    lead: None,
+                    note: None,
+                    indent: false,
+                })]
+                .into(),
+                subtitles: false,
+                fill: false,
+                plain: false,
+            },
+            Node::Tabs {
+                id: "t".into(),
+                value: None,
+                tabs: vec![Tab {
+                    id: "a".into(),
+                    title: "A".into(),
+                    badge: None,
+                    tone: Tone::Neutral,
+                    children: vec![],
+                }],
+                segmented: false,
+            },
+        ]);
+        assert_eq!(parse(&tree), Ok(expected));
     }
 }

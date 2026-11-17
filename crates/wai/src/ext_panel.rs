@@ -398,7 +398,9 @@ impl ExtPanel {
         *n += 1;
         let k = *n;
         let element = match node {
-            Node::Column { children, width } => {
+            Node::Column {
+                children, width, ..
+            } => {
                 return self.flex(children, *width, None, at, n, window, cx);
             }
             Node::Row { children, fill } => {
@@ -408,6 +410,7 @@ impl ExtPanel {
                 items,
                 subtitles,
                 fill,
+                ..
             } => {
                 let fill = *fill && at.column;
                 return (self.list(k, items, *subtitles, fill, cx), fill);
@@ -441,6 +444,7 @@ impl ExtPanel {
                 icon,
                 disabled,
                 confirm,
+                ..
             } => {
                 let (action, confirm) = (id.clone(), confirm.clone());
                 let danger = *style == ButtonStyle::Danger;
@@ -821,7 +825,7 @@ impl ExtPanel {
                     .border_color(border)
                     .into_any_element()
             }
-            Node::Link { text, url } => {
+            Node::Link { text, url, .. } => {
                 let url = SharedString::from(url);
                 let tip = url.clone();
                 // The link takes its own clicks, even in a clickable card or row.
@@ -1219,6 +1223,7 @@ fn leaf(node: &Node, k: usize, cx: &App) -> AnyElement {
             text,
             muted: dim,
             mono,
+            ..
         } => div()
             .text_sm()
             .when(*dim, |el| el.text_color(muted))
