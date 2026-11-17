@@ -1,7 +1,7 @@
 id = "wai-waycarbon"
 name = "WayCarbon"
-version = "0.5.1"
-api = "1.5"
+version = "0.6.0"
+api = "1.6"
 description = "What needs you at WayCarbon: PRs, reviews and Jira cards, one click from the right /waycarbon command"
 permissions = ["process", "panels", "bar", "sessions:control", "notify"]
 
@@ -16,6 +16,7 @@ marketplace = "waycarbon/claude-code"
 id = "waycarbon"
 title = "WayCarbon"
 icon = "icon.svg"
+wide = true
 
 [[contributes.items]]
 id = "attention"

@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,6 +55,19 @@ type server struct {
 	counts           counts
 	reviews          map[string]time.Time // newest review per PR of mine; nil until GitHub first loads
 	lastBar          string
+
+	sel         map[string]string // tab → selected item id
+	scope       string            // the Jira board's cards: "" the current sprint, "mine" all assigned to me
+	sprint      []Card
+	prSearch    *PRSearch
+	prDetails   map[string]*detail[PRDetail] // by PR URL; a refresh clears them
+	cardDetails map[string]*detail[cardData] // by card key
+	moveErr     string
+}
+
+func newServer(ctx context.Context, out io.Writer) *server {
+	return &server{ctx: ctx, out: out, lastBar: jsonString(node{"item": "attention"}), sel: map[string]string{},
+		prDetails: map[string]*detail[PRDetail]{}, cardDetails: map[string]*detail[cardData]{}}
 }
 
 func jsonString(v any) string {
@@ -90,13 +104,14 @@ func (s *server) refreshWork() {
 	go func() {
 		defer s.wg.Done()
 		var snap Snapshot
-		var cards []Card
-		var ghErr, jiraErr error
-		var both sync.WaitGroup
-		both.Add(2)
-		go func() { defer both.Done(); snap, ghErr = fetchGitHub(s.ctx, org(), time.Now().AddDate(0, 0, -30)) }()
-		go func() { defer both.Done(); cards, jiraErr = myCards(s.ctx) }()
-		both.Wait()
+		var cards, sprint []Card
+		var ghErr, jiraErr, sprintErr error
+		var all sync.WaitGroup
+		all.Add(3)
+		go func() { defer all.Done(); snap, ghErr = fetchGitHub(s.ctx, org(), time.Now().AddDate(0, 0, -30)) }()
+		go func() { defer all.Done(); cards, jiraErr = myCards(s.ctx) }()
+		go func() { defer all.Done(); sprint, sprintErr = sprintCards(s.ctx) }()
+		all.Wait()
 		st := WorkState{Login: snap.Login, Err: snap.Warn, Updated: time.Now()}
 		var nf ErrNotFound
 		switch {
@@ -114,10 +129,15 @@ func (s *server) refreshWork() {
 			} else {
 				st.JiraProblem = jiraErr.Error()
 			}
+		} else if sprintErr != nil {
+			st.SprintErr = sprintErr.Error()
 		}
 		s.smu.Lock()
 		st.SignIn, st.Search = s.wst.SignIn, s.wst.Search
-		s.work, s.wst, s.refreshing = buildWork(snap, cards), st, false
+		s.work, s.wst, s.sprint, s.refreshing = buildWork(snap, cards), st, sprint, false
+		clear(s.prDetails)
+		clear(s.cardDetails)
+		s.moveErr = ""
 		s.counts.NeedsYou, s.counts.Reviews, s.counts.Cards = len(s.work.NeedsYou), s.work.requested(), s.work.merged()
 		if ghErr == nil {
 			// ponytail: the first load only records, so starting wai does not replay old reviews.
@@ -223,6 +243,67 @@ func (s *server) moveDone(key string) {
 		}
 		s.refreshWork()
 	}()
+}
+
+// move moves a card to a status of the board, then refreshes; a failure shows in the card's detail.
+func (s *server) move(key, status string) {
+	if !keyRe.MatchString(key) || !slices.Contains(boardOrder, status) {
+		return
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		err := moveTo(s.ctx, key, status)
+		s.smu.Lock()
+		s.moveErr = ""
+		if err != nil {
+			s.moveErr = "Could not move " + key + " to " + status + ": " + err.Error()
+		}
+		s.paintAll()
+		s.smu.Unlock()
+		if err == nil {
+			s.refreshWork()
+		}
+	}()
+}
+
+// findPRs runs a PR search off the caller, like search does for cards.
+func (s *server) findPRs(q string) {
+	q = strings.TrimSpace(q)
+	s.smu.Lock()
+	defer s.smu.Unlock()
+	if q == "" {
+		s.prSearch = nil
+		s.paintAll()
+		return
+	}
+	ps := &PRSearch{Query: q, Busy: true}
+	s.prSearch = ps
+	s.paintAll()
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		prs, err := searchPRs(s.ctx, org(), q)
+		s.smu.Lock()
+		defer s.smu.Unlock()
+		if s.prSearch != ps {
+			return
+		}
+		s.prSearch = &PRSearch{Query: q, PRs: prs}
+		if err != nil {
+			s.prSearch.Err = err.Error()
+		}
+		s.paintAll()
+	}()
+}
+
+// solvePrompt is Solve card for a listed card: solve:KEY.
+func (s *server) solvePrompt(id string) (string, bool) {
+	key, ok := strings.CutPrefix(id, "solve:")
+	if _, listed := s.findCard(key); !ok || !listed {
+		return "", false
+	}
+	return promptFor("solve", key), true
 }
 
 // search runs a card search off the caller; an empty query clears it. A newer search or Clear
@@ -373,19 +454,51 @@ func (s *server) handle(m message) {
 		case "jira:clear":
 			s.search("")
 			return
-		}
-		if key, ok := strings.CutPrefix(strings.TrimPrefix(p.Action, "inbox:"), "done:"); ok {
-			s.moveDone(key)
+		case "jira:scope:sprint", "jira:scope:mine":
+			s.smu.Lock()
+			s.scope = strings.TrimPrefix(p.Action, "jira:scope:")
+			s.paintAll()
+			s.smu.Unlock()
+			return
+		case "prs:search":
+			s.findPRs(values["prs:q"])
+			return
+		case "prs:clear":
+			s.findPRs("")
 			return
 		}
-		s.smu.Lock()
-		text, ok := s.work.clickPrompt(p.Action)
-		if !ok {
-			text, ok = s.wst.Search.clickPrompt(p.Action)
-		}
-		s.smu.Unlock()
-		if ok {
-			s.call("sessions/open", node{"prompt": text, "send": false})
+		kind, rest, _ := strings.Cut(p.Action, ":")
+		switch kind {
+		case "sel":
+			tab, item, _ := strings.Cut(rest, ":")
+			if tab != "work" && tab != "jira" && tab != "prs" {
+				return
+			}
+			s.smu.Lock()
+			s.sel[tab] = item
+			s.paintAll()
+			s.smu.Unlock()
+		case "move":
+			key, status, _ := strings.Cut(rest, ":")
+			s.move(key, status)
+		case "act":
+			_, inner, _ := strings.Cut(rest, ":")
+			if key, ok := strings.CutPrefix(inner, "done:"); ok {
+				s.moveDone(key)
+				return
+			}
+			s.smu.Lock()
+			text, ok := s.work.clickPrompt(inner)
+			if !ok {
+				text, ok = s.prSearch.clickPrompt(inner)
+			}
+			if !ok {
+				text, ok = s.solvePrompt(inner)
+			}
+			s.smu.Unlock()
+			if ok {
+				s.call("sessions/open", node{"prompt": text, "send": false})
+			}
 		}
 	default:
 		if m.ID != nil {
@@ -397,7 +510,7 @@ func (s *server) handle(m message) {
 // run reads until EOF. Answers to our own requests are ignored.
 func run(in io.Reader, out io.Writer) {
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &server{ctx: ctx, out: out, lastBar: jsonString(node{"item": "attention"})}
+	s := newServer(ctx, out)
 	r := bufio.NewReaderSize(in, 1<<20)
 	for {
 		line, err := r.ReadBytes('\n')

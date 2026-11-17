@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -36,10 +37,16 @@ exit 0
 
 const happyJira = happyJiraBody
 
+// mineArgs and sprintArgs are the jira argv of my open cards and of those in the current sprint.
+const (
+	mineArgs   = `"issue list -a dev@example.com -s~Done --plain --no-headers --columns key,summary,status"`
+	sprintArgs = `"issue list -a dev@example.com -s~Done -q sprint in openSprints() --plain --no-headers --columns key,summary,status"`
+)
+
 const happyJiraBody = `
 case "$*" in
   "me") echo "dev@example.com" ;;
-  "issue list -a dev@example.com -s~Done --plain --no-headers --columns key,summary,status")
+  ` + mineArgs + `|` + sprintArgs + `)
     printf 'EC-1\tFix the login timeout\tIn Progress\n'
     printf '\n'
     printf 'EC-2\tAdd the export button\tTo Do\n' ;;
@@ -198,12 +205,17 @@ func TestInitializeAndRender(t *testing.T) {
 	r.initialize(t)
 
 	root := r.cards(t)
-	first := findID(root, "card:EC-1")
-	if first == nil || first["title"] != "Fix the login timeout" || first["subtitle"] != "EC-1 · In Progress" || first["badge"] != "In Progress" {
+	first := findID(root, "sel:jira:card:EC-1")
+	if first == nil || first["title"] != "Fix the login timeout" || first["subtitle"] != "EC-1" || first["badge"] != nil {
 		t.Fatalf("first card: %v", first)
 	}
-	if findID(root, "card:EC-2") == nil {
-		t.Error("want a card for EC-2")
+	// To Do comes first on the board, so EC-2 is selected; In Progress is not a board status: it goes last.
+	if c := findID(root, "sel:jira:card:EC-2"); c == nil || c["selected"] != true {
+		t.Errorf("want EC-2 selected: %v", c)
+	}
+	text := textOf(findID(root, "jira"))
+	if i, j := strings.Index(text, "To Do · 1"), strings.Index(text, "In Progress · 1"); i < 0 || j < i {
+		t.Errorf("board columns: %q", text)
 	}
 }
 
@@ -213,14 +225,28 @@ func TestCardClickOpensSession(t *testing.T) {
 	r.initialize(t)
 	r.cards(t)
 
-	r.send(`{"jsonrpc":"2.0","id":7,"method":"panel/action","params":{"panel":"waycarbon","action_id":"card:EC-2","values":{}}}`)
+	// Selecting a card shows its detail; only the detail's Solve card opens a session.
+	r.action(t, 6, "sel:jira:card:EC-1")
+	m := r.until(t, func(m map[string]any) bool {
+		if m["method"] == "sessions/open" {
+			t.Fatal("a selection must not open a session")
+		}
+		return m["method"] == "panel/render" && findID(render(t, m), "act:jira:solve:EC-1") != nil
+	})
+	if c := findID(render(t, m), "sel:jira:card:EC-1"); c["selected"] != true {
+		t.Errorf("want EC-1 selected: %v", c)
+	}
+	if c := findID(render(t, m), "sel:jira:card:EC-2"); c["selected"] != nil {
+		t.Errorf("EC-2 is no longer selected: %v", c)
+	}
+	r.send(`{"jsonrpc":"2.0","id":7,"method":"panel/action","params":{"panel":"waycarbon","action_id":"act:jira:solve:EC-1","values":{}}}`)
 	ack := r.reply(t, 7)
 	open := r.until(t, func(m map[string]any) bool { return m["method"] == "sessions/open" })
 	if ack["error"] != nil {
 		t.Errorf("panel/action not answered: %v", ack)
 	}
 	p := open["params"].(map[string]any)
-	if p["prompt"] != "/waycarbon:solve-card EC-2" || p["send"] != false {
+	if p["prompt"] != "/waycarbon:solve-card EC-1" || p["send"] != false {
 		t.Errorf("sessions/open params: %v", p)
 	}
 }
@@ -232,7 +258,7 @@ func TestRefreshAndUnknownMethod(t *testing.T) {
 	r.cards(t)
 	r.send(`{"jsonrpc":"2.0","id":3,"method":"panel/action","params":{"panel":"waycarbon","action_id":"work:refresh","values":{}}}`)
 	r.reply(t, 3)
-	if findID(r.cards(t), "card:EC-1") == nil {
+	if findID(r.cards(t), "sel:jira:card:EC-1") == nil {
 		t.Error("refresh must render the cards")
 	}
 	// A request gets -32601; a notification stays silent (the next answer is for id 5).
@@ -260,7 +286,7 @@ func TestSlowJiraDoesNotBlock(t *testing.T) {
 		return m["method"] == "panel/render" && strings.Contains(textOf(render(t, m)), "Loading…")
 	}
 	r.until(t, loading)
-	r.send(`{"jsonrpc":"2.0","id":8,"method":"panel/action","params":{"panel":"waycarbon","action_id":"card:EC-1","values":{}}}`)
+	r.send(`{"jsonrpc":"2.0","id":8,"method":"panel/action","params":{"panel":"waycarbon","action_id":"sel:jira:card:EC-1","values":{}}}`)
 	r.reply(t, 8) // answered while jira runs
 	r.send(`{"jsonrpc":"2.0","id":9,"method":"panel/action","params":{"panel":"waycarbon","action_id":"work:refresh","values":{}}}`)
 	r.reply(t, 9)
@@ -268,10 +294,11 @@ func TestSlowJiraDoesNotBlock(t *testing.T) {
 	os.WriteFile(release, nil, 0o644)
 	r.cards(t)
 	time.Sleep(300 * time.Millisecond)
-	waitFor(t, "the queued refresh", func() bool { return strings.Count(string(mustRead(runs)), "me\n") == 2 })
+	// Each refresh runs jira me twice: my cards and the sprint's.
+	waitFor(t, "the queued refresh", func() bool { return strings.Count(string(mustRead(runs)), "me\n") == 4 })
 	time.Sleep(300 * time.Millisecond)
-	if n := strings.Count(string(mustRead(runs)), "me\n"); n != 2 {
-		t.Errorf("jira me ran %d times, want 2: the refresh asked mid-refresh reruns once", n)
+	if n := strings.Count(string(mustRead(runs)), "me\n"); n != 4 {
+		t.Errorf("jira me ran %d times, want 4: the refresh asked mid-refresh reruns once", n)
 	}
 }
 
@@ -382,7 +409,7 @@ func TestBarItemFollowsCounts(t *testing.T) {
 	r.initialize(t)
 	// The server is internal to run(); drive the real paint path through a second instance.
 	var out strings.Builder
-	s := &server{out: &out, lastBar: jsonString(node{"item": "attention"})}
+	s := newServer(context.Background(), &out)
 	s.smu.Lock()
 	s.counts = counts{NeedsYou: 2, Cards: 1}
 	s.paintAll() // must not deadlock on smu
@@ -446,10 +473,11 @@ exit 0
 	r.until(t, has("is not installed"))
 	click := `{"jsonrpc":"2.0","id":1,"method":"panel/action","params":{"panel":"waycarbon","action_id":"plugin:install","values":{}}}`
 	r.send(click)
-	m := r.until(t, func(m map[string]any) bool {
-		return m["method"] == "panel/render" && find(render(t, m), "spinner") != nil
-	})
-	if find(render(t, m), "button") != nil && find(find(render(t, m), "button"), "button")["id"] == "plugin:install" {
+	installing := func(root map[string]any) bool {
+		return strings.Contains(jsonString(root), "Installing the WayCarbon plugin")
+	}
+	m := r.until(t, func(m map[string]any) bool { return m["method"] == "panel/render" && installing(render(t, m)) })
+	if findID(render(t, m), "plugin:install") != nil {
 		t.Error("the install button must give way to the spinner")
 	}
 	r.send(strings.Replace(click, `"id":1`, `"id":2`, 1)) // lands while the first install runs
@@ -457,7 +485,7 @@ exit 0
 	os.WriteFile(release, nil, 0o644)
 	m = r.until(t, has("marketplace unreachable"))
 	root := render(t, m)
-	if find(root, "spinner") != nil {
+	if installing(root) {
 		t.Error("spinner must be gone after the failure")
 	}
 	var btn bool
@@ -490,18 +518,26 @@ func workFakes(t *testing.T) (ghLog, jiraLog string) {
 	dir := t.TempDir()
 	ghLog, jiraLog = filepath.Join(dir, "gh.log"), filepath.Join(dir, "jira.log")
 	data, _ := filepath.Abs("testdata/graphql.json")
+	search, _ := filepath.Abs("testdata/search.json")
+	detail, _ := filepath.Abs("testdata/prdetail.json")
+	issue, _ := filepath.Abs("testdata/issue.json")
+	// The refresh's call is the one with mine=; a search has q=; any other GraphQL call is a PR detail.
 	fakeCLI(t, "gh", `echo "$*" >> '`+ghLog+`'
-case "$1 $2" in
-  "api graphql") cat '`+data+`' ;;
+case "$*" in
+  *" mine="*) cat '`+data+`' ;;
+  *" q="*) cat '`+search+`' ;;
+  "api graphql"*) cat '`+detail+`' ;;
 esac
 exit 0
 `)
 	fakeJira(t, `echo "$*" >> '`+jiraLog+`'
 case "$*" in
   "me") echo "dev@example.com" ;;
-  "issue list -a dev@example.com -s~Done --plain --no-headers --columns key,summary,status")
+  `+mineArgs+`|`+sprintArgs+`)
     printf 'EC-7\tShipped thing\tIn Review\nEC-8\tTwo parts\tIn Progress\nEC-5\tNothing yet\tTo Do\n' ;;
-  "issue move EC-7 Done") ;;
+  "issue view "*" --raw") cat '`+issue+`' ;;
+  "issue move EC-7 "*) ;;
+  "issue move EC-8 "*) echo "transition not allowed" >&2; exit 1 ;;
   *) echo "unexpected: $*" >&2; exit 2 ;;
 esac
 `)
@@ -511,9 +547,24 @@ esac
 
 func (r *rpc) action(t *testing.T, id int, action string) {
 	t.Helper()
-	r.send(`{"jsonrpc":"2.0","id":` + strconv.Itoa(id) + `,"method":"panel/action","params":{"panel":"waycarbon","action_id":"` + action + `","values":{}}}`)
+	r.actionWith(t, id, action, "{}")
+}
+
+// actionWith sends a panel action with the form values, a JSON object.
+func (r *rpc) actionWith(t *testing.T, id int, action, values string) {
+	t.Helper()
+	r.send(`{"jsonrpc":"2.0","id":` + strconv.Itoa(id) + `,"method":"panel/action","params":{"panel":"waycarbon","action_id":"` + action + `","values":` + values + `}}`)
 	r.reply(t, float64(id))
 }
+
+// tree waits for a render whose tree satisfies ok, and returns the tree.
+func (r *rpc) tree(t *testing.T, ok func(map[string]any) bool) map[string]any {
+	t.Helper()
+	return render(t, r.until(t, func(m map[string]any) bool { return m["method"] == "panel/render" && ok(render(t, m)) }))
+}
+
+// refreshes counts the GitHub refreshes in a gh log: only the refresh's call has mine=.
+func refreshes(log string) int { return strings.Count(string(mustRead(log)), " mine=") }
 
 func waitFor(t *testing.T, what string, ok func() bool) {
 	t.Helper()
@@ -531,15 +582,31 @@ func TestPRClickOpensSession(t *testing.T) {
 	r := start(t)
 	r.initializeRaw(t)
 	root := r.cards(t)
-	for _, id := range []string{"pr:" + prURL + "3", "review:" + prURL + "20", "card:EC-7", "card:EC-8", "card:EC-5"} {
+	for _, id := range []string{"sel:work:pr:" + prURL + "3", "sel:work:pr:" + prURL + "20", "sel:work:card:EC-7",
+		"sel:prs:pr:" + prURL + "20", "sel:jira:card:EC-7", "sel:jira:card:EC-8", "sel:jira:card:EC-5"} {
 		if findID(root, id) == nil {
 			t.Errorf("no card %s", id)
 		}
 	}
-	if find(findID(root, "pr:"+prURL+"3"), "link") == nil {
-		t.Error("a PR card has an Open on GitHub link")
+	// The first item, PR 1, is selected: its detail offers what it needs and links to GitHub.
+	work := findID(root, "work")
+	if b := findID(work, "act:work:pr:"+prURL+"1"); b == nil || b["label"] != "Resolve conflict" {
+		t.Errorf("PR 1 detail action: %v", b)
 	}
-	r.action(t, 7, "pr:"+prURL+"3")
+	if !strings.Contains(jsonString(work), `"Open on GitHub","type":"link","url":"`+prURL+`1"`) {
+		t.Error("the PR detail links to GitHub")
+	}
+	r.action(t, 6, "sel:work:pr:"+prURL+"3")
+	root = r.tree(t, func(root map[string]any) bool { return findID(root, "act:work:pr:"+prURL+"3") != nil })
+	if b := findID(root, "act:work:pr:"+prURL+"3"); b["label"] != "Fix review" {
+		t.Errorf("PR 3 detail action: %v", b)
+	}
+	// The detail loads: size, failed checks first, reviews and open threads.
+	root = r.tree(t, func(root map[string]any) bool { return findID(root, "work:pr-checks") != nil })
+	if !strings.Contains(jsonString(findID(root, "work")), `"value":"+120 −8 · 5 files"`) || findID(root, "work:pr-threads") == nil {
+		t.Errorf("PR detail: %v", textOf(findID(root, "work")))
+	}
+	r.action(t, 7, "act:work:pr:"+prURL+"3")
 	open := r.until(t, func(m map[string]any) bool { return m["method"] == "sessions/open" })
 	p := open["params"].(map[string]any)
 	if p["prompt"] != "/waycarbon:fix-review "+prURL+"3" || p["send"] != false {
@@ -563,20 +630,21 @@ func TestMoveToDone(t *testing.T) {
 	ghLog, jiraLog := workFakes(t)
 	r := start(t)
 	r.initializeRaw(t)
-	root := r.cards(t)
-	// The card shows on the Work and Jira tabs; button ids are unique across the tree.
-	for _, id := range []string{"inbox:done:EC-7", "done:EC-7"} {
-		btn := findID(root, id)
-		if btn == nil || btn["type"] != "button" {
-			t.Fatalf("no Move to Done button %s: %v", id, btn)
-		}
-		if c, _ := btn["confirm"].(map[string]any); c["title"] != "Move EC-7 to Done?" {
-			t.Errorf("confirm: %v", btn["confirm"])
-		}
+	r.cards(t)
+	r.action(t, 6, "sel:work:card:EC-7")
+	root := r.tree(t, func(root map[string]any) bool { return findID(root, "act:work:done:EC-7") != nil })
+	if c, _ := findID(root, "act:work:done:EC-7")["confirm"].(map[string]any); c["title"] != "Move EC-7 to Done?" {
+		t.Errorf("confirm: %v", c)
 	}
-	r.action(t, 7, "inbox:done:EC-7")
+	if b := findID(root, "act:work:card:EC-7"); b == nil || b["label"] != "Deploy" {
+		t.Errorf("want Deploy: %v", b)
+	}
+	if !strings.Contains(jsonString(findID(root, "work")), "PR merged") {
+		t.Error("the detail says the PR merged")
+	}
+	r.action(t, 7, "act:work:done:EC-7")
 	waitFor(t, "jira issue move", func() bool { return strings.Contains(string(mustRead(jiraLog)), "issue move EC-7 Done\n") })
-	waitFor(t, "a refresh after the move", func() bool { return strings.Count(string(mustRead(ghLog)), "api graphql") >= 2 })
+	waitFor(t, "a refresh after the move", func() bool { return refreshes(ghLog) >= 2 })
 }
 
 func TestGhMissing(t *testing.T) {
@@ -592,7 +660,7 @@ func TestGhMissing(t *testing.T) {
 	if l := find(root, "log"); l == nil || l["text"] != "brew install gh" {
 		t.Errorf("want a log with brew install gh, got %v", l)
 	}
-	if findID(root, "card:EC-1") == nil {
+	if findID(root, "sel:jira:card:EC-1") == nil {
 		t.Error("the jira cards must still render")
 	}
 }
@@ -630,7 +698,7 @@ exit 1
 		t.Error("want a spinner and Cancel")
 	}
 	r.action(t, 8, "gh:signin") // a second click while it runs does nothing
-	waitFor(t, "the refresh after sign-in", func() bool { return strings.Count(string(mustRead(log)), "api graphql") >= 2 })
+	waitFor(t, "the refresh after sign-in", func() bool { return refreshes(log) >= 2 })
 	if n := strings.Count(string(mustRead(log)), "auth login"); n != 1 {
 		t.Errorf("auth login ran %d times, want 1", n)
 	}
@@ -673,10 +741,11 @@ func TestMoveToDoneDuringRefresh(t *testing.T) {
 	t.Cleanup(func() { os.WriteFile(gate, nil, 0o644) })
 	data, _ := filepath.Abs("testdata/graphql.json")
 	fakeCLI(t, "gh", `echo "$*" >> '`+ghLog+`'
-if [ "$1 $2" = "api graphql" ]; then
-  [ "$(grep -c 'api graphql' '`+ghLog+`')" = 2 ] && while [ ! -f '`+gate+`' ]; do sleep 0.02; done
-  cat '`+data+`'
-fi
+case "$*" in
+  *" mine="*)
+    [ "$(grep -c ' mine=' '`+ghLog+`')" = 2 ] && while [ ! -f '`+gate+`' ]; do sleep 0.02; done
+    cat '`+data+`' ;;
+esac
 exit 0
 `)
 	fakeJira(t, `case "$*" in
@@ -691,18 +760,18 @@ esac
 	r.initializeRaw(t)
 	r.cards(t)                     // first refresh done: EC-7 shows Move to Done
 	r.action(t, 7, "work:refresh") // second graphql call: blocks on the gate
-	waitFor(t, "the slow refresh", func() bool { return strings.Count(string(mustRead(ghLog)), "api graphql") == 2 })
-	r.action(t, 8, "done:EC-7")
+	waitFor(t, "the slow refresh", func() bool { return refreshes(ghLog) == 2 })
+	r.action(t, 8, "act:work:done:EC-7")
 	waitFor(t, "jira move", func() bool { return fileExists(moved) })
 	time.Sleep(200 * time.Millisecond)
 	os.WriteFile(gate, nil, 0o644)
-	waitFor(t, "the rerun", func() bool { return strings.Count(string(mustRead(ghLog)), "api graphql") == 3 })
-	r.until(t, func(m map[string]any) bool {
-		return m["method"] == "panel/render" && findID(render(t, m), "card:EC-7") == nil && find(render(t, m), "tabs") != nil &&
-			!strings.Contains(textOf(render(t, m)), "Loading…") && findID(render(t, m), "work:refresh") != nil
+	waitFor(t, "the rerun", func() bool { return refreshes(ghLog) == 3 })
+	r.tree(t, func(root map[string]any) bool {
+		return findID(root, "sel:work:card:EC-7") == nil && findID(root, "sel:jira:card:EC-7") == nil &&
+			!strings.Contains(textOf(root), "Loading…") && findID(root, "work:refresh") != nil
 	})
 	time.Sleep(300 * time.Millisecond)
-	if n := strings.Count(string(mustRead(ghLog)), "api graphql"); n != 3 {
+	if n := refreshes(ghLog); n != 3 {
 		t.Errorf("%d refreshes, want 3 (start, manual, one rerun)", n)
 	}
 }
@@ -733,8 +802,14 @@ func TestPanelIdsAreUnique(t *testing.T) {
 			}
 		}
 	}
-	walk(r.cards(t))
-	for _, id := range []string{"work", "jira", "prs", "work:refresh", "jira:refresh", "prs:refresh", "prs:mine:EC-8", "prs:queue:none"} {
+	r.cards(t)
+	// Wait for both details, the PR's and the card's, so their sections are checked too.
+	walk(r.tree(t, func(root map[string]any) bool {
+		return findID(root, "work:pr-checks") != nil && findID(root, "jira:subtasks") != nil
+	}))
+	for _, id := range []string{"work", "jira", "prs", "work:refresh", "jira:refresh", "prs:refresh", "work:needs", "work:requested",
+		"work:update", "work:waiting", "prs:mine", "prs:req", "prs:queue", "prs:q", "prs:search", "jira:q", "jira:search",
+		"jira:scope:sprint", "jira:scope:mine", "act:work:pr:" + prURL + "1", "act:jira:solve:EC-5", "work:pr-checks", "jira:subtasks"} {
 		if !seen[id] {
 			t.Errorf("no %q in the tree", id)
 		}
@@ -746,7 +821,7 @@ func TestJiraSearch(t *testing.T) {
 	fakeJira(t, `
 case "$*" in
   "me") echo "dev@example.com" ;;
-  "issue list -a dev@example.com -s~Done --plain --no-headers --columns key,summary,status")
+  `+mineArgs+`|`+sprintArgs+`)
     printf 'EC-1\tFix the login timeout\tIn Progress\n' ;;
   "issue list --plain --no-headers --columns key,summary,status --paginate 50 -- -export button")
     printf 'EC-9\tAdd the export button\t\t\tDone\n' ;;
@@ -760,33 +835,32 @@ esac
 	r := start(t)
 	r.initialize(t)
 	r.cards(t)
+	// A search is done when the field holds it and nothing spins: the results and the first card's detail.
 	search := func(id int, q string) map[string]any {
 		t.Helper()
-		r.send(`{"jsonrpc":"2.0","id":` + strconv.Itoa(id) + `,"method":"panel/action","params":{"panel":"waycarbon","action_id":"jira:search","values":{"jira:q":"` + q + `"}}}`)
-		r.reply(t, float64(id))
-		m := r.until(t, func(m map[string]any) bool {
-			return m["method"] == "panel/render" && find(render(t, m), "spinner") == nil
+		r.actionWith(t, id, "jira:search", `{"jira:q":"`+q+`"}`)
+		return r.tree(t, func(root map[string]any) bool {
+			return findID(root, "jira:q")["value"] == strings.TrimSpace(q) && find(findID(root, "jira"), "spinner") == nil
 		})
-		return render(t, m)
 	}
 
 	root := search(10, "  -export button ")
-	if c := findID(root, "card:EC-9"); c == nil || c["badge"] != "Done" {
+	if c := findID(root, "sel:jira:card:EC-9"); c == nil || c["badge"] != "Done" || c["selected"] != true {
 		t.Fatalf("want EC-9 found by text: %v", c)
 	}
-	if findID(root, "jira:In Progress") != nil {
-		t.Error("results replace the statuses")
+	if strings.Contains(textOf(root), "In Progress · 1") {
+		t.Error("results replace the board")
 	}
-	if q := findID(root, "jira:q"); q["value"] != "-export button" {
-		t.Errorf("the field keeps the query: %v", q)
+	if findID(root, "act:jira:solve:EC-9") == nil {
+		t.Error("the found card's detail offers Solve card")
 	}
-	r.action(t, 11, "card:EC-9")
+	r.action(t, 11, "act:jira:solve:EC-9")
 	open := r.until(t, func(m map[string]any) bool { return m["method"] == "sessions/open" })
 	if p := open["params"].(map[string]any); p["prompt"] != "/waycarbon:solve-card EC-9" {
 		t.Errorf("found card click: %v", p)
 	}
 
-	if findID(search(12, "ec-1"), "card:EC-1") == nil {
+	if findID(search(12, "ec-1"), "sel:jira:card:EC-1") == nil {
 		t.Error("want EC-1 found by key")
 	}
 	if !strings.Contains(textOf(search(13, "nothing")), "No card matches nothing.") {
@@ -794,12 +868,9 @@ esac
 	}
 
 	r.action(t, 14, "jira:clear")
-	m := r.until(t, func(m map[string]any) bool {
-		return m["method"] == "panel/render" && findID(render(t, m), "jira:clear") == nil
-	})
-	root = render(t, m)
-	if findID(root, "jira:In Progress") == nil || findID(root, "jira:q")["value"] != "" {
-		t.Errorf("Clear brings back the statuses and empties the field: %v", findID(root, "jira:q"))
+	root = r.tree(t, func(root map[string]any) bool { return findID(root, "jira:clear") == nil })
+	if !strings.Contains(textOf(root), "In Progress · 1") || findID(root, "jira:q")["value"] != "" {
+		t.Errorf("Clear brings back the board and empties the field: %v", findID(root, "jira:q"))
 	}
 }
 
@@ -822,7 +893,7 @@ exit 0
 	if early {
 		t.Error("the first load must not notify")
 	}
-	if c := findID(findID(render(t, m), "needs"), "pr:https://github.com/waycarbon/front/pull/12"); c == nil || !strings.Contains(jsonString(c), "Approved") {
+	if c := findID(findID(render(t, m), "work:needs"), "sel:work:pr:https://github.com/waycarbon/front/pull/12"); c == nil || !strings.Contains(jsonString(c), "Approved") {
 		t.Fatalf("an approved PR with CI running needs you: %v", c)
 	}
 
@@ -831,5 +902,110 @@ exit 0
 	m = r.until(t, func(m map[string]any) bool { return m["method"] == "notify" })
 	if p := m["params"].(map[string]any); p["title"] != "@felipe approved #12" {
 		t.Errorf("notify: %v", p)
+	}
+}
+
+// Move to sends the status to jira and refreshes; a status off the board never reaches jira, and a
+// failed move shows in the card's detail.
+func TestMoveTo(t *testing.T) {
+	ghLog, jiraLog := workFakes(t)
+	r := start(t)
+	r.initializeRaw(t)
+	root := r.cards(t)
+	menu := find(findID(root, "jira"), "menu")
+	if menu == nil || menu["label"] != "Move to" {
+		t.Fatalf("want a Move to menu: %v", menu)
+	}
+	// EC-5 is selected and To Do: the menu offers the other nine statuses, each confirmed.
+	items := menu["items"].([]any)
+	first := items[0].(map[string]any)
+	if len(items) != 9 || first["id"] != "move:EC-5:Tech Refinement" || first["confirm"] == nil || strings.Contains(jsonString(items), "To Do") {
+		t.Errorf("menu items: %v", items)
+	}
+	r.action(t, 6, "move:EC-7:Done")
+	r.action(t, 7, "move:EC-7 --x:Test")
+	r.action(t, 8, "move:EC-7:Code Review")
+	waitFor(t, "jira issue move", func() bool { return strings.Contains(string(mustRead(jiraLog)), "issue move EC-7 Code Review\n") })
+	waitFor(t, "a refresh after the move", func() bool { return refreshes(ghLog) >= 2 })
+	if n := strings.Count(string(mustRead(jiraLog)), "issue move"); n != 1 {
+		t.Errorf("%d moves, want 1: %s", n, mustRead(jiraLog))
+	}
+
+	r.action(t, 9, "sel:jira:card:EC-8")
+	r.action(t, 10, "move:EC-8:Test")
+	r.tree(t, func(root map[string]any) bool {
+		return strings.Contains(jsonString(findID(root, "jira")), "Could not move EC-8 to Test: transition not allowed")
+	})
+}
+
+// A PR search covers the org's PRs in any state; an open one offers a review, a merged one nothing.
+func TestPRSearch(t *testing.T) {
+	ghLog, _ := workFakes(t)
+	r := start(t)
+	r.initializeRaw(t)
+	r.cards(t)
+	r.actionWith(t, 6, "prs:search", `{"prs:q":" EC-1240 "}`)
+	root := r.tree(t, func(root map[string]any) bool {
+		return findID(root, "prs:clear") != nil && find(findID(root, "prs"), "spinner") == nil
+	})
+	if !strings.Contains(string(mustRead(ghLog)), "q=EC-1240 in:title is:pr org:waycarbon") {
+		t.Errorf("search argv: %s", mustRead(ghLog))
+	}
+	prs := findID(root, "prs")
+	if !strings.Contains(textOf(prs), "1 card, 3 PRs for EC-1240") || findID(prs, "prs:mine") != nil {
+		t.Errorf("results replace the sections: %v", textOf(prs))
+	}
+	front, proto := "https://github.com/waycarbon/waycarbon-front/pull/92", "https://github.com/waycarbon/proto-repository/pull/93"
+	if c := findID(prs, "sel:prs:pr:"+proto); c == nil || c["badge"] != "Merged" {
+		t.Errorf("merged result: %v", c)
+	}
+	// The card's group comes first and is selected: its PRs together, with no Review all.
+	if g := findID(prs, "sel:prs:group:search:EC-1240"); g == nil || g["selected"] != true || g["badge"] != "3 PRs" {
+		t.Errorf("group: %v", g)
+	}
+	if strings.Contains(jsonString(prs), "act:prs:reviewall") {
+		t.Error("a search group offers no Review all")
+	}
+
+	r.action(t, 7, "sel:prs:pr:"+proto)
+	root = r.tree(t, func(root map[string]any) bool { return findID(root, "sel:prs:pr:"+proto)["selected"] == true })
+	if strings.Contains(jsonString(findID(root, "prs")), `"act:prs:`) {
+		t.Error("a merged PR has no action")
+	}
+	r.action(t, 8, "sel:prs:pr:"+front)
+	r.tree(t, func(root map[string]any) bool { return findID(root, "act:prs:review:"+front) != nil })
+	r.action(t, 9, "act:prs:review:"+front)
+	open := r.until(t, func(m map[string]any) bool { return m["method"] == "sessions/open" })
+	if p := open["params"].(map[string]any); p["prompt"] != "/waycarbon:code-review "+front {
+		t.Errorf("review: %v", p)
+	}
+
+	r.action(t, 10, "prs:clear")
+	root = r.tree(t, func(root map[string]any) bool { return findID(root, "prs:clear") == nil })
+	if findID(root, "prs:mine") == nil || findID(root, "prs:q")["value"] != "" {
+		t.Error("Clear brings back the sections and empties the field")
+	}
+}
+
+// The Jira board shows the current sprint by default, all my cards on Todos os meus.
+func TestJiraScope(t *testing.T) {
+	fakeJira(t, `
+case "$*" in
+  "me") echo "dev@example.com" ;;
+  `+mineArgs+`) printf 'EC-1\tFix the login timeout\tTo Do\nEC-3\tOld one\tTest\n' ;;
+  `+sprintArgs+`) printf 'EC-1\tFix the login timeout\tTo Do\n' ;;
+  *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+`)
+	r := start(t)
+	r.initialize(t)
+	root := r.cards(t)
+	if findID(root, "sel:jira:card:EC-1") == nil || findID(root, "sel:jira:card:EC-3") != nil || findID(root, "jira:scope:sprint")["style"] != "primary" {
+		t.Errorf("sprint scope: %v", textOf(findID(root, "jira")))
+	}
+	r.action(t, 6, "jira:scope:mine")
+	root = r.tree(t, func(root map[string]any) bool { return findID(root, "sel:jira:card:EC-3") != nil })
+	if findID(root, "jira:scope:mine")["style"] != "primary" || findID(root, "jira:scope:sprint")["style"] != nil {
+		t.Error("Todos os meus is the active toggle")
 	}
 }

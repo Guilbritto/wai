@@ -15,7 +15,8 @@ use crate::workspace::tests::{fake_settings, open, wait_until};
 const FAKE_JIRA: &str = r#"#!/bin/sh
 case "$*" in
   "me") echo "dev@example.com" ;;
-  "issue list -a dev@example.com -s~Done --plain --no-headers --columns key,summary,status")
+  "issue list -a dev@example.com -s~Done --plain --no-headers --columns key,summary,status"|\
+  "issue list -a dev@example.com -s~Done -q sprint in openSprints() --plain --no-headers --columns key,summary,status")
     printf 'EC-101\tFix the login timeout\tIn Progress\n'
     printf 'EC-102\tAdd the export button\tTo Do\n' ;;
   *) echo "unexpected: $*" >&2; exit 2 ;;
@@ -83,8 +84,12 @@ fn build(tmp: &Path) -> Option<std::path::PathBuf> {
     Some(src)
 }
 
+/// The Jira tab is a board: clicking a card selects it, and its Solve card pre-fills a session,
+/// which brings the main area back in place of the wide panel.
 #[gpui_kit::test]
-fn my_cards_panel_renders_and_click_prefills(cx: &mut TestAppContext) {
+fn jira_board_selects_and_solve_prefills(cx: &mut TestAppContext) {
+    use crate::sidebar::SidebarTab;
+
     let tmp = tempfile::tempdir().unwrap();
     let Some(src) = build(tmp.path()) else { return };
     let config = tmp.path().join("config");
@@ -100,10 +105,14 @@ fn my_cards_panel_renders_and_click_prefills(cx: &mut TestAppContext) {
         w.start_extensions(cx);
     });
     let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
-    let panel = host.read_with(cx, |h, _| h.panels().first().map(|p| p.view.clone()));
-    let panel = panel.expect("a tab for the WayCarbon panel");
-    // Card titles with their render index: the element id of a card is its pre-order position.
-    let cards = |cx: &mut gpui_kit::VisualTestContext| {
+    let panel = host.read_with(cx, |h, _| {
+        h.panels().first().map(|p| (p.view.clone(), p.wide))
+    });
+    let (panel, wide) = panel.expect("a tab for the WayCarbon panel");
+    assert!(wide, "the WayCarbon panel takes the main area's place");
+    // The board's cards: render index (a card's element id is its pre-order position), key, title
+    // and whether it is selected; and whether a button is drawn.
+    let board = |cx: &mut gpui_kit::VisualTestContext| {
         let tree = panel.read_with(cx, |p, _| p.tree.clone());
         let mut cards = Vec::new();
         if let Some(Ok(tree)) = tree {
@@ -111,24 +120,56 @@ fn my_cards_panel_renders_and_click_prefills(cx: &mut TestAppContext) {
             tree.walk(&mut |node| {
                 n += 1;
                 if let Node::Card {
-                    title: Some(title), ..
+                    id: Some(id),
+                    title: Some(title),
+                    selected,
+                    ..
                 } = node
+                    && let Some(key) = id.strip_prefix("sel:jira:card:")
                 {
-                    cards.push((n, title.to_string()));
+                    cards.push((n, key.to_string(), title.to_string(), *selected));
                 }
             });
         }
         cards
     };
-    wait_until(cx, "the cards", |cx| !cards(cx).is_empty());
-    let titles: Vec<_> = cards(cx).into_iter().map(|(_, t)| t).collect();
-    assert_eq!(titles, ["Fix the login timeout", "Add the export button"]);
+    let button = |id: &str, cx: &mut gpui_kit::VisualTestContext| {
+        let tree = panel.read_with(cx, |p, _| p.tree.clone());
+        let mut found = false;
+        if let Some(Ok(tree)) = tree {
+            tree.walk(&mut |node| {
+                found |= matches!(node, Node::Button { id: b, .. } if b == id);
+            });
+        }
+        found
+    };
+    wait_until(cx, "the board", |cx| !board(cx).is_empty());
+    // To Do comes first; In Progress is not a column of the board, so it goes last. The first is selected.
+    let cards: Vec<_> = (board(cx).into_iter())
+        .map(|(_, k, t, s)| (k, t, s))
+        .collect();
+    assert_eq!(
+        cards,
+        [
+            ("EC-102".into(), "Add the export button".into(), true),
+            ("EC-101".into(), "Fix the login timeout".into(), false)
+        ]
+    );
 
     click(("tab-panel", 0usize), cx);
-    // The cards sit in the Jira tab; Work opens first.
+    assert!(workspace.read_with(cx, |w, cx| w.wide_shown(cx)));
+    // Work opens first.
     click("panel-tab:tab:jira", cx);
-    let (k, _) = cards(cx).remove(1);
+    let (k, ..) = board(cx).remove(1);
     click(("panel-card", k), cx);
+    wait_until(cx, "EC-101 selected", |cx| {
+        button("act:jira:solve:EC-101", cx) && board(cx)[1].3
+    });
+    assert!(
+        workspace.read_with(cx, |w, _| w.panes.iter().all(|p| p.session().is_none())),
+        "selecting a card opens nothing"
+    );
+    click("panel-button:act:jira:solve:EC-101", cx);
     // Beside the focused (empty) pane: an extension's session never takes it (R61).
     wait_until(cx, "a pre-filled session", |cx| {
         workspace.read_with(cx, |w, _| {
@@ -137,9 +178,13 @@ fn my_cards_panel_renders_and_click_prefills(cx: &mut TestAppContext) {
     });
     let session = workspace.read_with(cx, |w, _| w.panes[1].session().cloned().unwrap());
     let draft = session.read_with(cx, |s, cx| s.draft(cx));
-    assert_eq!(draft, "/waycarbon:solve-card EC-102");
+    assert_eq!(draft, "/waycarbon:solve-card EC-101");
     assert!(
         session.read_with(cx, |s, _| s.model.items.is_empty()),
         "not sent"
+    );
+    assert_eq!(
+        workspace.read_with(cx, |w, _| w.sidebar_tab),
+        SidebarTab::Sessions
     );
 }
