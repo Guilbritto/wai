@@ -70,7 +70,7 @@ mod net {
             max: 1024 * 1024,
             timeout: Duration::from_secs(10),
         };
-        get_into(url, &mut body, limits)?;
+        get_into(url, &[], &mut body, limits)?;
         Ok(String::from_utf8(body)?)
     }
 
