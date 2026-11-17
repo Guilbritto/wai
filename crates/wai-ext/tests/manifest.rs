@@ -250,6 +250,11 @@ fn panel_icon_and_location() {
     assert!(p.location.in_prompt());
     let p = panel("location=\"prompt-side\"\n").unwrap();
     assert_eq!(p.contributes.panels[0].location, PanelLocation::PromptSide);
+    assert_eq!(p.contributes.panels[0].frame, None);
+    let p = panel("location=\"prompt-side\"\nframe=false\n").unwrap();
+    assert_eq!(p.contributes.panels[0].frame, Some(false));
+    let framed = panel("location=\"prompt\"\nframe=false\n").unwrap_err();
+    assert!(framed.to_string().contains("frame"), "{framed}");
     assert!(matches!(
         panel("location=\"main\"\nwidth=150\n"),
         Err(ManifestError::Unknown(_))
@@ -460,6 +465,7 @@ fn svg_icon_paths() {
         location: Default::default(),
         width: None,
         wide: false,
+        frame: None,
     };
     assert_eq!(spec("icon.svg").svg_icon(), Some(Path::new("icon.svg")));
     assert_eq!(

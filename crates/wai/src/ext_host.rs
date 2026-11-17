@@ -91,6 +91,8 @@ pub struct Panel {
     pub width: Option<u16>,
     /// A sidebar panel shown in the main area's place (`Workspace::wide_shown`).
     pub wide: bool,
+    /// A `prompt-side` panel drawn in a box of its own.
+    pub frame: bool,
     pub view: Entity<ExtPanel>,
     /// Its clicks, sent to the extension as `panel/action`.
     _actions: Subscription,
@@ -432,6 +434,7 @@ impl ExtHost {
             location: spec.location,
             width: spec.width,
             wide: spec.wide,
+            frame: spec.frame.unwrap_or(true),
             view,
             _actions: actions,
         }

@@ -2252,6 +2252,7 @@ impl Workspace {
         let slot = |location, width: u16| {
             host.prompt_panel(location).map(|p| PromptSlot {
                 view: p.view.clone(),
+                frame: p.frame,
                 width: px(f32::from(
                     p.width
                         .unwrap_or(width)

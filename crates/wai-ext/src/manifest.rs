@@ -148,6 +148,9 @@ pub struct PanelSpec {
     /// A sidebar panel that takes the main area's place while it is shown.
     #[serde(default)]
     pub wide: bool,
+    /// Whether a `prompt-side` panel is drawn in a box of its own (API 1.7). Absent means yes.
+    #[serde(default)]
+    pub frame: Option<bool>,
 }
 
 impl PanelSpec {
@@ -466,6 +469,12 @@ pub fn parse_manifest(text: &str, _ext_dir: &Path) -> Result<Manifest, ManifestE
         if p.location.in_prompt() && c.panels[..i].iter().any(|o| o.location == p.location) {
             return Err(ManifestError::Unknown(format!(
                 "panel {:?}: one panel per prompt location",
+                p.id
+            )));
+        }
+        if p.frame.is_some() && p.location != PanelLocation::PromptSide {
+            return Err(ManifestError::Unknown(format!(
+                "panel {:?}: frame is for prompt-side panels only",
                 p.id
             )));
         }

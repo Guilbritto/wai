@@ -45,7 +45,7 @@ title = "Pull requests"
 | `name` | string | Shown in the extension list and the consent dialog |
 | `version` | string | Free form. wai shows it; it does not compare versions |
 | `description` | string, optional | Shown last in the consent dialog, cut to fit |
-| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.7)`. Set it to `"1.7"` when you use `events/emit` or an `events:<id>` permission, to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
+| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.7)`. Set it to `"1.7"` when you use `events/emit`, an `events:<id>` permission or a panel's `frame`, to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
 | `permissions` | array of strings | See [Permissions](#permissions). An unknown permission is refused |
 | `process.command` | string | See [Commands and paths](#commands-and-paths). Needs `process` |
 | `process.args` | array of strings, optional | Arguments, passed as given (no shell) |
@@ -55,7 +55,7 @@ title = "Pull requests"
 | `contributes.mcp_servers` | array of tables | `name`, `command`, optional `args` (array), optional `env` (table of strings). Needs `process` |
 | `contributes.claude_plugins` | array of strings | Claude Code plugin names to suggest |
 | `requires.claude_plugins` | array of tables | `name`, `marketplace` (`owner/repo` or an `https://` URL of letters, digits and `._~:/@%+=,-`). At most 5. API 1.5. Installed after consent, see [Installing and consent](#installing-and-consent) |
-| `contributes.panels` | array of tables | `id`, `title`, optional `icon`, optional `location`, optional `width` (prompt panels only), optional `wide` (sidebar panels, API 1.6). At most one `prompt` and one `prompt-side` panel. See [Panels](#panels). Needs `panels` |
+| `contributes.panels` | array of tables | `id`, `title`, optional `icon`, optional `location`, optional `width` (prompt panels only), optional `wide` (sidebar panels, API 1.6), optional `frame` (`prompt-side` panels, API 1.7). At most one `prompt` and one `prompt-side` panel. See [Panels](#panels). Needs `panels` |
 | `contributes.items` | array of tables | `id`, `bar` (`"top"` or `"bottom"`), `title`. At most 3. See [Bar items](#bar-items). Needs `bar` |
 | `contributes.themes` | array of strings | Accepted, but not used in this version |
 
@@ -236,7 +236,7 @@ A panel exists while your process runs, and its content is the last tree you ren
   - Closing the pane does not stop your extension, and what the user typed stays: the panel is the same when it opens again.
   - The pane closes when your process stops, fails, crashes or is disabled. Panes are not part of work areas and are not saved between runs.
 - **`prompt`** (API 1.6): inside the prompt box of the focused pane's session or draft, at its right, behind a divider. The box grows to the taller of the two.
-- **`prompt-side`** (API 1.6): beside that prompt box, at its right, in a box of its own.
+- **`prompt-side`** (API 1.6): beside that prompt box, at its right, in a box of its own. With `frame = false` (API 1.7) the box is not drawn, only your tree: use it when your tree's height changes, so the box does not grow and shrink with it.
   - Only the focused pane's prompt box shows them: when the user focuses another pane, they move there. `event/session_focused` tells you which session that is.
   - `width` is the slot's width in px, 80 to 320 (a value outside is clamped). The default is 160 for `prompt` and 200 for `prompt-side`.
   - They hide while the prompt box would be left narrower than 360 px: in a narrow pane, or a split. `prompt` gives way last.

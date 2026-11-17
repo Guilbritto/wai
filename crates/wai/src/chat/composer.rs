@@ -12,11 +12,12 @@ use super::input::Attachment;
 use crate::ext_panel::ExtPanel;
 use crate::{aurora, campo};
 
-/// An extension's prompt panel (API 1.6) and its width.
+/// An extension's prompt panel (API 1.6), its width, and whether a side one has a box (API 1.7).
 #[derive(Clone, PartialEq)]
 pub struct PromptSlot {
     pub view: Entity<ExtPanel>,
     pub width: Pixels,
+    pub frame: bool,
 }
 
 /// The prompt panels of `owner`, the focused pane's session or draft: `inside` its prompt box,
@@ -85,18 +86,19 @@ pub(super) fn prompt_row(
     // Registers the id so tests can find it.
     .test_support();
     let side = side.map(|side| {
-        let el = slot("prompt-side", side)
-            .rounded(px(20.))
-            .border_1()
-            .overflow_hidden();
-        match dark {
-            true => el
-                .bg(aurora::noite_2().alpha(0.78))
-                .border_color(aurora::borda_forte()),
-            false => el.bg(theme.background).border_color(theme.input),
-        }
-        // Registers the id so tests can find it.
-        .test_support()
+        let frame = side.frame;
+        slot("prompt-side", side)
+            .when(frame, |el| {
+                let el = el.rounded(px(20.)).border_1().overflow_hidden();
+                match dark {
+                    true => el
+                        .bg(aurora::noite_2().alpha(0.78))
+                        .border_color(aurora::borda_forte()),
+                    false => el.bg(theme.background).border_color(theme.input),
+                }
+            })
+            // Registers the id so tests can find it.
+            .test_support()
     });
     let measure = canvas(
         move |bounds, _, cx| measured(bounds.size.width, cx),
