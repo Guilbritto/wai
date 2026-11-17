@@ -230,14 +230,22 @@ fn pop_overshoots_then_settles() {
     assert!(b.look(t0 + ms(140)).pop > 1.);
     assert_eq!(b.look(t0 + ms(200)).pop, 1.);
 }
+
+#[test]
+fn one_big_step_ends_it() {
+    // A stalled app, or a test clock jump: one advance crosses typing, hold and leave.
+    let mut b = Bubble::new("abc".into(), false, t0);
+    assert_eq!(b.advance(t0 + ms(4_000), false), Some(Ended::Timeout));
+}
 ```
 
 - [ ] **Step 2: Run them to make sure they fail.**
   Run `cargo test -p wai ext_bubble`. Expected: FAIL to compile.
 
 - [ ] **Step 3: Implement.**
-  - **Pop.** Ease-out-back with `c1 = 1.70158`: `1 + (c1 + 1)(t − 1)³ + c1(t − 1)²`, where `t = elapsed / POP`, clamped to `0..=1`; it is exactly 1 at `t = 1`.
-  - **Hold time.** `held` accumulates `now − last` on each `advance` while `!paused` and the text is fully typed (typing ends at `shown + CHAR × chars`).
+  - **Pop.** Ease-out-back with `c1 = 1.70158`: `1 + (c1 + 1)(t − 1)³ + c1(t − 1)²`, where `t = elapsed / POP`, clamped to `0..=1`. Return exactly 0 at `t = 0` and exactly 1 at `t = 1` (the formula is off by float error at the ends).
+  - **Hold time.** `held` accumulates, on each `advance` while `!paused`, the part of `last..now` after typing ends (`shown + CHAR × chars`), not the whole interval.
+  - **Back-dating.** A leave starts at the exact instant the hold completed (`now − (held − hold)`), not at the tick that noticed it, so tick spacing adds no delay. That is what `times_out_after_typing_plus_hold_plus_leave` and `one_big_step_ends_it` pin.
   - **Timeout.** A non-sticky bubble whose `held ≥ hold(chars)` starts leaving with `Ended::Timeout`.
   - **Collapse.** A sticky bubble is `collapsed` once `held ≥ STICKY_AFTER`.
   - **Leave.** `leave = (now − leaving_at) / LEAVE`. `advance` returns the `Ended` the first time it reaches 1.
@@ -391,8 +399,8 @@ fn bubble_times_out_and_reports_it(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn bubble_click_reports_click(cx: &mut TestAppContext) {
-    // show, then click: simulate a click on the bubble's bounds the way the existing card-click test does; advance 200 ms
-    // → sent == [("say", {"bubble": "click"})]
+    // show; advance 300 ms; crate::extensions_view::tests::click(name("panel-bubble:say"), cx)
+    // (as icon_only_button_is_clickable does); advance 200 ms → sent == [("say", {"bubble": "click"})]
 }
 
 #[gpui_kit::test]
@@ -409,14 +417,14 @@ fn new_text_restarts_the_bubble(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn typing_dims_a_collapsed_bubble(cx: &mut TestAppContext) {
-    // show sticky; advance 7 s (collapsed, ticker stopped); set_global(PromptTyping(true)); run_until_parked; frame
-    // → the panel re-rendered: check through a render counter, or read the bubble's opacity via
-    //   panel.read(cx).bubbles["say"] together with PromptTyping. Assert the observer is installed
-    //   (panel.read(cx).typing.is_some()) and no action was sent.
+    // show sticky; advance 7 s (collapsed, ticker stopped: panel.read(cx).ticker.is_none());
+    // count notifications: cx.update(|_, cx| cx.observe(&panel, move |_, _| *n.borrow_mut() += 1).detach());
+    // set_global(PromptTyping(true)); run_until_parked → the count went up (the observer notified the panel),
+    // and no action was sent.
 }
 ```
 
-  The selector string must match how `name()` joins kind and id (`"panel-bubble:say"`, like `"panel-button:b"`). Copy the click simulation from the existing card or button click test in this module.
+  The selector string must match how `name()` joins kind and id (`"panel-bubble:say"`, like `"panel-button:b"`). The click helper is `crate::extensions_view::tests::click`.
 
 - [ ] **Step 2: Run them to make sure they fail.**
   Run `cargo test -p wai ext_panel::tests::bubble`. Expected: FAIL; the placeholder renders `Unsupported`.
@@ -452,6 +460,7 @@ git commit -m "feat: draw animated speech bubbles in extension panels"
 
 ```go
 type line struct {
+	ID         string // "say-<n>", set when the line goes on screen; the bubble's id
 	Kind, Text string
 	Prio       int  // 3 urgent, 2 news, 1 small talk
 	Sticky     bool
@@ -472,11 +481,12 @@ type speech struct {
 	queue   []line
 	nextAt  time.Time // no line before this
 	chatted time.Time // last chatter said
+	seq     int       // numbers the ids
 }
 
 func (sp *speech) say(l line, now time.Time, asleep bool) // enqueue under the rules
-func (sp *speech) next(now time.Time)                     // promotes the head of the queue when free and past nextAt
-func (sp *speech) done(now time.Time)                     // the bubble ended: cur = nil, nextAt = now + lineGap
+func (sp *speech) next(now time.Time)                     // promotes the head of the queue when free and past nextAt, with a new ID
+func (sp *speech) done(id string, now time.Time)          // the bubble id ended: cur = nil, nextAt = now + lineGap; another id is ignored
 func (sp *speech) unfocus()                               // drops a non-sticky cur
 func (sp *speech) drop(kind string)                       // drops cur and queued lines of a kind (needs_you answered)
 func (sp *speech) expire(now time.Time)                   // drops a non-sticky cur older than stuckAfter
@@ -486,17 +496,20 @@ func (sp *speech) talking(now time.Time) bool             // cur typing: now < c
 **Rules inside `say`:**
 - Drop the line when its text equals `cur`'s or a queued one.
 - Drop chatter when `asleep`, or when `now − chatted < chatterGap`. Set `chatted` when chatter is accepted.
-- At priority 3 with a non-sticky `cur` of a lower priority, replace `cur` at once (`curAt = now`).
+- At priority 3 with a non-sticky `cur` of a lower priority, replace `cur` at once (`curAt = now`, a new ID).
+
+**Why ids:** the host may report the old bubble's end just after the extension replaced it. With one fixed id, that late `done` would clear the new line, and an urgent `needs_you` would vanish. A new id per line makes a stale `done` harmless.
 - Otherwise insert the line after the last queued line of the same or higher priority.
 - When the queue goes over `maxQueue`, remove the lowest-priority, oldest line.
 
 - [ ] **Step 1: Write the failing tests** in `speech_test.go`. Use `t0 := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)` and helpers `n(kind, prio)` and `chat(kind)`:
-  - `TestOneLineAtATimeWithGap`: say A and B; `next` gives `cur` A. After `done(t)`, `next(t+100ms)` leaves `cur` nil, and `next(t+250ms)` gives B.
+  - `TestOneLineAtATimeWithGap`: say A and B; `next` gives `cur` A. After `done(cur.ID, t)`, `next(t+100ms)` leaves `cur` nil, and `next(t+250ms)` gives B.
   - `TestUrgentJumpsAndReplaces`: with `cur` a prio-1 line, `say(needs_you prio 3)` makes `cur` the needs_you line. With `cur` sticky, it queues first instead.
   - `TestDedupe`: say "Nham!" twice makes the queue + cur hold 1 line.
   - `TestQueueCapDropsLowest`: say three prio-2 lines and one prio-1 line while `cur` is busy. The queue keeps the three prio-2 lines; then a fourth prio-2 line drops the oldest prio-2.
   - `TestChatterLimitedAndQuietAsleep`: two chatter lines 1 min apart give 1 accepted, and a third at 16 min is accepted. With `asleep` true, chatter is dropped and a prio-2 line is kept.
   - `TestUnfocusKeepsSticky`: `unfocus` drops a normal `cur` and keeps a sticky one.
+  - `TestStaleDoneIgnored`: with `cur` replaced by a needs_you line, `done(<the old ID>, now)` keeps the needs_you line; each promoted line has a different ID.
   - `TestStuckLineIsDropped`: `expire(curAt + 31s)` drops a non-sticky `cur`, but not a sticky one.
   - `TestTalking`: a 10-character line talks until `curAt + 500ms`.
 
@@ -544,31 +557,30 @@ func (s *server) pick(kind string) string
 
 // say queues kind's line with its priority, stickiness and chatter flag from kinds.
 func (s *server) say(kind string)
-
-const bubbleID = "say"
 ```
 
 **Wiring:**
-- `event/session_state`: entering `needs_you` calls `say("needs_you")`; the focused session entering `error` calls `say("error")`. When no session is in `needs_you` any more, call `talk.drop("needs_you")`.
+- `event/session_state`: entering `needs_you` calls `say("needs_you")`; the focused session entering `error` calls `say("error")`. Entering means the session's previous state was different.
 - `event/turn_ended`, in its existing switch: levelUp says `level_up`, egg says `egg`, and a normal end says `turn_done`.
 - `act`: `pet` says `pet`; `feed` says `feed` or `full`; `hatch` says `hatch`.
 - `gotPRs`: fix says `pr_fix`; approved says `pr_approved`.
 - `event/session_focused`: call `talk.unfocus()`.
-- `panel/action` whose `action_id == bubbleID` and whose `values` has `bubble`: call `talk.done(now)`, then render. It is not passed to `act`.
+- `panel/action` whose `action_id` starts with `say-` and whose `values` has `bubble`: call `talk.done(action_id, now)`, then render. It is not passed to `act`.
 - `render`, before building the tree:
+  - when no session is in `needs_you` (this also covers `sessions/list` answers), call `talk.drop("needs_you")`;
   - call `talk.expire(now)` and `talk.next(now)`;
   - compute `hungry = Hunger(now) >= 60`, `lonely = Affection(now) < 25` and `asleep = now − lastEvent > sleepGap`. Use these thresholds, not the mood word, because `alert` and `working` mask it;
   - turning `hungry` says `hungry`, turning `lonely` says `lonely`, and `asleep` going false says `wake`;
   - store the three values. The `asleep` argument to `say` is `asleep`.
-- `promptTree`: when `talk.cur != nil`, the column's first child is `{"type": "bubble", "id": "say", "text": cur.Text, "sticky": cur.Sticky, "tone": tone}`. The tone is `warning` for prio 3, `info` for prio 2, and none for prio 1. When `talk.talking(now)` and the mood is `idle`, draw with `"talk"`.
+- `promptTree`: when `talk.cur != nil`, the column's first child is `{"type": "bubble", "id": cur.ID, "text": cur.Text, "sticky": cur.Sticky, "tone": tone}`. The tone is `warning` for prio 3, `info` for prio 2, and none for prio 1. When `talk.talking(now)` and the mood is `idle`, draw with `"talk"`.
 - `moods["talk"] = {"o", "o", nil, 1}`, and `draw` uses mouth `"_"` on odd frames for `"talk"`.
 
-- [ ] **Step 1: Write the failing tests** in `main_test.go`, with the existing harness (`start(t, dir)`, `h.send`, `h.now`, `h.s.tick()`). Add a helper `bubbleOf(msgs) (text string, ok bool)` that finds a `bubble` node in the last prompt render.
+- [ ] **Step 1: Write the failing tests** in `main_test.go`, with the existing harness (`start(t, dir)`, `h.send`, `h.now`, `h.s.tick()`). Add a helper `bubbleOf(msgs) (id, text string, ok bool)` that finds a `bubble` node in the last prompt render.
   - `TestHatchSpeaks`: `act hatch` makes the bubble text contain the pet's name.
   - `TestNeedsYouIsStickyAndAnswered`: a `needs_you` state event gives a bubble with `sticky` true. A later `idle` event for the same session removes the bubble from the next render.
-  - `TestBubbleDoneFreesTheQueue`: send `pet`, then `feed`; the bubble shows the pet line. Then send `panel/action` with `{"action_id": "say", "values": {"bubble": "timeout"}}`, advance `h.now` by 300 ms, and tick (`h.s.tick()`); the bubble shows the feed line.
+  - `TestBubbleDoneFreesTheQueue`: send `pet`, then `feed`; the bubble shows the pet line. Then send `panel/action` with `{"action_id": <the bubble's id>, "values": {"bubble": "timeout"}}`, advance `h.now` by 300 ms, and tick (`h.s.tick()`); the bubble shows the feed line.
   - `TestFocusDropsNormalLine`: after `pet`, a `session_focused` event to another session leaves no bubble.
-  - `TestMouthTalks`: right after `pet` in an idle mood, two consecutive frames draw different mouths.
+  - `TestMouthTalks`: focus a session (frames only advance then), hatch, and move `h.now` 5 s on, past the hatch flash, so the mood is `idle`. Then call `h.s.say("pet")` directly; going through `act` would flash `happy`. Two consecutive `h.s.tick()` renders draw different mouths. Click lines usually flash a mood, so the mouth talks mostly for lines said while idle; that is the spec's rule.
   - The existing `TestProtocol` and `TestPREvents` still pass with the updated `promptOf`.
 
 - [ ] **Step 2: Run them to make sure they fail.**
@@ -594,7 +606,7 @@ git commit -m "chore: make the bichinho say fixed lines in a speech bubble"
 - Create: `extensions/wai-bichinho/agent.go`, with `agent_test.go`.
 - Modify: `extensions/wai-bichinho/pet.go`. `State` gains the pools and the diary.
 - Modify: `extensions/wai-bichinho/main.go`:
-  - `server` gains `run runner`, `gen chan pools`, `genBusy bool` and `genFailed time.Time`;
+  - `server` gains `claude string` (the CLI path), `run runner`, `gen chan pools`, `genBusy bool` and `genFailed time.Time`;
   - `serve` selects on `s.gen`;
   - `main` sets `run`;
   - the `note(...)` calls go at the events.
@@ -701,8 +713,10 @@ The goroutine:
 - [ ] **Step 2: Run them to make sure they fail.**
   Run `go test ./...`. Expected: FAIL (undefined).
 
-- [ ] **Step 3: Implement** `agent.go`, the `State` fields, the `serve` select on `s.gen`, `main`'s `s.run = claudeRunner(bin, dataDir)` (set in `initialize`, where the data dir is known, and only when `findClaude() != ""`), and the `note` calls.
-  Tests never set `run` unless they stub it, so no test spawns `claude`.
+- [ ] **Step 3: Implement** `agent.go`, the `State` fields, the `serve` select on `s.gen`, and the `note` calls. Wire the runner this way:
+  - `main()` sets `s.claude = findClaude()` before `serve`.
+  - `initialize`, once the data dir is known, sets `s.run = claudeRunner(s.claude, dir)` only when `s.claude != ""`.
+  - Tests build the server with `newServer` and never set `claude`, so `initialize` leaves `run` nil and no test spawns `claude`. Tests that need a runner stub `s.run` after `start`.
 
 - [ ] **Step 4: Run the tests.**
   Run `go test ./... && gofmt -l . && go vet ./...`. Expected: PASS, and clean.
