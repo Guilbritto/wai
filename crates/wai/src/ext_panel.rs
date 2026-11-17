@@ -333,6 +333,7 @@ impl ExtPanel {
         &mut self,
         children: &[Node],
         width: Option<f32>,
+        frame: Option<(usize, Option<Div>)>,
         split: Option<bool>,
         at: At,
         n: &mut usize,
@@ -372,12 +373,27 @@ impl ExtPanel {
         let element = match (column, split) {
             // In a row, a column takes the width left: a list has none of its own.
             (true, _) => (v_flex().gap_2())
+                .when(frame.is_some(), |el| {
+                    el.p_3()
+                        .rounded(px(12.))
+                        .border_1()
+                        .border_color(campo::line(cx))
+                        .bg(campo::glass(cx))
+                        .when(at.row, |el| el.min_h_full())
+                })
                 .when(fills, |el| el.flex_1().min_h_0())
                 .when(at.row, |el| el.flex_1())
                 .when_some(width, |el, w| el.w(px(w)).flex_none()),
             (false, true) => h_flex().gap_2().flex_1().min_h_0().items_stretch(),
             (false, false) => h_flex().gap_2().flex_wrap(),
         };
+        if let Some((k, head)) = frame {
+            let el = element
+                .id(("panel-frame", k))
+                .children(head)
+                .children(elements);
+            return (el.test_support().into_any_element(), fills);
+        }
         (element.children(elements).into_any_element(), fills)
     }
 
@@ -400,12 +416,85 @@ impl ExtPanel {
         let k = *n;
         let element = match node {
             Node::Column {
-                children, width, ..
+                children,
+                collapsed: true,
+                title,
+                badge,
+                ..
             } => {
-                return self.flex(children, *width, None, at, n, window, cx);
+                *n += children.iter().map(size).sum::<usize>();
+                let mut strip = v_flex()
+                    .id(("panel-strip", k))
+                    .w(px(28.))
+                    .flex_none()
+                    .items_center()
+                    .py_2()
+                    .gap_2()
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_color(line)
+                    .bg(campo::glass(cx))
+                    .children(
+                        badge
+                            .as_ref()
+                            .map(|b| campo::badge(b.to_string(), Tone::Neutral, cx)),
+                    );
+                for c in title.as_deref().unwrap_or("").to_uppercase().chars() {
+                    strip = strip.child(if c == ' ' {
+                        div().h(px(6.))
+                    } else {
+                        div()
+                            .text_size(px(10.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(muted)
+                            .line_height(px(11.))
+                            .child(c.to_string())
+                    });
+                }
+                strip.test_support().into_any_element()
+            }
+            Node::Column {
+                children,
+                width,
+                framed,
+                title,
+                badge,
+                tone,
+                ..
+            } => {
+                if !*framed {
+                    return self.flex(children, *width, None, None, at, n, window, cx);
+                }
+                let accent = match tone {
+                    Tone::Neutral => violet,
+                    tone => tone_color(*tone, cx),
+                };
+                let head = title.as_ref().map(|t| {
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().w(px(3.)).h(px(12.)).rounded_full().bg(accent))
+                        .child(campo::label(t.to_string(), cx))
+                        .child(div().flex_1())
+                        .children(badge.as_ref().map(|b| {
+                            campo::badge(b.to_string(), Tone::Neutral, cx)
+                                .id(("panel-frame-badge", k))
+                                .test_support()
+                        }))
+                });
+                return self.flex(children, *width, Some((k, head)), None, at, n, window, cx);
             }
             Node::Row { children, fill } => {
-                return self.flex(children, None, Some(*fill && at.column), at, n, window, cx);
+                return self.flex(
+                    children,
+                    None,
+                    None,
+                    Some(*fill && at.column),
+                    at,
+                    n,
+                    window,
+                    cx,
+                );
             }
             Node::List {
                 items,
@@ -1770,6 +1859,74 @@ mod tests {
             !shown(("panel-fill", 0usize), cx),
             "below a row it is a plain row"
         );
+    }
+
+    /// A collapsed column is a 28 px strip and does not draw its children.
+    #[gpui_kit::test]
+    fn collapsed_column_is_a_narrow_strip(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        show(
+            &panel,
+            json!({"type": "row", "children": [
+                {"type": "column", "collapsed": true, "title": "Code Review Done Long Title",
+                 "badge": "0", "children": [{"type": "button", "id": "hidden", "label": "H"}]},
+                {"type": "column", "children": [{"type": "text", "text": "plain"}]},
+            ]}),
+            cx,
+        );
+        let strip = cx.update(|window, _| window.find(("panel-strip", 2usize)).bounds());
+        assert_eq!(strip.size.width, px(28.));
+        assert!(!shown(name("panel-button:hidden"), cx));
+    }
+
+    /// A framed column in a fill row stretches to its height, so its spacer pins what follows
+    /// to the bottom.
+    #[gpui_kit::test]
+    fn framed_column_pins_after_spacer_to_the_bottom(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        show(
+            &panel,
+            json!({"type": "column", "children": [{"type": "row", "fill": true, "children": [
+                {"type": "column", "width": 200, "children": [{"type": "text", "text": "a"}]},
+                {"type": "column", "framed": true, "children": [
+                    {"type": "text", "text": "top"},
+                    {"type": "spacer"},
+                    {"type": "button", "id": "f", "label": "F"},
+                ]},
+            ]}]}),
+            cx,
+        );
+        let frame = cx.update(|window, _| window.find(("panel-frame", 5usize)).bounds());
+        let button = cx.update(|window, _| window.find(name("panel-button:f")).bounds());
+        assert!(
+            frame.bottom() - button.bottom() < px(24.),
+            "{button:?} in {frame:?}"
+        );
+    }
+
+    /// A titled column draws its frame and the header's badge; a plain one draws neither.
+    #[gpui_kit::test]
+    fn titled_column_draws_its_header(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        show(
+            &panel,
+            json!({"type": "column", "title": "Test", "badge": "2", "tone": "success",
+                   "children": [{"type": "text", "text": "x"}]}),
+            cx,
+        );
+        assert!(shown(("panel-frame", 1usize), cx));
+        assert!(shown(("panel-frame-badge", 1usize), cx));
+    }
+
+    #[gpui_kit::test]
+    fn plain_column_is_not_framed(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        show(
+            &panel,
+            json!({"type": "column", "children": [{"type": "text", "text": "x"}]}),
+            cx,
+        );
+        assert!(!shown(("panel-frame", 1usize), cx));
     }
 
     /// A text's line breaks show as lines.
