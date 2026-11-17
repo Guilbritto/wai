@@ -23,10 +23,10 @@ use wai_ext::panel::clamp;
 use wai_ext::{ExtId, ExtStore, Installed, Permission, RequiredPlugin, Source, Staged};
 use wai_settings::Settings;
 
-use crate::aurora;
 use crate::claude_plugins::{self, INSTALL_TIMEOUT};
 use crate::ext_host::{ExtHost, ExtStatus};
 use crate::marketplace::{self, Entry, Listings};
+use crate::{aurora, campo};
 
 /// v1 has no sandbox, and the consent dialog says so in these words.
 pub const LIMITATION: &str = "wai cannot restrict files or network access in this version; only install extensions you trust.";
@@ -680,7 +680,11 @@ impl Render for ExtensionsView {
                                 cx.listener(|this, _, window, cx| this.pick_folder(window, cx)),
                             ),
                     )
-                    .child(div().flex_1().child(Input::new(&self.url).small()))
+                    .child(div().flex_1().child(campo::field(
+                        Input::new(&self.url).small(),
+                        false,
+                        cx,
+                    )))
                     .child(
                         Button::new("ext-install-git")
                             .small()

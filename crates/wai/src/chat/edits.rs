@@ -33,8 +33,8 @@ use wai_agent::{FileDiff, Location};
 use super::model::{ChatItem, EditedFile, ToolItem, TurnState};
 use super::permission::OnOpen;
 use super::view::{ChatEvent, ChatSession};
-use crate::editor;
 use crate::sidebar::canonical;
+use crate::{campo, editor};
 
 /// Diffs stop rendering here; "Open file to see all" follows.
 pub const MAX_DIFF_LINES: usize = 2000;
@@ -493,20 +493,24 @@ impl ChatSession {
             ),
         };
         let this = cx.entity().downgrade();
-        window.open_dialog(cx, move |dialog, _, _| {
+        // Revert takes the focus once, when the dialog opens.
+        let (focus, focused) = (cx.focus_handle(), std::cell::Cell::new(false));
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if !focused.replace(true) {
+                focus.focus(window, cx);
+            }
             let (this, undo) = (this.clone(), undo.clone());
             let body = div().debug_selector(move || says.into()).child(body);
             dialog.title(title.clone()).child(body).footer(
                 DialogFooter::new()
-                    .child(
+                    .child(campo::button(
                         Button::new("cancel")
                             .label("Cancel")
                             .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
+                    ))
                     .child(
-                        Button::new("revert-confirm")
-                            .danger()
-                            .label("Revert")
+                        campo::danger(Button::new("revert-confirm").label("Revert"), cx)
+                            .track_focus(&focus)
                             .on_click(move |_, window, cx| {
                                 window.close_dialog(cx);
                                 this.update(cx, |this, cx| this.revert_file(ix, file, &undo, cx))

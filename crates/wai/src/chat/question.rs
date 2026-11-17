@@ -9,12 +9,13 @@ use gpui_kit::component::input::{Input, InputEvent, InputState, NumberInput};
 use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::{Map, Value};
 use wai_agent::{Choice, FieldKind, QuestionAnswer, QuestionField, QuestionRequest};
 
 use super::view::ChatSession;
-use crate::aurora;
+use crate::{aurora, campo};
 
 /// What the user entered so far in an open question's form, per field.
 pub struct QuestionForm {
@@ -234,11 +235,24 @@ fn render_field(
     };
     let control = match (state, &field.kind) {
         (FieldState::Choice(selected), FieldKind::SingleChoice(choices)) => {
+            let (line, glass, violet) = (campo::line(cx), campo::glass(cx), campo::violet(cx));
+            let (chosen_bg, chosen_border) = (violet.opacity(0.16), violet.opacity(0.45));
             RadioGroup::vertical(field_id(field))
-                .children(choices.iter().map(|c| {
+                .children(choices.iter().enumerate().map(|(ix, c)| {
+                    let on = *selected == Some(ix);
                     Radio::new(c.value.clone())
                         .label(c.label.clone())
                         .children(option_description(c, muted))
+                        // With a description, the option is a loose row: all of it clicks.
+                        .when(c.description.is_some(), |r| {
+                            r.w_full()
+                                .p_2()
+                                .rounded(px(9.))
+                                .border_1()
+                                .border_color(if on { chosen_border } else { line })
+                                .bg(if on { chosen_bg } else { glass })
+                                .hover(move |s| s.bg(chosen_bg).border_color(chosen_border))
+                        })
                 }))
                 .selected_index(*selected)
                 .on_click(edit(id, i, cx, |state, choice: &usize| {
@@ -268,7 +282,9 @@ fn render_field(
             }))
             .into_any_element(),
         (FieldState::Text(input), FieldKind::Number) => NumberInput::new(input).into_any_element(),
-        (FieldState::Text(input), _) => Input::new(input).into_any_element(),
+        (FieldState::Text(input), _) => {
+            campo::field(Input::new(input).small(), false, cx).into_any_element()
+        }
         // ponytail: a state always matches its field's kind (both come from `request.fields`).
         _ => div().into_any_element(),
     };

@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::Engine as _;
-use gpui_kit::component::attachment::{Attachment as Chip, AttachmentContent, AttachmentTitle};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{MoveDown, MoveUp, Position, Textarea};
 use gpui_kit::component::notification::Notification;
@@ -23,8 +22,8 @@ use super::model::{ChatItem, NoticeKind, TurnState, elapsed};
 use super::view::{ChatEvent, ChatSession};
 use crate::agents::AgentStatus;
 use crate::app::CancelTurn;
-use crate::aurora;
 use crate::workspace::folder_name;
+use crate::{aurora, campo};
 
 const IMAGE_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
@@ -37,6 +36,10 @@ pub struct Attachment {
 }
 
 impl Attachment {
+    pub(super) fn is_image(&self) -> bool {
+        matches!(self.block, PromptBlock::Image { .. })
+    }
+
     /// png/jpeg/gif/webp up to 5 MB become images; anything else a resource link.
     pub fn new(path: &Path) -> Self {
         let name = path.file_name().map_or_else(
@@ -472,15 +475,11 @@ impl ChatSession {
     ) -> impl IntoElement + use<> {
         let busy = matches!(self.model.state, TurnState::Working | TurnState::NeedsYou);
         let chips = self.attachments.iter().enumerate().map(|(ix, attachment)| {
-            Chip::new()
-                .id(("attachment", ix))
-                .content(
-                    AttachmentContent::new().title(AttachmentTitle::new(attachment.name.clone())),
-                )
-                .on_remove(cx.listener(move |this, _, _, cx| {
-                    this.attachments.remove(ix);
-                    cx.notify();
-                }))
+            let remove = cx.listener(move |this, _, _, cx| {
+                this.attachments.remove(ix);
+                cx.notify();
+            });
+            composer::attachment(ix, attachment, remove, cx)
         });
         let theme = cx.theme();
         let dark = theme.is_dark();
@@ -531,11 +530,15 @@ impl ChatSession {
         let field = match (dark, focused) {
             (true, true) => field
                 .bg(aurora::noite_2().alpha(0.78))
-                .border_color(aurora::boreal()),
+                .border_color(theme.ring)
+                .shadow(campo::halo(cx)),
             (true, false) => field
                 .bg(aurora::noite_2().alpha(0.78))
                 .border_color(aurora::borda_forte()),
-            (false, true) => field.bg(theme.background).border_color(theme.ring),
+            (false, true) => field
+                .bg(theme.background)
+                .border_color(theme.ring)
+                .shadow(campo::halo(cx)),
             (false, false) => field.bg(theme.background).border_color(theme.input),
         };
         // What the agent does, for how long, and how to stop it. The ring turns with the turn

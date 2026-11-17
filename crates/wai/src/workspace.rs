@@ -34,7 +34,6 @@ use crate::app::{
     ClosePane, FocusNextPane, NewSession, OpenFolder, OpenSettings, Quit, Save, ToggleTerminal,
     theme_mode,
 };
-use crate::aurora;
 use crate::chat::{
     ChatEvent, ChatSession, DraftView, PromptSlot, PromptSlots, TurnState, signed_out,
 };
@@ -55,6 +54,7 @@ use crate::terminal_view;
 use crate::terminals::TerminalTab;
 use crate::topbar::BRAND;
 use crate::update::{self, Outcome, UpdateStatus};
+use crate::{aurora, campo};
 
 pub(crate) const CHOOSE_AI: &str = "Choose an AI to start a session.";
 const SIDEBAR_WIDTH: f32 = 280.;
@@ -2551,7 +2551,12 @@ impl Workspace {
     ) {
         let this = cx.entity().downgrade();
         let then = std::rc::Rc::new(then);
-        window.open_dialog(cx, move |dialog, _, _| {
+        // Confirm takes the focus once, when the dialog opens.
+        let (focus, focused) = (cx.focus_handle(), std::cell::Cell::new(false));
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if !focused.replace(true) {
+                focus.focus(window, cx);
+            }
             let (this, then) = (this.clone(), then.clone());
             let heading = div()
                 .id("confirm-heading")
@@ -2561,17 +2566,19 @@ impl Workspace {
                 .child(title.clone());
             dialog.title(heading).child(body).footer(
                 DialogFooter::new()
-                    .child(
+                    .child(campo::button(
                         Button::new("cancel")
                             .label("Cancel")
                             .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
-                    .child(Button::new("confirm").danger().label(confirm).on_click(
-                        move |_, window, cx| {
-                            window.close_dialog(cx);
-                            this.update(cx, |this, cx| then(this, window, cx)).ok();
-                        },
-                    )),
+                    ))
+                    .child(
+                        campo::danger(Button::new("confirm").label(confirm), cx)
+                            .track_focus(&focus)
+                            .on_click(move |_, window, cx| {
+                                window.close_dialog(cx);
+                                this.update(cx, |this, cx| then(this, window, cx)).ok();
+                            }),
+                    ),
             )
         });
     }

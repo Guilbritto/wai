@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use gpui_kit::component::attachment::{Attachment as Chip, AttachmentContent, AttachmentTitle};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -17,6 +16,7 @@ use super::composer;
 use super::input::{Attachment, attach_button, paste_into, pick_paths, send_button};
 use super::view::ChatSession;
 use crate::aurora::{self, DISPLAY_FONT};
+use crate::campo;
 use crate::git::{self, Repo};
 use crate::workspace::{Dragged, DraggedSession, START_KEY};
 
@@ -885,15 +885,11 @@ impl Render for DraftView {
                     .child("Draft · starts when you send"),
             );
         let chips = self.attachments.iter().enumerate().map(|(ix, attachment)| {
-            Chip::new()
-                .id(("attachment", ix))
-                .content(
-                    AttachmentContent::new().title(AttachmentTitle::new(attachment.name.clone())),
-                )
-                .on_remove(cx.listener(move |this, _, _, cx| {
-                    this.attachments.remove(ix);
-                    cx.notify();
-                }))
+            let remove = cx.listener(move |this, _, _, cx| {
+                this.attachments.remove(ix);
+                cx.notify();
+            });
+            composer::attachment(ix, attachment, remove, cx)
         });
         let missing = (self.installed() == Some(false)).then(|| {
             let label = agent_label(&self.agent);
@@ -1032,11 +1028,15 @@ impl Render for DraftView {
         let prompt = match (dark, focused) {
             (true, true) => prompt
                 .bg(aurora::noite_2().alpha(0.78))
-                .border_color(aurora::boreal()),
+                .border_color(theme.ring)
+                .shadow(campo::halo(cx)),
             (true, false) => prompt
                 .bg(aurora::noite_2().alpha(0.78))
                 .border_color(aurora::borda_forte()),
-            (false, true) => prompt.bg(theme.background).border_color(theme.ring),
+            (false, true) => prompt
+                .bg(theme.background)
+                .border_color(theme.ring)
+                .shadow(campo::halo(cx)),
             (false, false) => prompt.bg(theme.background).border_color(theme.input),
         };
         let content = v_flex()

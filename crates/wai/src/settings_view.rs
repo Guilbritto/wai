@@ -21,6 +21,7 @@ use wai_settings::claude::{ClaudeData, Stamp};
 use wai_settings::{Change, Processing, SeenModel, Settings, ThemeChoice, agent_label, builtin};
 
 use crate::aurora::{self, DISPLAY_FONT};
+use crate::campo;
 use crate::extensions_view::ExtensionsView;
 use crate::path_field::{self, PathField};
 use crate::update::UpdateStatus;
@@ -264,16 +265,10 @@ pub(crate) fn card(rows: impl IntoIterator<Item = Div>, cx: &App) -> Div {
 }
 
 /// `body` under its small-capitals title; no title when `title` is empty.
-fn titled(title: &str, body: Div) -> Div {
+fn titled(title: &str, body: Div, cx: &App) -> Div {
     v_flex()
         .gap_2()
-        .children((!title.is_empty()).then(|| {
-            div()
-                .pl(px(2.))
-                .text_size(px(11.))
-                .text_color(aurora::nevoa_2())
-                .child(title.to_uppercase())
-        }))
+        .children((!title.is_empty()).then(|| campo::label(title.to_string(), cx).pl(px(2.))))
         .child(body)
 }
 
@@ -921,11 +916,13 @@ impl SettingsView {
     fn default_model(&self, row: &AgentRow, cx: &mut Context<Self>) -> Div {
         let selector = format!("settings-model-{}", row.id);
         let control = match (row.models.is_empty(), self.models.get(&row.id)) {
-            (false, Some(select)) => field(
+            (false, Some(select)) => field(campo::field(
                 Select::new(select)
                     .small()
                     .disabled(self.data.error.is_some()),
-            ),
+                false,
+                cx,
+            )),
             _ => field(
                 div()
                     .text_size(px(12.))
@@ -969,11 +966,13 @@ impl SettingsView {
                 .items_center()
                 .child(div().w(px(110.)).flex_none().child("Command"))
                 .child(
-                    div().flex_1().child(
+                    div().flex_1().child(campo::field(
                         Input::new(&self.command)
                             .small()
                             .disabled(self.data.error.is_some()),
-                    ),
+                        false,
+                        cx,
+                    )),
                 );
             lines.push(sub_fill(command, cx));
         }
@@ -1051,14 +1050,22 @@ impl SettingsView {
                 "Theme",
                 "Dark or light.",
                 "settings-theme",
-                field(Select::new(&self.theme).small().disabled(off)),
+                field(campo::field(
+                    Select::new(&self.theme).small().disabled(off),
+                    false,
+                    cx,
+                )),
                 cx,
             ),
             "Processing" => self.row(
                 "Processing",
                 "How the agent's steps show while it works.",
                 "settings-processing",
-                field(Select::new(&self.processing).small().disabled(off)),
+                field(campo::field(
+                    Select::new(&self.processing).small().disabled(off),
+                    false,
+                    cx,
+                )),
                 cx,
             ),
             "Shell" => self.row(
@@ -1094,7 +1101,11 @@ impl SettingsView {
                 "Repository",
                 "The GitHub repository wai's releases come from.",
                 "settings-updates-repo",
-                field(Input::new(&self.repo).small().disabled(off)),
+                field(campo::field(
+                    Input::new(&self.repo).small().disabled(off),
+                    false,
+                    cx,
+                )),
                 cx,
             ),
         }
@@ -1125,7 +1136,7 @@ impl Render for SettingsView {
             }
         }
         let cards: Vec<_> = (cards.into_iter())
-            .map(|(title, rows)| titled(title, card(rows, cx)))
+            .map(|(title, rows)| titled(title, card(rows, cx), cx))
             .collect();
         let ai = section == Section::Ai;
         let extensions = section == Section::Extensions;
@@ -1153,6 +1164,7 @@ impl Render for SettingsView {
                 v_flex()
                     .gap(px(10.))
                     .children(agents.iter().map(|a| self.agent_row(a, cx))),
+                cx,
             )
         });
         let project = ai
@@ -1178,7 +1190,7 @@ impl Render for SettingsView {
                     .label("Open")
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::OpenFile))),
             );
-            titled("Advanced", card([file], cx))
+            titled("Advanced", card([file], cx), cx)
         });
         let soon = if dark { aurora::ambar() } else { warning };
         let nav_fill = if dark {
@@ -1282,10 +1294,13 @@ impl Render for SettingsView {
                         .children(self.claude_actions(section, cx)),
                 )
                 .children(banner)
-                .children(
-                    (!extensions && !soon_page)
-                        .then(|| div().mt(px(14.)).child(Input::new(&self.search).small())),
-                ),
+                .children((!extensions && !soon_page).then(|| {
+                    div().mt(px(14.)).child(campo::field(
+                        Input::new(&self.search).small(),
+                        false,
+                        cx,
+                    ))
+                })),
         );
         let body = column(
             v_flex()
