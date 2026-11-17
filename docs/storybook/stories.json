@@ -340,6 +340,17 @@
         ]
       },
       {
+        "id": "path",
+        "title": "path",
+        "note": "A file or folder: typed or picked (editable), or picked only; Finder drops work on both",
+        "nodes": [
+          { "type": "path", "id": "path-file", "pick": "file", "placeholder": "/bin/zsh" },
+          { "type": "path", "id": "path-folder", "pick": "folder", "value": "~/Projects" },
+          { "type": "path", "id": "path-pick", "pick": "folder", "editable": false },
+          { "type": "path", "id": "path-picked", "pick": "file", "editable": false, "value": "/etc/hosts" }
+        ]
+      },
+      {
         "id": "checkbox",
         "title": "checkbox",
         "note": "Sent as a boolean",
