@@ -36,8 +36,6 @@ mod terminal_view;
 mod terminals;
 mod topbar;
 mod update;
-#[cfg(all(test, unix))]
-mod waycarbon;
 mod workspace;
 
 use std::path::{Path, PathBuf};

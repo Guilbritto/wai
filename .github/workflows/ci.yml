@@ -20,10 +20,10 @@ jobs:
       # The toolchain, its components and targets come from rust-toolchain.toml.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      # The Go extensions' own tests, and wai-waycarbon's end-to-end test in wai (unix only).
+      # The Go extensions' own tests.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: extensions/wai-waycarbon/go.mod
+          go-version-file: extensions/wai-rotinas/go.mod
           cache: false
       # Windows: Node (npx) for the ignored real-Claude smoke test, which CI does not run. macOS
       # runners ship Node; the wai-navegador test looks npx up on PATH there (it never runs it).
@@ -43,12 +43,6 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: cargo test --workspace --no-fail-fast -- $(grep -v -e '^#' -e '^$' .github/windows-known-failures.txt | sed 's/^/--skip /')
-      - run: go vet ./...
-        working-directory: extensions/wai-waycarbon
-      # Its tests put a sh-script `jira` on a `:`-joined PATH: unix only.
-      - run: go test ./...
-        if: runner.os != 'Windows'
-        working-directory: extensions/wai-waycarbon
       - run: go vet ./...
         working-directory: extensions/wai-rotinas
       # Its tests run /bin/sh scripts, and it refuses every script on Windows: unix only.

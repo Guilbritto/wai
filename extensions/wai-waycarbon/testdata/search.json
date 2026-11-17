@@ -1,6 +1,0 @@
-{"data":{"search":{"nodes":[
-  {"number": 93, "title": "feat: add scope_id EC-1240", "url": "https://github.com/waycarbon/proto-repository/pull/93", "state": "MERGED", "createdAt": "2026-11-01T10:00:00Z", "headRefName": "feat/EC-1240-scope", "repository": {"nameWithOwner": "waycarbon/proto-repository"}},
-  {"number": 92, "title": "feat: scope filter EC-1240", "url": "https://github.com/waycarbon/waycarbon-front/pull/92", "state": "OPEN", "createdAt": "2026-11-10T10:00:00Z", "headRefName": "feat/EC-1240-scope", "repository": {"nameWithOwner": "waycarbon/waycarbon-front"}, "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE"}}}]}},
-  {"number": 95, "title": "feat: scope in bff EC-1240", "url": "https://github.com/waycarbon/waycarbon-bff/pull/95", "state": "CLOSED", "createdAt": "2026-11-05T10:00:00Z", "headRefName": "feat/EC-1240-scope", "repository": {"nameWithOwner": "waycarbon/waycarbon-bff"}},
-  {}
-]}}}

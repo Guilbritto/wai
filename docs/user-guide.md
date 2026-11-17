@@ -549,7 +549,6 @@ indexes = ["https://example.com/wai-index.toml"]
 - Turning it off and on again gives it three more tries.
 
 First-party extensions live in `extensions/`. Each has its own README:
-- `wai-waycarbon`: WayCarbon templates and a Jira panel;
 - `wai-navegador`: a browser for agents through Playwright's MCP server;
 - `wai-rotinas`: scheduled scripts;
 - `wai-remoto`: phone access, design only.

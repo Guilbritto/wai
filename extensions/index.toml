@@ -76,37 +76,6 @@ url = "https://github.com/Guilbritto/wai/releases/download/wai-rotinas-v0.1.0/wa
 sha256 = "aecd5ab4762464d4d8dc2aaab524fbc803e4ff02ac4fd7f9766614b53005ba7e"
 
 [[extensions]]
-id = "wai-waycarbon"
-name = "WayCarbon"
-version = "0.6.0"
-description = "What needs you at WayCarbon: PRs, reviews and Jira cards, one click from the right /waycarbon command"
-repository = "https://github.com/Guilbritto/wai"
-
-[extensions.packages.darwin-arm64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.6.0/wai-waycarbon-0.6.0-darwin-arm64.tar.gz"
-sha256 = "850e516b4e4ecfc9dd1665bf1b40aadf7d522eb70b26c8c425eb087b96bd9011"
-
-[extensions.packages.darwin-x64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.6.0/wai-waycarbon-0.6.0-darwin-x64.tar.gz"
-sha256 = "b87fe8d08193558ba897658c324c69b2accd9155085def823d2d3f04d483aa0c"
-
-[extensions.packages.linux-arm64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.6.0/wai-waycarbon-0.6.0-linux-arm64.tar.gz"
-sha256 = "430d81f56c0ab5e5a98bbbf1e1762951d40017fa12f375a102da03848296cde0"
-
-[extensions.packages.linux-x64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.6.0/wai-waycarbon-0.6.0-linux-x64.tar.gz"
-sha256 = "093c4480eccb80e0adfdd47731fd7e25498e282442daa8864e5ae481d2b03558"
-
-[extensions.packages.windows-arm64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.6.0/wai-waycarbon-0.6.0-windows-arm64.tar.gz"
-sha256 = "fed12c8deec58cf3547331df585b820f3904cde4c894c6e53ea59c7309b88e22"
-
-[extensions.packages.windows-x64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.6.0/wai-waycarbon-0.6.0-windows-x64.tar.gz"
-sha256 = "f8aad456e01257beb046535b7f93ccb6fcca60182222b3721bb7f4cc539d2393"
-
-[[extensions]]
 id = "wai-bichinho"
 name = "Bichinho"
 version = "0.1.0"
