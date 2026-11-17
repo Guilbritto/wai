@@ -645,3 +645,165 @@ fn shutdown_kills_process() {
         assert!(rx.recv().await.is_err(), "the channel closes");
     });
 }
+
+/// Events and replies until `n` replies came back, by id.
+async fn until_replies(rx: &Receiver<ExtEvent>, n: usize) -> (Vec<ExtEvent>, HashMap<u64, Value>) {
+    let mut replies = HashMap::new();
+    let events = until(rx, |e| {
+        if let ExtEvent::Notify { title, body } = e
+            && title == "reply"
+        {
+            let reply: Value = serde_json::from_str(body).unwrap();
+            replies.insert(reply["id"].as_u64().unwrap(), reply);
+        }
+        replies.len() == n
+    })
+    .await;
+    (events, replies)
+}
+
+fn emitted(events: &[ExtEvent]) -> Vec<(&str, &Value)> {
+    (events.iter())
+        .filter_map(|e| match e {
+            ExtEvent::Emit { name, data } => Some((name.as_str(), data)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn emit_reaches_the_host() {
+    let tmp = tempfile::tempdir().unwrap();
+    let args = [
+        "--call",
+        r#"events/emit {"name": "pr.review", "data": {"n": 1}}"#,
+        "--call",
+        r#"events/emit {"name": "ping"}"#,
+    ];
+    let ext = installed(
+        tmp.path(),
+        &args,
+        vec![Permission::Process, Permission::Notify],
+    );
+    run(Duration::from_secs(10), async {
+        let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        let (events, replies) = until_replies(&rx, 2).await;
+        assert_eq!(
+            emitted(&events),
+            [("pr.review", &json!({"n": 1})), ("ping", &Value::Null)]
+        );
+        assert_eq!(replies[&1]["result"], Value::Null);
+        assert_eq!(replies[&2]["result"], Value::Null);
+    });
+}
+
+/// Review Focus 2 and 3: the name and size boundaries.
+#[test]
+fn emit_checks_name_and_size() {
+    let tmp = tempfile::tempdir().unwrap();
+    let names = [
+        "a".repeat(64),
+        "a".repeat(65),
+        "PR".into(),
+        "pr review".into(),
+        ".pr".into(),
+        "-pr".into(),
+    ];
+    let mut calls: Vec<String> = (names.iter())
+        .map(|n| format!("events/emit {}", json!({"name": n})))
+        .collect();
+    for len in [16_382, 16_383] {
+        let data = "x".repeat(len);
+        calls.push(format!(
+            "events/emit {}",
+            json!({"name": "big", "data": data})
+        ));
+    }
+    let args: Vec<&str> = calls.iter().flat_map(|c| ["--call", c.as_str()]).collect();
+    let ext = installed(
+        tmp.path(),
+        &args,
+        vec![Permission::Process, Permission::Notify],
+    );
+    run(Duration::from_secs(10), async {
+        let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        let (events, replies) = until_replies(&rx, 8).await;
+        let big = json!("x".repeat(16_382));
+        assert_eq!(
+            emitted(&events),
+            [(names[0].as_str(), &Value::Null), ("big", &big)]
+        );
+        for id in [1u64, 7] {
+            assert_eq!(replies[&id]["result"], Value::Null);
+        }
+        for (i, name) in names.iter().enumerate().skip(1) {
+            assert_eq!(
+                replies[&(i as u64 + 1)]["error"],
+                json!({"code": -32602, "message": format!("invalid event name {name:?}")})
+            );
+        }
+        assert_eq!(
+            replies[&8]["error"],
+            json!({"code": -32602, "message": "event data larger than 16 KiB"})
+        );
+    });
+}
+
+/// Review Focus 1: a notification has nowhere to report its error; it is dropped.
+#[test]
+fn emit_notification_with_bad_name_is_dropped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let args = [
+        "--notification",
+        r#"events/emit {"name": "Bad"}"#,
+        "--call",
+        r#"events/emit {"name": "good"}"#,
+    ];
+    let ext = installed(
+        tmp.path(),
+        &args,
+        vec![Permission::Process, Permission::Notify],
+    );
+    run(Duration::from_secs(10), async {
+        let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        let (events, replies) = until_replies(&rx, 1).await;
+        assert_eq!(emitted(&events), [("good", &Value::Null)]);
+        assert_eq!(replies[&1]["result"], Value::Null);
+    });
+}
+
+#[test]
+fn ext_event_needs_its_permission() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = ExtId::new("a").unwrap();
+    let granted = vec![
+        Permission::Process,
+        Permission::Notify,
+        Permission::Events(a.clone()),
+    ];
+    let ext = installed(tmp.path(), &[], granted);
+    run(Duration::from_secs(10), async {
+        let (handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        reported(&rx, "initialize").await;
+        let ext_event = |source: ExtId| HostEvent::Ext {
+            source,
+            name: "x".into(),
+            data: json!(1),
+        };
+        handle.notify_event(ext_event(a));
+        handle.notify_event(ext_event(ExtId::new("b").unwrap()));
+        handle.notify_event(HostEvent::FileSaved {
+            path: "/fence".into(),
+        });
+        let events = until(&rx, |e| title(e) == Some("event/file_saved")).await;
+        let bodies: Vec<_> = (events.iter())
+            .filter_map(|e| match e {
+                ExtEvent::Notify { title, body } if title == "event/ext" => Some(body.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bodies.len(), 1, "{bodies:?}");
+        let body: Value = serde_json::from_str(bodies[0]).unwrap();
+        assert_eq!(body, json!({"source": "a", "name": "x", "data": 1}));
+    });
+}

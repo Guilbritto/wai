@@ -22,6 +22,8 @@
 //!   notification titled `after`.
 //! - `--call <method>[ <params>]` (repeatable): after `initialize`, call each method with its JSON
 //!   params (default `{}`), with ids from 1.
+//! - `--notification <method>[ <params>]` (repeatable): after `initialize`, send each as a
+//!   notification (no id), before the `--call`s.
 //! - `--on-action <method>[ <params>]` (repeatable): the n-th `item/action` makes the n-th
 //!   call (the last repeats), with ids from 1000.
 //! - `--log <path>`: report to that file instead, one JSON line `{"title", "body"}` per report
@@ -162,6 +164,11 @@ fn main() {
                     send(json!({"jsonrpc": "2.0", "id": 99, "method": "notify",
                         "params": {"title": "big", "body": big}}));
                     send(notify("after", "{}".into()));
+                }
+                for n in values("--notification") {
+                    let (method, params) = n.split_once(' ').unwrap_or((&n, "{}"));
+                    let params: Value = serde_json::from_str(params).unwrap();
+                    send(json!({"jsonrpc": "2.0", "method": method, "params": params}));
                 }
                 for (ix, c) in values("--call").iter().enumerate() {
                     call(ix + 1, c);

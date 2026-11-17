@@ -22,6 +22,8 @@ use crate::rpc::{self, Incoming, Line, RpcError};
 use crate::{ExtId, Installed, Permission};
 
 pub const MAX_MESSAGE: usize = 4 << 20;
+/// An event's `data`, serialized.
+pub const MAX_EVENT_DATA: usize = 16 * 1024;
 pub const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Restarts after a crash, per handle; the next crash is `Crashed`.
 pub const MAX_RESTARTS: u32 = 3;
@@ -56,6 +58,11 @@ pub enum ExtEvent {
     Notify {
         title: String,
         body: String,
+    },
+    /// `events/emit`: a named event for the extensions granted `events:<this id>`.
+    Emit {
+        name: String,
+        data: Value,
     },
     OpenSession {
         agent: Option<String>,
@@ -109,6 +116,12 @@ pub enum HostEvent {
         agent: Option<String>,
         session: Option<String>,
     },
+    /// An event another extension emitted; `source` is set by wai.
+    Ext {
+        source: ExtId,
+        name: String,
+        data: Value,
+    },
 }
 
 impl HostEvent {
@@ -143,6 +156,11 @@ impl HostEvent {
                 "event/session_focused",
                 json!({"agent": agent, "session": session}),
                 read,
+            ),
+            Self::Ext { source, name, data } => (
+                "event/ext",
+                json!({"source": source.as_str(), "name": name, "data": data}),
+                Some(Permission::Events(source)),
             ),
         }
     }
@@ -551,6 +569,22 @@ impl Ext {
                     body: p.body,
                 })
             }
+            "events/emit" => {
+                let p: EmitParams = params_of(params)?;
+                if !valid_event_name(&p.name) {
+                    let error = format!("invalid event name {:?}", p.name);
+                    return Err(RpcError::new(rpc::INVALID_PARAMS, error));
+                }
+                let size = serde_json::to_string(&p.data).map_or(usize::MAX, |s| s.len());
+                if size > MAX_EVENT_DATA {
+                    let error = "event data larger than 16 KiB";
+                    return Err(RpcError::new(rpc::INVALID_PARAMS, error));
+                }
+                Call::Done(ExtEvent::Emit {
+                    name: p.name,
+                    data: p.data,
+                })
+            }
             "panel/render" => {
                 need(Permission::Panels)?;
                 let p: RenderParams = params_of(params)?;
@@ -626,6 +660,22 @@ struct NotifyParams {
     title: String,
     #[serde(default)]
     body: String,
+}
+
+#[derive(Deserialize)]
+struct EmitParams {
+    name: String,
+    #[serde(default)]
+    data: Value,
+}
+
+/// `[a-z0-9][a-z0-9._-]{0,63}`.
+fn valid_event_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    (1..=64).contains(&b.len())
+        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"._-".contains(c))
 }
 
 #[derive(Deserialize)]
@@ -890,7 +940,12 @@ async fn session(
         };
         let reply = || Reply(id.clone().map(|id| (commands_tx.clone(), generation, id)));
         match ext.call(&method, params, reply) {
-            Err(error) => respond(id, Err(error)),
+            Err(error) => {
+                if id.is_none() {
+                    eprintln!("wai: {} {method}: {}", ext.id.as_str(), error.message);
+                }
+                respond(id, Err(error));
+            }
             Ok(Call::Deferred(event)) => emit(event),
             Ok(Call::Done(event)) => {
                 emit(event);
