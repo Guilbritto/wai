@@ -80,7 +80,10 @@ fn capture(pipe: Option<impl std::io::Read + Send + 'static>) -> mpsc::Receiver<
 }
 
 /// Runs `cmd` with both outputs captured; kills it at `timeout`.
-fn run(mut cmd: Command, timeout: Duration) -> Result<(ExitStatus, String, String), String> {
+pub(crate) fn run(
+    mut cmd: Command,
+    timeout: Duration,
+) -> Result<(ExitStatus, String, String), String> {
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
