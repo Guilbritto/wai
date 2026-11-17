@@ -3,7 +3,7 @@
 //! the workspace writes the user's file.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -16,11 +16,13 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
 };
 use gpui_kit::*;
+use wai_ext::panel::Pick;
 use wai_settings::claude::{ClaudeData, Stamp};
 use wai_settings::{Change, Processing, SeenModel, Settings, ThemeChoice, agent_label, builtin};
 
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::extensions_view::ExtensionsView;
+use crate::path_field::{self, PathField};
 use crate::update::UpdateStatus;
 
 pub(crate) mod claude;
@@ -674,8 +676,10 @@ impl SettingsView {
         if !std::mem::take(&mut self.editing[ix]) {
             return;
         }
-        let input = if ix == 0 { &self.shell } else { &self.repo };
-        let text = input.read(cx).value().trim().to_string();
+        let text = match ix {
+            0 => path_field::value(&self.shell, cx),
+            _ => self.repo.read(cx).value().trim().to_string(),
+        };
         let value = (!text.is_empty()).then_some(text);
         self.change(
             if ix == 0 {
@@ -685,6 +689,29 @@ impl SettingsView {
             },
             cx,
         );
+    }
+
+    /// The shell: typed or picked; a saved path that is gone shows in red.
+    fn shell_field(&self, off: bool, cx: &mut Context<Self>) -> PathField {
+        let saved = self
+            .data
+            .settings
+            .terminal
+            .shell
+            .as_deref()
+            .unwrap_or_default();
+        let gone = saved.contains(['/', '\\']) && !Path::new(saved).exists();
+        let this = cx.entity().downgrade();
+        PathField::new("settings-shell-path", &self.shell, Pick::File)
+            .disabled(off)
+            .error(gone.then(|| "This file no longer exists.".into()))
+            .on_change(move |_, cx| {
+                this.update(cx, |this, cx| {
+                    this.editing[0] = true;
+                    this.commit(0, cx)
+                })
+                .ok();
+            })
     }
 
     /// The run goes through the reload, which asks for approval.
@@ -764,7 +791,10 @@ impl SettingsView {
         {
             if !self.editing[ix] {
                 let text = texts[ix].clone().unwrap_or_default();
-                input.update(cx, |i, cx| i.set_value(text, window, cx));
+                match ix {
+                    0 => path_field::set(&input, &text, window, cx),
+                    _ => input.update(cx, |i, cx| i.set_value(text, window, cx)),
+                }
             }
         }
         let advanced =
@@ -1035,7 +1065,7 @@ impl SettingsView {
                 "Shell",
                 "Leave it empty for the system default.",
                 "settings-shell",
-                field(Input::new(&self.shell).small().disabled(off)),
+                field(self.shell_field(off, cx)),
                 cx,
             ),
             "Automatic updates" => self.row(

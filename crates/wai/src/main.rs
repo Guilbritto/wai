@@ -7,6 +7,7 @@ mod app;
 mod areas;
 mod aurora;
 mod bars;
+mod campo;
 mod chat;
 mod claude_config;
 mod claude_plugins;
@@ -24,6 +25,7 @@ mod log;
 mod marketplace;
 mod notify;
 mod palette;
+mod path_field;
 mod search_view;
 mod settings_view;
 #[cfg(target_os = "macos")]

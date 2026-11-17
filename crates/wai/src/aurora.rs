@@ -1,5 +1,5 @@
-//! The "wai Aurora" look, after the Central de IA: its palette, its gpui-component theme (the dark
-//! one; light mode keeps Default Light) and the bundled display font.
+//! The "wai Aurora" look, after the Central de IA: its palette, its gpui-component themes (dark and
+//! "wai Aurora Light") and the bundled display font.
 //! Palette: docs/superpowers/specs/2026-11-09-wai-visual-aurora-design.md.
 
 use std::borrow::Cow;
@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use gpui_kit::base::{ResizeHandleRenderer, ResizeHandleState};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Theme, ThemeRegistry, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Theme, ThemeRegistry, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Axis, Bounds, BoxShadow, Corners, Div, FontWeight, Hsla, InteractiveElement,
@@ -20,7 +20,7 @@ pub(crate) const DISPLAY_FONT: &str = "Nunito";
 const FONT: &[u8] = include_bytes!("../assets/fonts/Nunito-Bold.ttf");
 const THEME: &str = include_str!("../assets/theme/aurora.json");
 
-/// Adds the display font and makes "wai Aurora" the dark theme. Between `gpui_kit::init` (the
+/// Adds the display font and makes "wai Aurora" the dark theme and "wai Aurora Light" the light one. Between `gpui_kit::init` (the
 /// global theme exists) and `Theme::change` (which applies it).
 pub(crate) fn register(cx: &mut App) {
     if let Err(err) = cx.text_system().add_fonts(vec![Cow::Borrowed(FONT)]) {
@@ -30,8 +30,11 @@ pub(crate) fn register(cx: &mut App) {
     registry
         .load_themes_from_str(THEME)
         .expect("aurora.json is a theme set");
-    let aurora = registry.themes()["wai Aurora"].clone();
-    Theme::global_mut(cx).dark_theme = aurora;
+    let dark = registry.themes()["wai Aurora"].clone();
+    let light = registry.themes()["wai Aurora Light"].clone();
+    let theme = Theme::global_mut(cx);
+    theme.dark_theme = dark;
+    theme.light_theme = light;
 }
 
 fn white(alpha: f32) -> Hsla {
@@ -189,23 +192,6 @@ pub(crate) fn card(focused: bool, cx: &App) -> Div {
                 .spread_radius(px(-40.)),
         ])
         .overflow_hidden()
-}
-
-/// A card inside a card, such as an extension panel's `card`: glass in dark mode, the theme's
-/// border in light.
-pub(crate) fn tile(cx: &App) -> Div {
-    let theme = cx.theme();
-    let (fill, border) = match theme.is_dark() {
-        true => (vidro(), borda()),
-        false => (theme.background, theme.border),
-    };
-    v_flex()
-        .p_2()
-        .gap_2()
-        .rounded(px(10.))
-        .border_1()
-        .border_color(border)
-        .bg(fill)
 }
 
 /// A card's header strip (`.painel-barra`).
@@ -384,6 +370,7 @@ mod tests {
             assert_eq!(theme.theme_name(), "wai Aurora");
             assert_eq!(hex(theme.background), hex(noite()));
             assert_eq!(hex(theme.primary), hex(boreal()));
+            assert_eq!(hex(theme.ring), 0x8d72ff73);
             // Keys the theme file misspells are skipped silently (Default Dark's own
             // `link.foreground` and `drag_border` are).
             assert_eq!(hex(theme.link), hex(ceu()));
@@ -392,14 +379,15 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn light_theme_stays_default(cx: &mut TestAppContext) {
+    fn light_theme_is_aurora_light(cx: &mut TestAppContext) {
         let settings = Settings {
             theme: ThemeChoice::Light,
             ..Default::default()
         };
         cx.update(|cx| {
             app::init(&settings, cx);
-            assert_eq!(cx.theme().theme_name(), "Default Light");
+            assert_eq!(cx.theme().theme_name(), "wai Aurora Light");
+            assert_eq!(hex(cx.theme().background), 0xf5f6fbff);
         });
     }
 

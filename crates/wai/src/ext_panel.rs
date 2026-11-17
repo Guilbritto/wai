@@ -16,9 +16,7 @@ use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::link::Link;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::progress::Progress;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tag::Tag;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
@@ -27,13 +25,19 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::{Map, Value};
-use wai_ext::panel::{ButtonStyle, Column, Confirm, Item, Node, Tab, TableRow, Tone, TooLarge};
+use wai_ext::panel::{
+    ButtonStyle, Column, Confirm, Item, Node, Pick, Tab, TableRow, Tone, TooLarge,
+};
 
-use crate::aurora;
-use crate::sidebar::ROW_HEIGHT;
+use crate::campo;
+use crate::path_field::{self, PathField};
 
 /// A list row with a subtitle: two lines.
-const TWO_LINE_ROW: f32 = 44.;
+const TWO_LINE_ROW: f32 = 42.;
+/// A table row, or a list row of one line.
+const ROW_HEIGHT: f32 = 30.;
+/// The space between loose rows.
+const ROW_GAP: f32 = 4.;
 /// A list, table or log without `fill` shows at most this many rows (lines) and scrolls the rest.
 const LIST_ROWS: usize = 12;
 /// R57: a list is never narrower, so a wide sibling in a row wraps below it instead.
@@ -146,7 +150,7 @@ impl ExtPanel {
             let (mut inputs, mut fields) = (HashSet::new(), HashSet::new());
             tree.walk(&mut |node| {
                 let (id, initial) = match node {
-                    Node::Input { id, value, .. } => {
+                    Node::Input { id, value, .. } | Node::Path { id, value, .. } => {
                         inputs.insert(id.as_str());
                         (id, value.as_deref().map(Value::from))
                     }
@@ -165,7 +169,7 @@ impl ExtPanel {
                     return;
                 }
                 match (node, &initial) {
-                    (Node::Input { .. }, Value::String(text)) => {
+                    (Node::Input { .. } | Node::Path { .. }, Value::String(text)) => {
                         self.pending.insert(id.clone(), text.as_str().into());
                     }
                     _ => {
@@ -208,7 +212,12 @@ impl ExtPanel {
         let label = (confirm.label.as_ref()).map_or("Confirm".into(), SharedString::from);
         // A dialog fading out still takes clicks.
         let sent = Rc::new(Cell::new(false));
-        window.open_dialog(cx, move |dialog, _, cx| {
+        // Confirm takes the focus once, when the dialog opens.
+        let (focus, focused) = (cx.focus_handle(), Cell::new(false));
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if !focused.replace(true) {
+                focus.focus(window, cx);
+            }
             let (this, action, sent) = (this.clone(), action.clone(), sent.clone());
             // The extension's name, so its question cannot pass for wai's own.
             let heading = v_flex()
@@ -227,15 +236,19 @@ impl ExtPanel {
             };
             dialog.footer(
                 DialogFooter::new()
-                    .child(
+                    .child(campo::button(
                         Button::new("cancel")
                             .label("Cancel")
                             .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
+                    ))
                     .child(
                         Button::new("confirm")
                             .label(label.clone())
-                            .map(|b| if danger { b.danger() } else { b.primary() })
+                            .track_focus(&focus)
+                            .map(|b| match danger {
+                                true => campo::danger(b, cx),
+                                false => campo::primary(b),
+                            })
                             .on_click(move |_, window, cx| {
                                 window.close_dialog(cx);
                                 if !sent.replace(true) {
@@ -263,6 +276,17 @@ impl ExtPanel {
                         let typed = || (self.inputs.get(id)).map(|(s, _)| s.value(cx).to_string());
                         let text = self.pending.get(id).map(|t| t.to_string()).or_else(typed);
                         (id, Value::from(text.unwrap_or_default()))
+                    }
+                    Node::Path { id, .. } => {
+                        let home = dirs::home_dir();
+                        let pending = self.pending.get(id);
+                        let pending =
+                            pending.map(|t| path_field::expand(t.trim(), home.as_deref()));
+                        let picked = || match self.inputs.get(id) {
+                            Some((Field::Line(state), _)) => Some(path_field::value(state, cx)),
+                            _ => None,
+                        };
+                        (id, Value::from(pending.or_else(picked).unwrap_or_default()))
                     }
                     Node::Select { id, options, .. } => {
                         let chosen = self.chosen(id, options);
@@ -315,6 +339,7 @@ impl ExtPanel {
     ) -> (AnyElement, bool) {
         let theme = cx.theme();
         let (muted, ring) = (theme.muted_foreground, theme.ring);
+        let (line, violet) = (campo::line(cx), campo::violet(cx));
         *n += 1;
         let k = *n;
         let element = match node {
@@ -388,9 +413,9 @@ impl ExtPanel {
                     .small()
                     .label(SharedString::from(label))
                     .map(|b| match style {
-                        ButtonStyle::Primary => b.primary(),
-                        ButtonStyle::Danger => b.danger(),
-                        ButtonStyle::Default => b,
+                        ButtonStyle::Primary => campo::primary(b),
+                        ButtonStyle::Danger => campo::danger(b, cx),
+                        ButtonStyle::Default => campo::button(b),
                     })
                     .when_some(icon.as_deref().and_then(lucide), |b, icon| b.icon(icon))
                     .disabled(*disabled)
@@ -426,10 +451,50 @@ impl ExtPanel {
                 self.inputs
                     .insert(id.clone(), (field.clone(), placeholder.clone()));
                 let element = match &field {
-                    Field::Line(state) => Input::new(state).small().into_any_element(),
-                    Field::Area(state, _) => Textarea::new(state).into_any_element(),
+                    Field::Line(state) => {
+                        campo::field(Input::new(state).small(), false, cx).into_any_element()
+                    }
+                    Field::Area(state, _) => Textarea::new(state)
+                        .rounded(px(campo::RADIUS))
+                        .bg(campo::recessed(cx))
+                        .into_any_element(),
                 };
                 own(element, at)
+            }
+            Node::Path {
+                id,
+                pick,
+                placeholder,
+                editable,
+                ..
+            } => {
+                let placeholder = placeholder.clone().unwrap_or_else(|| match pick {
+                    Pick::File => "Choose a file…".into(),
+                    Pick::Folder => "Choose a folder…".into(),
+                });
+                let (state, shown) = match self.inputs.get(id) {
+                    Some((Field::Line(state), shown)) => (state.clone(), shown.clone()),
+                    _ => (cx.new(|cx| InputState::new(window, cx)), "".into()),
+                };
+                if shown != placeholder {
+                    let text = SharedString::from(&placeholder);
+                    state.update(cx, |s, cx| s.set_placeholder(text, window, cx));
+                }
+                if let Some(text) = self.pending.remove(id) {
+                    path_field::set(&state, &text, window, cx);
+                }
+                (self.inputs).insert(
+                    id.clone(),
+                    (Field::Line(state.clone()), placeholder.clone()),
+                );
+                let this = cx.weak_entity();
+                let field = PathField::new(name("panel-path", id), &state, *pick)
+                    .editable(*editable)
+                    .placeholder(SharedString::from(&placeholder))
+                    .on_change(move |_, cx| {
+                        this.update(cx, |_, cx| cx.notify()).ok();
+                    });
+                own(field, at)
             }
             Node::Select { id, options, .. } => {
                 let chosen = self.chosen(id, options).cloned();
@@ -440,6 +505,8 @@ impl ExtPanel {
                     .outline()
                     .dropdown_caret(true)
                     .label(label)
+                    .map(|b| campo::field(b, false, cx))
+                    .min_w(px(LIST_MIN_WIDTH))
                     .dropdown_menu(move |menu, _, _| {
                         options.iter().fold(menu, |menu, option| {
                             let (this, field) = (this.clone(), field.clone());
@@ -458,7 +525,6 @@ impl ExtPanel {
             Node::Checkbox { id, label, .. } => {
                 let field = id.clone();
                 let checkbox = Checkbox::new(name("panel-checkbox", id))
-                    .small()
                     .label(SharedString::from(label))
                     .checked(self.checked(id))
                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
@@ -482,11 +548,20 @@ impl ExtPanel {
                 let icon = icon.as_deref().and_then(lucide);
                 let header =
                     (title.is_some() || subtitle.is_some() || badge.is_some()) || icon.is_some();
+                let recessed = campo::recessed(cx);
                 let header = header.then(|| {
                     let line = |text: &Arc<str>| div().truncate().child(SharedString::from(text));
                     h_flex()
                         .gap_2()
-                        .children(icon.map(|icon| Icon::new(icon).small().text_color(muted)))
+                        .children(icon.map(|icon| {
+                            h_flex()
+                                .size(px(campo::H))
+                                .flex_none()
+                                .justify_center()
+                                .rounded(px(campo::RADIUS))
+                                .bg(recessed)
+                                .child(Icon::new(icon).small().text_color(muted))
+                        }))
                         .child(
                             v_flex()
                                 .flex_1()
@@ -503,17 +578,38 @@ impl ExtPanel {
                         )
                         .children(
                             (badge.as_ref())
-                                .map(|b| Tag::secondary().small().child(SharedString::from(b))),
+                                .map(|b| campo::badge(b.to_string(), Tone::Neutral, cx)),
                         )
+                        // A clickable card shows where it goes on hover.
+                        .when(id.is_some(), |el| {
+                            el.child(
+                                div()
+                                    .ml_auto()
+                                    .opacity(0.)
+                                    .group_hover("panel-card", |s| s.opacity(1.))
+                                    .child(
+                                        Icon::new(Lucide::ChevronRight).small().text_color(muted),
+                                    ),
+                            )
+                        })
                 });
                 let children: Vec<_> = (children.iter())
                     .map(|child| self.node(child, inner, n, window, cx).0)
                     .collect();
-                let card = aurora::tile(cx).children(header).children(children);
+                let card = v_flex()
+                    .p_2()
+                    .gap_2()
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_color(line)
+                    .bg(campo::glass(cx))
+                    .children(header)
+                    .children(children);
                 match id {
                     Some(action) => {
                         let action = action.clone();
                         card.id(("panel-card", k))
+                            .group("panel-card")
                             .cursor_pointer()
                             .hover(move |el| el.border_color(ring))
                             .role(Role::Button)
@@ -545,7 +641,8 @@ impl ExtPanel {
                 };
                 let header = h_flex()
                     .id(name("panel-section", id))
-                    .gap_1()
+                    .h(px(24.))
+                    .gap_1p5()
                     .px_1()
                     .rounded(px(6.))
                     .border_1()
@@ -558,18 +655,16 @@ impl ExtPanel {
                     .tab_index(0)
                     .child(Icon::new(chevron).xsmall().text_color(muted))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(SharedString::from(title)),
+                        campo::label(title.to_string(), cx)
+                            .flex_none()
+                            .max_w_2_3()
+                            .truncate(),
                     )
                     .children(
-                        (badge.as_ref())
-                            .map(|b| Tag::secondary().small().child(SharedString::from(b))),
+                        (badge.as_ref()).map(|b| campo::badge(b.to_string(), Tone::Neutral, cx)),
                     )
+                    // A hairline to the edge.
+                    .child(div().flex_1().h(px(1.)).bg(line))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let open = this.open(&field);
                         this.set(field.clone(), Value::Bool(!open), cx)
@@ -585,7 +680,7 @@ impl ExtPanel {
                         let children: Vec<_> = (children.iter())
                             .map(|child| self.node(child, inner, n, window, cx).0)
                             .collect();
-                        Some(v_flex().gap_2().pl_4().children(children))
+                        Some(v_flex().gap_2().children(children))
                     }
                     // What follows keeps its numbers, so its element state.
                     false => {
@@ -601,33 +696,37 @@ impl ExtPanel {
             }
             Node::Tabs { id, tabs, .. } => {
                 let current = self.selected(id, tabs).id.clone();
+                let hover = campo::glass_hover(cx);
                 let bar = h_flex()
                     .gap_1()
                     .flex_wrap()
+                    .border_b_1()
+                    .border_color(line)
                     .children(tabs.iter().map(|tab| {
                         let on = tab.id == current;
                         let (field, choice) = (id.clone(), tab.id.clone());
                         h_flex()
                             .id(name("panel-tab", &format!("{id}:{}", tab.id)))
+                            .h(px(campo::H))
                             .gap_1()
                             .px_2()
-                            .py_0p5()
-                            .rounded(px(6.))
-                            .border_1()
-                            .border_color(transparent_black())
+                            .rounded_t(px(6.))
+                            .border_b_2()
+                            .border_color(if on { violet } else { transparent_black() })
                             .cursor_pointer()
                             .text_sm()
                             .when(on, |el| el.font_weight(FontWeight::SEMIBOLD))
                             .when(!on, |el| el.text_color(muted))
+                            .hover(move |el| el.bg(hover))
                             .role(Role::Tab)
                             .aria_label(SharedString::from(&tab.title))
                             .aria_selected(on)
-                            .focus_visible(move |el| el.border_color(ring))
+                            .focus_visible(move |el| el.bg(hover).border_color(ring))
                             .tab_index(0)
                             .child(SharedString::from(&tab.title))
                             .children(
                                 (tab.badge.as_ref())
-                                    .map(|b| Tag::secondary().small().child(SharedString::from(b))),
+                                    .map(|b| campo::badge(b.to_string(), Tone::Neutral, cx)),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.set(field.clone(), Value::from(choice.as_str()), cx)
@@ -671,9 +770,13 @@ impl ExtPanel {
                     Tone::Warning => AlertVariant::Warning,
                     Tone::Danger | Tone::Neutral => AlertVariant::Error,
                 };
+                let (fill, _, border) = campo::tint(*tone, cx);
                 Alert::new(("panel-alert", k), SharedString::from(text))
                     .with_variant(variant)
                     .when_some(title.as_ref(), |a, t| a.title(SharedString::from(t)))
+                    .rounded(px(10.))
+                    .bg(fill)
+                    .border_color(border)
                     .into_any_element()
             }
             Node::Link { text, url } => {
@@ -688,14 +791,19 @@ impl ExtPanel {
                             .href(url)
                             .text_sm()
                             .truncate()
-                            .child(SharedString::from(text)),
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .child(SharedString::from(text))
+                                    .child(Icon::new(Lucide::ExternalLink).xsmall()),
+                            ),
                     )
                     .test_support()
                     .into_any_element()
             }
             Node::Spinner(label) => h_flex()
                 .gap_2()
-                .child(Spinner::new().small())
+                .child(Spinner::new().small().color(violet))
                 .children(label.as_ref().map(|l| {
                     div()
                         .text_sm()
@@ -707,31 +815,39 @@ impl ExtPanel {
                 let icon = icon.as_deref().and_then(lucide);
                 let icon = icon.or(label.is_none().then_some(Lucide::Ellipsis));
                 let (this, items) = (cx.weak_entity(), items.clone());
+                let danger = cx.theme().danger;
                 let menu = Button::new(("panel-menu", k))
                     .small()
                     .ghost()
                     .when_some(icon, |b, icon| b.icon(icon))
-                    .when_some(label.as_ref(), |b, l| b.label(SharedString::from(l)))
+                    .map(|b| match label {
+                        Some(l) => campo::button(b.label(SharedString::from(l))),
+                        None => campo::icon(b),
+                    })
                     .dropdown_menu(move |menu, _, _| {
                         items.iter().fold(menu, |menu, item| {
+                            let danger_color = danger;
                             let (this, action) = (this.clone(), item.id.clone());
                             let (confirm, danger) = (item.confirm.clone(), item.danger);
-                            menu.item(
-                                PopupMenuItem::new(SharedString::from(&item.label)).on_click(
-                                    move |_, window, cx| {
-                                        let action = action.clone();
-                                        this.update(cx, |this, cx| {
-                                            this.press(action, confirm.as_ref(), danger, window, cx)
-                                        })
-                                        .ok();
-                                    },
-                                ),
-                            )
+                            let text = SharedString::from(&item.label);
+                            let entry = match danger {
+                                true => PopupMenuItem::element(move |_, _| {
+                                    div().text_color(danger_color).child(text.clone())
+                                }),
+                                false => PopupMenuItem::new(text),
+                            };
+                            menu.item(entry.on_click(move |_, window, cx| {
+                                let action = action.clone();
+                                this.update(cx, |this, cx| {
+                                    this.press(action, confirm.as_ref(), danger, window, cx)
+                                })
+                                .ok();
+                            }))
                         })
                     });
                 own(menu, at)
             }
-            Node::Unsupported => unsupported(muted),
+            Node::Unsupported => unsupported(cx),
         };
         (element, false)
     }
@@ -747,6 +863,7 @@ impl ExtPanel {
     ) -> AnyElement {
         let height = if subtitles { TWO_LINE_ROW } else { ROW_HEIGHT };
         let rows = items.len().min(LIST_ROWS) as f32;
+        let height = height + ROW_GAP;
         let (items, this) = (items.clone(), cx.weak_entity());
         uniform_list(("panel-list", k), items.len(), move |range, _, cx| {
             range
@@ -772,18 +889,15 @@ impl ExtPanel {
         fill: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme();
         let header = h_flex()
-            .h(px(ROW_HEIGHT))
-            .px_1()
+            .h(px(24.))
+            .px_2()
             .gap_2()
             .flex_none()
-            .border_b_1()
-            .border_color(theme.border)
-            .text_xs()
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(theme.muted_foreground)
-            .children((columns.iter()).map(|c| cell(c.width).child(SharedString::from(&c.title))));
+            .text_size(px(10.5))
+            .font_weight(FontWeight::BOLD)
+            .text_color(campo::dim(cx))
+            .children((columns.iter()).map(|c| cell(c.width).child(c.title.to_uppercase())));
         let widths: Rc<[Option<f32>]> = columns.iter().map(|c| c.width).collect();
         let (rows, count) = (rows.clone(), rows.len());
         let body = uniform_list(
@@ -798,7 +912,7 @@ impl ExtPanel {
         .map(|list| match fill {
             true => list.flex_1().min_h_0(),
             false => list
-                .h(px(ROW_HEIGHT * count.min(LIST_ROWS) as f32))
+                .h(px((ROW_HEIGHT + ROW_GAP) * count.min(LIST_ROWS) as f32))
                 .flex_none(),
         });
         v_flex()
@@ -818,10 +932,10 @@ impl ExtPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (foreground, muted) = (cx.theme().foreground, cx.theme().muted_foreground);
+        let foreground = cx.theme().foreground;
         let Some(row) = row else {
-            return (h_flex().id(("panel-row", ix)).h(px(ROW_HEIGHT)).px_1())
-                .child(unsupported(muted))
+            return gap(h_flex().id(("panel-row", ix)).h(px(ROW_HEIGHT)).px_1())
+                .child(unsupported(cx))
                 .into_any_element();
         };
         let at = At {
@@ -838,23 +952,30 @@ impl ExtPanel {
                 cell(*width).children(content)
             })
             .collect();
-        let line = |el: Div| el.h(px(ROW_HEIGHT)).px_1().gap_2().text_color(foreground);
-        match &row.id {
+        let line = |el: Div| el.h(px(ROW_HEIGHT)).px_2().gap_2().text_color(foreground);
+        let element = match &row.id {
             Some(action) => {
                 let action = action.clone();
-                line(crate::sidebar::row(false, cx))
+                line(campo::loose_row(cx))
                     .id(("panel-row", ix))
+                    .cursor_pointer()
                     .children(cells)
                     .on_click(cx.listener(move |this, _, _, cx| this.act(action.clone(), cx)))
                     .test_support()
                     .into_any_element()
             }
+            // Read-only: the same glass, no hover.
             None => line(h_flex())
+                .rounded(px(9.))
+                .border_1()
+                .border_color(campo::line(cx))
+                .bg(campo::glass(cx))
                 .id(("panel-row", ix))
                 .children(cells)
                 .test_support()
                 .into_any_element(),
-        }
+        };
+        gap(div()).child(element).into_any_element()
     }
 
     /// Monospace lines, only the visible ones drawn. With `follow` it stays at the end unless the
@@ -907,6 +1028,7 @@ impl ExtPanel {
         let copy = Button::new(("panel-log-copy", k))
             .xsmall()
             .ghost()
+            .size(px(22.))
             .icon(Lucide::Copy)
             .tooltip("Copy")
             .on_click(move |_, _, cx| {
@@ -916,10 +1038,12 @@ impl ExtPanel {
             .relative()
             .w_full()
             .min_w(px(LIST_MIN_WIDTH))
-            .rounded(px(6.))
-            .bg(theme.muted)
+            .rounded(px(campo::RADIUS))
+            .border_1()
+            .border_color(campo::line(cx))
+            .bg(campo::recessed(cx))
             .font_family(theme.mono_font_family.clone())
-            .text_xs()
+            .text_size(px(11.))
             .map(|el| match fill {
                 true => el.flex_1().min_h_0(),
                 false => el
@@ -927,7 +1051,7 @@ impl ExtPanel {
                     .flex_none(),
             })
             .child(list)
-            .child(div().absolute().top_0().right_0().child(copy))
+            .child(div().absolute().top_1().right_1().child(copy))
             .into_any_element()
     }
 }
@@ -940,10 +1064,10 @@ fn row(
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
-    let row = h_flex().w_full().h(px(height)).px_1().gap_2();
+    let height = height - ROW_GAP;
     let Some(item) = item else {
-        return row
-            .child(unsupported(theme.muted_foreground))
+        return gap(h_flex().w_full().h(px(height)).px_1())
+            .child(unsupported(cx))
             .into_any_element();
     };
     let (action, panel) = (item.id.clone(), panel.clone());
@@ -959,26 +1083,27 @@ fn row(
         .text_sm()
         .truncate()
         .child(SharedString::from(&item.title));
-    // The sidebar's row (radius, hover), at this list's height; the title keeps the text color.
-    crate::sidebar::row(false, cx)
+    let item = campo::loose_row(cx)
         .h(px(height))
-        .px_1()
+        .px_2()
         .gap_2()
         .text_color(theme.foreground)
         .id(("panel-item", ix))
+        .cursor_pointer()
         .child(v_flex().flex_1().min_w_0().child(title).children(subtitle))
-        .children(
-            item.badge
-                .as_ref()
-                .map(|badge| Tag::secondary().small().child(SharedString::from(badge))),
-        )
+        .children((item.badge.as_ref()).map(|b| campo::badge(b.to_string(), Tone::Neutral, cx)))
         .on_click(move |_, _, cx| {
             panel
                 .update(cx, |panel, cx| panel.act(action.clone(), cx))
                 .ok();
         })
-        .test_support()
-        .into_any_element()
+        .test_support();
+    gap(div()).child(item).into_any_element()
+}
+
+/// A loose row's slot in a list: the row, then the space before the next.
+fn gap<E: Styled>(el: E) -> E {
+    el.pb(px(ROW_GAP))
 }
 
 /// How many numbers `node` takes in `ExtPanel::node`: itself and what it holds, as if every
@@ -1012,16 +1137,6 @@ fn own(control: impl IntoElement, at: At) -> AnyElement {
             .child(control)
             .into_any_element(),
         false => control.into_any_element(),
-    }
-}
-
-fn tag(tone: Tone) -> Tag {
-    match tone {
-        Tone::Neutral => Tag::secondary(),
-        Tone::Info => Tag::info(),
-        Tone::Success => Tag::success(),
-        Tone::Warning => Tag::warning(),
-        Tone::Danger => Tag::danger(),
     }
 }
 
@@ -1071,17 +1186,33 @@ fn leaf(node: &Node, k: usize, cx: &App) -> AnyElement {
             .child(SharedString::from(text))
             .into_any_element(),
         Node::Badge { text, tone } => h_flex()
-            .child(tag(*tone).small().child(SharedString::from(text)))
+            .child(campo::badge(text.to_string(), *tone, cx))
             .into_any_element(),
-        Node::Progress(value) => Progress::new(("panel-progress", k))
-            .value(value * 100.)
+        // A violet-to-boreal fill on a recessed track.
+        Node::Progress(value) => div()
+            .id(("panel-progress", k))
+            .w_full()
+            .h(px(6.))
+            .rounded_full()
+            .bg(campo::recessed(cx))
+            .child(
+                div()
+                    .h_full()
+                    .w(relative(value.clamp(0., 1.)))
+                    .rounded_full()
+                    .bg(linear_gradient(
+                        90.,
+                        linear_color_stop(campo::violet(cx), 0.),
+                        linear_color_stop(theme.primary, 1.),
+                    )),
+            )
             .into_any_element(),
         Node::Icon { name, tone } => match lucide(name) {
             Some(icon) => Icon::new(icon)
                 .small()
                 .text_color(tone_color(*tone, cx))
                 .into_any_element(),
-            None => unsupported(muted),
+            None => unsupported(cx),
         },
         Node::Divider => div()
             .w_full()
@@ -1100,6 +1231,7 @@ fn leaf(node: &Node, k: usize, cx: &App) -> AnyElement {
                             .w(px(KV_KEY))
                             .flex_none()
                             .truncate()
+                            .text_xs()
                             .text_color(muted)
                             .child(SharedString::from(key)),
                     )
@@ -1112,7 +1244,7 @@ fn leaf(node: &Node, k: usize, cx: &App) -> AnyElement {
                     )
             }))
             .into_any_element(),
-        _ => unsupported(muted),
+        _ => unsupported(cx),
     }
 }
 
@@ -1148,11 +1280,22 @@ pub(crate) fn hover_card(node: &Node, ext_name: &SharedString, cx: &App) -> AnyE
         .into_any_element()
 }
 
-fn unsupported(muted: Hsla) -> AnyElement {
-    div()
+/// A dashed chip: the extension sent something this wai does not draw.
+fn unsupported(cx: &App) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    h_flex()
         .debug_selector(|| "panel-unsupported".into())
-        .text_sm()
+        .flex_none()
+        .gap_1()
+        .px_2()
+        .py_0p5()
+        .rounded(px(6.))
+        .border_1()
+        .border_dashed()
+        .border_color(campo::line(cx))
+        .text_xs()
         .text_color(muted)
+        .child(Icon::new(Lucide::CircleQuestionMark).xsmall())
         .child("Unsupported element")
         .into_any_element()
 }
@@ -1368,7 +1511,7 @@ mod tests {
 
         show(&panel, tree(list(true), "Second"), cx);
         assert!(
-            shown(("panel-item", 30usize), cx),
+            shown(("panel-item", 20usize), cx),
             "the list fills the panel"
         );
         assert!(below(cx), "what follows the list stays in view");
@@ -1377,7 +1520,7 @@ mod tests {
         // In a row, `fill` has no height to take.
         let row = json!({"type": "row", "children": [list(true)]});
         show(&panel, tree(row, "Second"), cx);
-        assert!(!shown(("panel-item", 30usize), cx));
+        assert!(!shown(("panel-item", 20usize), cx));
     }
 
     /// R57: a list in a column in a row keeps 160 px beside a sibling as wide as the row is
@@ -1494,6 +1637,9 @@ mod tests {
                 {"type": "input", "id": "i", "placeholder": "p", "multiline": true, "rows": 3},
                 {"type": "button", "id": "b", "label": "B", "icon": "copy", "disabled": true},
                 {"type": "badge", "text": "d", "tone": "danger"},
+                {"type": "progress", "value": 0.4},
+                {"type": "path", "id": "pa", "pick": "file"},
+                {"type": "path", "id": "pb", "pick": "folder", "editable": false, "value": "/opt"},
             ]}),
             cx,
         );
@@ -1503,6 +1649,28 @@ mod tests {
         assert!(shown(("panel-row", 1usize), cx));
         assert!(shown(("panel-log-line", 1usize), cx));
         assert!(lucide("git-pull-request").is_some() && lucide("no-such-icon").is_none());
+    }
+
+    /// A path field sends its path with `~` expanded; one outside home goes as it is.
+    #[gpui_kit::test]
+    fn path_value_reaches_the_form(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        show(
+            &panel,
+            json!({"type": "column", "children": [
+                {"type": "path", "id": "p", "pick": "folder", "value": "~/x"},
+                {"type": "path", "id": "q", "pick": "file", "editable": false, "value": "/opt/a"},
+                {"type": "button", "id": "go", "label": "Go"},
+            ]}),
+            cx,
+        );
+        click(name("panel-button:go"), cx);
+        let home = dirs::home_dir().unwrap().to_string_lossy().into_owned();
+        let values = actions.borrow()[0].1.clone();
+        assert_eq!(values, json!({"p": format!("{home}/x"), "q": "/opt/a"}));
     }
 
     /// A well-formed icon name that is not in the catalog shows as unsupported; an unknown

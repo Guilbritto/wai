@@ -91,6 +91,14 @@ pub enum Node {
         label: Arc<str>,
         checked: Option<bool>,
     },
+    /// A file or folder path (API 1.6). `editable`: typed or picked; else picked only.
+    Path {
+        id: String,
+        pick: Pick,
+        placeholder: Option<Arc<str>>,
+        value: Option<Arc<str>>,
+        editable: bool,
+    },
     Badge {
         text: Arc<str>,
         tone: Tone,
@@ -175,6 +183,13 @@ pub enum ButtonStyle {
     Default,
     Primary,
     Danger,
+}
+
+/// What a `path` node's system picker chooses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    File,
+    Folder,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -663,6 +678,17 @@ impl Parser {
                     value: line(o, "value"),
                 }
             }
+            "path" => Node::Path {
+                id: id(o)?,
+                pick: match str_field(o, "pick")? {
+                    "file" => Pick::File,
+                    "folder" => Pick::Folder,
+                    _ => return None,
+                },
+                placeholder: line(o, "placeholder"),
+                value: line(o, "value"),
+                editable: flag(o, "editable").unwrap_or(true),
+            },
             "checkbox" => Node::Checkbox {
                 id: id(o)?,
                 label: line(o, "label")?,
@@ -721,6 +747,7 @@ impl Parser {
             Node::Button { id, .. }
             | Node::Input { id, .. }
             | Node::Select { id, .. }
+            | Node::Path { id, .. }
             | Node::Checkbox { id, .. } => self.ids.insert(id.clone()).then_some(node),
             _ => Some(node),
         }
@@ -1759,5 +1786,34 @@ mod tests {
         let mut seen = 0;
         tree.walk(&mut |_| seen += 1);
         assert_eq!(seen, 10);
+    }
+
+    #[test]
+    fn path_node() {
+        let tree = json!({"type": "column", "children": [
+            {"type": "path", "id": "dir", "pick": "folder", "value": "~/src", "editable": false},
+            {"type": "path", "id": "dump", "pick": "file", "placeholder": "Dump", "editable": "no"},
+            {"type": "path", "id": "both", "pick": "both"},
+            {"type": "path", "pick": "file"},
+            {"type": "path", "id": "dir", "pick": "file"},
+        ]});
+        let path =
+            |id: &str, pick, placeholder: Option<&str>, value: Option<&str>, editable| Node::Path {
+                id: id.into(),
+                pick,
+                placeholder: placeholder.map(Into::into),
+                value: value.map(Into::into),
+                editable,
+            };
+        assert_eq!(
+            parse(&tree),
+            Ok(Node::Column(vec![
+                path("dir", Pick::Folder, None, Some("~/src"), false),
+                path("dump", Pick::File, Some("Dump"), None, true),
+                Node::Unsupported,
+                Node::Unsupported,
+                Node::Unsupported,
+            ]))
+        );
     }
 }
