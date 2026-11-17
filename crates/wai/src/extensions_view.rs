@@ -42,6 +42,7 @@ pub fn permission_text(permission: &Permission) -> String {
         Permission::Bar => "Show items in the top and bottom bars".into(),
         Permission::Network => "Use the network (not enforced)".into(),
         Permission::Fs(path) => format!("Access {} (not enforced)", path.display()),
+        Permission::Events(id) => format!("Receive events from the {} extension", id.as_str()),
     }
 }
 

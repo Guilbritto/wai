@@ -283,17 +283,18 @@ fn api_version_is_checked_first() {
     assert!(with_api("\"1.4\"", "").is_ok());
     assert!(with_api("\"1.5\"", "").is_ok());
     assert!(with_api("\"1.6\"", "").is_ok());
-    let newer = with_api("\"1.7\"", "").unwrap_err();
+    assert!(with_api("\"1.7\"", "").is_ok());
+    let newer = with_api("\"1.8\"", "").unwrap_err();
     assert_eq!(
         newer.to_string(),
-        "Go Tools needs a newer wai (extension API 1.7; this wai has 1.6)"
+        "Go Tools needs a newer wai (extension API 1.8; this wai has 1.7)"
     );
     // Even when the newer API's fields would fail the strict parse.
     assert_eq!(
         with_api("\"2.0\"", "\nfuture = true\n")
             .unwrap_err()
             .to_string(),
-        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.6)"
+        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.7)"
     );
     // Numeric, not lexical: 1.10 is newer than 1.2.
     assert!(matches!(
@@ -467,4 +468,23 @@ fn svg_icon_paths() {
     assert_eq!(spec("../w.svg").svg_icon(), None);
     assert_eq!(spec("/tmp/w.svg").svg_icon(), None);
     assert_eq!(spec("database").svg_icon(), None);
+}
+
+#[test]
+fn events_permission_names_one_extension() {
+    let manifest = |perm: &str| {
+        format!("id = \"pet\"\nname = \"Pet\"\nversion = \"1.0.0\"\npermissions = [\"{perm}\"]\n")
+    };
+    let m = parse_manifest(&manifest("events:wai-waycarbon"), Path::new("/x")).unwrap();
+    let want = Permission::Events(ExtId::new("wai-waycarbon").unwrap());
+    assert_eq!(m.permissions, std::slice::from_ref(&want));
+    assert_eq!(want.to_string(), "events:wai-waycarbon");
+    for bad in ["events:", "events:Bad_Id", "events:-x", "events:a/b"] {
+        assert_eq!(
+            parse_manifest(&manifest(bad), Path::new("/x"))
+                .unwrap_err()
+                .to_string(),
+            format!("events permission {bad:?} must name an extension id")
+        );
+    }
 }

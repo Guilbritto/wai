@@ -4,7 +4,7 @@ An extension is a folder with a `wai-extension.toml` manifest. It can be manifes
 
 Users install an extension from a folder, from a git URL, or from the Extensions page's **Available** list, which downloads a prebuilt package from an index. Anyone can publish one: see [Publishing](#publishing).
 
-This guide describes API version 1.6 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
+This guide describes API version 1.7 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
 - `wai-navegador` is manifest-only;
 - `wai-rotinas` and `wai-bichinho` are written in Go; `wai-bichinho` draws in the prompt box (API 1.6).
 
@@ -45,7 +45,7 @@ title = "Pull requests"
 | `name` | string | Shown in the extension list and the consent dialog |
 | `version` | string | Free form. wai shows it; it does not compare versions |
 | `description` | string, optional | Shown last in the consent dialog, cut to fit |
-| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.6)`. Set it to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
+| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.7)`. Set it to `"1.7"` when you use `events/emit` or an `events:<id>` permission, to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
 | `permissions` | array of strings | See [Permissions](#permissions). An unknown permission is refused |
 | `process.command` | string | See [Commands and paths](#commands-and-paths). Needs `process` |
 | `process.args` | array of strings, optional | Arguments, passed as given (no shell) |
@@ -88,6 +88,7 @@ Calls in both directions are checked against what the user **granted** at instal
 | `bar` | Contribute bar items, `item/update`, and receive `item/action`. Shown as *Show items in the top and bottom bars* |
 | `network` | Nothing is enforced. It tells the user the extension uses the network |
 | `fs:<path>` | Nothing is enforced. It tells the user the extension uses `<path>`, which must be a relative path inside the extension's folder |
+| `events:<id>` | Receive `event/ext` from extension `<id>` (see [Events between extensions](#events-between-extensions)). `<id>` need not be installed. API 1.7 |
 
 `event/file_saved`, `command/run` and `initialize` need no permission.
 
@@ -154,7 +155,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 
 | Method | Kind | Params | Notes |
 |---|---|---|---|
-| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.6", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
+| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.7", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
 | `command/run` | request | `{"id": "<command id>"}` | The user ran one of your commands without `prompt` from the palette. wai ignores the answer |
 | `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item, card, table row, button or menu item was clicked (after its confirmation, if it has one). `action_id` is its `id`. `values` has every form field in the panel by id: inputs and paths as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels` |
 | `item/action` | request | `{"item": "<item id>"}` | The user clicked one of your bar items. wai ignores the answer. The usual reply is a `panel/open` or a `sessions/open`. Needs `bar` |
@@ -164,7 +165,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `event/session_focused` | notification | `{"agent", "session"}` | The focused pane's session, the one whose prompt box shows your prompt panels; both `null` when the focused pane is not a session (a draft, a file, a panel) or the main area is closed. Sent when it changes, and once after `initialize` when wai knows it. API 1.6. Needs `sessions:read` |
 
 - Paths are absolute, and on Windows they never carry the `\\?\` prefix.
-- Answer `initialize` before anything else. API 1.1 to 1.6 only add fields and methods; ignore the ones you do not know.
+- Answer `initialize` before anything else. API 1.1 to 1.7 only add fields and methods; ignore the ones you do not know.
 
 ### Extension → host
 

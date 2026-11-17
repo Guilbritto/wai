@@ -93,7 +93,7 @@ pub struct McpServerSpec {
 
 /// The extension API this wai speaks: `initialize` sends it, and a manifest's `api` may not be
 /// newer.
-pub const API: &str = "1.6";
+pub const API: &str = "1.7";
 
 pub const MAX_ITEMS: usize = 3;
 
@@ -216,6 +216,7 @@ pub enum Permission {
     Bar,
     Network,
     Fs(PathBuf),
+    Events(ExtId),
 }
 
 impl std::fmt::Display for Permission {
@@ -229,6 +230,7 @@ impl std::fmt::Display for Permission {
             Self::Bar => f.write_str("bar"),
             Self::Network => f.write_str("network"),
             Self::Fs(p) => write!(f, "fs:{}", p.display()),
+            Self::Events(id) => write!(f, "events:{}", id.as_str()),
         }
     }
 }
@@ -329,16 +331,21 @@ pub(crate) fn parse_permission(s: &str) -> Result<Permission, ManifestError> {
         "panels" => Permission::Panels,
         "bar" => Permission::Bar,
         "network" => Permission::Network,
-        _ => match s.strip_prefix("fs:") {
-            Some(p) => {
-                if !relative_inside(p) {
-                    return Err(ManifestError::Unknown(format!(
-                        "fs permission path {p:?} must be a relative path inside the extension"
-                    )));
+        _ => match s.strip_prefix("events:") {
+            Some(id) => Permission::Events(ExtId::new(id).map_err(|_| {
+                ManifestError::Unknown(format!("events permission {s:?} must name an extension id"))
+            })?),
+            None => match s.strip_prefix("fs:") {
+                Some(p) => {
+                    if !relative_inside(p) {
+                        return Err(ManifestError::Unknown(format!(
+                            "fs permission path {p:?} must be a relative path inside the extension"
+                        )));
+                    }
+                    Permission::Fs(PathBuf::from(p))
                 }
-                Permission::Fs(PathBuf::from(p))
-            }
-            None => return Err(ManifestError::Unknown(format!("unknown permission {s:?}"))),
+                None => return Err(ManifestError::Unknown(format!("unknown permission {s:?}"))),
+            },
         },
     })
 }
