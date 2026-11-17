@@ -1705,10 +1705,10 @@ pub(crate) mod tests {
         assert!(field.is_some() && inside.is_none() && side.is_none());
     }
 
-    /// The real wai-bichinho, built with `go`, draws its egg in the focused prompt box.
+    /// The real wai-bichinho, built with `go`, draws its egg beside the focused prompt box.
     #[cfg(unix)]
     #[gpui_kit::test]
-    fn bichinho_draws_in_the_prompt_box(cx: &mut TestAppContext) {
+    fn bichinho_draws_beside_the_prompt_box(cx: &mut TestAppContext) {
         use gpui_kit::{px, size};
         use wai_ext::PanelLocation;
         use wai_ext::panel::Node;
@@ -1746,7 +1746,7 @@ pub(crate) mod tests {
         });
         start_now(&workspace, cx);
         let slot = host.read_with(cx, |h, _| {
-            h.prompt_panel(PanelLocation::Prompt)
+            h.prompt_panel(PanelLocation::PromptSide)
                 .map(|p| p.view.clone())
         });
         let slot = slot.expect("the pet's slot");
@@ -1769,7 +1769,7 @@ pub(crate) mod tests {
         });
         cx.update(|window, cx| {
             window.render_frame(cx);
-            assert!(window.try_find("prompt-slot").is_some());
+            assert!(window.try_find("prompt-side").is_some());
         });
         // The sidebar shows the card's button only.
         assert!(crate::sidebar::tests::label(("tab-panel", 0usize), cx).is_some());

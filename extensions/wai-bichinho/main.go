@@ -1,4 +1,4 @@
-// wai-bichinho: a wai extension (line-delimited JSON-RPC 2.0 on stdio) that keeps a small pet in
+// wai-bichinho: a wai extension (line-delimited JSON-RPC 2.0 on stdio) that keeps a small pet beside
 // the prompt box. It hatches from an egg at a rarity, grows on your agents' finished turns, gets
 // hungry and lonely with time, and reacts to the focused session.
 package main
@@ -233,8 +233,9 @@ func (s *server) promptTree(now time.Time) node {
 		badge = node{"type": "badge", "text": fmt.Sprintf("Lv %d", level(p.XP)), "tone": rarities[speciesByID(p.Species).Rarity].tone}
 	}
 	return node{"type": "column", "children": []node{
-		{"type": "text", "text": draw(s.st.Pet, mood, s.frame), "mono": true},
-		{"type": "row", "children": []node{badge, {"type": "text", "text": status, "muted": true}, {"type": "spacer"}, s.menu()}},
+		// The menu shares the drawing's line: at 160 px it does not fit beside the status.
+		{"type": "row", "children": []node{{"type": "text", "text": draw(s.st.Pet, mood, s.frame), "mono": true}, {"type": "spacer"}, s.menu()}},
+		{"type": "row", "children": []node{badge, {"type": "text", "text": status, "muted": true}}},
 	}}
 }
 

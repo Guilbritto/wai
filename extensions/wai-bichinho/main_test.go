@@ -170,7 +170,8 @@ func (h *harness) send(line string) []map[string]any {
 	return got
 }
 
-// promptOf is the prompt panel's art and its row's badge and word, from the last render.
+// promptOf is the prompt panel's art (first row) and its second row's badge and word, from the
+// last render.
 func promptOf(t *testing.T, msgs []map[string]any) (art, badge, word string) {
 	t.Helper()
 	for _, m := range msgs {
@@ -179,7 +180,7 @@ func promptOf(t *testing.T, msgs []map[string]any) (art, badge, word string) {
 			continue
 		}
 		kids := p["tree"].(map[string]any)["children"].([]any)
-		art = kids[0].(map[string]any)["text"].(string)
+		art = kids[0].(map[string]any)["children"].([]any)[0].(map[string]any)["text"].(string)
 		row := kids[1].(map[string]any)["children"].([]any)
 		badge = row[0].(map[string]any)["text"].(string)
 		word = row[1].(map[string]any)["text"].(string)

@@ -1,6 +1,6 @@
 # wai-bichinho
 
-A small pet that lives in your prompt box. It hatches from an egg, grows with your agents' finished turns, gets hungry and lonely with time, and reacts to the focused session.
+A small pet that lives beside your prompt box. It hatches from an egg, grows with your agents' finished turns, gets hungry and lonely with time, and reacts to the focused session.
 
 ## Build and install
 
@@ -21,6 +21,6 @@ Then in wai: Extensions, install from folder, pick this folder, and review the c
 - **Moods.** It works along with the focused session, shouts when any session needs you, frowns at an error, and falls asleep after 20 minutes without activity.
 - **PRs.** With wai-waycarbon installed, it hears its `prs.mine` event: it flashes when one of your PRs is approved or needs a fix (conflict, failing CI, requested changes), then shows how many to fix or merge. Without wai-waycarbon it just never hears it.
 
-The pet shows only in the focused pane's prompt box, and hides in narrow panes. **Open card** (or the paw in the activity bar) opens its card in the sidebar: stats, care, renaming, the collection and past pets.
+The pet shows only beside the focused pane's prompt box, and hides in narrow panes. **Open card** (or the paw in the activity bar) opens its card in the sidebar: stats, care, renaming, the collection and past pets.
 
 State lives in `pet.json` in the extension's data folder (`<config>/extension-data/wai-bichinho/`).

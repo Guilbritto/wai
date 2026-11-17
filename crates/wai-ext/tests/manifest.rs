@@ -195,7 +195,7 @@ fn first_party_manifests_validate() {
     assert_eq!(rotinas.process.unwrap().command, "bin/wai-rotinas");
     assert_eq!(rotinas.contributes.panels[0].id, "rotinas");
 
-    // wai-bichinho: a pet in the prompt box, and its card in the sidebar.
+    // wai-bichinho: a pet beside the prompt box, without a frame, and its card in the sidebar.
     let pet = read("wai-bichinho");
     assert_eq!(
         pet.permissions,
@@ -210,8 +210,8 @@ fn first_party_manifests_validate() {
         panic!("two panels: {:?}", pet.contributes.panels)
     };
     assert_eq!(
-        (slot.location, slot.width),
-        (PanelLocation::Prompt, Some(160))
+        (slot.location, slot.width, slot.frame),
+        (PanelLocation::PromptSide, Some(160), Some(false))
     );
     assert_eq!((card.location, card.width), (PanelLocation::Sidebar, None));
 
