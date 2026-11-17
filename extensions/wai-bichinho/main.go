@@ -56,6 +56,9 @@ type server struct {
 	listID int
 	sent   map[string]string // the last tree sent per panel
 	prs    map[string]string // my open PRs, URL → reason, from wai-waycarbon; nil until its first event
+
+	talk                   speech
+	hungry, lonely, asleep bool // last frame's values
 }
 
 func newServer(out io.Writer, now func() time.Time, rng *rand.Rand) *server {
@@ -200,8 +203,10 @@ func (s *server) gotPRs(list []struct{ URL, Reason string }) {
 	switch {
 	case fix:
 		s.react("alert", "check PR")
+		s.say("pr_fix")
 	case approved:
 		s.react("happy", "approved!")
+		s.say("pr_approved")
 	}
 }
 
@@ -232,13 +237,27 @@ func (s *server) promptTree(now time.Time) node {
 	if p := s.st.Pet; p != nil {
 		badge = node{"type": "badge", "text": fmt.Sprintf("Lv %d", level(p.XP)), "tone": rarities[speciesByID(p.Species).Rarity].tone}
 	}
+	if mood == "idle" && s.talk.talking(now) {
+		mood = "talk"
+	}
 	// The drawing gets a line of its own: its width changes between frames, so anything beside it
 	// would wrap under it and back. The menu sits by the badge, which does not animate.
-	return node{"type": "column", "children": []node{
+	kids := []node{
 		{"type": "row", "children": []node{badge, {"type": "spacer"}, s.menu()}},
 		{"type": "text", "text": draw(s.st.Pet, mood, s.frame), "mono": true},
 		{"type": "text", "text": status, "muted": true},
-	}}
+	}
+	if c := s.talk.cur; c != nil {
+		bubble := node{"type": "bubble", "id": c.ID, "text": c.Text, "sticky": c.Sticky}
+		switch c.Prio {
+		case 3:
+			bubble["tone"] = "warning"
+		case 2:
+			bubble["tone"] = "info"
+		}
+		kids = append([]node{bubble}, kids...)
+	}
+	return node{"type": "column", "children": kids}
 }
 
 func (s *server) cardTree(now time.Time) node {
@@ -333,6 +352,30 @@ func (s *server) render() {
 		return
 	}
 	now := s.now()
+	needs := false
+	for _, state := range s.states {
+		needs = needs || state == "needs_you"
+	}
+	if !needs {
+		s.talk.drop("needs_you")
+	}
+	s.talk.expire(now)
+	hungry, lonely, asleep := false, false, now.Sub(s.lastEvent) > sleepGap
+	if p := s.st.Pet; p != nil {
+		hungry, lonely = p.Hunger(now) >= 60, p.Affection(now) < 25
+	}
+	wasHungry, wasLonely, wasAsleep := s.hungry, s.lonely, s.asleep
+	s.hungry, s.lonely, s.asleep = hungry, lonely, asleep
+	if hungry && !wasHungry {
+		s.say("hungry")
+	}
+	if lonely && !wasLonely {
+		s.say("lonely")
+	}
+	if wasAsleep && !asleep {
+		s.say("wake")
+	}
+	s.talk.next(now)
 	for _, p := range []struct {
 		id   string
 		tree node
@@ -367,13 +410,16 @@ func (s *server) act(action string, values map[string]any) {
 		if p != nil {
 			p.Pet(now)
 			s.react("happy", "♥")
+			s.say("pet")
 		}
 	case "feed":
 		if p != nil {
 			if p.Feed(now) {
 				s.react("happy", "yum")
+				s.say("feed")
 			} else {
 				s.react("idle", "full")
+				s.say("full")
 			}
 		}
 	case "card":
@@ -382,6 +428,7 @@ func (s *server) act(action string, values map[string]any) {
 		if s.st.Eggs > 0 {
 			s.st.Hatch(s.rng, now)
 			s.react("surprise", "hi!")
+			s.say("hatch")
 		}
 	case "rename":
 		name, _ := values["name"].(string)
@@ -424,6 +471,11 @@ func (s *server) handle(m message) {
 		}
 		json.Unmarshal(m.Params, &p)
 		s.write(node{"jsonrpc": "2.0", "id": m.ID, "result": nil})
+		if _, ok := p.Values["bubble"]; ok && strings.HasPrefix(p.Action, "say-") {
+			s.talk.done(p.Action, s.now())
+			s.render()
+			return
+		}
 		s.lastEvent = s.now()
 		s.act(p.Action, p.Values)
 		s.render()
@@ -433,7 +485,15 @@ func (s *server) handle(m message) {
 		}
 		json.Unmarshal(m.Params, &p)
 		if k := key(p.Agent, p.Session); k != "" && p.State != nil {
+			prev := s.states[k]
 			s.states[k] = *p.State
+			switch {
+			case *p.State == prev:
+			case *p.State == "needs_you":
+				s.say("needs_you")
+			case *p.State == "error" && k == s.focused:
+				s.say("error")
+			}
 		}
 		s.lastEvent = s.now()
 		s.render()
@@ -444,10 +504,13 @@ func (s *server) handle(m message) {
 		switch {
 		case levelUp:
 			s.react("happy", "level up!")
+			s.say("level_up")
 		case egg:
 			s.react("surprise", "an egg!")
+			s.say("egg")
 		case s.st.Pet != nil && p.Reason == "end_turn":
 			s.react("happy", fmt.Sprintf("+%d xp", xpPerTurn))
+			s.say("turn_done")
 		}
 		s.save()
 		s.lastEvent = s.now()
@@ -456,6 +519,7 @@ func (s *server) handle(m message) {
 		var p struct{ Agent, Session *string }
 		json.Unmarshal(m.Params, &p)
 		s.focused = key(p.Agent, p.Session)
+		s.talk.unfocus()
 		s.lastEvent = s.now()
 		s.render()
 	case "event/ext":

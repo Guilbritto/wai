@@ -254,6 +254,7 @@ var moods = map[string]mood{
 	"error":    {"x", "~", []string{"#"}, 1},
 	"hungry":   {"o", "O", nil, 1},
 	"sad":      {";", "n", nil, 1},
+	"talk":     {"o", "o", nil, 1},
 	"sleeping": {"-", "_", []string{"z", "zZ"}, 4},
 }
 
@@ -262,6 +263,9 @@ func draw(p *Pet, moodName string, frame int) string {
 	m := moods[moodName]
 	if moodName == "idle" && frame%8 == 7 {
 		m = moods["blink"]
+	}
+	if moodName == "talk" && frame%2 == 1 {
+		m.mouth = "_"
 	}
 	lines := eggArt
 	if p != nil {
