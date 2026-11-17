@@ -6,19 +6,23 @@
       {
         "id": "column",
         "title": "column",
-        "note": "Stacks children vertically",
+        "note": "Stacks children vertically. width (API 1.6) fixes its width in a row; the others share the rest",
         "nodes": [
           { "type": "column", "children": [
             { "type": "text", "text": "First" },
             { "type": "text", "text": "Second" },
             { "type": "text", "text": "Third" }
+          ] },
+          { "type": "row", "children": [
+            { "type": "column", "width": 140, "children": [{ "type": "badge", "text": "width 140" }] },
+            { "type": "column", "children": [{ "type": "text", "text": "No width: takes what is left", "muted": true }] }
           ] }
         ]
       },
       {
         "id": "row",
         "title": "row",
-        "note": "Side by side; wraps when there is no room",
+        "note": "Side by side; wraps when there is no room. fill (API 1.6) under columns only takes the height left and scrolls each child; here, in a card, it is a plain row",
         "nodes": [
           { "type": "row", "children": [
             { "type": "icon", "name": "git-branch" },
@@ -30,18 +34,25 @@
             { "type": "badge", "text": "delta" }, { "type": "badge", "text": "epsilon" }, { "type": "badge", "text": "zeta" },
             { "type": "badge", "text": "eta" }, { "type": "badge", "text": "theta" }, { "type": "badge", "text": "iota" },
             { "type": "badge", "text": "kappa" }, { "type": "badge", "text": "lambda" }, { "type": "badge", "text": "omicron" }
+          ] },
+          { "type": "row", "fill": true, "children": [
+            { "type": "column", "width": 180, "children": [
+              { "type": "list", "fill": true, "items": [{ "id": "row-fill-a", "title": "EC-101" }, { "id": "row-fill-b", "title": "EC-102" }] }
+            ] },
+            { "type": "column", "children": [{ "type": "text", "text": "The detail of the selected item", "muted": true }] }
           ] }
         ]
       },
       {
         "id": "card",
         "title": "card",
-        "note": "Bordered; header is icon, title, subtitle, badge. With id the whole card is clickable",
+        "note": "Bordered; header is icon, title, subtitle, badge. With id the whole card is clickable. selected (API 1.6) highlights it",
         "nodes": [
           { "type": "card", "children": [{ "type": "text", "text": "A card with no header" }] },
           { "type": "card", "title": "Deploy", "subtitle": "staging, 2 min ago", "badge": "ok", "icon": "rocket",
             "children": [{ "type": "text", "text": "Children go below the header", "muted": true }] },
-          { "type": "card", "id": "card-click", "title": "Clickable card", "subtitle": "Click, Enter or Space sends panel/action card-click", "icon": "mouse-pointer-click" }
+          { "type": "card", "id": "card-click", "title": "Clickable card", "subtitle": "Click, Enter or Space sends panel/action card-click", "icon": "mouse-pointer-click" },
+          { "type": "card", "id": "card-selected", "title": "Selected card", "subtitle": "The item a detail shows", "icon": "check", "selected": true }
         ]
       },
       {

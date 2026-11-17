@@ -98,7 +98,7 @@ func (b *book) tree() node {
 	return node{"type": "column", "children": []any{
 		node{"type": "row", "children": []any{
 			node{"type": "icon", "name": "book-open", "tone": "info"},
-			node{"type": "text", "text": "Extension API 1.5"},
+			node{"type": "text", "text": "Extension API 1.6"},
 			node{"type": "spacer"},
 			node{"type": "text", "text": "Last action: " + b.last, "mono": true, "muted": true},
 		}},
