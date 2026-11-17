@@ -802,7 +802,9 @@ cargo run -q -p wai-ext --bin wai-index-check -- extensions/index.toml
 
 ### Your own index
 
-Host a file in the same format at any https URL. A raw file in a GitHub repository works: `https://raw.githubusercontent.com/<owner>/<repo>/main/index.toml`. Users add the URL to `[extensions] indexes` in their settings, and its extensions show with `from <host>`. It cannot replace an id the official index lists.
+Host a file in the same format at any https URL. A raw file in a GitHub repository works: `https://raw.githubusercontent.com/<owner>/<repo>/main/index.toml`. Users add the URL with **Add index…** on the Extensions page (or to `[extensions] indexes` in their settings), and its extensions show with `from <host>`. It cannot replace an id the official index lists.
+
+**A private index.** Keep the extension in a private GitHub repository and release it with the shared workflow and `with: latest: true`: the latest release's `index-entry.toml` is then the index. Users click **Add index…** and type `owner/repo`; wai reads the index and downloads the package with their `gh` login, which needs access to the repository. Only people with access see the extension.
 
 ### First-party extensions
 

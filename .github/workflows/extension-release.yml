@@ -10,6 +10,8 @@ name: extension-release
 #       permissions:
 #         contents: write
 #       uses: Guilbritto/wai/.github/workflows/extension-release.yml@main
+#       with:
+#         latest: true   # only in a repository that is its own private index
 #
 # A manifest whose `process.command` is a path (`bin/x`) is built with Go for every platform
 # (`go.mod` in the extension's folder); any other (no process, or a program on PATH such as
@@ -22,6 +24,10 @@ on:
         description: The extension's folder, where wai-extension.toml is
         type: string
         default: .
+      latest:
+        description: Mark the release as the repository's latest (a private index reads the latest release's index-entry.toml)
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -140,9 +146,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ID: ${{ steps.manifest.outputs.id }}
           VERSION: ${{ steps.manifest.outputs.version }}
-        # --latest=false: in a repository that also releases an app (wai itself), its updater
-        # reads /releases/latest.
+        # `latest` defaults to false: in a repository that also releases an app (wai itself), its
+        # updater reads /releases/latest.
         run: |
           gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP"/dist/* \
-            --repo "$GITHUB_REPOSITORY" --title "$ID $VERSION" --latest=false \
+            --repo "$GITHUB_REPOSITORY" --title "$ID $VERSION" --latest=${{ inputs.latest }} \
             --notes "Add or update this extension in an index with index-entry.toml (see docs/extensions.md in Guilbritto/wai)."
