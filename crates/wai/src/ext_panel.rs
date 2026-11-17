@@ -628,6 +628,45 @@ impl ExtPanel {
                     });
                 own(field, at)
             }
+            Node::Select {
+                id,
+                options,
+                segmented: true,
+                ..
+            } => {
+                let chosen = self.chosen(id, options).cloned();
+                let hover = campo::glass_hover(cx);
+                let bar = segment_bar(h_flex().gap_1().flex_wrap(), line, cx).children(
+                    options.iter().map(|option| {
+                        let on = chosen.as_ref() == Some(option);
+                        let (field, option) = (id.clone(), option.clone());
+                        let element = h_flex()
+                            .id(name("panel-segment", &format!("{id}:{option}")))
+                            .h(px(campo::H))
+                            .px_2()
+                            .cursor_pointer()
+                            .text_sm();
+                        segment_pill(element, on, violet)
+                            .when(on, |el| el.font_weight(FontWeight::SEMIBOLD))
+                            .when(!on, |el| el.text_color(muted))
+                            .hover(move |el| el.bg(hover))
+                            .role(Role::Button)
+                            .aria_label(SharedString::from(&option))
+                            .aria_selected(on)
+                            .focus_visible(move |el| el.bg(hover).border_color(ring))
+                            .tab_index(0)
+                            .child(SharedString::from(&option))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !on {
+                                    this.set(field.clone(), Value::from(&*option), cx);
+                                    this.act(field.clone(), cx);
+                                }
+                            }))
+                            .test_support()
+                    }),
+                );
+                own(bar, at)
+            }
             Node::Select { id, options, .. } => {
                 let chosen = self.chosen(id, options).cloned();
                 let label = chosen.as_ref().map_or("—".into(), SharedString::from);
@@ -831,27 +870,39 @@ impl ExtPanel {
                     .children(body)
                     .into_any_element()
             }
-            Node::Tabs { id, tabs, .. } => {
+            Node::Tabs {
+                id,
+                tabs,
+                segmented,
+                ..
+            } => {
                 let current = self.selected(id, tabs).id.clone();
                 let hover = campo::glass_hover(cx);
+                let seg = *segmented;
                 let bar = h_flex()
                     .gap_1()
                     .flex_wrap()
-                    .border_b_1()
-                    .border_color(line)
+                    .when(!seg, |el| el.border_b_1().border_color(line))
+                    .when(seg, |el| segment_bar(el, line, cx))
                     .children(tabs.iter().map(|tab| {
                         let on = tab.id == current;
                         let (field, choice) = (id.clone(), tab.id.clone());
+                        let tone = if seg { tab.tone } else { Tone::Neutral };
                         h_flex()
                             .id(name("panel-tab", &format!("{id}:{}", tab.id)))
                             .h(px(campo::H))
                             .gap_1()
                             .px_2()
-                            .rounded_t(px(6.))
-                            .border_b_2()
-                            .border_color(if on { violet } else { transparent_black() })
                             .cursor_pointer()
                             .text_sm()
+                            .when(!seg, |el| {
+                                el.rounded_t(px(6.)).border_b_2().border_color(if on {
+                                    violet
+                                } else {
+                                    transparent_black()
+                                })
+                            })
+                            .when(seg, |el| segment_pill(el, on, violet))
                             .when(on, |el| el.font_weight(FontWeight::SEMIBOLD))
                             .when(!on, |el| el.text_color(muted))
                             .hover(move |el| el.bg(hover))
@@ -862,8 +913,7 @@ impl ExtPanel {
                             .tab_index(0)
                             .child(SharedString::from(&tab.title))
                             .children(
-                                (tab.badge.as_ref())
-                                    .map(|b| campo::badge(b.to_string(), Tone::Neutral, cx)),
+                                (tab.badge.as_ref()).map(|b| campo::badge(b.to_string(), tone, cx)),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.set(field.clone(), Value::from(choice.as_str()), cx)
@@ -1513,6 +1563,25 @@ fn unsupported(cx: &App) -> AnyElement {
 
 /// A button or field's element id. Their ids are unique in a tree, and the kind keeps one kind's
 /// element state from meeting another's.
+/// The recessed rail the segments of tabs and selects sit in.
+fn segment_bar(bar: Div, line: Hsla, cx: &App) -> Div {
+    (bar.p(px(3.)).gap(px(2.)).rounded(px(10.)))
+        .border_1()
+        .border_color(line)
+        .bg(campo::recessed(cx))
+}
+
+/// One segment: a violet outline when selected.
+fn segment_pill<E: Styled>(pill: E, on: bool, violet: Hsla) -> E {
+    let pill = pill.h(px(campo::H - 6.)).px_3().rounded(px(7.)).border_1();
+    match on {
+        true => pill
+            .bg(violet.opacity(0.18))
+            .border_color(violet.opacity(0.6)),
+        false => pill.border_color(transparent_black()),
+    }
+}
+
 fn name(kind: &str, id: &str) -> ElementId {
     ElementId::Name(format!("{kind}:{id}").into())
 }
@@ -2311,6 +2380,62 @@ mod tests {
         frame(cx);
         assert!(shown(name("panel-button:in-help"), cx));
         assert!(!shown(name("panel-button:in-work"), cx));
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn segmented_tabs_switch_like_tabs(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        let mut tree = tabs_tree(None);
+        tree["style"] = json!("segmented");
+        tree["tabs"][0]["tone"] = json!("warning");
+        show(&panel, tree, cx);
+        assert!(shown(name("panel-tab:t:work"), cx));
+        assert!(shown(name("panel-button:in-work"), cx));
+        click(name("panel-tab:t:help"), cx);
+        frame(cx);
+        assert!(shown(name("panel-button:in-help"), cx));
+        assert!(!shown(name("panel-button:in-work"), cx));
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn segmented_select_sends_the_new_value_once(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        show(
+            &panel,
+            json!({"type": "select", "id": "scope", "segmented": true,
+                "options": ["Sprint atual", "Todos os meus"]}),
+            cx,
+        );
+        click(name("panel-segment:scope:Sprint atual"), cx);
+        assert!(
+            actions.borrow().is_empty(),
+            "the selected segment sends nothing"
+        );
+        click(name("panel-segment:scope:Todos os meus"), cx);
+        assert_eq!(sent(&actions), ["scope"]);
+        assert_eq!(actions.borrow()[0].1["scope"], "Todos os meus");
+        click(name("panel-segment:scope:Todos os meus"), cx);
+        assert_eq!(sent(&actions), ["scope"]);
+    }
+
+    #[gpui_kit::test]
+    fn plain_select_sends_nothing_on_change(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        show(
+            &panel,
+            json!({"type": "select", "id": "scope", "options": ["a", "b"]}),
+            cx,
+        );
+        panel.update(cx, |p, cx| p.set("scope".into(), json!("b"), cx));
         assert!(actions.borrow().is_empty());
     }
 
