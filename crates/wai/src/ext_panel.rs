@@ -2136,7 +2136,10 @@ mod tests {
             .collect();
         assert_eq!(strips.len(), 6);
         let last = strips.iter().map(|b| b.right()).max().unwrap();
-        assert!(last <= detail.left(), "strip {last:?} under detail {detail:?}");
+        assert!(
+            last <= detail.left(),
+            "strip {last:?} under detail {detail:?}"
+        );
         for c in cols {
             assert!(c.right() <= detail.left(), "{c:?} under detail {detail:?}");
             assert!(c.size.width < px(300.), "{c:?} does not wrap");
