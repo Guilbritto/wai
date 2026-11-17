@@ -542,6 +542,11 @@ impl ExtPanel {
             | Node::Kv(_) => leaf(node, k, cx),
             Node::Markdown(text) => TextView::markdown(("panel-md", k), SharedString::from(text))
                 .text_sm()
+                .on_link_click(|url, _, _, cx| {
+                    if wai_ext::panel::web_url(url) {
+                        cx.open_url(url);
+                    }
+                })
                 .into_any_element(),
             Node::Button {
                 id,
@@ -593,13 +598,13 @@ impl ExtPanel {
                         let typed = old.map(|(field, _)| field.value(cx));
                         let field = Field::new(*rows, window, cx);
                         if let Field::Line(state) = &field {
-                            let id = id.clone();
+                            let (id, clear) = (id.clone(), *clear);
                             // Typing shows or hides the ×; Enter sends when the node submits.
                             cx.subscribe_in(
                                 state,
                                 window,
                                 move |this, _, event, _, cx| match event {
-                                    InputEvent::Change => cx.notify(),
+                                    InputEvent::Change if clear => cx.notify(),
                                     InputEvent::PressEnter { .. } if this.submits(&id) => {
                                         this.act(id.clone(), cx)
                                     }
@@ -1050,7 +1055,7 @@ impl ExtPanel {
                     let href = url.clone();
                     let button = Button::new(name("panel-link", url)).small().icon(icon);
                     let label = SharedString::from(text);
-                    match icon_only {
+                    let button = match icon_only {
                         true => {
                             campo::icon(button.accessibility_label(label.clone())).tooltip(label)
                         }
@@ -1058,8 +1063,8 @@ impl ExtPanel {
                             campo::button(button.label(label)).tooltip(SharedString::from(url))
                         }
                     }
-                    .on_click(move |_, _, cx| cx.open_url(&href))
-                    .into_any_element()
+                    .on_click(move |_, _, cx| cx.open_url(&href));
+                    own(button, at)
                 } else {
                     let url = SharedString::from(url);
                     let tip = url.clone();
@@ -2472,6 +2477,34 @@ mod tests {
             *actions.borrow(),
             [("go".to_string(), json!({"done": true}))]
         );
+    }
+
+    /// An icon link in a clickable card takes its own click: the card's action is not sent.
+    #[gpui_kit::test]
+    fn icon_link_in_a_card_sends_nothing(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        show(
+            &panel,
+            json!({"type": "card", "id": "card", "children": [
+                {"type": "link", "text": "Open", "url": "https://github.com",
+                 "icon": "external-link"},
+            ]}),
+            cx,
+        );
+        click(name("panel-link:https://github.com"), cx);
+        assert!(sent(&actions).is_empty(), "the card's action stays unsent");
+    }
+
+    /// Markdown links open only on the web schemes the `link` node accepts.
+    #[test]
+    fn markdown_links_open_only_web_urls() {
+        assert!(panel::web_url("https://github.com/a"));
+        for bad in ["file:///Applications/Foo.app", "ssh://h", "javascript:x"] {
+            assert!(!panel::web_url(bad), "{bad}");
+        }
     }
 
     /// Cancel sends nothing; Confirm sends the action clicked once, with the form's values at

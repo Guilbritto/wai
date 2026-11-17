@@ -894,7 +894,7 @@ fn id(o: &Map<String, Value>) -> Option<String> {
 
 /// An `http://` or `https://` URL with something after the scheme, on one line, at most `MAX_URL`
 /// bytes.
-fn web_url(url: &str) -> bool {
+pub fn web_url(url: &str) -> bool {
     let start = url.get(..8).unwrap_or(url).to_ascii_lowercase();
     let scheme = ["https://", "http://"]
         .into_iter()
