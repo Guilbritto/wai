@@ -163,6 +163,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `event/turn_ended` | notification | `{"agent", "session", "reason"}` | `reason` is `end_turn`, `cancelled`, `max_tokens`, `refusal`, or the agent's own. Needs `sessions:read` |
 | `event/file_saved` | notification | `{"path": "<absolute path>"}` | The user saved a file in wai |
 | `event/session_focused` | notification | `{"agent", "session"}` | The focused pane's session, the one whose prompt box shows your prompt panels; both `null` when the focused pane is not a session (a draft, a file, a panel) or the main area is closed. Sent when it changes, and once after `initialize` when wai knows it. API 1.6. Needs `sessions:read` |
+| `event/ext` | notification | `{"source", "name", "data"}` | An event another extension emitted. API 1.7. Needs `events:<source>` |
 
 - Paths are absolute, and on Windows they never carry the `\\?\` prefix.
 - Answer `initialize` before anything else. API 1.1 to 1.7 only add fields and methods; ignore the ones you do not know.
@@ -175,6 +176,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `sessions/open` | `sessions:control` | `{"agent"?: string, "prompt"?: string, "send"?: bool}` | `{"agent", "session"}` once the session has started |
 | `sessions/prompt` | `sessions:control` | `{"agent", "session", "text"}` | `null` at once |
 | `notify` | `notify` | `{"title", "body"?}` | `null` |
+| `events/emit` | none | `{"name", "data"?}` | `null` |
 | `panel/render` | `panels` | `{"panel": "<panel id>", "tree": {…}}` | `null` |
 | `panel/open` | `panels` | `{"panel": "<panel id>"}` | `null` once shown |
 | `item/update` | `bar` | `{"item": "<item id>", "text"?, "icon"?, "tooltip"?, "tone"?, "card"?}` | `null` |
@@ -210,6 +212,16 @@ When an enabled extension with `[process]` and the `process` permission starts (
 - An item id not in your manifest gets `-32602`.
 
 **Notifications or requests.** You may send any of these as a notification (no `id`) when you do not need the answer, as the examples below do. A denied notification is dropped without an answer.
+
+## Events between extensions
+
+An extension sends `events/emit` with a `name` and optional `data`; wai forwards it as `event/ext`, with `source` set to the emitter's id, to every other running extension granted `events:<emitter id>`.
+
+- `name` matches `[a-z0-9][a-z0-9._-]{0,63}`, and `data` is any JSON of at most 16 KiB serialized. A request with either wrong gets an `INVALID_PARAMS` error; a notification is dropped and logged.
+- At most 20 events per second per emitter; the excess is dropped and logged.
+- An emitter never receives its own events, even with `events:<its own id>`.
+- There is no queue: an extension that is not running misses the event, and the source need not be installed.
+- wai does not check payloads: the emitter documents its event names and `data` in its README, and listeners ignore names they do not know.
 
 ## Panels
 

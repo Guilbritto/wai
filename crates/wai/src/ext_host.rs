@@ -34,6 +34,9 @@ const MAX_BATCH: usize = 256;
 /// At most one notification, one `sessions/open` and one `panel/open` per 2 s per extension: the
 /// excess notifications are dropped, the excess opens refused.
 const CALL_GAP: Duration = Duration::from_secs(2);
+/// At most `EMIT_LIMIT` `events/emit` per `EMIT_WINDOW` per extension; the excess is dropped.
+const EMIT_LIMIT: u32 = 20;
+const EMIT_WINDOW: Duration = Duration::from_secs(1);
 const TOO_MANY_OPENS: &str = "Too many sessions opened; try again later";
 const TOO_MANY_SHOWS: &str = "Too many panel opens; try again later";
 
@@ -143,6 +146,8 @@ struct Running {
     opened: Option<Instant>,
     /// When it last showed one of its panels (`panel/open`).
     shown: Option<Instant>,
+    /// The start and count of its current `events/emit` window.
+    emitted: Option<(Instant, u32)>,
     /// What each item last said (`item/update`); empty again for a fresh process.
     items: HashMap<String, ItemState>,
     _pump: Task<()>,
@@ -466,6 +471,7 @@ impl ExtHost {
             notified: None,
             opened: None,
             shown: None,
+            emitted: None,
             items: HashMap::new(),
             _pump: pump,
         };
@@ -503,7 +509,25 @@ impl ExtHost {
                 }
                 return;
             }
-            ExtEvent::Emit { .. } => return,
+            ExtEvent::Emit { name, data } => {
+                let Some(running) = self.running.get_mut(id) else {
+                    return;
+                };
+                if !allow_burst(&mut running.emitted, Instant::now()) {
+                    let msg = format!("{} emits too often; dropped {name:?}", id.as_str());
+                    return eprintln!("wai: {msg}");
+                }
+                for (other, running) in &self.running {
+                    if other != id {
+                        running.handle.notify_event(HostEvent::Ext {
+                            source: id.clone(),
+                            name: name.clone(),
+                            data: data.clone(),
+                        });
+                    }
+                }
+                return;
+            }
             ExtEvent::Notify { title, body } => return self.notify(id, &title, &body),
             ExtEvent::OpenSession { reply, .. } if !self.may_open(id) => {
                 return reply.send(Err(TOO_MANY_OPENS.into()));
@@ -539,6 +563,16 @@ fn allow(last: &mut Option<Instant>, now: Instant) -> bool {
     true
 }
 
+/// Whether an event at `now` fits the emitter's current window of `EMIT_LIMIT` per `EMIT_WINDOW`.
+fn allow_burst(window: &mut Option<(Instant, u32)>, now: Instant) -> bool {
+    let (start, count) = match *window {
+        Some((start, count)) if now < start + EMIT_WINDOW => (start, count + 1),
+        _ => (now, 1),
+    };
+    *window = Some((start, count));
+    count <= EMIT_LIMIT
+}
+
 /// `first` and what else waits, up to `MAX_BATCH` events: one update applies them.
 fn batch<T>(first: T, rx: &smol::channel::Receiver<T>) -> Vec<T> {
     let more = std::iter::from_fn(|| rx.try_recv().ok()).take(MAX_BATCH - 1);
@@ -554,7 +588,7 @@ pub(crate) mod tests {
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{Entity, TestAppContext, VisualTestContext};
     use serde_json::{Value, json};
-    use wai_ext::{ExtStore, MANIFEST_FILE, Source, parse_manifest};
+    use wai_ext::{ExtEvent, ExtId, ExtStore, HostEvent, MANIFEST_FILE, Source, parse_manifest};
     use wai_settings::{AgentConfig, Settings};
 
     use super::{PanelIcon, panel_icon};
@@ -1023,6 +1057,62 @@ pub(crate) mod tests {
         });
         let seen: Vec<_> = blind.iter().map(|l| l["title"].clone()).collect();
         assert_eq!(seen, ["initialize", "event/file_saved"]);
+    }
+
+    /// An extension hears the events of the sources it was granted, never its own, and at most
+    /// `EMIT_LIMIT` of a burst.
+    #[gpui_kit::test]
+    fn ext_events_reach_granted_listeners(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = |id: &str, permissions: &str| {
+            format!(
+                "id = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\napi = \"1.7\"\n\
+                 permissions = [{permissions}]\n[process]\ncommand = \"bin/run\"\n"
+            )
+        };
+        let events = "\"process\", \"events:emitter\"";
+        for (id, permissions) in [
+            ("emitter", events),
+            ("listener", events),
+            ("deaf", "\"process\""),
+        ] {
+            install(tmp.path(), &config, &manifest(id, permissions), "", "");
+        }
+        let (workspace, cx) = workspace_at(&config, Settings::default(), cx);
+        for id in ["emitter", "listener", "deaf"] {
+            logged(&log_path(tmp.path(), id), "initialize", cx, |l| {
+                !bodies(l, "initialize").is_empty()
+            });
+        }
+
+        let emitter = ExtId::new("emitter").unwrap();
+        workspace.update(cx, |w, cx| {
+            w.ext_host.update(cx, |host, cx| {
+                for n in 0..25 {
+                    let event = ExtEvent::Emit {
+                        name: "pr.review".into(),
+                        data: json!({"n": n}),
+                    };
+                    host.apply(&emitter, event, cx);
+                }
+                host.broadcast(HostEvent::FileSaved {
+                    path: "/fence".into(),
+                });
+            })
+        });
+
+        let heard = |id: &str, cx: &mut VisualTestContext| {
+            let log = log_path(tmp.path(), id);
+            let lines = logged(&log, id, cx, |l| !bodies(l, "event/file_saved").is_empty());
+            bodies(&lines, "event/ext")
+        };
+        let want: Vec<_> = (0..20)
+            .map(|n| json!({"source": "emitter", "name": "pr.review", "data": {"n": n}}))
+            .collect();
+        assert_eq!(heard("listener", cx), want);
+        assert!(heard("deaf", cx).is_empty());
+        assert!(heard("emitter", cx).is_empty());
     }
 
     /// R51: at most one notification per 2 s per extension; the excess is dropped.
@@ -2117,7 +2207,7 @@ pub(crate) mod tests {
 mod limits {
     use std::time::{Duration, Instant};
 
-    use super::{CALL_GAP, MAX_BATCH, allow, batch};
+    use super::{CALL_GAP, EMIT_LIMIT, EMIT_WINDOW, MAX_BATCH, allow, allow_burst, batch};
 
     #[test]
     fn notifications_wait_two_seconds() {
@@ -2126,6 +2216,18 @@ mod limits {
         assert!(!allow(&mut last, now + Duration::from_millis(1_999)));
         assert!(allow(&mut last, now + CALL_GAP));
         assert!(!allow(&mut last, now + CALL_GAP + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn allow_burst_lets_twenty_through_per_second() {
+        let (mut window, t0) = (None, Instant::now());
+        for _ in 0..EMIT_LIMIT {
+            assert!(allow_burst(&mut window, t0));
+        }
+        assert!(!allow_burst(&mut window, t0));
+        assert!(!allow_burst(&mut window, t0 + Duration::from_millis(999)));
+        assert!(allow_burst(&mut window, t0 + EMIT_WINDOW));
+        assert_eq!(window, Some((t0 + EMIT_WINDOW, 1)));
     }
 
     /// R56: an extension folder whose path is not UTF-8 never panics: its agents' commands
