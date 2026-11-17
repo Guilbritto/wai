@@ -1162,6 +1162,8 @@ fn row(
     let lead = (item.lead.as_ref()).map(|l| {
         div()
             .flex_none()
+            .max_w(px(120.))
+            .truncate()
             .text_xs()
             .text_color(muted)
             .child(SharedString::from(l))
@@ -1179,7 +1181,9 @@ fn row(
         false => campo::loose_row(cx).when(item.selected, |el| el.border_color(violet)),
     };
     // Title and note share one truncating line; a subtitle goes under the title when there is one.
+    let selector = format!("panel-item-text:{}", item.id);
     let text = h_flex()
+        .debug_selector(move || selector)
         .gap_2()
         .min_w_0()
         .overflow_hidden()
@@ -1906,19 +1910,22 @@ mod tests {
     #[gpui_kit::test]
     fn long_item_text_stays_on_one_line(cx: &mut TestAppContext) {
         let (panel, cx) = panel_window(cx);
-        let long = "w".repeat(300);
+        let long = "word ".repeat(60);
         show(
             &panel,
             json!({"type": "column", "width": 200, "children": [{"type": "list", "plain": true, "items": [
                 {"id": "s", "title": "Short"},
-                {"id": "l", "title": long, "lead": long, "note": long},
+                {"id": "l", "title": long, "lead": long, "note": long, "badge": "B"},
             ]}]}),
             cx,
         );
-        let height = |ix: usize, cx: &mut VisualTestContext| {
-            cx.update(|window, _| window.find(("panel-item", ix)).bounds().size.height)
-        };
-        assert_eq!(height(1, cx), height(0, cx));
+        let mut text = |selector: &'static str| cx.debug_bounds(selector).expect("the text line");
+        let (short, long) = (text("panel-item-text:s"), text("panel-item-text:l"));
+        let row = cx.update(|window, _| window.find(("panel-item", 1usize)).bounds());
+        // Wrapping would make the line taller than a short one's.
+        assert_eq!(long.size.height, short.size.height);
+        // Overflowing would push it, or the badge after it, past the row.
+        assert!(long.right() <= row.right() && long.bottom() <= row.bottom());
     }
 
     /// A path field sends its path with `~` expanded; one outside home goes as it is.
