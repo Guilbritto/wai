@@ -216,7 +216,7 @@ A panel exists while your process runs, and its content is the last tree you ren
 
 **Where it shows (`location`):**
 - **`sidebar`** (the default): a sidebar tab titled by `title`, cut to 24 characters.
-  - **`wide = true`** (API 1.6): while the tab is shown, the sessions area hides and the sidebar takes the whole window. Clicking the panel's button again, another sidebar tab, or opening a session or a `main` panel brings the sessions back on the Sessions tab. A `main` panel cannot be wide.
+  - **`wide = true`** (API 1.6): while the tab is shown, the sessions area hides and the sidebar takes the whole window. Clicking the panel's button again, another sidebar tab, or opening a session, a `main` panel, a file or the terminal brings the sessions back on the Sessions tab. A `main` panel cannot be wide.
 - **`main`:** a pane in the main area, beside the sessions, with a header (icon, title, your extension's name, ×).
   - Its activity-bar button opens the pane, or focuses it if it is open. The button shows selected while the pane is on screen. There is at most one pane per panel.
   - It takes the focused pane, as a session does; the session there stays open in the sidebar. If the focused pane is the editor, it opens in a new pane beside it.

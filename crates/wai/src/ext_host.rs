@@ -1933,8 +1933,9 @@ pub(crate) mod tests {
         );
     }
 
-    /// A wide panel's icon hides the main area while it is shown; its icon again, another tab, a
-    /// session starting or a main panel opening bring the main area back, on the Sessions tab.
+    /// A wide panel's icon hides the main area while it is shown; its icon again, another tab, the
+    /// terminal, a file, a session starting or a main panel opening bring the main area back, on
+    /// the Sessions tab.
     #[gpui_kit::test]
     fn wide_panel_takes_the_main_area(cx: &mut TestAppContext) {
         use crate::extensions_view::tests::click;
@@ -1973,6 +1974,23 @@ pub(crate) mod tests {
         cx.simulate_keystrokes("secondary-b");
         assert!(!main(cx));
 
+        // The terminal and files live in the main area: showing either leaves the wide panel.
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.toggle_terminal(&crate::app::ToggleTerminal, window, cx)
+            })
+        });
+        assert_eq!(tab(cx), SidebarTab::Sessions);
+        assert!(main(cx));
+        click(("tab-panel", 1usize), cx);
+        let file = tmp.path().join("notes.txt");
+        std::fs::write(&file, "notes").unwrap();
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.open_file(file, None, window, cx)));
+        assert_eq!(tab(cx), SidebarTab::Sessions);
+        assert!(main(cx));
+
+        click(("tab-panel", 1usize), cx);
+        assert!(!main(cx));
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| {
                 w.start_session("fake".into(), None, false, None, window, cx)

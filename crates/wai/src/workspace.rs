@@ -2288,8 +2288,9 @@ impl Workspace {
             .any(|p| p.wide && tab == SidebarTab::Panel(p.view.entity_id()))
     }
 
-    /// Something opens in the main area: a wide panel gives way to the Sessions tab.
-    fn leave_wide(&mut self, cx: &App) {
+    /// Something opens in the main area (a session, a main panel, a file, the terminal): a wide
+    /// panel gives way to the Sessions tab.
+    pub(crate) fn leave_wide(&mut self, cx: &App) {
         if self.wide_shown(cx) {
             self.sidebar_tab = SidebarTab::Sessions;
         }
@@ -2690,6 +2691,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.leave_wide(cx);
         // One tab per file, named as the watcher reports it (`/private/var`, not `/var`).
         let path = canonical(&path);
         if self.reveal(&path, line, window, cx) {
