@@ -13,7 +13,7 @@ use gpui_kit::component::alert::{Alert, AlertVariant};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::DialogFooter;
-use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::link::Link;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
@@ -186,6 +186,19 @@ impl ExtPanel {
         }
         self.tree = Some(tree.map(Rc::new));
         cx.notify();
+    }
+
+    /// Whether the shown tree has an input `id` that sends on Enter.
+    fn submits(&self, id: &str) -> bool {
+        let mut submits = false;
+        if let Some(Ok(tree)) = &self.tree {
+            tree.walk(&mut |node| {
+                if let Node::Input { id: i, submit, .. } = node {
+                    submits |= *submit && **i == *id;
+                }
+            });
+        }
+        submits
     }
 
     fn act(&mut self, action: String, cx: &mut Context<Self>) {
@@ -535,21 +548,29 @@ impl ExtPanel {
                 label,
                 style,
                 icon,
+                icon_only,
                 disabled,
                 confirm,
-                ..
             } => {
                 let (action, confirm) = (id.clone(), confirm.clone());
                 let danger = *style == ButtonStyle::Danger;
+                let icon = icon.as_deref().and_then(lucide);
+                // An icon that is not bundled leaves the label to show.
+                let only = *icon_only && icon.is_some();
                 let button = Button::new(name("panel-button", id))
                     .small()
-                    .label(SharedString::from(label))
+                    .when(!only, |b| b.label(SharedString::from(label)))
+                    .when(only, |b| {
+                        let label = SharedString::from(label);
+                        b.tooltip(label.clone()).accessibility_label(label)
+                    })
                     .map(|b| match style {
                         ButtonStyle::Primary => campo::primary(b),
                         ButtonStyle::Danger => campo::danger(b, cx),
+                        ButtonStyle::Default if only => campo::icon(b),
                         ButtonStyle::Default => campo::button(b),
                     })
-                    .when_some(icon.as_deref().and_then(lucide), |b, icon| b.icon(icon))
+                    .when_some(icon, |b, icon| b.icon(icon))
                     .disabled(*disabled)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.press(action.clone(), confirm.as_ref(), danger, window, cx)
@@ -560,6 +581,9 @@ impl ExtPanel {
                 id,
                 placeholder,
                 rows,
+                icon,
+                submit,
+                clear,
                 ..
             } => {
                 let (field, shown) = match self.inputs.get(id) {
@@ -568,6 +592,20 @@ impl ExtPanel {
                     old => {
                         let typed = old.map(|(field, _)| field.value(cx));
                         let field = Field::new(*rows, window, cx);
+                        if let Field::Line(state) = &field {
+                            let id = id.clone();
+                            // Typing shows or hides the ×; Enter sends when the node submits.
+                            cx.subscribe_in(state, window, move |this, _, event, _, cx| {
+                                match event {
+                                    InputEvent::Change => cx.notify(),
+                                    InputEvent::PressEnter { .. } if this.submits(&id) => {
+                                        this.act(id.clone(), cx)
+                                    }
+                                    _ => {}
+                                }
+                            })
+                            .detach();
+                        }
                         if let Some(typed) = typed.filter(|t| !t.is_empty()) {
                             field.set_value(&typed, window, cx);
                         }
@@ -584,7 +622,34 @@ impl ExtPanel {
                     .insert(id.clone(), (field.clone(), placeholder.clone()));
                 let element = match &field {
                     Field::Line(state) => {
-                        campo::field(Input::new(state).small(), false, cx).into_any_element()
+                        let muted = cx.theme().muted_foreground;
+                        let typed = !state.read(cx).value().is_empty();
+                        let this = cx.weak_entity();
+                        let id = id.clone();
+                        let (submit, clear_state) = (*submit, state.clone());
+                        let input = Input::new(state)
+                            .small()
+                            .when_some(icon.as_deref().and_then(lucide), |i, icon| {
+                                i.prefix(Icon::new(icon).small().text_color(muted))
+                            })
+                            .when(*clear && typed, |i| {
+                                i.suffix(
+                                    campo::icon(
+                                        Button::new(name("panel-input-clear", &id))
+                                            .small()
+                                            .icon(Lucide::X),
+                                    )
+                                    .accessibility_label("Clear")
+                                    .on_click(move |_, window, cx| {
+                                        clear_state.update(cx, |s, cx| s.set_value("", window, cx));
+                                        if submit {
+                                            this.update(cx, |this, cx| this.act(id.clone(), cx))
+                                                .ok();
+                                        }
+                                    }),
+                                )
+                            });
+                        campo::field(input, false, cx).into_any_element()
                     }
                     Field::Area(state, _) => Textarea::new(state)
                         .rounded(px(campo::RADIUS))
@@ -887,7 +952,7 @@ impl ExtPanel {
                     .children(tabs.iter().map(|tab| {
                         let on = tab.id == current;
                         let (field, choice) = (id.clone(), tab.id.clone());
-                        let tone = if seg { tab.tone } else { Tone::Neutral };
+                        let tone = tab.tone;
                         h_flex()
                             .id(name("panel-tab", &format!("{id}:{}", tab.id)))
                             .h(px(campo::H))
@@ -967,6 +1032,23 @@ impl ExtPanel {
                     .bg(fill)
                     .border_color(border)
                     .into_any_element()
+            }
+            Node::Link {
+                text,
+                url,
+                icon,
+                icon_only,
+            } if icon.as_deref().and_then(lucide).is_some() => {
+                let icon = icon.as_deref().and_then(lucide).unwrap();
+                let (href, tip) = (url.clone(), SharedString::from(url));
+                let button = Button::new(name("panel-link", url)).small().icon(icon);
+                match icon_only {
+                    true => campo::icon(button.accessibility_label(SharedString::from(text))),
+                    false => campo::button(button.label(SharedString::from(text))),
+                }
+                .tooltip(tip)
+                .on_click(move |_, _, cx| cx.open_url(&href))
+                .into_any_element()
             }
             Node::Link { text, url, .. } => {
                 let url = SharedString::from(url);
@@ -1561,8 +1643,6 @@ fn unsupported(cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// A button or field's element id. Their ids are unique in a tree, and the kind keeps one kind's
-/// element state from meeting another's.
 /// The recessed rail the segments of tabs and selects sit in.
 fn segment_bar(bar: Div, line: Hsla, cx: &App) -> Div {
     (bar.p(px(3.)).gap(px(2.)).rounded(px(10.)))
@@ -1582,6 +1662,8 @@ fn segment_pill<E: Styled>(pill: E, on: bool, violet: Hsla) -> E {
     }
 }
 
+/// A button or field's element id. Their ids are unique in a tree, and the kind keeps one kind's
+/// element state from meeting another's.
 fn name(kind: &str, id: &str) -> ElementId {
     ElementId::Name(format!("{kind}:{id}").into())
 }
@@ -2089,6 +2171,7 @@ mod tests {
                 {"type": "log", "text": "a\n\tb"},
                 {"type": "alert", "tone": "warning", "title": "W", "text": "w"},
                 {"type": "link", "text": "l", "url": "https://example.com/a"},
+                {"type": "link", "text": "l", "url": "https://example.com/b", "icon": "external-link", "icon_only": true},
                 {"type": "icon", "name": "check", "tone": "success"},
                 {"type": "spinner", "label": "busy"},
                 {"type": "spinner"},
@@ -2113,6 +2196,107 @@ mod tests {
         assert!(shown(("panel-row", 1usize), cx));
         assert!(shown(("panel-log-line", 1usize), cx));
         assert!(lucide("git-pull-request").is_some() && lucide("no-such-icon").is_none());
+    }
+
+    /// Focuses the `query` input and presses Enter.
+    #[cfg(unix)]
+    fn enter_in_query(panel: &Entity<ExtPanel>, cx: &mut VisualTestContext) {
+        let input = panel.read_with(cx, |p, _| p.inputs.get("query").map(|(s, _)| s.clone()));
+        let Some(super::Field::Line(input)) = input else {
+            panic!("the query input")
+        };
+        cx.update(|window, cx| input.update(cx, |s, cx| s.focus(window, cx)));
+        cx.simulate_keystrokes("enter");
+    }
+
+    /// Only an input with `submit` sends on Enter; a plain one sends nothing.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn submit_input_sends_on_enter(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        show(
+            &panel,
+            json!({"type": "input", "id": "query", "placeholder": "p", "submit": true}),
+            cx,
+        );
+        type_query(&panel, "EC-1240", cx);
+        enter_in_query(&panel, cx);
+        assert_eq!(sent(&actions), ["query"]);
+        assert_eq!(actions.borrow()[0].1["query"], "EC-1240");
+
+        show(
+            &panel,
+            json!({"type": "input", "id": "query", "placeholder": "p"}),
+            cx,
+        );
+        enter_in_query(&panel, cx);
+        assert_eq!(sent(&actions), ["query"], "a plain input sends nothing");
+    }
+
+    /// The x empties the input, and sends only with `submit`; it is hidden while empty.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn clear_empties_and_submits(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        let tree = |submit: bool| {
+            json!({"type": "input", "id": "query", "placeholder": "p",
+                   "clear": true, "submit": submit})
+        };
+        show(&panel, tree(true), cx);
+        assert!(!shown(name("panel-input-clear:query"), cx), "empty: no x");
+        type_query(&panel, "EC-1240", cx);
+        frame(cx);
+        assert!(shown(name("panel-input-clear:query"), cx));
+        click(name("panel-input-clear:query"), cx);
+        let typed = panel.read_with(cx, |p, cx| p.inputs["query"].0.value(cx));
+        assert_eq!(&*typed, "");
+        assert_eq!(sent(&actions), ["query"]);
+        assert_eq!(actions.borrow()[0].1["query"], "");
+
+        show(&panel, tree(false), cx);
+        type_query(&panel, "x", cx);
+        frame(cx);
+        click(name("panel-input-clear:query"), cx);
+        let typed = panel.read_with(cx, |p, cx| p.inputs["query"].0.value(cx));
+        assert_eq!(&*typed, "");
+        assert_eq!(sent(&actions), ["query"], "no submit: nothing more sent");
+    }
+
+    /// An icon-only button is clickable and keeps its label for the tooltip and screen readers.
+    #[gpui_kit::test]
+    fn icon_only_button_keeps_its_label_for_a11y(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        show(
+            &panel,
+            json!({"type": "button", "id": "r", "label": "Refresh", "icon": "refresh-cw",
+                   "icon_only": true}),
+            cx,
+        );
+        assert!(shown(name("panel-button:r"), cx));
+        click(name("panel-button:r"), cx);
+        assert_eq!(sent(&actions), ["r"]);
+    }
+
+    /// A link with an icon is drawn as a button; one with an unknown icon stays a text link.
+    #[gpui_kit::test]
+    fn icon_link_renders_as_a_button(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        let link = |icon: &str| {
+            json!({"type": "link", "text": "Open on GitHub", "url": "https://github.com",
+                   "icon": icon})
+        };
+        show(&panel, link("external-link"), cx);
+        assert!(shown(name("panel-link:https://github.com"), cx));
+        show(&panel, link("no-such-icon"), cx);
+        assert!(!shown(name("panel-link:https://github.com"), cx));
+        assert!(shown(("panel-link", 0usize), cx));
     }
 
     /// A plain list's rows draw the icon, tone, selection, lead and note; a click still sends the id.
