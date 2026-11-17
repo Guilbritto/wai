@@ -1172,6 +1172,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{tick_period, until_next_tick};
+    use crate::chat::PromptTyping;
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
@@ -1260,6 +1261,28 @@ mod tests {
 
     /// With an agent that steers, a message sent during a turn joins it: it shows as the user's
     /// once the turn reads it, the turn's reply takes it in, and no second prompt goes out.
+    #[gpui_kit::test]
+    fn sending_clears_the_typing_signal(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(&slow_reply(1, 0)));
+        let session = start_session(&workspace, cx);
+        let owner = session.entity_id();
+        cx.update(|_, cx| {
+            cx.set_global(crate::chat::PromptSlots {
+                owner: Some(owner),
+                inside: None,
+                side: None,
+            })
+        });
+        let typing = |cx: &mut VisualTestContext| cx.read(|cx| cx.global::<PromptTyping>().0);
+        cx.simulate_input("go");
+        assert!(typing(cx));
+        cx.simulate_keystrokes("enter");
+        assert!(!typing(cx));
+        session.update_in(cx, |s, window, cx| s.prefill("again", window, cx));
+        assert!(typing(cx));
+    }
+
     #[gpui_kit::test]
     fn message_sent_during_a_turn_steers_it(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process

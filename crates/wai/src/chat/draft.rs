@@ -808,6 +808,7 @@ impl DraftView {
             let text = text.cloned().collect::<Vec<_>>().join("\n\n");
             self.input
                 .update(cx, |input, cx| input.set_value(text, window, cx));
+            super::composer::set_typing(cx.entity_id(), self.prompt_typed(cx), cx);
         }
         self.notice = error;
         cx.emit(DraftEvent::Changed);
