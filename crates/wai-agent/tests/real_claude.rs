@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use async_channel::Receiver;
 use wai_agent::{
-    AgentCaps, AgentEvent, AgentHandle, AgentSpec, ChoiceKind, FieldKind, PromptBlock,
+    AgentCaps, AgentEvent, AgentHandle, AgentSpec, ChoiceKind, FieldKind, Meta, PromptBlock,
     QuestionAnswer, SessionEvent, StopReason, SubagentState, ToolContent,
 };
 
@@ -594,4 +594,79 @@ fn permission_requests_in_default_mode() {
         agent.shutdown().await;
         std::fs::remove_dir_all(&dir).ok();
     });
+}
+
+/// A turn's reply and the context size its last usage update reported.
+async fn sized_turn(
+    agent: &AgentHandle,
+    rx: &Receiver<AgentEvent>,
+    session: &str,
+    prompt: &str,
+) -> (String, u64) {
+    agent.prompt(session.into(), vec![PromptBlock::Text(prompt.into())]);
+    let (mut text, mut size) = (String::new(), 0);
+    loop {
+        match rx.recv().await.expect("event channel closed") {
+            AgentEvent::Update { event, .. } => match event {
+                SessionEvent::AgentText(s) => text.push_str(&s),
+                // The last one is the turn result's authoritative window.
+                SessionEvent::Usage { size: s, .. } => size = s,
+                _ => {}
+            },
+            AgentEvent::TurnEnded { .. } => return (text, size),
+            AgentEvent::AuthRequired { .. } => panic!("not signed in to Claude Code"),
+            AgentEvent::Exited { error } => panic!("agent exited mid-turn: {error:?}"),
+            _ => {}
+        }
+    }
+}
+
+/// Per-session context size: with `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` in the user's settings,
+/// this `_meta` turns 1M back on for one session (and its idle compaction off). `opus` is
+/// natively 1M, so the model rows stay the same; the reported window is what changes.
+#[test]
+#[ignore = "needs network, npx and a Claude Code login"]
+fn one_million_context_via_meta() {
+    run(async {
+        let dir = std::env::temp_dir().join(format!("wai-real-claude-1m-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = wai_settings::canonical(&dir);
+        let meta: Meta = serde_json::from_value(serde_json::json!({"claudeCode": {"options": {
+            "settings": {"env": {"CLAUDE_CODE_DISABLE_1M_CONTEXT": "0"}},
+            "env": {"CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS": "1000000"}
+        }}}))
+        .unwrap();
+        let (agent, rx) = spawn();
+        ready(&rx).await;
+
+        let session = agent.new_session(dir.clone(), vec![]).await.expect("new");
+        let id = session.id.clone();
+        let (_, size) = sized_turn(&agent, &rx, &id, "Reply with the word ok.").await;
+        println!("new: size {size}");
+        assert!(size <= 200_000, "a new session is 200k");
+
+        let long = agent.load_session(id.clone(), dir.clone(), vec![], Some(meta.clone()));
+        long.await.expect("load with the meta");
+        while rx.try_recv().is_ok() {} // the replayed history
+        let (text, size) = sized_turn(&agent, &rx, &id, "Reply with the word yes.").await;
+        println!("load + meta: size {size}, reply {text:?}");
+        assert!(size >= 900_000, "the meta turns 1M on");
+
+        let short = agent.load_session(id.clone(), dir.clone(), vec![], None);
+        short.await.expect("load without the meta");
+        while rx.try_recv().is_ok() {}
+        let prompt = "Which single word did you reply with last time? Reply with just it.";
+        let (text, size) = sized_turn(&agent, &rx, &id, prompt).await;
+        println!("load, no meta: size {size}, reply {text:?}");
+        assert!(size <= 200_000, "back at 200k");
+        assert!(text.to_lowercase().contains("yes"), "the history survived");
+
+        let forked = agent.fork_session(id.clone(), dir.clone(), vec![], Some(meta));
+        let fork = forked.await.expect("fork with the meta").id;
+        let (_, size) = sized_turn(&agent, &rx, &fork, "Reply with the word ok.").await;
+        println!("fork + meta: size {size}");
+        assert!(size >= 900_000, "a fork with the meta is 1M");
+        agent.shutdown().await;
+        std::fs::remove_dir_all(&dir).ok();
+    })
 }

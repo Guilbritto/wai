@@ -243,3 +243,20 @@ Spike item 7: with this meta, the adapter's log shows the idle compaction skippe
 
 - The exact meta JSON and the model-row matching, both decided by the spike.
 - Names, chip visuals (follow the existing chips), and how the busy state looks.
+
+## Spike results
+
+Measured on 2026-11-17 with `claude-agent-acp@0.103.0`, model `opus` (`claude-opus-5-5`), and the
+owner's `~/.claude/settings.json` (`CLAUDE_CODE_DISABLE_1M_CONTEXT=1`). Regression check:
+`one_million_context_via_meta` in `crates/wai-agent/tests/real_claude.rs`.
+
+- Mechanism A holds with the meta as designed:
+  `{"claudeCode":{"options":{"settings":{"env":{"CLAUDE_CODE_DISABLE_1M_CONTEXT":"0"}},"env":{"CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS":"1000000"}}}}`.
+- No model row ends in `[1m]`, with or without the meta: `opus` is natively 1M, and the flag only
+  caps it. Switching size is a reload with or without the meta; no model row changes.
+- CLI `getContextUsage()`: flag on → `rawMaxTokens` 200000, `autoCompactThreshold` 167000;
+  meta → 1000000 and 967000. The turn result's `Usage.size` follows (200000 / 1000000).
+- A load with the meta right after `session/new` works, before any prompt. A load without it goes
+  back to 200k and keeps the history. A fork with the meta is 1M.
+- `Usage.size` mid-turn can carry the adapter's cached window for the model; only the turn
+  result's (last) value is authoritative.
