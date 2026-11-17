@@ -20,6 +20,8 @@ pub enum Change {
     UpdatesCheck(bool),
     UpdatesRepo(Option<String>),
     Processing(Processing),
+    /// Appends an index URL to `[extensions] indexes`, unless it is there already.
+    AddIndex(String),
 }
 
 fn table<'a>(parent: &'a mut Table, name: &str) -> &'a mut Table {
@@ -110,6 +112,16 @@ pub fn write_change(user_dir: &Path, change: &Change) -> Result<(), SettingsErro
             };
             set(table(root, "conversation"), "processing", Some(value(name)));
         }
+        Change::AddIndex(url) => {
+            let ext = table(root, "extensions");
+            if !ext.get("indexes").is_some_and(|i| i.is_array()) {
+                ext.insert("indexes", value(toml_edit::Array::new()));
+            }
+            let list = ext["indexes"].as_array_mut().expect("just made an array");
+            if !list.iter().any(|v| v.as_str() == Some(url)) {
+                list.push(url.as_str());
+            }
+        }
     }
     std::fs::create_dir_all(user_dir).map_err(io)?;
     let tmp = user_dir.join("settings.toml.tmp");
@@ -166,6 +178,23 @@ mod tests {
         write_change(d.path(), &Change::Shell(None)).unwrap();
         let (s, _) = Settings::load(d.path(), None).unwrap();
         assert!(!s.models.contains_key("codex") && s.terminal.shell.is_none());
+    }
+
+    #[test]
+    fn add_index_appends_once() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.toml");
+        std::fs::write(&p, "# mine\ntheme = \"light\"\n").unwrap();
+        write_change(d.path(), &Change::AddIndex("https://a/i.toml".into())).unwrap();
+        write_change(d.path(), &Change::AddIndex("https://b/i.toml".into())).unwrap();
+        write_change(d.path(), &Change::AddIndex("https://a/i.toml".into())).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.starts_with("# mine\ntheme = \"light\"\n"), "{text}");
+        let (s, _) = Settings::load(d.path(), None).unwrap();
+        assert_eq!(
+            s.extensions.indexes,
+            ["https://a/i.toml", "https://b/i.toml"]
+        );
     }
 
     #[test]
