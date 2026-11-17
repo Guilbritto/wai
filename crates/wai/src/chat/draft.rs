@@ -1045,7 +1045,8 @@ impl Render for DraftView {
             .when(!self.attachments.is_empty(), |el| {
                 el.child(h_flex().gap_2().flex_wrap().children(chips))
             })
-            .child(textarea)
+            // A taller prompt panel: the text takes the height, the bar stays at the bottom.
+            .child(div().flex_grow(1.).child(textarea))
             .child(
                 h_flex()
                     .gap_2()
