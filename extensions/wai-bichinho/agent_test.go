@@ -208,6 +208,21 @@ func TestDiaryCapped(t *testing.T) {
 	}
 }
 
+func TestRelaunchWhileHungryAndLonelyIsQuiet(t *testing.T) {
+	dir := t.TempDir()
+	body := `{"pet":{"name":"Bolota","species":"tatu","born":"2026-11-01T00:00:00Z","fed_at":"2026-11-01T00:00:00Z","love":0,"loved_at":"2026-11-01T00:00:00Z"},"eggs":0,"seen":{}}`
+	os.WriteFile(filepath.Join(dir, stateFile), []byte(body), 0o600)
+	h := start(t, dir)
+	h.s.tick()
+	h.s.tick()
+	if len(h.s.st.Diary) != 0 || h.s.talk.cur != nil || len(h.s.talk.queue) != 0 {
+		t.Errorf("diary %v cur %v queue %v", h.s.st.Diary, h.s.talk.cur, h.s.talk.queue)
+	}
+	if !h.s.hungry || !h.s.lonely {
+		t.Errorf("not seeded: hungry %v lonely %v", h.s.hungry, h.s.lonely)
+	}
+}
+
 func TestEventsWriteDiary(t *testing.T) {
 	h := start(t, t.TempDir())
 	h.send(`{"jsonrpc":"2.0","id":1,"method":"panel/action","params":{"panel":"pet","action_id":"hatch","values":{}}}`)

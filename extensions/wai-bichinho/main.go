@@ -479,6 +479,10 @@ func (s *server) handle(m message) {
 		}
 		s.load()
 		s.lastEvent = s.now()
+		// A relaunch is not a turn: a pet already hungry or lonely says and notes nothing.
+		if p := s.st.Pet; p != nil {
+			s.hungry, s.lonely = p.Hunger(s.now()) >= 60, p.Affection(s.now()) < 25
+		}
 		s.ready = true
 		s.listID++
 		s.write(node{"jsonrpc": "2.0", "id": s.listID, "method": "sessions/list"})
