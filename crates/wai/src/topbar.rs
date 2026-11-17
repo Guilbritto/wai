@@ -12,7 +12,7 @@ use gpui_kit::*;
 use wai_ext::Bar;
 use wai_ext::panel::clamp;
 
-use crate::app::{OpenPalette, ToggleAgents, ToggleTerminal};
+use crate::app::{OpenPalette, ToggleAgents, ToggleSidebar, ToggleTerminal};
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::bars::{TOP_ITEMS, drawn, ext_item, hide_entries, hide_menu};
 use crate::chat::TurnState;
@@ -128,6 +128,16 @@ impl Workspace {
             .on_click(
                 cx.listener(|this, _, window, cx| this.open_palette(&OpenPalette, window, cx)),
             );
+        let sidebar = Button::new("topbar-sidebar")
+            .ghost()
+            .small()
+            .icon(IconName::PanelLeft)
+            .tooltip("Toggle sidebar")
+            .accessibility_label("Toggle sidebar")
+            .selected(!self.sidebar_hidden)
+            .on_click(
+                cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
+            );
         let terminal =
             Button::new("topbar-terminal")
                 .ghost()
@@ -168,11 +178,13 @@ impl Workspace {
             .gap_1()
             .children(self.templates_menu(cx))
             .children(self.shown("wai.palette").then_some(palette))
+            .children(self.shown("wai.sidebar-toggle").then_some(sidebar))
             .children(self.shown("wai.terminal").then_some(terminal))
             .children(agents.filter(|_| self.shown("wai.agents-toggle")));
         let mut own = vec![
             ("wai.status", "Agent status"),
             ("wai.palette", "Command palette"),
+            ("wai.sidebar-toggle", "Sidebar"),
             ("wai.terminal", "Terminal"),
         ];
         // Listed only while its button can show.

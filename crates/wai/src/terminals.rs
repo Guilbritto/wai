@@ -132,6 +132,8 @@ impl Workspace {
             return;
         }
         self.terminal_visible = true;
+        // It lives in the main area.
+        self.main_closed = false;
         self.save_state(cx);
         if let Some(terminal) = self.terminal() {
             terminal.update(cx, |t, cx| t.activate(window, cx));
@@ -203,6 +205,7 @@ impl Workspace {
         self.next_terminal += 1;
         self.active_terminal = self.terminals.len() - 1;
         self.terminal_visible = true;
+        self.main_closed = false;
         self.save_state(cx);
         view.update(cx, |t, cx| t.activate(window, cx));
         cx.notify();

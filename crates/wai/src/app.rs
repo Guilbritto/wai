@@ -31,6 +31,7 @@ actions!(
         OpenPalette,
         OpenSettings,
         ToggleAgents,
+        ToggleSidebar,
         FilterSessions
     ]
 );
@@ -73,6 +74,7 @@ fn bind_keys(cx: &mut App) {
         ("secondary-}", Box::new(NextTerminal), Some("Terminal")),
         ("secondary-{", Box::new(PrevTerminal), Some("Terminal")),
         ("secondary-alt-b", Box::new(ToggleAgents), workspace),
+        ("secondary-b", Box::new(ToggleSidebar), workspace),
         // A session leaves the screen and stays open; R20: an editor closes its active tab.
         ("secondary-w", Box::new(ClosePane), workspace),
         ("secondary-s", Box::new(Save), workspace),

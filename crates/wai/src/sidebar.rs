@@ -20,7 +20,7 @@ pub use wai_settings::canonical;
 use wai_settings::{SessionGroup, WorkArea};
 
 use crate::agents::AgentStatus;
-use crate::app::{FilterSessions, NewSession};
+use crate::app::{FilterSessions, NewSession, ToggleSidebar};
 use crate::aurora;
 use crate::bars::{HideEntry, hide_menu};
 use crate::chat::{ChatItem, ChatModel, ChatSession, DraftView, TurnState};
@@ -259,6 +259,34 @@ impl Workspace {
         }));
     }
 
+    /// ⌘B, or a click on the selected rail icon: hides the sidebar, or shows it again. The main
+    /// area and the sidebar never both go: hiding the sidebar brings a closed main area back.
+    pub(crate) fn toggle_sidebar(
+        &mut self,
+        _: &ToggleSidebar,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar_hidden = !self.sidebar_hidden;
+        if self.sidebar_hidden {
+            self.main_closed = false;
+            // The caret may have been in the sidebar.
+            self.focus_pane(self.focused_pane, window, cx);
+        }
+        self.save_state(cx);
+        cx.notify();
+    }
+
+    /// Selects `tab` and shows the sidebar.
+    pub(crate) fn show_tab(&mut self, tab: SidebarTab, cx: &mut Context<Self>) {
+        self.sidebar_tab = tab;
+        if self.sidebar_hidden {
+            self.sidebar_hidden = false;
+            self.save_state(cx);
+        }
+        cx.notify();
+    }
+
     /// The selected panel; the activity bar (`render_rail`) switches them.
     pub(crate) fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let panels = self.ext_host.read(cx).panels();
@@ -337,14 +365,21 @@ impl Workspace {
         };
         let icon = |name: Lucide| Icon::new(name).size(px(17.));
         let tab_item = |tab: SidebarTab, id: ElementId, label: SharedString, body: AnyElement| {
-            let on = self.sidebar_tab == tab;
+            let on = !self.sidebar_hidden && self.sidebar_tab == tab;
             item(id, label, on)
                 .role(Role::Tab)
                 .aria_selected(on)
                 .child(body)
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                    this.sidebar_tab = tab;
-                    if tab == SidebarTab::Search {
+                    // As in VS Code: the selected tab's icon hides the sidebar, or shows it.
+                    // A double click's second click shows it again.
+                    let selected = this.sidebar_tab == tab;
+                    if selected && (event.click_count() == 1 || this.sidebar_hidden) {
+                        this.toggle_sidebar(&ToggleSidebar, window, cx);
+                    } else {
+                        this.show_tab(tab, cx);
+                    }
+                    if tab == SidebarTab::Search && !this.sidebar_hidden {
                         let focus = this.search.read(cx).query_focus(cx);
                         window.focus(&focus, cx);
                     }
@@ -352,7 +387,6 @@ impl Workspace {
                     if tab == SidebarTab::Sessions && event.click_count() > 1 {
                         this.new_session(&NewSession, window, cx);
                     }
-                    cx.notify();
                 }))
                 // Registers the id so tests can find and click it (a Button does it itself).
                 .test_support()
@@ -396,7 +430,10 @@ impl Workspace {
             let on = match p.main {
                 true => (self.panes.iter())
                     .any(|pane| matches!(pane, Pane::Extension(v) if *v == p.view)),
-                false => self.sidebar_tab == SidebarTab::Panel(p.view.entity_id()),
+                false => {
+                    !self.sidebar_hidden
+                        && self.sidebar_tab == SidebarTab::Panel(p.view.entity_id())
+                }
             };
             let mark = match &p.icon {
                 Some(PanelIcon::Lucide(name)) => icon(*name).into_any_element(),
@@ -777,10 +814,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar_tab = SidebarTab::Sessions;
+        self.show_tab(SidebarTab::Sessions, cx);
         self.sessions_filter
             .update(cx, |input, cx| input.focus(window, cx));
-        cx.notify();
     }
 
     /// The group holding session `id`.

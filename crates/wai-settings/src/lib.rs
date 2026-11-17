@@ -503,6 +503,10 @@ pub struct AppState {
     pub agents_right: bool,
     /// That panel is hidden.
     pub agents_collapsed: bool,
+    /// The sidebar is hidden (⌘B); the rail stays.
+    pub sidebar_hidden: bool,
+    /// The user closed the lone empty pane: the sidebar takes the main area's width.
+    pub main_closed: bool,
     /// Agent commands and shells the user approved; `None` for a state from before approvals.
     pub approved: Option<BTreeSet<String>>,
     /// Agent id -> the models its last session offered.
@@ -589,6 +593,8 @@ impl Default for AppState {
             sidebar_width: 260.0,
             agents_right: false,
             agents_collapsed: false,
+            sidebar_hidden: false,
+            main_closed: false,
             approved: None,
             models_seen: BTreeMap::new(),
             groups: Vec::new(),
@@ -999,6 +1005,8 @@ mod tests {
             sidebar_width: 300.0,
             agents_right: true,
             agents_collapsed: true,
+            sidebar_hidden: true,
+            main_closed: true,
             approved: Some(["x".into()].into()),
             models_seen: [(
                 "codex".to_string(),
@@ -1051,6 +1059,7 @@ mod tests {
         // A state from before the Agents panel: in the sidebar.
         let old = AppState::load(&path);
         assert!(!old.agents_right && !old.agents_collapsed);
+        assert!(!old.sidebar_hidden && !old.main_closed);
         // A state from before names and groups.
         let old = r#"{"open_sessions":[{"agent":"a","session_id":"s","cwd":"/","pane":0}]}"#;
         std::fs::write(&path, old).unwrap();

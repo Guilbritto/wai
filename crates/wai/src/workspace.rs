@@ -240,6 +240,11 @@ pub struct Workspace {
     pub(crate) agents_right: bool,
     /// That panel is hidden.
     pub(crate) agents_collapsed: bool,
+    /// ⌘B hid the sidebar; the rail stays.
+    pub(crate) sidebar_hidden: bool,
+    /// The user closed the lone empty pane: the main area is not drawn while that pane is all it
+    /// has, and the sidebar takes its width (`main_shown`). Never with `sidebar_hidden`.
+    pub(crate) main_closed: bool,
     /// Created on first use (the sidebar's Extensions button, a project's suggestion): it reads
     /// `user_dir`'s extensions.
     pub(crate) extensions: Option<Entity<ExtensionsView>>,
@@ -452,6 +457,8 @@ impl Workspace {
             agents,
             agents_right: false,
             agents_collapsed: false,
+            sidebar_hidden: false,
+            main_closed: false,
             sessions: Vec::new(),
             panes: vec![Pane::Empty(None)],
             focused_pane: 0,
@@ -891,6 +898,8 @@ impl Workspace {
         }
         self.agents_right = state.agents_right;
         self.agents_collapsed = state.agents_collapsed;
+        self.sidebar_hidden = state.sidebar_hidden;
+        self.main_closed = state.main_closed && !state.sidebar_hidden;
         self.open_folded = state.open_folded;
         self.hidden = state.hidden;
         self.rail_order = state.rail_order;
@@ -1035,6 +1044,8 @@ impl Workspace {
             sidebar_width: SIDEBAR_WIDTH,
             agents_right: self.agents_right,
             agents_collapsed: self.agents_collapsed,
+            sidebar_hidden: self.sidebar_hidden,
+            main_closed: self.main_closed,
             approved: Some(self.approved.clone()),
             models_seen: self.models_seen.clone(),
             groups: self.groups.clone(),
@@ -1870,8 +1881,7 @@ impl Workspace {
                 if main {
                     self.open_panel(view, false, window, cx);
                 } else {
-                    self.sidebar_tab = SidebarTab::Panel(view.entity_id());
-                    cx.notify();
+                    self.show_tab(SidebarTab::Panel(view.entity_id()), cx);
                 }
                 reply.send(Ok(serde_json::Value::Null));
             }
@@ -2077,6 +2087,9 @@ impl Workspace {
     /// active tab instead (the pane goes with the last one). R87: a pane's × runs it on its own
     /// pane, focused or not.
     pub(crate) fn close_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.panes[..], [Pane::Empty(_)]) {
+            return self.close_main(window, cx);
+        }
         if let Pane::Editor(pane) = &self.panes[ix] {
             return pane.update(cx, |p, cx| p.close(p.active, window, cx));
         }
@@ -2185,15 +2198,34 @@ impl Workspace {
         early.unwrap_or_default()
     }
 
-    /// Removes pane `ix` (empties it when it is the only one) and focuses its neighbour.
+    /// Removes pane `ix` (empties it when it is the only one) and focuses its neighbour. A lone
+    /// pane that empties shows, even in a closed main area: closing that is the empty pane's ×.
     fn drop_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.panes.len() > 1 {
             self.panes.remove(ix);
         } else {
             self.panes[ix] = Pane::Empty(None);
+            self.main_closed = false;
         }
         self.focus_pane(ix.min(self.panes.len() - 1), window, cx);
         self.save_state(cx);
+    }
+
+    /// The lone empty pane's ×: the main area goes, its terminal with it (the shells keep
+    /// running), and the sidebar, shown, takes its width until something opens in a pane.
+    fn close_main(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.panes[0] = Pane::Empty(None);
+        self.main_closed = true;
+        self.sidebar_hidden = false;
+        self.terminal_visible = false;
+        self.focus_pane(0, window, cx);
+        self.save_state(cx);
+    }
+
+    /// Whether the main area (panes and terminal) is drawn: not while it is closed with only the
+    /// empty pane.
+    pub(crate) fn main_shown(&self) -> bool {
+        !(self.main_closed && matches!(self.panes[..], [Pane::Empty(None)]))
     }
 
     fn dirty_tabs(&self, cx: &App) -> Vec<Entity<FileEditor>> {
@@ -3149,8 +3181,8 @@ impl Workspace {
                     )
             })
             .children(problem.map(|p| div().max_w(px(480.)).text_color(theme.danger).child(p)))
-            // In a split, its × drops it; a lone empty pane has nothing to close.
-            .when(self.panes.len() > 1, |el| {
+            // In a split, its × drops it; a lone one's closes the main area.
+            .map(|el| {
                 let close = Button::new("pane-close")
                     .ghost()
                     .xsmall()
@@ -3360,7 +3392,6 @@ impl Render for Workspace {
                 .when(dragging, |el| el.relative().child(Self::drop_zones(ix, cx)));
             resizable_panel().child(on_card(aurora::card(focused, cx), content))
         });
-        let sidebar = on_card(aurora::card(false, cx), sidebar).debug_selector(|| "sidebar".into());
         // The terminal paints its own square background: 5 px in, on a card of its colour, it
         // leaves the card's corners round.
         let terminal_card = aurora::card(false, cx)
@@ -3372,6 +3403,48 @@ impl Render for Workspace {
             on_card(aurora::card(false, cx), self.render_agents(cx))
                 .debug_selector(|| "agents-panel".into())
         });
+        // `close_main` and `toggle_sidebar` keep one of the two.
+        let main_shown = self.main_shown();
+        let sidebar_shown = !self.sidebar_hidden || !main_shown;
+        let sidebar = sidebar_shown.then(|| {
+            let sidebar =
+                on_card(aurora::card(false, cx), sidebar).debug_selector(|| "sidebar".into());
+            // Alone, it takes the main area's width.
+            match main_shown {
+                true => resizable_panel().size(px(SIDEBAR_WIDTH)).fixed(),
+                false => resizable_panel(),
+            }
+            .child(sidebar)
+        });
+        let main = main_shown.then(|| {
+            // Keyed by count: each split starts with equal widths.
+            let panes = h_resizable(("panes", self.panes.len()))
+                .with_handle_appearance(aurora::handle())
+                .children(panes);
+            let terminal = resizable_panel()
+                .size(px(TERMINAL_HEIGHT))
+                .fixed()
+                .visible(self.terminal_visible)
+                .child(terminal);
+            resizable_panel().child(
+                v_resizable("center")
+                    .with_handle_appearance(aurora::handle())
+                    .child(resizable_panel().child(panes))
+                    .child(terminal),
+            )
+        });
+        let agents = resizable_panel()
+            .size(px(SIDEBAR_WIDTH))
+            .fixed()
+            .visible(agents.is_some())
+            .child(div().size_full().children(agents));
+        // Keyed by which of sidebar and main area show: the panels' sizes go by index.
+        // ponytail: dragged pane widths reset when the sidebar toggles.
+        let layout = usize::from(sidebar_shown) + 2 * usize::from(main_shown);
+        // `children` replaces the panels, so all go at once.
+        let columns = h_resizable(("workspace", layout))
+            .with_handle_appearance(aurora::handle())
+            .children(sidebar.into_iter().chain(main).chain([agents]));
 
         div()
             .key_context("Workspace")
@@ -3383,6 +3456,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::next_terminal_action))
             .on_action(cx.listener(Self::prev_terminal_action))
             .on_action(cx.listener(Self::toggle_agents))
+            .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::close_focused_pane))
             .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::focus_next_pane))
@@ -3398,49 +3472,17 @@ impl Render for Workspace {
             .text_color(theme.foreground)
             .children(aurora::backdrop(cx))
             .child(
-                v_flex().size_full().child(top_bar).child(
-                    h_flex().flex_1().min_h_0().child(rail).child(
-                        div().flex_1().min_w_0().h_full().p_1().child(
-                            h_resizable("workspace")
-                                .with_handle_appearance(aurora::handle())
-                                .child(
-                                    resizable_panel()
-                                        .size(px(SIDEBAR_WIDTH))
-                                        .fixed()
-                                        .child(sidebar),
-                                )
-                                .child(
-                                    resizable_panel().child(
-                                        v_resizable("center")
-                                            .with_handle_appearance(aurora::handle())
-                                            .child(
-                                                resizable_panel().child(
-                                                    // Keyed by count: each split starts with equal
-                                                    // widths.
-                                                    h_resizable(("panes", self.panes.len()))
-                                                        .with_handle_appearance(aurora::handle())
-                                                        .children(panes),
-                                                ),
-                                            )
-                                            .child(
-                                                resizable_panel()
-                                                    .size(px(TERMINAL_HEIGHT))
-                                                    .fixed()
-                                                    .visible(self.terminal_visible)
-                                                    .child(terminal),
-                                            ),
-                                    ),
-                                )
-                                .child(
-                                    resizable_panel()
-                                        .size(px(SIDEBAR_WIDTH))
-                                        .fixed()
-                                        .visible(agents.is_some())
-                                        .child(div().size_full().children(agents)),
-                                ),
-                        ),
-                    ),
-                ).child(bottom_bar),
+                v_flex()
+                    .size_full()
+                    .child(top_bar)
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .child(rail)
+                            .child(div().flex_1().min_w_0().h_full().p_1().child(columns)),
+                    )
+                    .child(bottom_bar),
             )
     }
 }
@@ -4182,28 +4224,119 @@ pub(crate) mod tests {
         assert!(!shown(cx));
     }
 
-    /// A lone empty pane has no ×; in a split, an empty pane's × drops that pane.
+    /// Draws a frame and returns `id`'s bounds, if it is drawn.
+    fn drawn(id: &'static str, cx: &mut VisualTestContext) -> Option<gpui_kit::Bounds<Pixels>> {
+        cx.run_until_parked();
+        cx.update(|window, cx| window.render_frame(cx));
+        cx.debug_bounds(id)
+    }
+
+    /// A lone empty pane's × closes the main area: the sidebar takes its width until something
+    /// opens in a pane, and closing that pane leaves an empty pane. In a split, an empty pane's
+    /// × drops that pane.
     #[gpui_kit::test]
-    fn lone_empty_pane_has_no_close(cx: &mut TestAppContext) {
+    fn lone_empty_pane_closes_the_main_area(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, fake_settings(""));
-        let close = |cx: &mut VisualTestContext| {
-            cx.update(|window, cx| {
-                window.render_frame(cx);
-                window.try_find("pane-close").is_some()
-            })
-        };
-        assert!(!close(cx));
+        cx.simulate_resize(size(px(1400.), px(900.)));
+        click("pane-close", cx);
+        assert!(drawn("pane-0", cx).is_none());
+        let sidebar = drawn("sidebar", cx).expect("sidebar drawn");
+        assert!(sidebar.size.width > px(1000.), "{sidebar:?}");
 
         start_now(&workspace, cx);
+        assert!(drawn("pane-0", cx).is_some());
+        let sidebar = drawn("sidebar", cx).expect("sidebar drawn");
+        assert_eq!(sidebar.size.width, px(super::SIDEBAR_WIDTH));
         workspace.update(cx, |w, _| w.panes.push(Pane::Empty(None)));
-        assert!(close(cx));
-        cx.update(|window, cx| window.click("pane-close", cx));
-
+        click("pane-close", cx);
         workspace.read_with(cx, |w, _| {
             assert!(matches!(w.panes[..], [Pane::Session(_)]));
             assert_eq!(w.sessions.len(), 1, "the session stays open");
         });
+
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.close_pane(0, window, cx)));
+        assert!(drawn("pane-0", cx).is_some(), "an empty pane is left");
+        cx.simulate_keystrokes("secondary-w");
+        assert!(drawn("pane-0", cx).is_none());
+    }
+
+    /// The terminal lives in the main area: it goes with it, and showing it brings the area back.
+    #[gpui_kit::test]
+    fn terminal_goes_with_the_main_area(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the terminal runs a real shell
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_keystrokes("ctrl-`");
+        assert!(drawn("terminal", cx).is_some());
+        click("pane-close", cx);
+        assert!(drawn("pane-0", cx).is_none() && drawn("terminal", cx).is_none());
+        assert!(!workspace.read_with(cx, |w, _| w.terminal_visible));
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.toggle_terminal(&ToggleTerminal, window, cx))
+        });
+        assert!(drawn("pane-0", cx).is_some() && drawn("terminal", cx).is_some());
+    }
+
+    /// ⌘B, the top bar's button and the selected rail icon hide the sidebar and show it again;
+    /// another rail icon shows it on its tab. Hiding it in a closed main area brings that back.
+    #[gpui_kit::test]
+    fn sidebar_hides_and_shows(cx: &mut TestAppContext) {
+        let (workspace, cx) = open(cx, Settings::default());
+        cx.simulate_resize(size(px(1400.), px(900.)));
+        let shown = |cx: &mut VisualTestContext| {
+            let drawn = drawn("sidebar", cx).is_some();
+            assert_eq!(drawn, workspace.read_with(cx, |w, _| !w.sidebar_hidden));
+            drawn
+        };
+        let pane = drawn("pane-0", cx).expect("pane drawn");
+        cx.simulate_keystrokes("secondary-b");
+        assert!(!shown(cx));
+        let wide = drawn("pane-0", cx).expect("pane drawn");
+        assert!(wide.size.width > pane.size.width, "{wide:?} {pane:?}");
+        cx.simulate_keystrokes("secondary-b");
+        assert!(shown(cx));
+
+        click("topbar-sidebar", cx);
+        assert!(!shown(cx));
+        click("topbar-sidebar", cx);
+        assert!(shown(cx));
+
+        click("tab-sessions", cx);
+        assert!(!shown(cx));
+        click("tab-files", cx);
+        assert!(shown(cx));
+        assert_eq!(
+            workspace.read_with(cx, |w, _| w.sidebar_tab),
+            crate::sidebar::SidebarTab::Files
+        );
+
+        click("pane-close", cx);
+        assert!(drawn("pane-0", cx).is_none());
+        cx.simulate_keystrokes("secondary-b");
+        assert!(!shown(cx));
+        assert!(drawn("pane-0", cx).is_some(), "the main area comes back");
+    }
+
+    /// Both are saved on each change and come back at launch, never both gone.
+    #[gpui_kit::test]
+    fn sidebar_and_main_area_are_restored(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = AppState {
+            sidebar_hidden: true,
+            main_closed: true,
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        let (workspace, cx) = open_at(cx, Settings::default(), Some(path.clone()));
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.restore(window, cx)));
+        assert!(drawn("sidebar", cx).is_none() && drawn("pane-0", cx).is_some());
+
+        cx.simulate_keystrokes("secondary-b");
+        let state = AppState::load(&path);
+        assert!(!state.sidebar_hidden && !state.main_closed);
+        click("pane-close", cx);
+        assert!(AppState::load(&path).main_closed);
     }
 
     fn center_of(id: impl Into<ElementId>, cx: &mut VisualTestContext) -> Point<Pixels> {

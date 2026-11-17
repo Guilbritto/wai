@@ -246,7 +246,7 @@ impl Workspace {
         self.agents_right = !self.agents_right;
         self.agents_collapsed = false;
         if !self.agents_right {
-            self.sidebar_tab = SidebarTab::Agents;
+            self.show_tab(SidebarTab::Agents, cx);
         } else if self.sidebar_tab == SidebarTab::Agents {
             self.sidebar_tab = SidebarTab::Sessions;
         }

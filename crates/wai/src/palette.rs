@@ -10,7 +10,7 @@ use wai_ext::panel::clamp;
 use wai_ext::{CommandSpec, ExtId};
 use wai_settings::agent_label;
 
-use crate::app::{NewSession, OpenFolder, OpenPalette, ToggleTerminal};
+use crate::app::{NewSession, OpenFolder, OpenPalette, ToggleSidebar, ToggleTerminal};
 use crate::settings_view::Section;
 use crate::sidebar::SidebarTab;
 use crate::workspace::Workspace;
@@ -22,6 +22,7 @@ pub(crate) const TITLE_CHARS: usize = 80;
 pub(crate) enum Entry {
     NewSession,
     ToggleTerminal,
+    ToggleSidebar,
     OpenFolder,
     Tab(SidebarTab),
     MoveAgents,
@@ -46,6 +47,7 @@ impl Workspace {
         let wai = vec![
             ("New session".into(), Entry::NewSession),
             ("Toggle terminal".into(), Entry::ToggleTerminal),
+            ("Toggle sidebar".into(), Entry::ToggleSidebar),
             ("Open folder…".into(), Entry::OpenFolder),
             ("Search".into(), Entry::Tab(SidebarTab::Search)),
             ("History".into(), Entry::Tab(SidebarTab::History)),
@@ -126,6 +128,7 @@ impl Workspace {
         match entry {
             Entry::NewSession => self.new_session(&NewSession, window, cx),
             Entry::ToggleTerminal => self.toggle_terminal(&ToggleTerminal, window, cx),
+            Entry::ToggleSidebar => self.toggle_sidebar(&ToggleSidebar, window, cx),
             Entry::OpenFolder => self.open_folder(&OpenFolder, window, cx),
             Entry::MoveAgents => self.move_agents(cx),
             // On the right, Agents has no tab: its panel shows.
@@ -135,12 +138,11 @@ impl Workspace {
                 cx.notify();
             }
             Entry::Tab(tab) => {
-                self.sidebar_tab = tab;
+                self.show_tab(tab, cx);
                 if tab == SidebarTab::Search {
                     let focus = self.search.read(cx).query_focus(cx);
                     window.focus(&focus, cx);
                 }
-                cx.notify();
             }
             Entry::Extensions => {
                 self.show_extensions(window, cx);
@@ -230,6 +232,7 @@ mod tests {
                     strings(&[
                         "New session",
                         "Toggle terminal",
+                        "Toggle sidebar",
                         "Open folder…",
                         "Search",
                         "History",
