@@ -35,7 +35,7 @@ use crate::app::{
     theme_mode,
 };
 use crate::chat::{
-    ChatEvent, ChatSession, DraftView, PromptSlot, PromptSlots, TurnState, signed_out,
+    ChatEvent, ChatSession, DraftView, PromptSlot, PromptSlots, PromptTyping, TurnState, signed_out,
 };
 use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved, TabsChanged, recovery};
 use crate::ext_host::{ExtHost, PanelIcon, SessionCall};
@@ -2268,8 +2268,21 @@ impl Workspace {
         let (agent, session) = focused.unzip();
         host.focus(agent, session);
         if self.prompt_slots != slots {
+            let owner_changed = self.prompt_slots.owner != slots.owner;
             self.prompt_slots = slots.clone();
             cx.set_global(slots);
+            if owner_changed {
+                let typed = match pane {
+                    Some(Pane::Session(session)) => session.read(cx).prompt_typed(cx),
+                    Some(Pane::Draft(draft)) => draft.read(cx).prompt_typed(cx),
+                    _ => false,
+                };
+                if cx.try_global::<PromptTyping>().copied().unwrap_or_default()
+                    != PromptTyping(typed)
+                {
+                    cx.set_global(PromptTyping(typed));
+                }
+            }
         }
     }
 

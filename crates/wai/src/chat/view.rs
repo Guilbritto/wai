@@ -217,6 +217,10 @@ pub struct ChatSession {
 impl EventEmitter<ChatEvent> for ChatSession {}
 
 impl ChatSession {
+    pub(crate) fn prompt_typed(&self, cx: &App) -> bool {
+        !self.input.read(cx).value().is_empty()
+    }
+
     pub fn new(
         agent: String,
         started: SessionStarted,
@@ -245,6 +249,7 @@ impl ChatSession {
                             (this.menu_ix, this.menu_closed) = (0, false);
                             // Typing is back in the prompt, out of the agent list.
                             this.agent_cursor = None;
+                            super::composer::set_typing(cx.entity_id(), this.prompt_typed(cx), cx);
                             cx.notify();
                         }
                         _ => {}

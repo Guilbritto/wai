@@ -10,7 +10,7 @@ mod question;
 mod render;
 mod view;
 
-pub use composer::{PromptSlot, PromptSlots};
+pub use composer::{PromptSlot, PromptSlots, PromptTyping};
 pub use draft::{DraftData, DraftEvent, DraftView};
 #[cfg(test)]
 pub use input::Attachment;
