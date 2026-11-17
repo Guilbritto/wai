@@ -197,6 +197,8 @@ pub struct ChatSession {
     pub(super) scroller: Entity<MessageScrollerState>,
     /// The pinned stack's height at the last paint; 0 while nothing waits.
     pub(super) waiting_height: Pixels,
+    /// The prompt box's row width last frame: whether its prompt panels fit.
+    pub(super) prompt_width: Pixels,
     pub(super) modes: Option<Entity<SelectState<Vec<Mode>>>>,
     /// The header's pickers of the model, effort and mode options, in that order.
     pub(super) pickers: Vec<(String, Entity<SelectState<Vec<Choice>>>)>,
@@ -290,6 +292,7 @@ impl ChatSession {
             questions: HashMap::new(),
             scroller: cx.new(|cx| MessageScrollerState::new(0, cx)),
             waiting_height: px(0.),
+            prompt_width: px(0.),
             modes: None,
             pickers: Vec::new(),
             pickers_stale: false,

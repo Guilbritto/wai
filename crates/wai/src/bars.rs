@@ -574,7 +574,7 @@ impl Workspace {
 
     /// The rail's keys in the user's order, hidden ones included.
     pub(crate) fn rail_keys(&self, cx: &App) -> Vec<String> {
-        let panels = self.ext_host.read(cx).panels();
+        let panels = self.ext_host.read(cx).rail_panels();
         let default: Vec<String> = (TABS.iter().map(|(_, key, ..)| key.to_string()))
             .chain(panels.iter().map(|p| p.key()))
             .collect();

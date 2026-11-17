@@ -18,7 +18,7 @@ use wai_agent::{
     AgentError, AgentHandle, BrokerError, QuestionAnswer, SessionEvent, SessionStarted,
     SessionSummary, StopReason,
 };
-use wai_ext::{CommandSpec, ExtEvent, ExtId, HostEvent, Reply};
+use wai_ext::{CommandSpec, ExtEvent, ExtId, HostEvent, PROMPT_WIDTH, PanelLocation, Reply};
 use wai_project::{FsChange, ProjectWatcher};
 use wai_settings::{
     AgentConfig, AppState, Approval, Change, OpenSession, SeenModel, SeenModes, Settings, Template,
@@ -35,7 +35,9 @@ use crate::app::{
     theme_mode,
 };
 use crate::aurora;
-use crate::chat::{ChatEvent, ChatSession, DraftView, TurnState, signed_out};
+use crate::chat::{
+    ChatEvent, ChatSession, DraftView, PromptSlot, PromptSlots, TurnState, signed_out,
+};
 use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved, TabsChanged, recovery};
 use crate::ext_host::{ExtHost, PanelIcon, SessionCall};
 use crate::ext_panel::ExtPanel;
@@ -242,6 +244,8 @@ pub struct Workspace {
     pub(crate) agents_collapsed: bool,
     /// ⌘B hid the sidebar; the rail stays.
     pub(crate) sidebar_hidden: bool,
+    /// What the `PromptSlots` global was last set to.
+    prompt_slots: PromptSlots,
     /// The user closed the lone empty pane: the main area is not drawn while that pane is all it
     /// has, and the sidebar takes its width (`main_shown`). Never with `sidebar_hidden`.
     pub(crate) main_closed: bool,
@@ -458,6 +462,7 @@ impl Workspace {
             agents_right: false,
             agents_collapsed: false,
             sidebar_hidden: false,
+            prompt_slots: PromptSlots::default(),
             main_closed: false,
             sessions: Vec::new(),
             panes: vec![Pane::Empty(None)],
@@ -1877,11 +1882,14 @@ impl Workspace {
                 let Some(p) = self.ext_host.read(cx).panel_of(&ext, &panel) else {
                     return reply.send(Err(format!("No panel named {panel}")));
                 };
-                let (view, main) = (p.view.clone(), p.main);
-                if main {
-                    self.open_panel(view, false, window, cx);
-                } else {
-                    self.show_tab(SidebarTab::Panel(view.entity_id()), cx);
+                // A prompt panel is always on screen with the focused prompt box.
+                let (view, location) = (p.view.clone(), p.location);
+                match location {
+                    PanelLocation::Main => self.open_panel(view, false, window, cx),
+                    PanelLocation::Sidebar => {
+                        self.show_tab(SidebarTab::Panel(view.entity_id()), cx)
+                    }
+                    PanelLocation::Prompt | PanelLocation::PromptSide => {}
                 }
                 reply.send(Ok(serde_json::Value::Null));
             }
@@ -2224,6 +2232,46 @@ impl Workspace {
 
     /// Whether the main area (panes and terminal) is drawn: not while it is closed with only the
     /// empty pane.
+    /// The prompt panels (API 1.6) go to the focused pane's session or draft, the first of each
+    /// location in the extensions' order; extensions hear which session that is. The global
+    /// changes only when they do: the sessions' prompt boxes read it.
+    fn sync_prompt_slots(&mut self, cx: &mut Context<Self>) {
+        let pane = (self.main_shown())
+            .then(|| self.panes.get(self.focused_pane))
+            .flatten();
+        let owner = pane.and_then(|pane| match pane {
+            Pane::Session(session) => Some(session.entity_id()),
+            Pane::Draft(draft) => Some(draft.entity_id()),
+            _ => None,
+        });
+        let focused = pane.and_then(Pane::session).map(|session| {
+            let session = session.read(cx);
+            (session.agent.clone(), session.id.clone())
+        });
+        let host = self.ext_host.read(cx);
+        let slot = |location, width: u16| {
+            host.prompt_panel(location).map(|p| PromptSlot {
+                view: p.view.clone(),
+                width: px(f32::from(
+                    p.width
+                        .unwrap_or(width)
+                        .clamp(*PROMPT_WIDTH.start(), *PROMPT_WIDTH.end()),
+                )),
+            })
+        };
+        let slots = PromptSlots {
+            owner,
+            inside: slot(PanelLocation::Prompt, 160),
+            side: slot(PanelLocation::PromptSide, 200),
+        };
+        let (agent, session) = focused.unzip();
+        host.focus(agent, session);
+        if self.prompt_slots != slots {
+            self.prompt_slots = slots.clone();
+            cx.set_global(slots);
+        }
+    }
+
     pub(crate) fn main_shown(&self) -> bool {
         !(self.main_closed && matches!(self.panes[..], [Pane::Empty(None)]))
     }
@@ -3347,6 +3395,7 @@ fn on_card(card: Div, content: impl IntoElement) -> Div {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_prompt_slots(cx);
         let top_bar = self.render_top_bar(window, cx);
         let bottom_bar = self.render_bottom_bar(window, cx);
         let sidebar = self.render_sidebar(cx);

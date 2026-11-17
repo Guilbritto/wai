@@ -1,11 +1,115 @@
 //! What the draft screen and a running conversation share on their prompt box: the strip of
-//! chips on its top edge and the chips of its bottom bar.
+//! chips on its top edge, the chips of its bottom bar, and the extension panels drawn in and
+//! beside it.
 
-use gpui_kit::component::{ActiveTheme as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::aurora;
+use crate::ext_panel::ExtPanel;
+
+/// An extension's prompt panel (API 1.6) and its width.
+#[derive(Clone, PartialEq)]
+pub struct PromptSlot {
+    pub view: Entity<ExtPanel>,
+    pub width: Pixels,
+}
+
+/// The prompt panels of `owner`, the focused pane's session or draft: `inside` its prompt box,
+/// `side` beside it. The workspace sets it when one of them changes.
+#[derive(Clone, Default, PartialEq)]
+pub struct PromptSlots {
+    pub owner: Option<EntityId>,
+    pub inside: Option<PromptSlot>,
+    pub side: Option<PromptSlot>,
+}
+
+impl Global for PromptSlots {}
+
+/// The narrowest the prompt box gets for a slot: in a narrower pane the slots hide.
+pub(super) const MIN_FIELD: Pixels = px(360.);
+
+/// The prompt box's row: `strip` on `field`, which holds `content`, plus the slots of `owner`
+/// that fit `width`, the row's width last frame. `measured` gets this frame's.
+pub(super) fn prompt_row(
+    owner: EntityId,
+    strip: impl IntoElement,
+    field: Stateful<Div>,
+    content: Div,
+    width: Pixels,
+    measured: impl Fn(Pixels, &mut App) + 'static,
+    cx: &App,
+) -> Div {
+    let slots = cx
+        .try_global::<PromptSlots>()
+        .filter(|s| s.owner == Some(owner));
+    let mut room = width - MIN_FIELD;
+    let mut fit = |slot: Option<&PromptSlot>| {
+        let slot = slot.filter(|s| s.width <= room)?.clone();
+        room -= slot.width;
+        Some(slot)
+    };
+    let inside = fit(slots.and_then(|s| s.inside.as_ref()));
+    let side = fit(slots.and_then(|s| s.side.as_ref()));
+    let theme = cx.theme();
+    let dark = theme.is_dark();
+    // A click in a slot is the extension's: it does not put the caret in the textarea.
+    let slot = |id: &'static str, slot: PromptSlot| {
+        div()
+            .id(id)
+            .flex_none()
+            .w(slot.width)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(slot.view)
+    };
+    let field = match inside {
+        Some(inside) => field
+            .flex_row()
+            .child(content.flex_1().min_w_0().p_3())
+            .child(
+                slot("prompt-slot", inside)
+                    .border_l_1()
+                    .border_color(match dark {
+                        true => aurora::borda(),
+                        false => theme.border,
+                    })
+                    // Registers the id so tests can find it.
+                    .test_support(),
+            ),
+        None => field.p_3().child(content),
+    }
+    // Registers the id so tests can find it.
+    .test_support();
+    let side = side.map(|side| {
+        let el = slot("prompt-side", side)
+            .rounded(px(20.))
+            .border_1()
+            .overflow_hidden();
+        match dark {
+            true => el
+                .bg(aurora::noite_2().alpha(0.78))
+                .border_color(aurora::borda_forte()),
+            false => el.bg(theme.background).border_color(theme.input),
+        }
+        // Registers the id so tests can find it.
+        .test_support()
+    });
+    let measure = canvas(
+        move |bounds, _, cx| measured(bounds.size.width, cx),
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full();
+    h_flex()
+        .relative()
+        .w_full()
+        .items_end()
+        .gap_2()
+        .child(measure)
+        .child(v_flex().flex_1().min_w_0().child(strip).child(field))
+        .children(side)
+}
 
 /// `.strip`: one tab sitting on the composer's top edge, 18 px in from its left. Add the chips
 /// as children, then put it in `strip_row`.

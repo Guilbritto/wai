@@ -104,6 +104,11 @@ pub enum HostEvent {
     FileSaved {
         path: PathBuf,
     },
+    /// The session whose prompt box has focus; `None` when the focused pane is not a session.
+    SessionFocused {
+        agent: Option<String>,
+        session: Option<String>,
+    },
 }
 
 impl HostEvent {
@@ -133,6 +138,11 @@ impl HostEvent {
                 "event/file_saved",
                 json!({"path": dunce::simplified(&path).to_string_lossy()}),
                 None,
+            ),
+            Self::SessionFocused { agent, session } => (
+                "event/session_focused",
+                json!({"agent": agent, "session": session}),
+                read,
             ),
         }
     }

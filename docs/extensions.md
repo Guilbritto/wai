@@ -1,10 +1,10 @@
 # Writing wai extensions
 
-An extension is a folder with a `wai-extension.toml` manifest. It can be manifest-only (templates, prompt commands, agents, MCP servers) or run a program of its own. That program can be in any language: it speaks line-delimited JSON-RPC 2.0 over stdio and can draw panels in wai's sidebar or main area and show items in its top and bottom bars.
+An extension is a folder with a `wai-extension.toml` manifest. It can be manifest-only (templates, prompt commands, agents, MCP servers) or run a program of its own. That program can be in any language: it speaks line-delimited JSON-RPC 2.0 over stdio and can draw panels in wai's sidebar, main area or prompt box and show items in its top and bottom bars.
 
 Users install an extension from a folder, from a git URL, or from the Extensions page's **Available** list, which downloads a prebuilt package from an index. Anyone can publish one: see [Publishing](#publishing).
 
-This guide describes API version 1.5 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
+This guide describes API version 1.6 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
 - `wai-navegador` is manifest-only;
 - `wai-waycarbon` and `wai-rotinas` are written in Go.
 
@@ -28,7 +28,7 @@ args = []
 id = "main"
 title = "Hello"
 icon = "hand"                   # optional: a Lucide icon for the activity bar
-location = "main"               # optional: "sidebar" (default) or "main"
+location = "main"               # optional: "sidebar" (default), "main", "prompt" or "prompt-side"
 
 [[contributes.items]]
 id = "prs"
@@ -44,7 +44,7 @@ title = "Pull requests"
 | `name` | string | Shown in the extension list and the consent dialog |
 | `version` | string | Free form. wai shows it; it does not compare versions |
 | `description` | string, optional | Shown last in the consent dialog, cut to fit |
-| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.5)`. Set it to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
+| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.6)`. Set it to `"1.6"` when you use a `prompt` or `prompt-side` panel or `event/session_focused`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
 | `permissions` | array of strings | See [Permissions](#permissions). An unknown permission is refused |
 | `process.command` | string | See [Commands and paths](#commands-and-paths). Needs `process` |
 | `process.args` | array of strings, optional | Arguments, passed as given (no shell) |
@@ -54,7 +54,7 @@ title = "Pull requests"
 | `contributes.mcp_servers` | array of tables | `name`, `command`, optional `args` (array), optional `env` (table of strings). Needs `process` |
 | `contributes.claude_plugins` | array of strings | Claude Code plugin names to suggest |
 | `requires.claude_plugins` | array of tables | `name`, `marketplace` (`owner/repo` or an `https://` URL of letters, digits and `._~:/@%+=,-`). At most 5. API 1.5. Installed after consent, see [Installing and consent](#installing-and-consent) |
-| `contributes.panels` | array of tables | `id`, `title`, optional `icon`, optional `location`. See [Panels](#panels). Needs `panels` |
+| `contributes.panels` | array of tables | `id`, `title`, optional `icon`, optional `location`, optional `width` (prompt panels only). At most one `prompt` and one `prompt-side` panel. See [Panels](#panels). Needs `panels` |
 | `contributes.items` | array of tables | `id`, `bar` (`"top"` or `"bottom"`), `title`. At most 3. See [Bar items](#bar-items). Needs `bar` |
 | `contributes.themes` | array of strings | Accepted, but not used in this version |
 
@@ -80,7 +80,7 @@ Calls in both directions are checked against what the user **granted** at instal
 | Permission | What it allows |
 |---|---|
 | `process` | Run `[process]`. Also required to contribute `agents` and `mcp_servers`, which run code |
-| `sessions:read` | `sessions/list`. Receive `event/session_state` and `event/turn_ended` |
+| `sessions:read` | `sessions/list`. Receive `event/session_state`, `event/turn_ended` and `event/session_focused` |
 | `sessions:control` | `sessions/open` and `sessions/prompt`. It does not include `sessions:read` |
 | `notify` | `notify`: system notifications |
 | `panels` | Contribute panels, `panel/render`, `panel/open`, and receive `panel/action` |
@@ -153,16 +153,17 @@ When an enabled extension with `[process]` and the `process` permission starts (
 
 | Method | Kind | Params | Notes |
 |---|---|---|---|
-| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.5", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
+| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.6", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
 | `command/run` | request | `{"id": "<command id>"}` | The user ran one of your commands without `prompt` from the palette. wai ignores the answer |
 | `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item, card, table row, button or menu item was clicked (after its confirmation, if it has one). `action_id` is its `id`. `values` has every form field in the panel by id: inputs as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels` |
 | `item/action` | request | `{"item": "<item id>"}` | The user clicked one of your bar items. wai ignores the answer. The usual reply is a `panel/open` or a `sessions/open`. Needs `bar` |
 | `event/session_state` | notification | `{"agent", "session", "state"}` | `state` is `idle`, `working`, `needs_you` or `error`. Needs `sessions:read` |
 | `event/turn_ended` | notification | `{"agent", "session", "reason"}` | `reason` is `end_turn`, `cancelled`, `max_tokens`, `refusal`, or the agent's own. Needs `sessions:read` |
 | `event/file_saved` | notification | `{"path": "<absolute path>"}` | The user saved a file in wai |
+| `event/session_focused` | notification | `{"agent", "session"}` | The focused pane's session, the one whose prompt box shows your prompt panels; both `null` when the focused pane is not a session (a draft, a file, a panel) or the main area is closed. Sent when it changes, and once after `initialize` when wai knows it. API 1.6. Needs `sessions:read` |
 
 - Paths are absolute, and on Windows they never carry the `\\?\` prefix.
-- Answer `initialize` before anything else. API 1.1 to 1.5 only add fields and methods; ignore the ones you do not know.
+- Answer `initialize` before anything else. API 1.1 to 1.6 only add fields and methods; ignore the ones you do not know.
 
 ### Extension → host
 
@@ -195,7 +196,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 - At most **100 renders per second** per extension: extra renders are coalesced, keeping each panel's latest tree, and the last one always lands.
 - A panel id not in your manifest gets `-32602`.
 
-**`panel/open`** shows a panel: a sidebar panel becomes the sidebar's tab, a main panel opens in a pane or its pane is focused (see [Panels](#panels)).
+**`panel/open`** shows a panel: a sidebar panel becomes the sidebar's tab, a main panel opens in a pane or its pane is focused (see [Panels](#panels)). A prompt panel is always shown with the focused prompt box: `panel/open` does nothing for it.
 - It never takes the keyboard focus.
 - At most **one every 2 seconds** per extension, or `Too many panel opens; try again later`.
 - A panel id not in your manifest gets `-32602`.
@@ -210,7 +211,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 
 ## Panels
 
-A panel exists while your process runs, and its content is the last tree you rendered. Before your first render it says `Waiting for the extension…`. Each panel has a button in the activity bar (the column of icons on the left) showing its `icon`, or the first letters of its `title` when it has no icon or wai does not know the name.
+A panel exists while your process runs, and its content is the last tree you rendered. Before your first render it says `Waiting for the extension…`. Each sidebar or main panel has a button in the activity bar (the column of icons on the left) showing its `icon`, or the first letters of its `title` when it has no icon or wai does not know the name. Prompt panels have none.
 
 **Where it shows (`location`):**
 - **`sidebar`** (the default): a sidebar tab titled by `title`, cut to 24 characters.
@@ -219,6 +220,13 @@ A panel exists while your process runs, and its content is the last tree you ren
   - It takes the focused pane, as a session does; the session there stays open in the sidebar. If the focused pane is the editor, it opens in a new pane beside it.
   - Closing the pane does not stop your extension, and what the user typed stays: the panel is the same when it opens again.
   - The pane closes when your process stops, fails, crashes or is disabled. Panes are not part of work areas and are not saved between runs.
+- **`prompt`** (API 1.6): inside the prompt box of the focused pane's session or draft, at its right, behind a divider. The box grows to the taller of the two.
+- **`prompt-side`** (API 1.6): beside that prompt box, at its right, in a box of its own.
+  - Only the focused pane's prompt box shows them: when the user focuses another pane, they move there. `event/session_focused` tells you which session that is.
+  - `width` is the slot's width in px, 80 to 320 (a value outside is clamped). The default is 160 for `prompt` and 200 for `prompt-side`.
+  - They hide while the prompt box would be left narrower than 360 px: in a narrow pane, or a split. `prompt` gives way last.
+  - Each location shows one panel: the first one in the extensions list. Another extension's panel there waits until that one stops.
+  - Keep the tree small: a few lines of `text` (`mono` for ASCII art), a `progress`, a `badge`, a `menu`. A click in the slot does not move the caret into the prompt box.
 
 **`icon`:** a [Lucide](https://lucide.dev/icons) icon name in kebab-case, such as `git-pull-request`, `database` or `rocket`. wai ships the whole Lucide set it bundles; an unknown name falls back to the initials and does not fail the install. The `icon` node and the `icon` fields of nodes take the same names. A panel's `icon` may instead be the path of an `.svg` file in your extension's folder (`icons/panel.svg`): a relative path without `..`, at most 32 KB, a regular file (not a symlink). wai draws it as a mask in the activity bar's colours, so its fill colour does not matter, and shows the initials when the file is missing or too big. The shared release workflow packs it.
 

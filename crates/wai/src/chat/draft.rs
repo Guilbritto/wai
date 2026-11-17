@@ -239,6 +239,8 @@ pub struct DraftView {
     /// Agent id -> its program is on PATH; empty until the check ends.
     installed: HashMap<String, bool>,
     show_install: bool,
+    /// The prompt box's row width last frame: whether its prompt panels fit.
+    prompt_width: Pixels,
     folders: Menu,
     agents: Menu,
     models: Menu,
@@ -355,6 +357,7 @@ impl DraftView {
             data,
             installed: HashMap::new(),
             show_install: false,
+            prompt_width: px(0.),
             folders,
             agents,
             models,
@@ -1020,8 +1023,6 @@ impl Render for DraftView {
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let prompt = v_flex()
             .id("draft-composer")
-            .gap_2()
-            .p_3()
             .rounded(px(20.))
             .border_1()
             .on_mouse_down(
@@ -1037,24 +1038,43 @@ impl Render for DraftView {
                 .border_color(aurora::borda_forte()),
             (false, true) => prompt.bg(theme.background).border_color(theme.ring),
             (false, false) => prompt.bg(theme.background).border_color(theme.input),
-        }
-        .children(notice)
-        .when(!self.attachments.is_empty(), |el| {
-            el.child(h_flex().gap_2().flex_wrap().children(chips))
-        })
-        .child(textarea)
-        .child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(attach)
-                .children(mode)
-                .child(div().flex_1())
-                .children(model)
-                .child(send),
-        )
-        // Registers the id so tests can find it.
-        .test_support();
+        };
+        let content = v_flex()
+            .gap_2()
+            .children(notice)
+            .when(!self.attachments.is_empty(), |el| {
+                el.child(h_flex().gap_2().flex_wrap().children(chips))
+            })
+            .child(textarea)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(attach)
+                    .children(mode)
+                    .child(div().flex_1())
+                    .children(model)
+                    .child(send),
+            );
+        let view = cx.entity().downgrade();
+        let measured = move |width, cx: &mut App| {
+            let set = |this: &mut Self, cx: &mut Context<Self>| {
+                if this.prompt_width != width {
+                    this.prompt_width = width;
+                    cx.notify();
+                }
+            };
+            view.update(cx, set).ok();
+        };
+        let row = composer::prompt_row(
+            cx.entity_id(),
+            strip,
+            prompt,
+            content,
+            self.prompt_width,
+            measured,
+            cx,
+        );
         // `.hint`: the keys as small chips, the draft shortcut at the right.
         let key = |keys: &str, what: String| {
             h_flex()
@@ -1108,7 +1128,7 @@ impl Render for DraftView {
                             .child("Pick where and with whom. Nothing starts until you send."),
                     ),
             )
-            .child(v_flex().child(strip).child(prompt))
+            .child(row)
             .child(hints);
         v_flex()
             .key_context("DraftView")

@@ -11,7 +11,7 @@
 //! servers), shows their notifications and hands their session requests to the workspace
 //! (`SessionCall`).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -82,14 +82,20 @@ pub struct Panel {
     pub ext_name: SharedString,
     /// Its icon, when it has a usable one; else the rail shows the title's initials.
     pub icon: Option<PanelIcon>,
-    /// A main-area pane rather than a sidebar tab.
-    pub main: bool,
+    /// A sidebar tab, a main-area pane, or a slot of the focused prompt box.
+    pub location: PanelLocation,
+    /// A prompt panel's width in px.
+    pub width: Option<u16>,
     pub view: Entity<ExtPanel>,
     /// Its clicks, sent to the extension as `panel/action`.
     _actions: Subscription,
 }
 
 impl Panel {
+    pub fn main(&self) -> bool {
+        self.location == PanelLocation::Main
+    }
+
     /// `<ext id>/<panel id>`.
     pub fn key(&self) -> String {
         format!("{}/{}", self.ext.as_str(), self.id)
@@ -148,6 +154,9 @@ pub struct ExtHost {
     panels: Vec<Panel>,
     /// The enabled extensions, in the order of the list `sync` got: their contributions.
     enabled: Vec<Installed>,
+    /// The last `event/session_focused`, sent again to an extension that starts. Set while the
+    /// workspace renders, so not through an update.
+    focused: RefCell<Option<(Option<String>, Option<String>)>>,
 }
 
 impl ExtHost {
@@ -157,6 +166,7 @@ impl ExtHost {
             running: HashMap::new(),
             panels: Vec::new(),
             enabled: Vec::new(),
+            focused: RefCell::new(None),
         }
     }
 
@@ -228,6 +238,13 @@ impl ExtHost {
         &self.panels
     }
 
+    /// The panels with an activity bar button: not the prompt box's.
+    pub fn rail_panels(&self) -> Vec<&Panel> {
+        (self.panels.iter())
+            .filter(|p| !p.location.in_prompt())
+            .collect()
+    }
+
     /// Extension `ext`'s panel `id`, while shown.
     pub fn panel_of(&self, ext: &ExtId, id: &str) -> Option<&Panel> {
         (self.panels.iter()).find(|p| p.ext == *ext && p.id == id)
@@ -285,6 +302,26 @@ impl ExtHost {
         for running in self.running.values() {
             running.handle.notify_event(event.clone());
         }
+    }
+
+    /// `event/session_focused` when the focused session changed: `agent` and `session` of the
+    /// focused pane's session, `None` when it is not one.
+    pub fn focus(&self, agent: Option<String>, session: Option<String>) {
+        let now = Some((agent, session));
+        if *self.focused.borrow() != now {
+            self.focused.replace(now);
+            self.broadcast(self.focus_event().unwrap());
+        }
+    }
+
+    fn focus_event(&self) -> Option<HostEvent> {
+        let (agent, session) = self.focused.borrow().clone()?;
+        Some(HostEvent::SessionFocused { agent, session })
+    }
+
+    /// The first prompt panel at `location` of the running extensions, in list order.
+    pub fn prompt_panel(&self, location: PanelLocation) -> Option<&Panel> {
+        self.panels.iter().find(|p| p.location == location)
     }
 
     /// `command/run`, to a running extension.
@@ -385,7 +422,8 @@ impl ExtHost {
             title: spec.title.clone(),
             ext_name,
             icon: panel_icon(spec, &installed.dir),
-            main: spec.location == PanelLocation::Main,
+            location: spec.location,
+            width: spec.width,
             view,
             _actions: actions,
         }
@@ -397,6 +435,9 @@ impl ExtHost {
 
     fn start(&mut self, installed: Installed, cx: &mut Context<Self>) {
         let (handle, events) = ExtHandle::spawn(&installed, &self.project);
+        if let Some(event) = self.focus_event() {
+            handle.notify_event(event);
+        }
         let id = installed.manifest.id.clone();
         let pump = cx.spawn({
             let id = id.clone();
@@ -1494,6 +1535,78 @@ pub(crate) mod tests {
         });
         let version = cx.update(|window, _| window.find("bottombar-version").bounds());
         assert!(version.right() <= px(900.), "{version:?}");
+    }
+
+    /// API 1.6: a `prompt` panel shows inside the focused pane's prompt box and a `prompt-side`
+    /// one beside it, at their widths; neither gets a rail button. The extension hears which
+    /// session has the focus. Off the focused pane, or in a pane too narrow, they hide.
+    #[gpui_kit::test]
+    fn prompt_panels_follow_the_focused_box(cx: &mut TestAppContext) {
+        use gpui_kit::{Bounds, Pixels, px, size};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = "id = \"pet\"\nname = \"Pet\"\nversion = \"1.0.0\"\n\
+            permissions = [\"process\", \"panels\", \"sessions:read\"]\n\
+            [process]\ncommand = \"bin/run\"\n\
+            [[contributes.panels]]\nid = \"in\"\ntitle = \"In\"\nlocation = \"prompt\"\n\
+            width = 150\n\
+            [[contributes.panels]]\nid = \"out\"\ntitle = \"Out\"\nlocation = \"prompt-side\"\n";
+        install(tmp.path(), &config, manifest, "", "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        cx.simulate_resize(size(px(1400.), px(800.)));
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        wait_until(cx, "the panels", |cx| {
+            host.read_with(cx, |h, _| h.panels().len() == 2)
+        });
+        start_now(&workspace, cx);
+        let find = |cx: &mut VisualTestContext| -> [Option<Bounds<Pixels>>; 3] {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                ["prompt-box", "prompt-slot", "prompt-side"]
+                    .map(|id| window.try_find(id).map(|e| e.bounds()))
+            })
+        };
+        let [field, inside, side] = find(cx);
+        let (field, inside, side) = (field.unwrap(), inside.unwrap(), side.unwrap());
+        assert!((inside.size.width - px(150.)).abs() < px(0.5), "{inside:?}");
+        assert!(inside.left() > field.left() && inside.right() <= field.right() + px(0.5));
+        assert!((side.size.width - px(200.)).abs() < px(0.5), "{side:?}");
+        assert!(side.left() >= field.right(), "{side:?} {field:?}");
+        assert!(crate::sidebar::tests::label(("tab-panel", 0usize), cx).is_none());
+        let log = log_path(tmp.path(), "pet");
+        let focused = json!({"agent": "fake", "session": "fake-1"});
+        logged(&log, "the focused session", cx, |l| {
+            bodies(l, "event/session_focused").contains(&focused)
+        });
+
+        // Another pane takes the focus, and the slots.
+        workspace.update(cx, |w, cx| {
+            w.panes.push(Pane::Empty(None));
+            w.focused_pane = 1;
+            cx.notify();
+        });
+        assert_eq!(find(cx), [field_of(cx), None, None]);
+        let none = json!({"agent": null, "session": null});
+        logged(&log, "no focused session", cx, |l| {
+            bodies(l, "event/session_focused").last() == Some(&none)
+        });
+
+        // Alone again, in a narrow window: no room for them.
+        workspace.update(cx, |w, cx| {
+            w.panes.pop();
+            w.focused_pane = 0;
+            cx.notify();
+        });
+        assert!(find(cx)[1].is_some());
+        cx.simulate_resize(size(px(700.), px(800.)));
+        let [field, inside, side] = find(cx);
+        assert!(field.is_some() && inside.is_none() && side.is_none());
+    }
+
+    fn field_of(cx: &mut VisualTestContext) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+        cx.update(|window, _| window.try_find("prompt-box").map(|e| e.bounds()))
     }
 
     /// A panel and an item with the same id hide apart.

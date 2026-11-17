@@ -222,6 +222,30 @@ fn panel_icon_and_location() {
         Err(ManifestError::Parse(_))
     ));
     assert!(matches!(panel("icon=3\n"), Err(ManifestError::Parse(_))));
+
+    // Prompt panels: a width, and one per prompt location.
+    let p = panel("location=\"prompt\"\nwidth=150\n").unwrap();
+    let p = &p.contributes.panels[0];
+    assert_eq!((p.location, p.width), (PanelLocation::Prompt, Some(150)));
+    assert!(p.location.in_prompt());
+    let p = panel("location=\"prompt-side\"\n").unwrap();
+    assert_eq!(p.contributes.panels[0].location, PanelLocation::PromptSide);
+    assert!(matches!(
+        panel("location=\"main\"\nwidth=150\n"),
+        Err(ManifestError::Unknown(_))
+    ));
+    let two = |a: &str, b: &str| {
+        parse(&format!(
+            "{h}[[contributes.panels]]\nid=\"a\"\ntitle=\"A\"\nlocation=\"{a}\"\n\
+             [[contributes.panels]]\nid=\"b\"\ntitle=\"B\"\nlocation=\"{b}\"\n"
+        ))
+    };
+    assert!(two("prompt", "prompt-side").is_ok());
+    assert!(two("main", "main").is_ok());
+    assert!(matches!(
+        two("prompt", "prompt"),
+        Err(ManifestError::Unknown(_))
+    ));
 }
 
 #[test]
@@ -235,17 +259,18 @@ fn api_version_is_checked_first() {
     assert!(with_api(&format!("\"{API}\""), "").is_ok());
     assert!(with_api("\"1.4\"", "").is_ok());
     assert!(with_api("\"1.5\"", "").is_ok());
-    let newer = with_api("\"1.6\"", "").unwrap_err();
+    assert!(with_api("\"1.6\"", "").is_ok());
+    let newer = with_api("\"1.7\"", "").unwrap_err();
     assert_eq!(
         newer.to_string(),
-        "Go Tools needs a newer wai (extension API 1.6; this wai has 1.5)"
+        "Go Tools needs a newer wai (extension API 1.7; this wai has 1.6)"
     );
     // Even when the newer API's fields would fail the strict parse.
     assert_eq!(
         with_api("\"2.0\"", "\nfuture = true\n")
             .unwrap_err()
             .to_string(),
-        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.5)"
+        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.6)"
     );
     // Numeric, not lexical: 1.10 is newer than 1.2.
     assert!(matches!(
@@ -408,6 +433,7 @@ fn svg_icon_paths() {
         title: "P".into(),
         icon: Some(icon.into()),
         location: Default::default(),
+        width: None,
     };
     assert_eq!(spec("icon.svg").svg_icon(), Some(Path::new("icon.svg")));
     assert_eq!(

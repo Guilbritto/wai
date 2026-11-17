@@ -519,8 +519,6 @@ impl ChatSession {
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let field = v_flex()
             .id("prompt-box")
-            .gap_2()
-            .p_3()
             .rounded(px(20.))
             .border_1()
             .capture_key_down(
@@ -596,21 +594,37 @@ impl ChatSession {
                 });
         let strip = self.render_strip(cx);
         let bar = self.render_bar(attach, stop, send, window, cx);
+        let content = v_flex()
+            .gap_2()
+            .when(!self.attachments.is_empty(), |el| {
+                el.child(h_flex().gap_2().flex_wrap().children(chips))
+            })
+            .child(textarea)
+            .child(bar);
+        let view = cx.entity().downgrade();
+        let measured = move |width, cx: &mut App| {
+            let set = |this: &mut Self, cx: &mut Context<Self>| {
+                if this.prompt_width != width {
+                    this.prompt_width = width;
+                    cx.notify();
+                }
+            };
+            view.update(cx, set).ok();
+        };
+        let row = composer::prompt_row(
+            cx.entity_id(),
+            strip,
+            field,
+            content,
+            self.prompt_width,
+            measured,
+            cx,
+        );
         let prompt = v_flex().gap_2().p_3().children(status).child(
             // The menu opens above the strip, not over it.
             v_flex()
                 .relative()
-                .child(strip)
-                .child(
-                    field
-                        .when(!self.attachments.is_empty(), |el| {
-                            el.child(h_flex().gap_2().flex_wrap().children(chips))
-                        })
-                        .child(textarea)
-                        .child(bar)
-                        // Registers the id so tests can find it.
-                        .test_support(),
-                )
+                .child(row)
                 .children(self.render_menu(cx)),
         );
         let prompt = prompt

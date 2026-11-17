@@ -315,7 +315,7 @@ impl Workspace {
     /// user, then Extensions and Settings at the foot.
     pub(crate) fn render_rail(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
-        let panels = self.ext_host.read(cx).panels();
+        let panels = self.ext_host.read(cx).rail_panels();
         let needs_you = (self.sessions.iter())
             .filter(|s| matches!(s.read(cx).status(), TurnState::NeedsYou))
             .count();
@@ -427,7 +427,7 @@ impl Workspace {
         // shown selected while the pane is on screen. Its icon, else the title's initials.
         let extension = panels.iter().enumerate().map(|(ix, p)| {
             let title = p.title.clone();
-            let on = match p.main {
+            let on = match p.main() {
                 true => (self.panes.iter())
                     .any(|pane| matches!(pane, Pane::Extension(v) if *v == p.view)),
                 false => {
@@ -456,7 +456,7 @@ impl Workspace {
                     .child(initials(&title))
                     .into_any_element(),
             };
-            if !p.main {
+            if !p.main() {
                 let tab = SidebarTab::Panel(p.view.entity_id());
                 let el = tab_item(tab, ("tab-panel", ix).into(), title.into(), mark);
                 return (p.key(), el.into_any_element());

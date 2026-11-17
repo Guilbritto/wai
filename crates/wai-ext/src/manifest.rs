@@ -93,7 +93,7 @@ pub struct McpServerSpec {
 
 /// The extension API this wai speaks: `initialize` sends it, and a manifest's `api` may not be
 /// newer.
-pub const API: &str = "1.5";
+pub const API: &str = "1.6";
 
 pub const MAX_ITEMS: usize = 3;
 
@@ -142,6 +142,9 @@ pub struct PanelSpec {
     pub icon: Option<String>,
     #[serde(default)]
     pub location: PanelLocation,
+    /// A prompt panel's width in px, clamped to [`PROMPT_WIDTH`].
+    #[serde(default)]
+    pub width: Option<u16>,
 }
 
 impl PanelSpec {
@@ -175,7 +178,22 @@ pub enum PanelLocation {
     Sidebar,
     /// A pane in the main area, opened from the activity bar.
     Main,
+    /// Inside the focused session's prompt box, at its right (API 1.6).
+    Prompt,
+    /// Beside the focused session's prompt box, at its right (API 1.6).
+    #[serde(rename = "prompt-side")]
+    PromptSide,
 }
+
+impl PanelLocation {
+    /// Drawn by the prompt box, not the activity bar.
+    pub fn in_prompt(self) -> bool {
+        matches!(self, Self::Prompt | Self::PromptSide)
+    }
+}
+
+/// The width range of a prompt panel, in px.
+pub const PROMPT_WIDTH: std::ops::RangeInclusive<u16> = 80..=320;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -427,6 +445,20 @@ pub fn parse_manifest(text: &str, _ext_dir: &Path) -> Result<Manifest, ManifestE
     let c = raw.contributes;
     if !c.panels.is_empty() {
         need(Permission::Panels)?;
+    }
+    for (i, p) in c.panels.iter().enumerate() {
+        if p.width.is_some() && !p.location.in_prompt() {
+            return Err(ManifestError::Unknown(format!(
+                "panel {:?}: width is for prompt panels only",
+                p.id
+            )));
+        }
+        if p.location.in_prompt() && c.panels[..i].iter().any(|o| o.location == p.location) {
+            return Err(ManifestError::Unknown(format!(
+                "panel {:?}: one panel per prompt location",
+                p.id
+            )));
+        }
     }
     if !c.items.is_empty() {
         need(Permission::Bar)?;

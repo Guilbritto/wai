@@ -30,6 +30,7 @@ fn installed(dir: &Path, args: &[&str], granted: Vec<Permission>) -> Installed {
                 title: "Main".into(),
                 icon: None,
                 location: PanelLocation::Sidebar,
+                width: None,
             }],
             items: vec![ItemSpec {
                 id: "prs".into(),
@@ -122,7 +123,7 @@ fn initialize_roundtrip() {
             init["params"],
             json!({
                 "protocol": 1,
-                "api": "1.5",
+                "api": "1.6",
                 "wai_version": env!("CARGO_PKG_VERSION"),
                 "ext_id": "fake",
                 "granted": ["process", "notify", "panels"],
@@ -280,9 +281,13 @@ fn ungranted_call_denied() {
             state: "Working".into(),
         });
         handle.notify_event(HostEvent::TurnEnded {
-            agent,
-            session,
+            agent: agent.clone(),
+            session: session.clone(),
             reason: "end_turn".into(),
+        });
+        handle.notify_event(HostEvent::SessionFocused {
+            agent: Some(agent),
+            session: Some(session),
         });
         handle.panel_action("main", "go", json!({}));
         handle.run_command("probe");
