@@ -168,6 +168,11 @@ pub fn run(
             ))),
             ..base
         };
+        #[cfg(feature = "screenshot")]
+        if let (Ok(json), Ok(png)) = (std::env::var("WAI_SHOT_TREE"), std::env::var("WAI_SHOT")) {
+            shot_tree(PathBuf::from(json), png, options, cx);
+            return;
+        }
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
             cx.new(|cx| Workspace::new(project, settings, Some(state_path), true, window, cx))
         })
@@ -361,6 +366,8 @@ fn type_text(text: &str, window: &mut Window, cx: &mut App) {
 /// (fase-3-panel.png).
 /// `WAI_SHOT_PALETTE=1`: the command palette open (fase-3-palette.png).
 /// `WAI_SHOT_DRAFT=1`: the new-session draft (fix-draft.png).
+/// `WAI_SHOT_TREE=<file.json>`: that panel tree alone, in a 1320x620 window, drawn as a wide
+/// sidebar panel is (see `shot_tree`).
 /// `WAI_SHOT_HISTORY=1`, with any of the above: the sidebar's History tab.
 /// `WAI_SHOT_DRAG=left|center|right`: see `drag_open_row`.
 #[cfg(feature = "screenshot")]
@@ -499,6 +506,66 @@ fn screenshot(
         let image = window.update(cx, |_, window, _| window.render_to_image());
         match image.and_then(|image| Ok(image?.save(&path)?)) {
             Ok(()) => eprintln!("wai: screenshot saved to {path}"),
+            Err(e) => eprintln!("wai: screenshot failed: {e}"),
+        }
+        cx.update(|cx| cx.quit());
+    })
+    .detach();
+}
+
+/// `WAI_SHOT_TREE`: the panel tree in `json` (the `panel` value an extension sends), under the
+/// sidebar's card, saved to `png` after 1 s; wai quits.
+#[cfg(feature = "screenshot")]
+struct ShotTree(Entity<crate::ext_panel::ExtPanel>);
+
+#[cfg(feature = "screenshot")]
+impl Render for ShotTree {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .p_1()
+            .bg(gpui_kit::component::ActiveTheme::theme(&**cx).sidebar)
+            .child(
+                crate::aurora::card(false, cx)
+                    .size_full()
+                    .py_2()
+                    .child(self.0.clone()),
+            )
+    }
+}
+
+#[cfg(feature = "screenshot")]
+fn shot_tree(json: PathBuf, png: String, options: WindowOptions, cx: &mut App) {
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&json).expect("read WAI_SHOT_TREE"))
+            .expect("WAI_SHOT_TREE json");
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(px(1320.), px(620.)),
+            cx,
+        ))),
+        ..options
+    };
+    let (window, _) = gpui_kit::open_window(options, cx, |_, cx| {
+        let panel = cx.new(|_| crate::ext_panel::ExtPanel::new("WayCarbon".into()));
+        panel.update(cx, |p, cx| p.set_tree(wai_ext::panel::parse(&value), cx));
+        cx.new(|_| ShotTree(panel))
+    })
+    .expect("open window");
+    cx.activate(true);
+    cx.spawn(async move |cx| {
+        let executor = cx.background_executor().clone();
+        executor.timer(Duration::from_secs(1)).await;
+        for _ in 0..3 {
+            window
+                .update(cx, |_, window, cx| window.draw(cx).clear(cx))
+                .ok();
+            executor.timer(Duration::from_millis(100)).await;
+        }
+        let image = window.update(cx, |_, window, _| window.render_to_image());
+        match image.and_then(|image| Ok(image?.save(&png)?)) {
+            Ok(()) => eprintln!("wai: screenshot saved to {png}"),
             Err(e) => eprintln!("wai: screenshot failed: {e}"),
         }
         cx.update(|cx| cx.quit());
