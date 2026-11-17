@@ -384,6 +384,109 @@
     ]
   },
   {
+    "id": "mockup",
+    "title": "API 1.7",
+    "stories": [
+      {
+        "id": "list-plain",
+        "title": "list plain",
+        "note": "plain (API 1.7): borderless 32 px rows. Items take icon, tone (colors the icon and badge), selected, lead, note and indent",
+        "nodes": [
+          { "type": "list", "plain": true, "items": [
+            { "id": "plain-1", "title": "Build failed", "icon": "circle-x", "tone": "danger", "badge": "CI", "lead": "#42" },
+            { "id": "plain-2", "title": "Waiting for review", "icon": "clock", "badge": "Waiting", "note": "2 days", "selected": true },
+            { "id": "plain-3", "title": "Approved", "icon": "check", "tone": "success", "badge": "Ready" },
+            { "id": "plain-4", "title": "A child row under a group", "icon": "git-branch", "tone": "info", "indent": true }
+          ] }
+        ]
+      },
+      {
+        "id": "text-styles",
+        "title": "text styles",
+        "note": "style (API 1.7): strong, heading or label. Combines with mono and muted",
+        "nodes": [
+          { "type": "text", "text": "Heading", "style": "heading" },
+          { "type": "text", "text": "Strong", "style": "strong" },
+          { "type": "text", "text": "Label", "style": "label" },
+          { "type": "text", "text": "strong, mono and muted", "style": "strong", "mono": true, "muted": true }
+        ]
+      },
+      {
+        "id": "column-framed",
+        "title": "column framed",
+        "note": "framed (API 1.7): rounded, bordered, padded, at least as tall as the space it gets, so a spacer pins the footer to the bottom",
+        "nodes": [
+          { "type": "column", "framed": true, "children": [
+            { "type": "text", "text": "Details", "style": "heading" },
+            { "type": "text", "text": "The body", "muted": true },
+            { "type": "spacer" },
+            { "type": "row", "children": [
+              { "type": "button", "id": "framed-go", "label": "Run", "icon": "play", "style": "primary" },
+              { "type": "link", "text": "Open", "url": "https://example.com", "icon": "external-link" }
+            ] }
+          ] }
+        ]
+      },
+      {
+        "id": "board-columns",
+        "title": "column title and collapsed",
+        "note": "title adds an accent bar (tone), a label and the badge pill; it implies framed. collapsed is a 28 px strip, children not drawn, width ignored",
+        "nodes": [
+          { "type": "row", "children": [
+            { "type": "column", "title": "To do", "badge": "2", "children": [
+              { "type": "text", "text": "First task" },
+              { "type": "text", "text": "Second task" }
+            ] },
+            { "type": "column", "title": "Doing", "badge": "1", "tone": "info", "children": [{ "type": "text", "text": "In flight" }] },
+            { "type": "column", "title": "Done", "badge": "5", "tone": "success", "collapsed": true, "children": [{ "type": "text", "text": "Hidden" }] }
+          ] }
+        ]
+      },
+      {
+        "id": "tabs-segmented",
+        "title": "tabs segmented",
+        "note": "style segmented (API 1.7): a box of pills. A tab's tone colors its badge",
+        "nodes": [
+          { "type": "tabs", "id": "seg-tabs", "style": "segmented", "tabs": [
+            { "id": "seg-a", "title": "Work", "badge": "3", "tone": "warning", "children": [{ "type": "text", "text": "Work" }] },
+            { "id": "seg-b", "title": "Issues", "badge": "12", "children": [{ "type": "text", "text": "Issues" }] },
+            { "id": "seg-c", "title": "Pull requests", "children": [{ "type": "text", "text": "Pull requests" }] }
+          ] }
+        ]
+      },
+      {
+        "id": "select-segmented",
+        "title": "select segmented",
+        "note": "segmented (API 1.7): options as a segmented control. Choosing one sends panel/action with the select's id and values[id]; a plain dropdown sends nothing",
+        "nodes": [
+          { "type": "select", "id": "seg-select", "segmented": true, "options": ["Current sprint", "All mine"], "value": "Current sprint" }
+        ]
+      },
+      {
+        "id": "input-search",
+        "title": "input search",
+        "note": "icon, submit and clear (API 1.7): Enter sends the id, and so does the x, which shows only while the field has text",
+        "nodes": [
+          { "type": "column", "width": 300, "children": [
+            { "type": "input", "id": "search-input", "placeholder": "Search", "icon": "search", "submit": true, "clear": true }
+          ] }
+        ]
+      },
+      {
+        "id": "icon-actions",
+        "title": "icon-only button and links",
+        "note": "icon_only (API 1.7): label (or text) is the tooltip and accessible label. A link with icon draws a button with the icon and its text",
+        "nodes": [
+          { "type": "row", "children": [
+            { "type": "button", "id": "icon-refresh", "label": "Refresh", "icon": "refresh-cw", "icon_only": true },
+            { "type": "link", "text": "Open in the browser", "url": "https://example.com", "icon": "external-link", "icon_only": true },
+            { "type": "link", "text": "Open in the browser", "url": "https://example.com", "icon": "external-link" }
+          ] }
+        ]
+      }
+    ]
+  },
+  {
     "id": "bar",
     "title": "Bar item",
     "stories": [
