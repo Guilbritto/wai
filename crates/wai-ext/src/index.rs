@@ -93,6 +93,26 @@ pub fn https_url(url: &str) -> bool {
     https_host(url).is_some()
 }
 
+/// What a user types to add an index: an `https_url` as is, or a GitHub `owner/repo`, whose
+/// latest release's `index-entry.toml` is the index.
+pub fn index_url(input: &str) -> Option<String> {
+    let input = input.trim();
+    if https_url(input) {
+        return Some(input.to_string());
+    }
+    let name = |s: &str| {
+        !s.is_empty()
+            && s != "."
+            && s != ".."
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+    };
+    let (owner, repo) = input.split_once('/')?;
+    (name(owner) && name(repo)).then(|| {
+        format!("https://github.com/{owner}/{repo}/releases/latest/download/index-entry.toml")
+    })
+}
+
 /// The host (with any port) of a URL `https_url` accepts.
 pub fn https_host(url: &str) -> Option<&str> {
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
@@ -179,6 +199,42 @@ mod tests {
 
     fn package(platform: &str, url: &str, sha: &str) -> String {
         format!("[extensions.packages.{platform}]\nurl = \"{url}\"\nsha256 = \"{sha}\"\n")
+    }
+
+    #[test]
+    fn index_url_shorthand() {
+        let latest =
+            "https://github.com/waycarbon/wai-waycarbon/releases/latest/download/index-entry.toml";
+        assert_eq!(
+            index_url("waycarbon/wai-waycarbon").as_deref(),
+            Some(latest)
+        );
+        assert_eq!(
+            index_url("  waycarbon/wai-waycarbon \n").as_deref(),
+            Some(latest)
+        );
+        assert_eq!(
+            index_url("a.b/c_d-1").as_deref(),
+            Some("https://github.com/a.b/c_d-1/releases/latest/download/index-entry.toml")
+        );
+        assert_eq!(
+            index_url("https://example.com/i.toml").as_deref(),
+            Some("https://example.com/i.toml")
+        );
+        for bad in [
+            "",
+            "a",
+            "a/",
+            "/b",
+            "a/b/",
+            "a/b/c",
+            "a b/c",
+            "http://x/i.toml",
+            "a/b?c",
+            "../b",
+        ] {
+            assert_eq!(index_url(bad), None, "{bad:?}");
+        }
     }
 
     #[test]

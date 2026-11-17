@@ -5,6 +5,8 @@ use std::path::Path;
 
 use wai_ext::index::{Listing, https_host, parse_index};
 
+mod github;
+
 /// The index in this repository, read by every wai.
 pub const OFFICIAL_INDEX: &str =
     "https://raw.githubusercontent.com/Guilbritto/wai/main/extensions/index.toml";
@@ -30,17 +32,19 @@ pub fn fetch_all(user: &[String]) -> Listings {
     let urls = std::iter::once(OFFICIAL_INDEX).chain(user.iter().map(String::as_str));
     for (n, url) in urls.enumerate() {
         let parsed = get_index(url).and_then(|text| parse_index(&text).map_err(anyhow::Error::msg));
+        let label = github::repo_label(url);
         let (listings, skipped) = match parsed {
             Ok(parsed) => parsed,
             Err(e) => {
-                out.errors.push(format!("Could not load {url}: {e:#}"));
+                let label = label.as_deref().unwrap_or(url);
+                out.errors.push(format!("Could not load {label}: {e:#}"));
                 continue;
             }
         };
         for notice in skipped {
             eprintln!("wai: index {url}: skipped {notice}");
         }
-        let from = (n > 0).then(|| https_host(url).unwrap_or(url).to_string());
+        let from = (n > 0).then(|| label.unwrap_or_else(|| https_host(url).unwrap_or(url).into()));
         for listing in listings {
             if !out.entries.iter().any(|e| e.listing.id == listing.id) {
                 let from = from.clone();
@@ -53,13 +57,28 @@ pub fn fetch_all(user: &[String]) -> Listings {
 
 #[cfg(not(test))]
 mod net {
+    use std::io::Write;
     use std::time::Duration;
 
     use super::*;
-    use crate::update::download::{Limits, download_with, get_into};
+    use crate::update::download::{HttpStatus, Limits, get_into};
 
     fn https(url: &str) -> bool {
         wai_ext::index::https_url(url)
+    }
+
+    /// Anonymous first; a 404 on a GitHub URL is tried again with the user's GitHub login. A 404
+    /// writes nothing, so the retry can use the same `out`.
+    fn get(url: &str, out: &mut impl Write, limits: Limits) -> anyhow::Result<()> {
+        match get_into(url, &[], out, limits) {
+            Err(e) if e.downcast_ref::<HttpStatus>().is_some_and(|s| s.0 == 404) => {
+                match github::classify(url) {
+                    Some(gh) => github::get_private(url, gh, out, limits),
+                    None => Err(e),
+                }
+            }
+            other => other,
+        }
     }
 
     pub(super) fn get_index(url: &str) -> anyhow::Result<String> {
@@ -70,17 +89,24 @@ mod net {
             max: 1024 * 1024,
             timeout: Duration::from_secs(10),
         };
-        get_into(url, &mut body, limits)?;
+        get(url, &mut body, limits)?;
         Ok(String::from_utf8(body)?)
     }
 
+    /// Into `to` (created, or truncated); on any error `to` is removed.
     pub(super) fn get_package(url: &str, to: &Path) -> anyhow::Result<()> {
         let limits = Limits {
             allowed: https,
             max: 100 * 1024 * 1024,
             timeout: Duration::from_secs(600),
         };
-        download_with(url, to, limits)
+        let result = std::fs::File::create(to)
+            .map_err(Into::into)
+            .and_then(|mut file| get(url, &mut file, limits));
+        if result.is_err() {
+            std::fs::remove_file(to).ok();
+        }
+        result
     }
 }
 

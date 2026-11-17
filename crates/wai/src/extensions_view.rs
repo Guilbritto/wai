@@ -18,10 +18,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 // A manifest's text goes through `clamp`: a hostile one cannot push the permissions out of the
 // consent dialog.
-use wai_ext::index::Listing;
+use wai_ext::index::{Listing, index_url};
 use wai_ext::panel::clamp;
 use wai_ext::{ExtId, ExtStore, Installed, Permission, RequiredPlugin, Source, Staged};
-use wai_settings::Settings;
+use wai_settings::{Change, Settings, write_change};
 
 use crate::claude_plugins::{self, INSTALL_TIMEOUT};
 use crate::ext_host::{ExtHost, ExtStatus};
@@ -103,6 +103,8 @@ pub struct ExtensionsView {
     /// Runs what the store has enabled; told after each change.
     host: Entity<ExtHost>,
     url: Entity<InputState>,
+    /// The Add index dialog's input.
+    index: Entity<InputState>,
     /// The stage in progress: a copy or a clone, off the main thread. A new one replaces it.
     staging: Option<Task<()>>,
     available: Available,
@@ -117,12 +119,14 @@ impl ExtensionsView {
         cx: &mut Context<Self>,
     ) -> Self {
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("https://… or git@…"));
+        let index = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo or https://…"));
         Self {
             config_dir: config_dir.to_path_buf(),
             store: ExtStore::open(config_dir),
             _host_changed: cx.observe(&host, |_, _, cx| cx.notify()),
             host,
             url,
+            index,
             staging: None,
             available: Available::NotFetched,
         }
@@ -393,6 +397,57 @@ impl ExtensionsView {
             .ok();
         });
         self.available = Available::Loading { _fetch: fetch };
+    }
+
+    fn add_index_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (index, this) = (self.index.clone(), cx.entity().downgrade());
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let input = index.read(cx).value().to_string();
+            let body = v_flex().gap_2().child(Input::new(&index)).child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("A GitHub repo (owner/repo) or an https URL."),
+            );
+            let this = this.clone();
+            dialog.title("Add an extension index").child(body).footer(
+                DialogFooter::new()
+                    .child(
+                        Button::new("index-cancel")
+                            .label("Cancel")
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("index-add")
+                            .primary()
+                            .label("Add")
+                            .disabled(index_url(&input).is_none())
+                            .on_click(move |_, window, cx| {
+                                window.close_dialog(cx);
+                                this.update(cx, |this, cx| this.add_index(&input, window, cx))
+                                    .ok();
+                            }),
+                    ),
+            )
+        });
+    }
+
+    /// Saves `input`'s index to the user's settings and reads the indexes again.
+    fn add_index(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(url) = index_url(input) else {
+            return;
+        };
+        match write_change(&self.config_dir, &Change::AddIndex(url)) {
+            Err(e) => {
+                let notice = Notification::warning(format!("Could not save settings: {e}"));
+                window.push_notification(notice, cx);
+            }
+            Ok(()) => {
+                self.index.update(cx, |s, cx| s.set_value("", window, cx));
+                self.refresh(cx);
+                cx.notify();
+            }
+        }
     }
 
     fn pick_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -710,6 +765,17 @@ impl Render for ExtensionsView {
                 header("AVAILABLE", listed.map(|l| l.entries.len()))
                     .items_center()
                     .child(div().flex_1())
+                    .child(
+                        Button::new("ext-add-index")
+                            .ghost()
+                            .xsmall()
+                            .label("Add index…")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.add_index_dialog(window, cx)
+                                }),
+                            ),
+                    )
                     .child(
                         Button::new("ext-refresh")
                             .ghost()
@@ -1239,6 +1305,50 @@ pub(crate) mod tests {
         assert!(cx.debug_bounds("consent: 1.2.0 → 1.3.0").is_some());
         click("consent-install", cx);
         assert_eq!(installed(&view, cx)[0].manifest.version, "1.3.0");
+    }
+
+    /// Add index writes the expanded shorthand to the user's settings once and reads the indexes
+    /// again; an invalid input writes nothing.
+    #[gpui_kit::test]
+    fn adds_an_index(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let (workspace, cx) = workspace(&config, cx);
+        let view =
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.show_extensions(window, cx)));
+        let type_in = |text: &str, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                let input = view.read(cx).index.clone();
+                input.update(cx, |s, cx| s.set_value(text, window, cx));
+            });
+        };
+        click("ext-add-index", cx);
+        type_in("not a repo", cx);
+        click("index-add", cx);
+        assert!(
+            !config.join("settings.toml").exists(),
+            "an invalid index is not written"
+        );
+        type_in("waycarbon/wai-waycarbon", cx);
+        click("index-add", cx);
+        let (s, _) = Settings::load(&config, None).unwrap();
+        assert_eq!(
+            s.extensions.indexes,
+            [
+                "https://github.com/waycarbon/wai-waycarbon/releases/latest/download/index-entry.toml"
+            ]
+        );
+        let errors = view.read_with(cx, |v, _| match &v.available {
+            super::Available::Loaded(l) => l.errors.clone(),
+            _ => vec![],
+        });
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.starts_with("Could not load waycarbon/wai-waycarbon:")),
+            "{errors:?}"
+        );
     }
 
     /// Enabled before launch, it starts once the window is open; quitting kills it.

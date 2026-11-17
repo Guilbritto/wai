@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, ensure};
 use http_body_util::BodyExt as _;
-use hyper::header::{ACCEPT, LOCATION, USER_AGENT};
+use hyper::header::{ACCEPT, AUTHORIZATION, HeaderName, HeaderValue, LOCATION, USER_AGENT};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 
@@ -61,28 +61,71 @@ pub(super) fn download(url: &str, dest: &Path) -> anyhow::Result<()> {
 pub(crate) fn download_with(url: &str, dest: &Path, limits: Limits) -> anyhow::Result<()> {
     let result = File::create(dest)
         .map_err(Into::into)
-        .and_then(|mut file| get_into(url, &mut file, limits));
+        .and_then(|mut file| get_into(url, &[], &mut file, limits));
     if result.is_err() {
         std::fs::remove_file(dest).ok();
     }
     result
 }
 
-/// GET `url` into `out` within `limits`.
+/// A GET that ended on a status other than 200 or a redirect.
+#[derive(Debug)]
+pub(crate) struct HttpStatus(pub u16);
+
+impl std::fmt::Display for HttpStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP {}", self.0)
+    }
+}
+
+impl std::error::Error for HttpStatus {}
+
+/// GET `url` into `out` within `limits`. `headers` go on the first request only (never on a
+/// redirect hop), each replacing a default of the same name.
 // ponytail: blocks one GPUI background thread up to `limits.timeout`, with its own runtime like
 // `fetch`. `out` is written with blocking calls between awaits; a slow disk stalls only this
 // thread. Upgrade: tokio's `fs` feature if the runtime ever serves more than this one request.
-pub(crate) fn get_into(url: &str, out: &mut impl Write, limits: Limits) -> anyhow::Result<()> {
+pub(crate) fn get_into(
+    url: &str,
+    headers: &[(&str, &str)],
+    out: &mut impl Write,
+    limits: Limits,
+) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let got = runtime
-        .block_on(async { tokio::time::timeout(limits.timeout, get(url, out, limits)).await });
+    let got = runtime.block_on(async {
+        tokio::time::timeout(limits.timeout, get(url, headers, out, limits)).await
+    });
     runtime.shutdown_background();
     got.map_err(|_| anyhow!("no download in {} s", limits.timeout.as_secs()))?
 }
 
-async fn get(url: &str, out: &mut impl Write, limits: Limits) -> anyhow::Result<()> {
+/// Request `hop` of a GET: only the first carries `headers`.
+fn request(
+    url: &str,
+    hop: usize,
+    headers: &[(&str, &str)],
+) -> anyhow::Result<hyper::Request<String>> {
+    let mut request = hyper::Request::get(url)
+        .header(USER_AGENT, concat!("wai/", env!("CARGO_PKG_VERSION")))
+        .header(ACCEPT, "application/octet-stream")
+        .body(String::new())?;
+    for (name, value) in headers.iter().filter(|_| hop == 0) {
+        let name = HeaderName::from_bytes(name.as_bytes())?;
+        let mut value = HeaderValue::from_str(value)?;
+        value.set_sensitive(name == AUTHORIZATION);
+        request.headers_mut().insert(name, value);
+    }
+    Ok(request)
+}
+
+async fn get(
+    url: &str,
+    headers: &[(&str, &str)],
+    out: &mut impl Write,
+    limits: Limits,
+) -> anyhow::Result<()> {
     let https = hyper_rustls::HttpsConnectorBuilder::new()
         .with_native_roots()?
         .https_only()
@@ -90,13 +133,9 @@ async fn get(url: &str, out: &mut impl Write, limits: Limits) -> anyhow::Result<
         .build();
     let client = Client::builder(TokioExecutor::new()).build(https);
     let mut url = url.to_string();
-    for _ in 0..=MAX_REDIRECTS {
+    for hop in 0..=MAX_REDIRECTS {
         ensure!((limits.allowed)(&url), "refusing to download from {url:?}");
-        let request = hyper::Request::get(&url)
-            .header(USER_AGENT, concat!("wai/", env!("CARGO_PKG_VERSION")))
-            .header(ACCEPT, "application/octet-stream")
-            .body(String::new())?;
-        let response = client.request(request).await?;
+        let response = client.request(request(&url, hop, headers)?).await?;
         let status = response.status().as_u16();
         match status {
             200 => return write(response.into_body(), out, limits.max).await,
@@ -107,7 +146,7 @@ async fn get(url: &str, out: &mut impl Write, limits: Limits) -> anyhow::Result<
                     .ok_or_else(|| anyhow!("HTTP {status} without a Location"))?
                     .to_string();
             }
-            _ => bail!("HTTP {status}"),
+            _ => return Err(HttpStatus(status).into()),
         }
     }
     bail!("too many redirects")
@@ -167,6 +206,23 @@ mod tests {
             expected_sum("1  a\n2  wai_1_x64-setup.exe\n", name),
             Some("2".into())
         );
+    }
+
+    #[test]
+    fn headers_go_on_the_first_request_only() {
+        let extra = [
+            ("authorization", "Bearer t"),
+            ("accept", "application/vnd.github+json"),
+        ];
+        let first = request("https://api.github.com/x", 0, &extra).unwrap();
+        assert_eq!(first.headers()["authorization"], "Bearer t");
+        assert!(first.headers()["authorization"].is_sensitive());
+        assert_eq!(first.headers().get_all("accept").iter().count(), 1);
+        assert_eq!(first.headers()["accept"], "application/vnd.github+json");
+        let hop = request("https://release-assets.githubusercontent.com/x", 1, &extra).unwrap();
+        assert!(hop.headers().get("authorization").is_none());
+        assert_eq!(hop.headers()["accept"], "application/octet-stream");
+        assert_eq!(anyhow::Error::from(HttpStatus(404)).to_string(), "HTTP 404");
     }
 
     #[test]
