@@ -1,0 +1,20 @@
+id = "wai-bichinho"
+name = "Bichinho"
+version = "0.1.0"
+description = "A small pet in your prompt box that grows with your agents' finished turns"
+api = "1.6"
+permissions = ["process", "panels", "sessions:read"]
+
+[process]
+command = "bin/wai-bichinho"
+
+[[contributes.panels]]
+id = "pet"
+title = "Pet"
+location = "prompt"
+width = 160
+
+[[contributes.panels]]
+id = "card"
+title = "Pet card"
+icon = "paw-print"

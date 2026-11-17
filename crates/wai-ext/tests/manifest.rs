@@ -195,6 +195,25 @@ fn first_party_manifests_validate() {
     assert_eq!(rotinas.process.unwrap().command, "bin/wai-rotinas");
     assert_eq!(rotinas.contributes.panels[0].id, "rotinas");
 
+    // wai-bichinho: a pet in the prompt box, and its card in the sidebar.
+    let pet = read("wai-bichinho");
+    assert_eq!(
+        pet.permissions,
+        [
+            Permission::Process,
+            Permission::Panels,
+            Permission::SessionsRead
+        ]
+    );
+    let [slot, card] = pet.contributes.panels.as_slice() else {
+        panic!("two panels: {:?}", pet.contributes.panels)
+    };
+    assert_eq!(
+        (slot.location, slot.width),
+        (PanelLocation::Prompt, Some(160))
+    );
+    assert_eq!((card.location, card.width), (PanelLocation::Sidebar, None));
+
     // wai-remoto: a skeleton; no process, nothing contributed.
     let remoto = read("wai-remoto");
     assert!(remoto.process.is_none());
