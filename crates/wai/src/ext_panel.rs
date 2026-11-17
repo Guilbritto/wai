@@ -2308,7 +2308,7 @@ mod tests {
         assert!(shown(name("panel-link:https://github.com"), cx));
         show(&panel, link("no-such-icon"), cx);
         assert!(!shown(name("panel-link:https://github.com"), cx));
-        assert!(shown(("panel-link", 0usize), cx));
+        assert!(shown(("panel-link", 1usize), cx));
     }
 
     /// A plain list's rows draw the icon, tone, selection, lead and note; a click still sends the id.
