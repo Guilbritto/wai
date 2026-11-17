@@ -1259,8 +1259,6 @@ mod tests {
         })
     }
 
-    /// With an agent that steers, a message sent during a turn joins it: it shows as the user's
-    /// once the turn reads it, the turn's reply takes it in, and no second prompt goes out.
     #[gpui_kit::test]
     fn sending_clears_the_typing_signal(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
@@ -1283,6 +1281,8 @@ mod tests {
         assert!(typing(cx));
     }
 
+    /// With an agent that steers, a message sent during a turn joins it: it shows as the user's
+    /// once the turn reads it, the turn's reply takes it in, and no second prompt goes out.
     #[gpui_kit::test]
     fn message_sent_during_a_turn_steers_it(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
