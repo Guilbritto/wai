@@ -168,6 +168,10 @@ pub struct ChatSession {
     loading: bool,
     /// Runs with a 1M context window: loads carry `context_meta`.
     pub(crate) long_context: bool,
+    /// The Context chip's 200k/1M picker: Claude sessions only.
+    pub(super) context_picker: Option<Entity<SelectState<Vec<&'static str>>>>,
+    /// A Context switch reloaded the session: take the options the agent reports again.
+    pub(super) retake: bool,
     /// Queued text going back to the prompt box at the next frame (which has the window).
     pub(super) unsent: Option<String>,
     /// The `/` menu's selected row, its scroll, and whether Esc closed it.
@@ -215,7 +219,7 @@ pub struct ChatSession {
     pub(super) drawer_scroll: ScrollHandle,
     /// Pending while streamed text waits for `STREAM_FLUSH`.
     flush: Option<Task<()>>,
-    _subscriptions: Vec<Subscription>,
+    pub(super) _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<ChatEvent> for ChatSession {}
@@ -278,6 +282,8 @@ impl ChatSession {
             settling: 0,
             loading: false,
             long_context: false,
+            context_picker: None,
+            retake: false,
             unsent: None,
             menu_ix: 0,
             menu_scroll: ScrollHandle::new(),
@@ -311,6 +317,9 @@ impl ChatSession {
         this.set_modes(started.modes, started.current_mode, window, cx);
         this.model.config = started.config;
         this.sync_pickers(window, cx);
+        if this.agent == "claude" {
+            this.context_picker = Some(this.new_context_picker(window, cx));
+        }
         this
     }
 
@@ -444,7 +453,7 @@ impl ChatSession {
         if self.modes.is_none() {
             self.set_modes(started.modes, started.current_mode, window, cx);
         }
-        if self.model.config.is_empty() {
+        if self.model.config.is_empty() || std::mem::take(&mut self.retake) {
             self.model.config = started.config;
             self.pickers_stale = true;
         }
@@ -1069,6 +1078,7 @@ impl ChatSession {
         self.handle = handle.clone();
         self.bound = next_binding();
         cx.emit(ChatEvent::Bound);
+        self.sync_context_picker(window, cx);
         self.model.items.clear();
         self.model.subagents.clear();
         self.model.waiting.clear();
@@ -1195,8 +1205,8 @@ mod tests {
     use crate::notify;
     use crate::sidebar::canonical;
     use crate::workspace::tests::{
-        click, fake_live, fake_settings, history_settings, launch, live, load_history, open,
-        open_at, reveal, start_now, wait_until,
+        ONE_MILLION, click, fake_live, fake_settings, history_settings, launch, live, load_history,
+        meta_reply, open, open_at, reveal, start_now, wait_until,
     };
     use crate::workspace::{Pane, Workspace};
 
@@ -4409,5 +4419,124 @@ mod tests {
         cx.update(|window, cx| window.blur(cx));
         cx.simulate_keystrokes("1");
         assert!(waiting(cx), "a digit outside the prompt answered the card");
+    }
+
+    /// The fake agent registered as `claude`: its sessions get the Context chip.
+    fn claude_settings(flags: &str) -> Settings {
+        let mut settings = fake_settings(flags);
+        let fake = settings.agents.remove("fake").unwrap();
+        settings.agents.insert("claude".into(), fake);
+        settings.default_agent = Some("claude".into());
+        settings
+    }
+
+    fn switch(session: &Entity<ChatSession>, long: bool, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| session.update(cx, |s, cx| s.set_long_context(long, window, cx)));
+        wait_until(cx, "the reload", |cx| state(session, cx) == TurnState::Idle);
+    }
+
+    fn model_current(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> String {
+        session.read_with(cx, |s, _| {
+            let model = s.model.config.iter().find(|o| o.id == "model").unwrap();
+            model.current.clone()
+        })
+    }
+
+    fn is_long(
+        workspace: &Entity<Workspace>,
+        session: &Entity<ChatSession>,
+        cx: &mut VisualTestContext,
+    ) -> bool {
+        let id = session.read_with(cx, |s, _| s.id.clone());
+        workspace.read_with(cx, |w, _| w.long_context.contains(&id))
+    }
+
+    /// The switch reloads the same session with the meta; the draft in the box stays.
+    #[gpui_kit::test]
+    fn switch_to_one_million_keeps_the_session(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, claude_settings("--models --echo-meta"));
+        let session = start_session(&workspace, cx);
+        let id = session.read_with(cx, |s, _| s.id.clone());
+        cx.simulate_input("draft");
+        switch(&session, true, cx);
+        assert_eq!(session.read_with(cx, |s, _| s.id.clone()), id);
+        assert!(session.read_with(cx, |s, _| s.long_context));
+        assert!(is_long(&workspace, &session, cx));
+        assert_eq!(typed(&session, cx), "draft");
+        assert!(meta_reply(&session, cx).contains(ONE_MILLION));
+    }
+
+    #[gpui_kit::test]
+    fn switch_back_to_200k(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, claude_settings("--models --echo-meta"));
+        let session = start_session(&workspace, cx);
+        switch(&session, true, cx);
+        switch(&session, false, cx);
+        assert!(!session.read_with(cx, |s, _| s.long_context));
+        assert!(!is_long(&workspace, &session, cx));
+        assert_eq!(meta_reply(&session, cx), "meta:");
+    }
+
+    /// The reload starts the agent's session over: the pane shows the model it reports, not the
+    /// one it showed before.
+    #[gpui_kit::test]
+    fn switch_shows_the_agents_model(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, claude_settings("--models"));
+        let session = start_session(&workspace, cx);
+        wait_until(cx, "the options", |cx| {
+            session.read_with(cx, |s, _| !s.model.config.is_empty())
+        });
+        session.update(cx, |s, _| {
+            let model = s.model.config.iter_mut().find(|o| o.id == "model").unwrap();
+            model.current = "fake-large".into();
+        });
+        switch(&session, true, cx);
+        assert_eq!(model_current(&session, cx), "fake-small");
+    }
+
+    #[gpui_kit::test]
+    fn same_value_does_nothing(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, claude_settings("--echo-meta"));
+        let session = start_session(&workspace, cx);
+        let bound = session.read_with(cx, |s, _| s.bound);
+        cx.update(|window, cx| session.update(cx, |s, cx| s.set_long_context(false, window, cx)));
+        assert_eq!(state(&session, cx), TurnState::Idle);
+        assert_eq!(session.read_with(cx, |s, _| s.bound), bound);
+    }
+
+    #[gpui_kit::test]
+    fn context_chip_only_for_claude(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, claude_settings(""));
+        start_session(&workspace, cx);
+        assert!(shows("bar-context", cx));
+    }
+
+    #[gpui_kit::test]
+    fn no_context_chip_for_other_agents(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        start_session(&workspace, cx);
+        assert!(!shows("bar-context", cx));
+    }
+
+    /// During a turn the chip is off and a switch does nothing.
+    #[gpui_kit::test]
+    fn context_chip_disabled_during_a_turn(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, claude_settings(&slow_reply(200, 20)));
+        let session = start_session(&workspace, cx);
+        send("go", cx);
+        wait_until(cx, "the first chunk", |cx| {
+            last_agent_text(&session, cx).is_some()
+        });
+        assert!(session.read_with(cx, |s, _| s.context_locked()));
+        cx.update(|window, cx| session.update(cx, |s, cx| s.set_long_context(true, window, cx)));
+        assert!(!session.read_with(cx, |s, _| s.long_context));
+        assert!(!is_long(&workspace, &session, cx));
     }
 }

@@ -65,8 +65,7 @@
 //!
 //! - `--models`: `session/new`, `load` and `fork` return a `model` option (`fake-small`,
 //!   `fake-large`) and an `effort` option (`low`, `high`); `session/set_config_option` stores the
-//!   value per session, and each turn answers `model:<current model id>`. A session whose last
-//!   load or fork had a `_meta` also lists `fake-small[1m]` and `fake-large[1m]`.
+//!   value per session, and each turn answers `model:<current model id>`.
 //! - `--config-mode`: with `--models`, a `mode` option (`ask`, `code`) joins them.
 //! - `--reject-config`: `session/set_config_option` fails.
 //! - `--steering`: advertise `_meta.steering.supported` and take `_session/steering`: during a
@@ -302,7 +301,6 @@ impl Fake {
             acp::SessionConfigOption::select(id, name, current(id, default), values)
                 .category(category)
         };
-        let one_million = (self.meta.lock().expect("meta poisoned")).contains_key(&*session.0);
         let mode = self.opts.config_mode.then(|| {
             select(
                 "mode",
@@ -319,16 +317,7 @@ impl Fake {
                     "Model",
                     C::Model,
                     "fake-small",
-                    if one_million {
-                        &[
-                            ("fake-small", "Fake Small"),
-                            ("fake-large", "Fake Large"),
-                            ("fake-small[1m]", "Fake Small 1M"),
-                            ("fake-large[1m]", "Fake Large 1M"),
-                        ]
-                    } else {
-                        &[("fake-small", "Fake Small"), ("fake-large", "Fake Large")]
-                    },
+                    &[("fake-small", "Fake Small"), ("fake-large", "Fake Large")],
                 ),
                 select(
                     "effort",

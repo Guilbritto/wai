@@ -780,6 +780,10 @@ impl ChatSession {
                 )
             }),
         };
+        let context = self.context_picker.as_ref().map(|state| {
+            let select = select(state, max_h).disabled(self.context_locked());
+            bar_chip("bar-context".into(), select.into_any_element())
+        });
         let rest = (self.pickers.iter())
             .filter(|(id, _)| !is_mode(id))
             .map(|(id, state)| {
@@ -791,6 +795,7 @@ impl ChatSession {
             .child(attach)
             .children(mode)
             .child(div().flex_1())
+            .children(context)
             .children(rest)
             .children(stop)
             .child(send)

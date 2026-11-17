@@ -6,8 +6,8 @@ use async_channel::Receiver;
 use wai_agent::{
     AgentCaps, AgentError, AgentEvent, AgentHandle, AgentSpec, BrokerError, Choice, ChoiceKind,
     CommandInfo, ConfigCategory, ConfigOption, ConfigValue, FieldKind, McpServer, Meta,
-    PermissionRequest, PromptBlock, QuestionAnswer, QuestionRequest, SessionEvent, SessionStarted,
-    StopReason, SubagentPatch, SubagentState, ToolContent, program, quote,
+    PermissionRequest, PromptBlock, QuestionAnswer, QuestionRequest, SessionEvent, StopReason,
+    SubagentPatch, SubagentState, ToolContent, program, quote,
 };
 
 fn run(test: impl Future<Output = ()>) {
@@ -687,37 +687,6 @@ fn meta_reaches_load_and_fork() {
 
         let forked = agent.fork_session("abc".into(), cwd(), vec![], Some(meta));
         assert_eq!(turn(forked.await.unwrap().id).await, r#"meta:{"k":"v"}"#);
-    });
-}
-
-/// `--models`: a session loaded with a `_meta` also lists the `[1m]` rows of its models.
-#[test]
-fn meta_lists_the_one_million_rows() {
-    run(async {
-        let (agent, rx) = spawn(&["--models"]);
-        ready(&rx).await;
-        let meta: Meta = serde_json::from_str(r#"{"k":"v"}"#).unwrap();
-        let models = |started: SessionStarted| {
-            let model = started
-                .config
-                .into_iter()
-                .find(|o| o.id == "model")
-                .unwrap();
-            model.values.into_iter().map(|v| v.id).collect::<Vec<_>>()
-        };
-
-        let long = agent.load_session("abc".into(), cwd(), vec![], Some(meta));
-        assert_eq!(
-            models(long.await.unwrap()),
-            [
-                "fake-small",
-                "fake-large",
-                "fake-small[1m]",
-                "fake-large[1m]"
-            ]
-        );
-        let short = agent.load_session("abc".into(), cwd(), vec![], None);
-        assert_eq!(models(short.await.unwrap()), ["fake-small", "fake-large"]);
     });
 }
 

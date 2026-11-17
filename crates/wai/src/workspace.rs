@@ -5451,7 +5451,7 @@ pub(crate) mod tests {
     }
 
     /// Once `session` is idle, sends "hi": the `--echo-meta` fake's reply, `meta:<json>`.
-    fn meta_reply(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> String {
+    pub(crate) fn meta_reply(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> String {
         let idle = |cx: &mut VisualTestContext| {
             session.read_with(cx, |s, _| s.model.state == TurnState::Idle)
         };
@@ -5471,7 +5471,7 @@ pub(crate) mod tests {
         echoed(cx).unwrap()
     }
 
-    const ONE_MILLION: &str = r#""CLAUDE_CODE_DISABLE_1M_CONTEXT":"0""#;
+    pub(crate) const ONE_MILLION: &str = r#""CLAUDE_CODE_DISABLE_1M_CONTEXT":"0""#;
 
     fn reload(session: &Entity<ChatSession>, long: bool, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
