@@ -1605,6 +1605,77 @@ pub(crate) mod tests {
         assert!(field.is_some() && inside.is_none() && side.is_none());
     }
 
+    /// The real wai-bichinho, built with `go`, draws its egg in the focused prompt box.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn bichinho_draws_in_the_prompt_box(cx: &mut TestAppContext) {
+        use gpui_kit::{px, size};
+        use wai_ext::PanelLocation;
+        use wai_ext::panel::Node;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let from = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions/wai-bichinho");
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        for entry in std::fs::read_dir(&from).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let go = name.ends_with(".go") && !name.ends_with("_test.go");
+            if go || name == MANIFEST_FILE || name == "go.mod" {
+                std::fs::copy(entry.path(), src.join(&name)).unwrap();
+            }
+        }
+        let built = std::process::Command::new("go")
+            .args(["build", "-o", "bin/wai-bichinho", "."])
+            .current_dir(&src)
+            .status();
+        if !built.is_ok_and(|s| s.success()) {
+            eprintln!("SKIPPED: `go build` is unavailable, so wai-bichinho cannot be built");
+            return;
+        }
+        let config = tmp.path().join("config");
+        let mut store = ExtStore::open(&config);
+        let staged = store.stage(&Source::Folder(src)).unwrap();
+        let granted = staged.manifest().permissions.clone();
+        store.commit(staged, granted).unwrap();
+
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        cx.simulate_resize(size(px(1400.), px(800.)));
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        wait_until(cx, "the panels", |cx| {
+            host.read_with(cx, |h, _| h.panels().len() == 2)
+        });
+        start_now(&workspace, cx);
+        let slot = host.read_with(cx, |h, _| {
+            h.prompt_panel(PanelLocation::Prompt)
+                .map(|p| p.view.clone())
+        });
+        let slot = slot.expect("the pet's slot");
+        let art = |cx: &mut VisualTestContext| {
+            let mut art = None;
+            if let Some(Ok(tree)) = slot.read_with(cx, |p, _| p.tree.clone()) {
+                tree.walk(&mut |node| {
+                    if let Node::Text {
+                        text, mono: true, ..
+                    } = node
+                    {
+                        art = Some(text.to_string());
+                    }
+                });
+            }
+            art
+        };
+        wait_until(cx, "the egg", |cx| {
+            art(cx).is_some_and(|art| art.contains("(   )"))
+        });
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("prompt-slot").is_some());
+        });
+        // The sidebar shows the card's button only.
+        assert!(crate::sidebar::tests::label(("tab-panel", 0usize), cx).is_some());
+        assert!(crate::sidebar::tests::label(("tab-panel", 1usize), cx).is_none());
+    }
+
     fn field_of(cx: &mut VisualTestContext) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
         cx.update(|window, _| window.try_find("prompt-box").map(|e| e.bounds()))
     }
