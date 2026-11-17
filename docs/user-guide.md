@@ -369,7 +369,7 @@ Settings is a modal over the window, not a pane.
 - **Conversation:** **Processing**, how a chat shows the agent's steps: Step by step, Grouped or Hidden (see [Chatting](#chatting)). It applies at once to every open session. Permission cards, questions and file edits always show.
 - **Terminal:** **Shell**, a path; empty is the system default. It applies to terminals opened afterwards, and changing it asks `Run a new command?`.
 - **Updates:** **Automatic updates** (switch), **Version** (the installed version, its status and one button: **Check now**, **Restart now** or **Open release page**) and **Repository** (see [Updates](#updates)).
-- **Extensions:** extensions add panels, commands, agents and MCP servers to wai. They run with your permissions. Install from a folder or a git URL. The **Installed** group lists each one with its version badge, permissions, any problem, the Claude plugins it suggests (**Install in terminal**), an **Enabled** switch and **Uninstall**. The **Available** group lists what the extension indexes offer, with **Install** or **Update to <version>** and **Refresh** (see [Extensions](#extensions)).
+- **Extensions:** extensions add panels, commands, agents and MCP servers to wai. They run with your permissions. Install from a folder or a git URL. The **Installed** group lists each one with its version badge, permissions, any problem, the Claude plugins it suggests (**Install in terminal**), an **Enabled** switch and **Uninstall**. The **Available** group lists what the extension indexes offer, with **Install** or **Update to <version>**, **Add index…** and **Refresh** (see [Extensions](#extensions)).
 
 The search filters the current page's rows by label (agents by name). A broken `settings.toml` shows its error banner on every wai page and makes them read-only.
 
@@ -519,13 +519,13 @@ The **Extensions** button opens Settings on its **Extensions** page. **Installed
 - **Uninstall** it;
 - install from a folder (**Install from folder…**) or a git URL (**Install from git URL…**, `https://` or `git@`).
 
-**Available** lists the extensions that indexes offer, each with its name, version, description and, for one from your own index, `from <host>`:
+**Available** lists the extensions that indexes offer, each with its name, version, description and, for one from your own index, `from <host>` (`from owner/repo` for a GitHub release):
 - **Install** downloads its prebuilt package for your platform, checks it against the SHA-256 the index pins and opens the consent dialog. Nothing is compiled on your machine.
 - **Update to <version>** shows when the index lists another version of an extension you have; **Installed** when you have that version.
 - `Not available for this platform` means the index has no package for your system.
-- The indexes are read the first time you open the page, never at launch, and again on **Refresh**. An index that does not load shows `Could not load <url>: <error>`; the others still list.
+- The indexes are read the first time you open the page, never at launch, and again on **Refresh**. An index that does not load shows `Could not load <url or owner/repo>: <error>`; the others still list.
 
-**Indexes.** wai always reads the official index, `extensions/index.toml` in wai's repository, where anyone can list an extension through a reviewed pull request. To add your own (a team's, say), list them in your `settings.toml`:
+**Indexes.** wai always reads the official index, `extensions/index.toml` in wai's repository, where anyone can list an extension through a reviewed pull request. To add your own (a team's, say), click **Add index…** and type a GitHub `owner/repo` (its latest release's `index-entry.toml`) or an `https://` URL. It is saved to your `settings.toml`, where you can also list indexes by hand:
 
 ```toml
 [extensions]
@@ -533,6 +533,7 @@ indexes = ["https://example.com/wai-index.toml"]
 ```
 
 - Only `https://` URLs load, and only your own settings file can add indexes: a project's `.wai/settings.toml` cannot.
+- A private GitHub repo loads with your `gh` login (`GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token`), sent only to GitHub. The account must have access to the repo; `gh auth switch` changes it.
 - The official index is read first, and the first index to list an id keeps it, so your indexes add extensions but never replace an official one.
 - A change applies on the next **Refresh**.
 
