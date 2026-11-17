@@ -403,6 +403,7 @@ func (s *server) handle(m message) {
 		var p struct{ Agent, Session *string }
 		json.Unmarshal(m.Params, &p)
 		s.focused = key(p.Agent, p.Session)
+		s.lastEvent = s.now()
 		s.render()
 	case "":
 		// The answer to our sessions/list: the open sessions' states, closed ones dropped.
