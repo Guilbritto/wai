@@ -360,6 +360,9 @@ impl ExtPanel {
             // Its scroll survives re-renders: the id does not count the nodes above.
             // ponytail: two split rows in one tab share these ids, so their scrolls.
             let width = match child {
+                Node::Column {
+                    collapsed: true, ..
+                } => Some(28.),
                 Node::Column { width, .. } => *width,
                 _ => None,
             };
@@ -1877,6 +1880,29 @@ mod tests {
         let strip = cx.update(|window, _| window.find(("panel-strip", 2usize)).bounds());
         assert_eq!(strip.size.width, px(28.));
         assert!(!shown(name("panel-button:hidden"), cx));
+    }
+
+    /// In a fill row a collapsed column's cell is as narrow as its strip; its sibling takes the rest.
+    #[gpui_kit::test]
+    fn collapsed_column_in_a_fill_row_stays_narrow(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        show(
+            &panel,
+            json!({"type": "column", "children": [{"type": "row", "fill": true, "children": [
+                {"type": "column", "collapsed": true, "title": "Done", "badge": "0",
+                 "children": []},
+                {"type": "column", "children": [{"type": "text", "text": "plain"}]},
+            ]}]}),
+            cx,
+        );
+        let bounds = |id: (&'static str, usize), cx: &mut VisualTestContext| {
+            cx.update(|window, _| window.find(id).bounds())
+        };
+        let strip = bounds(("panel-strip", 3), cx);
+        assert_eq!(strip.size.width, px(28.));
+        let rest = bounds(("panel-fill", 1), cx);
+        let width = cx.update(|window, _| window.viewport_size().width);
+        assert!(rest.size.width > width - px(80.), "{rest:?} of {width:?}");
     }
 
     /// A framed column in a fill row stretches to its height, so its spacer pins what follows
