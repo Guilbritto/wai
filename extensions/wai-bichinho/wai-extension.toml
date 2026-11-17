@@ -1,9 +1,9 @@
 id = "wai-bichinho"
 name = "Bichinho"
-version = "0.1.0"
+version = "0.2.0"
 description = "A small pet in your prompt box that grows with your agents' finished turns"
-api = "1.6"
-permissions = ["process", "panels", "sessions:read"]
+api = "1.7"
+permissions = ["process", "panels", "sessions:read", "events:wai-waycarbon"]
 
 [process]
 command = "bin/wai-bichinho"

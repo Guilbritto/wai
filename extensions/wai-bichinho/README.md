@@ -9,7 +9,7 @@ cd extensions/wai-bichinho
 go build -o bin/wai-bichinho .
 ```
 
-Then in wai: Extensions, install from folder, pick this folder, and review the consent (`process`, `panels`, `sessions:read`). It needs a wai with extension API 1.6.
+Then in wai: Extensions, install from folder, pick this folder, and review the consent (`process`, `panels`, `sessions:read`, `events:wai-waycarbon`). It needs a wai with extension API 1.7.
 
 ## Playing
 
@@ -19,6 +19,7 @@ Then in wai: Extensions, install from folder, pick this folder, and review the c
 - **Growing.** Each finished turn in any session gives 10 xp (2 for a cancelled one). Levels come at 25, 100, 225, 400… xp.
 - **Care.** It goes from full to starving in 8 hours and loses its affection in a day: **Feed** and **Pet** it from the ⋯ menu or its card. It never dies.
 - **Moods.** It works along with the focused session, shouts when any session needs you, frowns at an error, and falls asleep after 20 minutes without activity.
+- **PRs.** With wai-waycarbon installed, it hears its `prs.mine` event: it flashes when one of your PRs is approved or needs a fix (conflict, failing CI, requested changes), then shows how many to fix or merge. Without wai-waycarbon it just never hears it.
 
 The pet shows only in the focused pane's prompt box, and hides in narrow panes. **Open card** (or the paw in the activity bar) opens its card in the sidebar: stats, care, renaming, the collection and past pets.
 

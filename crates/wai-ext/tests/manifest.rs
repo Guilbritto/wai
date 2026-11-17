@@ -202,7 +202,8 @@ fn first_party_manifests_validate() {
         [
             Permission::Process,
             Permission::Panels,
-            Permission::SessionsRead
+            Permission::SessionsRead,
+            Permission::Events(ExtId::new("wai-waycarbon").unwrap())
         ]
     );
     let [slot, card] = pet.contributes.panels.as_slice() else {

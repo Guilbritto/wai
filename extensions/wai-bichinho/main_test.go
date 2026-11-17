@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"os"
@@ -263,6 +264,59 @@ func TestProtocol(t *testing.T) {
 	again := start(t, dir)
 	if p := again.s.st.Pet; p == nil || p.Name != "Zezinho" || p.XP != xpPerTurn {
 		t.Errorf("reloaded pet: %+v", p)
+	}
+}
+
+func TestPREvents(t *testing.T) {
+	h := start(t, t.TempDir())
+	h.send(`{"jsonrpc":"2.0","id":1,"method":"panel/action","params":{"panel":"pet","action_id":"hatch","values":{}}}`)
+	h.now = h.now.Add(time.Minute) // past the hatch flash
+	prs := func(reasons ...string) string {
+		var list []string
+		for i, r := range reasons {
+			list = append(list, fmt.Sprintf(`{"url":"https://github.com/o/r/pull/%d","reason":%q}`, i+1, r))
+		}
+		return `{"jsonrpc":"2.0","method":"event/ext","params":{"source":"wai-waycarbon","name":"prs.mine","data":{"prs":[` + strings.Join(list, ",") + `]}}}`
+	}
+	word := func(line string) string {
+		t.Helper()
+		h.send(line) // a render that would repeat the last tree sends nothing, so read the mood
+		_, w := h.s.mood(h.now)
+		return w
+	}
+
+	if w := word(prs("approved", "waiting")); w != "merge PR" {
+		t.Errorf("first event, no flash, an approved PR: %q", w)
+	}
+	if w := word(prs("approved", "ci_failed")); w != "check PR" {
+		t.Errorf("a PR that turns red flashes: %q", w)
+	}
+	h.now = h.now.Add(time.Minute)
+	if w := word(prs("approved", "ci_failed", "conflict")); w != "check PR" {
+		t.Errorf("a new PR with a conflict flashes: %q", w)
+	}
+	h.now = h.now.Add(time.Minute)
+	if w := word(prs("approved", "ci_failed", "conflict")); w != "fix 2 PRs" {
+		t.Errorf("no change, PRs to fix win over approved: %q", w)
+	}
+	if w := word(prs("approved", "approved")); w != "approved!" {
+		t.Errorf("a PR approved: %q", w)
+	}
+	h.now = h.now.Add(time.Minute)
+	if w := word(prs("approved", "approved")); w != "2 to merge" {
+		t.Errorf("two approved: %q", w)
+	}
+	for _, other := range []string{
+		`{"jsonrpc":"2.0","method":"event/ext","params":{"source":"someone","name":"prs.mine","data":{"prs":[]}}}`,
+		`{"jsonrpc":"2.0","method":"event/ext","params":{"source":"wai-waycarbon","name":"other","data":{"prs":[]}}}`,
+		`{"jsonrpc":"2.0","method":"event/ext","params":{"source":"wai-waycarbon","name":"prs.mine","data":"bad"}}`,
+	} {
+		if msgs := h.send(other); len(msgs) != 0 {
+			t.Errorf("ignored %s: %v", other, msgs)
+		}
+	}
+	if w := word(prs()); w == "2 to merge" || w == "approved!" {
+		t.Errorf("all merged: %q", w)
 	}
 }
 

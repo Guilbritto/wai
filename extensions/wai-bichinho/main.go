@@ -55,6 +55,7 @@ type server struct {
 	ticks  int
 	listID int
 	sent   map[string]string // the last tree sent per panel
+	prs    map[string]string // my open PRs, URL → reason, from wai-waycarbon; nil until its first event
 }
 
 func newServer(out io.Writer, now func() time.Time, rng *rand.Rand) *server {
@@ -144,6 +145,12 @@ func (s *server) mood(now time.Time) (string, string) {
 	case "working":
 		return "working", "working"
 	}
+	if n := s.countPRs(attention); n > 0 {
+		return "alert", plural(n, "fix PR", "fix %d PRs")
+	}
+	if n := s.countPRs(func(r string) bool { return r == "approved" }); n > 0 {
+		return "happy", plural(n, "merge PR", "%d to merge")
+	}
 	switch {
 	case p.Hunger(now) >= 60:
 		return "hungry", "hungry"
@@ -153,6 +160,49 @@ func (s *server) mood(now time.Time) (string, string) {
 		return "sleeping", "zzz"
 	}
 	return "idle", p.Name
+}
+
+// attention is a PR reason that asks the user to fix something.
+func attention(reason string) bool {
+	return reason == "conflict" || reason == "ci_failed" || reason == "changes_requested"
+}
+
+func (s *server) countPRs(match func(string) bool) int {
+	n := 0
+	for _, r := range s.prs {
+		if match(r) {
+			n++
+		}
+	}
+	return n
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return fmt.Sprintf(many, n)
+}
+
+// gotPRs takes wai-waycarbon's prs.mine, the whole state each time, and flashes what changed since
+// the last one; the first only records, so a restart does not shout about old PRs.
+func (s *server) gotPRs(list []struct{ URL, Reason string }) {
+	prs := map[string]string{}
+	fix, approved := false, false
+	for _, p := range list {
+		prs[p.URL] = p.Reason
+		if s.prs != nil && s.prs[p.URL] != p.Reason {
+			fix = fix || attention(p.Reason)
+			approved = approved || p.Reason == "approved"
+		}
+	}
+	s.prs = prs
+	switch {
+	case fix:
+		s.react("alert", "check PR")
+	case approved:
+		s.react("happy", "approved!")
+	}
 }
 
 func (s *server) menu() node {
@@ -404,6 +454,18 @@ func (s *server) handle(m message) {
 		json.Unmarshal(m.Params, &p)
 		s.focused = key(p.Agent, p.Session)
 		s.lastEvent = s.now()
+		s.render()
+	case "event/ext":
+		var p struct {
+			Source, Name string
+			Data         struct {
+				PRs []struct{ URL, Reason string }
+			}
+		}
+		if json.Unmarshal(m.Params, &p) != nil || p.Source != "wai-waycarbon" || p.Name != "prs.mine" {
+			return
+		}
+		s.gotPRs(p.Data.PRs)
 		s.render()
 	case "":
 		// The answer to our sessions/list: the open sessions' states, closed ones dropped.
