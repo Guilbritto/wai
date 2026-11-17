@@ -49,11 +49,22 @@ pub const MAX_INPUT_ROWS: u8 = 20;
 pub const MAX_URL: usize = 2_048;
 /// Lucide names are kebab-case: `git-pull-request`.
 pub const MAX_ICON: usize = 64;
+/// A column's `width`, in px.
+pub const MIN_WIDTH: f64 = 24.;
+pub const MAX_WIDTH: f64 = 2_000.;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
-    Column(Vec<Node>),
-    Row(Vec<Node>),
+    /// `width`: fixed, in px; else columns in a row share the width.
+    Column {
+        children: Vec<Node>,
+        width: Option<f32>,
+    },
+    /// `fill`: below columns only, it takes the height left and each child scrolls on its own.
+    Row {
+        children: Vec<Node>,
+        fill: bool,
+    },
     Text {
         text: Arc<str>,
         muted: bool,
@@ -112,6 +123,7 @@ pub enum Node {
         subtitle: Option<Arc<str>>,
         badge: Option<Arc<str>>,
         icon: Option<Arc<str>>,
+        selected: bool,
         children: Vec<Node>,
     },
     /// `open`: the initial state; open when never given.
@@ -254,8 +266,14 @@ pub fn parse(tree: &Value) -> Result<Node, TooLarge> {
 fn card(tree: &Value) -> Option<Node> {
     fn display(node: Node) -> Node {
         match node {
-            Node::Column(children) => Node::Column(children.into_iter().map(display).collect()),
-            Node::Row(children) => Node::Row(children.into_iter().map(display).collect()),
+            Node::Column { children, width } => Node::Column {
+                children: children.into_iter().map(display).collect(),
+                width,
+            },
+            Node::Row { children, fill } => Node::Row {
+                children: children.into_iter().map(display).collect(),
+                fill,
+            },
             Node::Text { .. }
             | Node::Badge { .. }
             | Node::Icon { .. }
@@ -277,8 +295,8 @@ impl Node {
     pub fn walk<'a>(&'a self, f: &mut impl FnMut(&'a Node)) {
         f(self);
         match self {
-            Node::Column(children)
-            | Node::Row(children)
+            Node::Column { children, .. }
+            | Node::Row { children, .. }
             | Node::Card { children, .. }
             | Node::Section { children, .. } => {
                 for child in children {
@@ -479,8 +497,15 @@ impl Parser {
         depth: usize,
     ) -> Result<Option<Node>, TooLarge> {
         Ok(match kind {
-            "column" => self.children(o, depth)?.map(Node::Column),
-            "row" => self.children(o, depth)?.map(Node::Row),
+            "column" => self.children(o, depth)?.map(|children| Node::Column {
+                children,
+                width: (o.get("width").and_then(Value::as_f64))
+                    .map(|w| w.clamp(MIN_WIDTH, MAX_WIDTH) as f32),
+            }),
+            "row" => self.children(o, depth)?.map(|children| Node::Row {
+                children,
+                fill: flag(o, "fill").unwrap_or(false),
+            }),
             "card" => {
                 let card = |children| Node::Card {
                     id: id(o),
@@ -488,6 +513,7 @@ impl Parser {
                     subtitle: line(o, "subtitle"),
                     badge: line(o, "badge"),
                     icon: icon(o),
+                    selected: flag(o, "selected").unwrap_or(false),
                     children,
                 };
                 Some(card(self.children(o, depth)?.unwrap_or_default()))
@@ -826,6 +852,20 @@ fn confirm(o: &Map<String, Value>) -> Option<Option<Confirm>> {
 
 #[cfg(test)]
 mod tests {
+    fn col(children: Vec<Node>) -> Node {
+        Node::Column {
+            children,
+            width: None,
+        }
+    }
+
+    fn row(children: Vec<Node>) -> Node {
+        Node::Row {
+            children,
+            fill: false,
+        }
+    }
+
     use serde_json::{Map, Value, json};
 
     use super::*;
@@ -882,7 +922,7 @@ mod tests {
 
     fn children(tree: Value) -> Vec<Node> {
         match parse(&tree) {
-            Ok(Node::Column(children)) => children,
+            Ok(Node::Column { children, .. }) => children,
             other => panic!("not a column: {other:?}"),
         }
     }
@@ -910,8 +950,8 @@ mod tests {
             {"type": "checkbox", "id": "c2", "label": "Unchecked"},
             {"type": "progress", "value": 0.25},
         ]});
-        let expected = Node::Column(vec![
-            Node::Row(vec![
+        let expected = col(vec![
+            row(vec![
                 Node::Text {
                     text: "Hello".into(),
                     muted: true,
@@ -1037,7 +1077,7 @@ mod tests {
         }
         let mut tree = json!({"type": "column"});
         tree["children"] = arrays;
-        assert_eq!(parse(&tree), Ok(Node::Column(vec![Node::Unsupported])));
+        assert_eq!(parse(&tree), Ok(col(vec![Node::Unsupported])));
         drop_deep(tree);
     }
 
@@ -1206,7 +1246,7 @@ mod tests {
                     options: vec![],
                     value: None,
                 },
-                Node::Row(vec![Node::Unsupported]),
+                row(vec![Node::Unsupported]),
             ]
         );
     }
@@ -1324,6 +1364,7 @@ mod tests {
                 subtitle: Some("wai#12".into()),
                 badge: Some("open".into()),
                 icon: Some("git-pull-request".into()),
+                selected: false,
                 children: vec![Node::Text {
                     text: "body".into(),
                     muted: false,
@@ -1336,6 +1377,7 @@ mod tests {
                 subtitle: None,
                 badge: None,
                 icon: None,
+                selected: false,
                 children: vec![],
             },
             Node::Section {
@@ -1504,6 +1546,7 @@ mod tests {
                     subtitle: None,
                     badge: None,
                     icon: None,
+                    selected: false,
                     children: vec![],
                 },
                 button("b", "B"),
@@ -1671,7 +1714,7 @@ mod tests {
         for case in cases {
             assert_eq!(parse(&case), Ok(Node::Unsupported), "{case}");
         }
-        let Ok(Node::Column(children)) = parse(&json!({"type": "column", "children": [
+        let Ok(Node::Column { children, .. }) = parse(&json!({"type": "column", "children": [
             {"type": "button", "id": "b", "label": "B"},
             {"type": "tabs", "id": "b", "tabs": [tab("a")]},
             {"type": "tabs", "id": "t", "tabs": [tab("a")]},
@@ -1750,10 +1793,7 @@ mod tests {
         assert_eq!(unsupported, 0);
         let button =
             json!({"type": "column", "children": [{"type": "button", "id": "b", "label": "Go"}]});
-        assert_eq!(
-            *card(button).unwrap(),
-            Node::Column(vec![Node::Unsupported])
-        );
+        assert_eq!(*card(button).unwrap(), col(vec![Node::Unsupported]));
         assert_eq!(item_state(&json!({"text": "x"})).card, None);
         assert_eq!(card(Value::Null), None);
         assert_eq!(card(json!("not a tree")), Some(Arc::new(Node::Unsupported)));
@@ -1807,13 +1847,60 @@ mod tests {
             };
         assert_eq!(
             parse(&tree),
-            Ok(Node::Column(vec![
-                path("dir", Pick::Folder, None, Some("~/src"), false),
-                path("dump", Pick::File, Some("Dump"), None, true),
-                Node::Unsupported,
-                Node::Unsupported,
-                Node::Unsupported,
-            ]))
+            Ok(Node::Column {
+                children: vec![
+                    path("dir", Pick::Folder, None, Some("~/src"), false),
+                    path("dump", Pick::File, Some("Dump"), None, true),
+                    Node::Unsupported,
+                    Node::Unsupported,
+                    Node::Unsupported,
+                ],
+                width: None,
+            })
         );
+    }
+
+    /// A row's `fill`, a column's `width` (clamped) and a card's `selected`; wrong types are
+    /// ignored.
+    #[test]
+    fn split_fields() {
+        let tree = json!({"type": "column", "children": [
+            {"type": "row", "fill": true, "children": [
+                {"type": "column", "width": 380, "children": []},
+                {"type": "column", "width": 5, "children": []},
+                {"type": "column", "width": 1e9, "children": []},
+                {"type": "column", "width": "wide", "children": []},
+            ]},
+            {"type": "row", "fill": "yes", "children": []},
+            {"type": "card", "id": "c", "selected": true},
+            {"type": "card", "id": "d"},
+        ]});
+        let Ok(Node::Column { children, width }) = parse(&tree) else {
+            panic!("a column")
+        };
+        assert_eq!(width, None);
+        let Node::Row {
+            children: columns,
+            fill: true,
+        } = &children[0]
+        else {
+            panic!("a fill row: {:?}", children[0])
+        };
+        let widths: Vec<_> = (columns.iter())
+            .map(|c| match c {
+                Node::Column { width, .. } => *width,
+                _ => panic!("a column"),
+            })
+            .collect();
+        assert_eq!(widths, [Some(380.), Some(24.), Some(2_000.), None]);
+        assert!(matches!(children[1], Node::Row { fill: false, .. }));
+        assert!(matches!(children[2], Node::Card { selected: true, .. }));
+        assert!(matches!(
+            children[3],
+            Node::Card {
+                selected: false,
+                ..
+            }
+        ));
     }
 }

@@ -325,6 +325,61 @@ impl ExtPanel {
         self.values.get(id) != Some(&Value::Bool(false))
     }
 
+    /// A column (`split` is `None`) or a row. A split row (`Some(true)`: `fill`, below columns
+    /// only) takes the height left and does not wrap; each child scrolls on its own.
+    #[allow(clippy::too_many_arguments)]
+    fn flex(
+        &mut self,
+        children: &[Node],
+        width: Option<f32>,
+        split: Option<bool>,
+        at: At,
+        n: &mut usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (AnyElement, bool) {
+        let column = split.is_none();
+        let split = split == Some(true);
+        // R56: below a row nothing fills, not even in a column: a row never grows.
+        let inner = At {
+            column: at.column && column,
+            row: !column,
+            click: at.click,
+        };
+        let mut fills = split;
+        let mut elements = Vec::with_capacity(children.len());
+        for (ix, child) in children.iter().enumerate() {
+            let (element, grows) = self.node(child, inner, n, window, cx);
+            fills |= grows;
+            if !split {
+                elements.push(element);
+                continue;
+            }
+            // Its scroll survives re-renders: the id does not count the nodes above.
+            // ponytail: two split rows in one tab share these ids, so their scrolls.
+            let width = match child {
+                Node::Column { width, .. } => *width,
+                _ => None,
+            };
+            let cell = match width {
+                Some(width) => div().w(px(width)).flex_none(),
+                None => div().flex_1().min_w_0(),
+            };
+            let cell = cell.id(("panel-fill", ix)).h_full().overflow_y_scroll();
+            elements.push(cell.child(element).test_support().into_any_element());
+        }
+        let element = match (column, split) {
+            // In a row, a column takes the width left: a list has none of its own.
+            (true, _) => (v_flex().gap_2())
+                .when(fills, |el| el.flex_1().min_h_0())
+                .when(at.row, |el| el.flex_1())
+                .when_some(width, |el, w| el.w(px(w)).flex_none()),
+            (false, true) => h_flex().gap_2().flex_1().min_h_0().items_stretch(),
+            (false, false) => h_flex().gap_2().flex_wrap(),
+        };
+        (element.children(elements).into_any_element(), fills)
+    }
+
     /// The node and whether it grows to fill the panel's height: a `fill` list, table or log
     /// whose parents are all columns, and those columns. `n` numbers the nodes for the element
     /// ids of those without an id of their own. Recursion is bounded: a tree is at most
@@ -343,31 +398,11 @@ impl ExtPanel {
         *n += 1;
         let k = *n;
         let element = match node {
-            Node::Column(children) | Node::Row(children) => {
-                let column = matches!(node, Node::Column(_));
-                // R56: below a row nothing fills, not even in a column: a row never grows.
-                let filling = at.column && column;
-                let inner = At {
-                    column: filling,
-                    row: !column,
-                    click: at.click,
-                };
-                let mut fills = false;
-                let children: Vec<_> = (children.iter())
-                    .map(|child| {
-                        let (element, grows) = self.node(child, inner, n, window, cx);
-                        fills |= grows;
-                        element
-                    })
-                    .collect();
-                let element = match column {
-                    // In a row, a column takes the width left: a list has none of its own.
-                    true => (v_flex().gap_2())
-                        .when(fills, |el| el.flex_1().min_h_0())
-                        .when(at.row, |el| el.flex_1()),
-                    false => h_flex().gap_2().flex_wrap(),
-                };
-                return (element.children(children).into_any_element(), fills);
+            Node::Column { children, width } => {
+                return self.flex(children, *width, None, at, n, window, cx);
+            }
+            Node::Row { children, fill } => {
+                return self.flex(children, None, Some(*fill && at.column), at, n, window, cx);
             }
             Node::List {
                 items,
@@ -538,6 +573,7 @@ impl ExtPanel {
                 subtitle,
                 badge,
                 icon,
+                selected,
                 children,
             } => {
                 let inner = At {
@@ -603,6 +639,10 @@ impl ExtPanel {
                     .border_1()
                     .border_color(line)
                     .bg(campo::glass(cx))
+                    // Selected: the active tab's violet.
+                    .when(*selected, |el| {
+                        el.border_color(violet).bg(campo::glass_hover(cx))
+                    })
                     .children(header)
                     .children(children);
                 match id {
@@ -756,7 +796,9 @@ impl ExtPanel {
                     .when(fills, |el| el.flex_1().min_h_0())
                     .child(own(bar, at))
                     .child(
+                        // Keyed by tab: each tab keeps its own scroll offsets.
                         v_flex()
+                            .id(name("panel-tabs-body", &format!("{id}:{current}")))
                             .gap_2()
                             .when(fills, |el| el.flex_1().min_h_0())
                             .children(body),
@@ -1110,8 +1152,8 @@ fn gap<E: Styled>(el: E) -> E {
 /// section were open. A table's cells number their own.
 fn size(node: &Node) -> usize {
     1 + match node {
-        Node::Column(children)
-        | Node::Row(children)
+        Node::Column { children, .. }
+        | Node::Row { children, .. }
         | Node::Card { children, .. }
         | Node::Section { children, .. } => children.iter().map(size).sum(),
         Node::Tabs { tabs, .. } => tabs.iter().flat_map(|t| &t.children).map(size).sum(),
@@ -1254,11 +1296,11 @@ pub(crate) fn hover_card(node: &Node, ext_name: &SharedString, cx: &App) -> AnyE
     fn draw(node: &Node, n: &mut usize, cx: &App) -> AnyElement {
         *n += 1;
         match node {
-            Node::Column(children) => v_flex()
+            Node::Column { children, .. } => v_flex()
                 .gap_1()
                 .children(children.iter().map(|c| draw(c, n, cx)))
                 .into_any_element(),
-            Node::Row(children) => h_flex()
+            Node::Row { children, .. } => h_flex()
                 .gap_1()
                 .children(children.iter().map(|c| draw(c, n, cx)))
                 .into_any_element(),
@@ -1581,6 +1623,96 @@ mod tests {
         });
         cx.update(|window, cx| window.render_frame(cx));
         assert!(top(cx) < before, "the panel scrolls");
+    }
+
+    /// A `fill` row below columns takes the height left, its fixed column keeps its width, and
+    /// each column scrolls on its own; the scroll survives a render with more nodes above. Below
+    /// a row, `fill` does nothing.
+    #[gpui_kit::test]
+    fn fill_row_splits_and_scrolls(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        let tree = |head: usize| {
+            let list: Vec<_> = (0..80)
+                .map(|n| json!({"type": "button", "id": format!("a{n}"), "label": "A"}))
+                .collect();
+            let mut kids: Vec<_> = (0..head)
+                .map(|_| json!({"type": "text", "text": "head"}))
+                .collect();
+            kids.push(json!({"type": "row", "fill": true, "children": [
+                {"type": "column", "width": 200, "children": list},
+                {"type": "column", "children": [{"type": "button", "id": "detail", "label": "D"}]},
+            ]}));
+            json!({"type": "column", "children": kids})
+        };
+        show(&panel, tree(1), cx);
+        let bounds = |id: ElementId, cx: &mut VisualTestContext| {
+            cx.update(|window, _| window.find(id).bounds())
+        };
+        let list = bounds(("panel-fill", 0usize).into(), cx);
+        assert_eq!(list.size.width, px(200.));
+        let height = cx.update(|window, _| window.viewport_size().height);
+        assert!(
+            list.bottom() > height - px(20.),
+            "{list:?} fills to {height:?}"
+        );
+        assert!(shown(name("panel-button:a0"), cx));
+        assert!(
+            !shown(name("panel-button:a79"), cx),
+            "the column scrolls, not the panel"
+        );
+
+        let (a0, detail) = (
+            bounds(name("panel-button:a0"), cx).top(),
+            bounds(name("panel-button:detail"), cx).top(),
+        );
+        cx.simulate_event(ScrollEvent {
+            position: list.center(),
+            delta: ScrollDelta::Lines(point(0., -20.)),
+            ..Default::default()
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        let scrolled = bounds(name("panel-button:a0"), cx).top();
+        assert!(scrolled < a0, "the list scrolls");
+        assert_eq!(bounds(name("panel-button:detail"), cx).top(), detail);
+
+        show(&panel, tree(2), cx);
+        let again = bounds(name("panel-button:a0"), cx).top();
+        assert!(
+            again < a0,
+            "the scroll survives a node more above: {again:?} {a0:?}"
+        );
+
+        show(
+            &panel,
+            json!({"type": "column", "children": [
+                {"type": "row", "children": [{"type": "row", "fill": true, "children": []}]},
+            ]}),
+            cx,
+        );
+        assert!(
+            !shown(("panel-fill", 0usize), cx),
+            "below a row it is a plain row"
+        );
+    }
+
+    /// A text's line breaks show as lines.
+    #[gpui_kit::test]
+    fn text_breaks_lines(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        let below = |text: &str, cx: &mut VisualTestContext| {
+            show(
+                &panel,
+                json!({"type": "column", "children": [
+                    {"type": "text", "text": text},
+                    {"type": "button", "id": "b", "label": "B"},
+                ]}),
+                cx,
+            );
+            cx.update(|window, _| window.find(name("panel-button:b")).bounds().top())
+        };
+        let one = below("a", cx);
+        let three = below("a\nb\nc", cx);
+        assert!(three - one > px(20.), "{one:?} {three:?}");
     }
 
     /// Each action the panel sends, with the form's values.

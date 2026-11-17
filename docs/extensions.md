@@ -29,6 +29,7 @@ id = "main"
 title = "Hello"
 icon = "hand"                   # optional: a Lucide icon for the activity bar
 location = "main"               # optional: "sidebar" (default), "main", "prompt" or "prompt-side"
+# wide = true                   # optional, sidebar only: takes the main area's place while shown
 
 [[contributes.items]]
 id = "prs"
@@ -44,7 +45,7 @@ title = "Pull requests"
 | `name` | string | Shown in the extension list and the consent dialog |
 | `version` | string | Free form. wai shows it; it does not compare versions |
 | `description` | string, optional | Shown last in the consent dialog, cut to fit |
-| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.6)`. Set it to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused` or the `path` node, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
+| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.6)`. Set it to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
 | `permissions` | array of strings | See [Permissions](#permissions). An unknown permission is refused |
 | `process.command` | string | See [Commands and paths](#commands-and-paths). Needs `process` |
 | `process.args` | array of strings, optional | Arguments, passed as given (no shell) |
@@ -54,7 +55,7 @@ title = "Pull requests"
 | `contributes.mcp_servers` | array of tables | `name`, `command`, optional `args` (array), optional `env` (table of strings). Needs `process` |
 | `contributes.claude_plugins` | array of strings | Claude Code plugin names to suggest |
 | `requires.claude_plugins` | array of tables | `name`, `marketplace` (`owner/repo` or an `https://` URL of letters, digits and `._~:/@%+=,-`). At most 5. API 1.5. Installed after consent, see [Installing and consent](#installing-and-consent) |
-| `contributes.panels` | array of tables | `id`, `title`, optional `icon`, optional `location`, optional `width` (prompt panels only). At most one `prompt` and one `prompt-side` panel. See [Panels](#panels). Needs `panels` |
+| `contributes.panels` | array of tables | `id`, `title`, optional `icon`, optional `location`, optional `width` (prompt panels only), optional `wide` (sidebar panels, API 1.6). At most one `prompt` and one `prompt-side` panel. See [Panels](#panels). Needs `panels` |
 | `contributes.items` | array of tables | `id`, `bar` (`"top"` or `"bottom"`), `title`. At most 3. See [Bar items](#bar-items). Needs `bar` |
 | `contributes.themes` | array of strings | Accepted, but not used in this version |
 
@@ -215,6 +216,7 @@ A panel exists while your process runs, and its content is the last tree you ren
 
 **Where it shows (`location`):**
 - **`sidebar`** (the default): a sidebar tab titled by `title`, cut to 24 characters.
+  - **`wide = true`** (API 1.6): while the tab is shown, the sessions area hides and the sidebar takes the whole window. Clicking the panel's button again, another sidebar tab, or opening a session or a `main` panel brings the sessions back on the Sessions tab. A `main` panel cannot be wide.
 - **`main`:** a pane in the main area, beside the sessions, with a header (icon, title, your extension's name, ×).
   - Its activity-bar button opens the pane, or focuses it if it is open. The button shows selected while the pane is on screen. There is at most one pane per panel.
   - It takes the focused pane, as a session does; the session there stays open in the sidebar. If the focused pane is the editor, it opens in a new pane beside it.
@@ -238,9 +240,9 @@ A tree is JSON nodes. Every field without `?` is required.
 
 | `type` | Fields | Notes |
 |---|---|---|
-| `column` | `children` (array of nodes) | Stacks children vertically |
-| `row` | `children` (array of nodes) | Places children side by side; they wrap when there is no room |
-| `card` | `id`?, `title`?, `subtitle`?, `badge`?, `icon`?, `children`? | A bordered card: a header (icon, title, subtitle, badge), then its children. With `id`, the whole card is clickable (also with Enter or Space) and sends `panel/action` with that `id`. Card ids may repeat |
+| `column` | `children` (array of nodes), `width`? (px) | Stacks children vertically. `width` (API 1.6, 24 to 2,000) fixes its width in a row; without it, the columns of a row share the width left |
+| `row` | `children` (array of nodes), `fill`? (bool) | Places children side by side; they wrap when there is no room. `fill` (API 1.6): when every node above it is a `column`, the row takes the height left and each child scrolls on its own (a list beside a detail); anywhere else it is a plain row |
+| `card` | `id`?, `title`?, `subtitle`?, `badge`?, `icon`?, `selected`? (bool), `children`? | A bordered card: a header (icon, title, subtitle, badge), then its children. With `id`, the whole card is clickable (also with Enter or Space) and sends `panel/action` with that `id`. Card ids may repeat. `selected` (API 1.6) draws it highlighted, for the item a detail shows |
 | `section` | `id`, `title`, `open`? (bool, default `true`), `badge`?, `children` | A block the user can collapse. `open` is an initial value (see the rules) |
 | `tabs` | `id`, `value`?, `tabs` (array of `{"id", "title", "badge"?, "children"}`) | A tab bar; the selected tab's `children` show below it. At most 10 tabs. `value` is the initial tab id (default the first), an initial value (see the rules). The selected tab id is sent in `values` under the node's `id`. API 1.5 |
 | `divider` | | A horizontal line |
@@ -257,7 +259,7 @@ A tree is JSON nodes. Every field without `?` is required.
 
 | `type` | Fields | Notes |
 |---|---|---|
-| `text` | `text`, `muted`? (bool), `mono`? (bool) | Up to 10,000 characters. `mono`: monospace |
+| `text` | `text`, `muted`? (bool), `mono`? (bool) | Up to 10,000 characters; `\n` breaks the line. `mono`: monospace |
 | `markdown` | `text` | Up to 10,000 characters |
 | `badge` | `text`, `tone`? | |
 | `icon` | `name`, `tone`? | An unknown name shows as `Unsupported element` |
