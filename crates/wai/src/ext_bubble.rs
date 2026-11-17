@@ -1,7 +1,5 @@
 //! The speech bubble's timeline: pop, typing, hold, leave. Pure and clock-driven.
 
-#![allow(dead_code)] // until the panel uses it
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

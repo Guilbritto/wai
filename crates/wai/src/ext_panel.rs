@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::alert::{Alert, AlertVariant};
@@ -24,12 +25,14 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use wai_ext::panel::{
     ButtonStyle, Column, Confirm, Item, Node, Pick, Tab, TableRow, TextStyle, Tone, TooLarge,
 };
 
 use crate::campo;
+use crate::chat::PromptTyping;
+use crate::ext_bubble::{self, Bubble, Ended};
 use crate::path_field::{self, PathField};
 
 /// A list row with a subtitle: two lines.
@@ -128,6 +131,12 @@ pub struct ExtPanel {
     pending: HashMap<String, Arc<str>>,
     /// Each log's scroll and the line count it last showed, by node number.
     logs: HashMap<usize, (UniformListScrollHandle, usize)>,
+    /// Each speech bubble's timeline, by id.
+    bubbles: HashMap<String, Bubble>,
+    /// Redraws and advances the bubbles while one animates.
+    ticker: Option<Task<()>>,
+    /// Redraws the bubbles when the prompt box starts or stops having text.
+    typing: Option<Subscription>,
 }
 
 impl EventEmitter<PanelAction> for ExtPanel {}
@@ -142,6 +151,9 @@ impl ExtPanel {
             initials: HashMap::new(),
             pending: HashMap::new(),
             logs: HashMap::new(),
+            bubbles: HashMap::new(),
+            ticker: None,
+            typing: None,
         }
     }
 
@@ -184,8 +196,180 @@ impl ExtPanel {
             self.values.retain(|id, _| fields.contains(id.as_str()));
             self.initials.retain(|id, _| fields.contains(id.as_str()));
         }
+        if let Ok(tree) = &tree {
+            let now = cx.background_executor().now();
+            let mut ids = HashSet::new();
+            tree.walk(&mut |node| {
+                if let Node::Bubble {
+                    id, text, sticky, ..
+                } = node
+                {
+                    ids.insert(id.as_str());
+                    if self.bubbles.get(id).is_none_or(|b| b.text() != text) {
+                        self.bubbles
+                            .insert(id.clone(), Bubble::new(text.clone(), *sticky, now));
+                    }
+                }
+            });
+            self.bubbles.retain(|id, _| ids.contains(id.as_str()));
+        }
+        if !self.bubbles.is_empty() && self.typing.is_none() {
+            self.typing = Some(cx.observe_global::<PromptTyping>(|this, cx| {
+                this.ensure_ticker(cx);
+                cx.notify()
+            }));
+        }
         self.tree = Some(tree.map(Rc::new));
+        self.ensure_ticker(cx);
         cx.notify();
+    }
+
+    fn typing(cx: &App) -> bool {
+        cx.try_global::<PromptTyping>().is_some_and(|t| t.0)
+    }
+
+    /// Starts the loop that advances the bubbles, when one animates and none runs. It stops
+    /// itself once nothing animates.
+    fn ensure_ticker(&mut self, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        if self.ticker.is_some() || !self.bubbles.values().any(|b| b.animating(now)) {
+            return;
+        }
+        self.ticker = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(ext_bubble::TICK).await;
+                let more = this.update(cx, |this, cx| {
+                    let now = cx.background_executor().now();
+                    let typing = Self::typing(cx);
+                    let mut ended = Vec::new();
+                    for (id, b) in &mut this.bubbles {
+                        if let Some(how) = b.advance(now, b.hovered || typing) {
+                            ended.push((id.clone(), how));
+                        }
+                    }
+                    for (action, how) in ended {
+                        let how = match how {
+                            Ended::Click => "click",
+                            Ended::Timeout => "timeout",
+                        };
+                        cx.emit(PanelAction {
+                            action,
+                            values: json!({"bubble": how}),
+                        });
+                    }
+                    let more = this.bubbles.values().any(|b| b.animating(now));
+                    if !more {
+                        this.ticker = None;
+                    }
+                    cx.notify();
+                    more
+                });
+                if !more.unwrap_or(false) {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn bubble(&self, id: &str, tone: Tone, sticky: bool, cx: &mut Context<Self>) -> AnyElement {
+        let Some(bubble) = self.bubbles.get(id).filter(|b| !b.ended()) else {
+            return div().into_any_element();
+        };
+        let look = bubble.look(cx.background_executor().now());
+        let hovered = bubble.hovered;
+        let typing = Self::typing(cx);
+        let theme = cx.theme();
+        let (popover, text_color) = (theme.popover, theme.popover_foreground);
+        let (_, _, border) = campo::tint(tone, cx);
+        let accent = tone_color(tone, cx);
+        let collapsed = look.collapsed && !hovered;
+        // Never 0 before the leave: an element at opacity 0 counts as hidden.
+        let opacity = look.pop.clamp(0.01, 1.) * (1. - look.leave) * if typing { 0.25 } else { 1. };
+        let shown: String = bubble.text().chars().take(look.chars).collect();
+        let body = match collapsed {
+            true => div()
+                .relative()
+                .child("!")
+                .with_animation(
+                    "panel-bubble-bounce",
+                    Animation::new(Duration::from_millis(900))
+                        .repeat()
+                        .with_easing(bounce(ease_in_out)),
+                    |el, d| el.top(px(-3. * d)),
+                )
+                .into_any_element(),
+            false => div().child(shown).into_any_element(),
+        };
+        let (hover_id, click_id) = (id.to_string(), id.to_string());
+        let selector = format!("panel-bubble:{id}");
+        v_flex()
+            .id(name("panel-bubble", id))
+            .debug_selector(move || selector)
+            .test_support()
+            .self_start()
+            .max_w_full()
+            .relative()
+            .top(px(6. * (1. - look.pop) - 4. * look.leave))
+            .opacity(opacity)
+            .child(
+                div()
+                    .relative()
+                    .overflow_hidden()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(campo::RADIUS))
+                    .border_1()
+                    .border_color(border)
+                    .bg(popover)
+                    .text_color(text_color)
+                    .text_xs()
+                    .child(body)
+                    .when(!sticky, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .bottom_0()
+                                .left_0()
+                                .h(px(2.))
+                                .w(relative(look.left))
+                                .bg(accent),
+                        )
+                    }),
+            )
+            .child(
+                div().w(px(10.)).h(px(6.)).ml(px(18.)).child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, _| {
+                            let mut tail = PathBuilder::fill();
+                            tail.move_to(bounds.origin);
+                            tail.line_to(point(bounds.right(), bounds.origin.y));
+                            tail.line_to(point(bounds.center().x, bounds.bottom()));
+                            tail.close();
+                            if let Ok(path) = tail.build() {
+                                window.paint_path(path, border);
+                            }
+                        },
+                    )
+                    .size_full(),
+                ),
+            )
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if let Some(b) = this.bubbles.get_mut(&hover_id) {
+                    b.hovered = *hovered;
+                }
+                this.ensure_ticker(cx);
+                cx.notify();
+            }))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let now = cx.background_executor().now();
+                if let Some(b) = this.bubbles.get_mut(&click_id) {
+                    b.click(now);
+                }
+                this.ensure_ticker(cx);
+                cx.notify();
+            }))
+            .into_any_element()
     }
 
     /// Whether the shown tree has an input `id` that sends on Enter.
@@ -541,7 +725,9 @@ impl ExtPanel {
             | Node::Divider
             | Node::Spacer
             | Node::Kv(_) => leaf(node, k, cx),
-            Node::Bubble { .. } => div().into_any_element(),
+            Node::Bubble {
+                id, tone, sticky, ..
+            } => self.bubble(id, *tone, *sticky, cx),
             Node::Markdown(text) => TextView::markdown(("panel-md", k), SharedString::from(text))
                 .text_sm()
                 .on_link_click(|url, _, _, cx| {
@@ -2256,6 +2442,109 @@ mod tests {
         cx.update(|window, cx| window.render_frame(cx));
     }
 
+    fn ms(n: u64) -> std::time::Duration {
+        std::time::Duration::from_millis(n)
+    }
+
+    fn timeout() -> Vec<(String, Value)> {
+        vec![("say".to_string(), json!({"bubble": "timeout"}))]
+    }
+
+    fn say(text: &str) -> Value {
+        json!({"type": "bubble", "id": "say", "text": text})
+    }
+
+    #[gpui_kit::test]
+    fn bubble_times_out_and_reports_it(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        let sent = actions(&panel, cx);
+        show(&panel, say("Oi"), cx);
+        assert!(shown(name("panel-bubble:say"), cx));
+        cx.executor().advance_clock(ms(4_000));
+        cx.run_until_parked();
+        assert_eq!(*sent.borrow(), timeout());
+        frame(cx);
+        assert!(!shown(name("panel-bubble:say"), cx));
+    }
+
+    #[gpui_kit::test]
+    fn bubble_click_reports_click(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let sent = actions(&panel, cx);
+        show(&panel, say("Oi"), cx);
+        cx.executor().advance_clock(ms(300));
+        cx.run_until_parked();
+        click(name("panel-bubble:say"), cx);
+        cx.executor().advance_clock(ms(200));
+        cx.run_until_parked();
+        assert_eq!(
+            *sent.borrow(),
+            vec![("say".to_string(), json!({"bubble": "click"}))]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn bubble_waits_while_typing(cx: &mut TestAppContext) {
+        use crate::chat::PromptTyping;
+
+        let (panel, cx) = panel_window(cx);
+        let sent = actions(&panel, cx);
+        cx.update(|_, cx| cx.set_global(PromptTyping(true)));
+        show(&panel, say("Oi"), cx);
+        cx.executor().advance_clock(ms(20_000));
+        cx.run_until_parked();
+        assert!(sent.borrow().is_empty());
+        cx.update(|_, cx| cx.set_global(PromptTyping(false)));
+        cx.run_until_parked();
+        cx.executor().advance_clock(ms(4_000));
+        cx.run_until_parked();
+        assert_eq!(*sent.borrow(), timeout());
+    }
+
+    #[gpui_kit::test]
+    fn new_text_restarts_the_bubble(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        let sent = actions(&panel, cx);
+        show(&panel, say("Oi"), cx);
+        cx.executor().advance_clock(ms(2_700));
+        cx.run_until_parked();
+        show(&panel, say("Tchau"), cx);
+        cx.executor().advance_clock(ms(1_000));
+        cx.run_until_parked();
+        assert!(sent.borrow().is_empty());
+        cx.executor().advance_clock(ms(3_000));
+        cx.run_until_parked();
+        assert_eq!(*sent.borrow(), timeout());
+    }
+
+    #[gpui_kit::test]
+    fn typing_dims_a_collapsed_bubble(cx: &mut TestAppContext) {
+        use crate::chat::PromptTyping;
+
+        let (panel, cx) = panel_window(cx);
+        let sent = actions(&panel, cx);
+        show(
+            &panel,
+            json!({"type": "bubble", "id": "say", "text": "Oi", "sticky": true}),
+            cx,
+        );
+        cx.executor().advance_clock(ms(7_000));
+        cx.run_until_parked();
+        assert!(panel.read_with(cx, |p, _| p.ticker.is_none()));
+        let n = Rc::new(RefCell::new(0));
+        let count = n.clone();
+        cx.update(|_, cx| {
+            cx.observe(&panel, move |_, _| *count.borrow_mut() += 1)
+                .detach()
+        });
+        cx.update(|_, cx| cx.set_global(PromptTyping(true)));
+        cx.run_until_parked();
+        assert!(*n.borrow() > 0);
+        assert!(sent.borrow().is_empty());
+    }
+
     /// One of every v2 node: none is drawn as unsupported.
     #[gpui_kit::test]
     fn every_node_renders(cx: &mut TestAppContext) {
@@ -2279,6 +2568,7 @@ mod tests {
                 {"type": "link", "text": "l", "url": "https://example.com/a"},
                 {"type": "link", "text": "l", "url": "https://example.com/b", "icon": "external-link", "icon_only": true},
                 {"type": "icon", "name": "check", "tone": "success"},
+                {"type": "bubble", "id": "say", "text": "Oi"},
                 {"type": "spinner", "label": "busy"},
                 {"type": "spinner"},
                 {"type": "divider"},
