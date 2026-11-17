@@ -595,15 +595,17 @@ impl ExtPanel {
                         if let Field::Line(state) = &field {
                             let id = id.clone();
                             // Typing shows or hides the ×; Enter sends when the node submits.
-                            cx.subscribe_in(state, window, move |this, _, event, _, cx| {
-                                match event {
+                            cx.subscribe_in(
+                                state,
+                                window,
+                                move |this, _, event, _, cx| match event {
                                     InputEvent::Change => cx.notify(),
                                     InputEvent::PressEnter { .. } if this.submits(&id) => {
                                         this.act(id.clone(), cx)
                                     }
                                     _ => {}
-                                }
-                            })
+                                },
+                            )
                             .detach();
                         }
                         if let Some(typed) = typed.filter(|t| !t.is_empty()) {
@@ -640,13 +642,18 @@ impl ExtPanel {
                                             .icon(Lucide::X),
                                     )
                                     .accessibility_label("Clear")
-                                    .on_click(move |_, window, cx| {
-                                        clear_state.update(cx, |s, cx| s.set_value("", window, cx));
-                                        if submit {
-                                            this.update(cx, |this, cx| this.act(id.clone(), cx))
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            clear_state
+                                                .update(cx, |s, cx| s.set_value("", window, cx));
+                                            if submit {
+                                                this.update(cx, |this, cx| {
+                                                    this.act(id.clone(), cx)
+                                                })
                                                 .ok();
-                                        }
-                                    }),
+                                            }
+                                        },
+                                    ),
                                 )
                             });
                         campo::field(input, false, cx).into_any_element()
@@ -1038,39 +1045,43 @@ impl ExtPanel {
                 url,
                 icon,
                 icon_only,
-            } if icon.as_deref().and_then(lucide).is_some() => {
-                let icon = icon.as_deref().and_then(lucide).unwrap();
-                let (href, tip) = (url.clone(), SharedString::from(url));
-                let button = Button::new(name("panel-link", url)).small().icon(icon);
-                match icon_only {
-                    true => campo::icon(button.accessibility_label(SharedString::from(text))),
-                    false => campo::button(button.label(SharedString::from(text))),
-                }
-                .tooltip(tip)
-                .on_click(move |_, _, cx| cx.open_url(&href))
-                .into_any_element()
-            }
-            Node::Link { text, url, .. } => {
-                let url = SharedString::from(url);
-                let tip = url.clone();
-                // The link takes its own clicks, even in a clickable card or row.
-                div()
-                    .id(("panel-link", k))
-                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                    .child(
-                        Link::new(("panel-link-text", k))
-                            .href(url)
-                            .text_sm()
-                            .truncate()
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .child(SharedString::from(text))
-                                    .child(Icon::new(Lucide::ExternalLink).xsmall()),
-                            ),
-                    )
-                    .test_support()
+            } => {
+                if let Some(icon) = icon.as_deref().and_then(lucide) {
+                    let href = url.clone();
+                    let button = Button::new(name("panel-link", url)).small().icon(icon);
+                    let label = SharedString::from(text);
+                    match icon_only {
+                        true => {
+                            campo::icon(button.accessibility_label(label.clone())).tooltip(label)
+                        }
+                        false => {
+                            campo::button(button.label(label)).tooltip(SharedString::from(url))
+                        }
+                    }
+                    .on_click(move |_, _, cx| cx.open_url(&href))
                     .into_any_element()
+                } else {
+                    let url = SharedString::from(url);
+                    let tip = url.clone();
+                    // The link takes its own clicks, even in a clickable card or row.
+                    div()
+                        .id(("panel-link", k))
+                        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                        .child(
+                            Link::new(("panel-link-text", k))
+                                .href(url)
+                                .text_sm()
+                                .truncate()
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .child(SharedString::from(text))
+                                        .child(Icon::new(Lucide::ExternalLink).xsmall()),
+                                ),
+                        )
+                        .test_support()
+                        .into_any_element()
+                }
             }
             Node::Spinner(label) => h_flex()
                 .gap_2()
@@ -2266,9 +2277,10 @@ mod tests {
         assert_eq!(sent(&actions), ["query"], "no submit: nothing more sent");
     }
 
-    /// An icon-only button is clickable and keeps its label for the tooltip and screen readers.
+    /// An icon-only button is drawn and clickable. The test API cannot read its tooltip or
+    /// accessibility label, so those are not asserted.
     #[gpui_kit::test]
-    fn icon_only_button_keeps_its_label_for_a11y(cx: &mut TestAppContext) {
+    fn icon_only_button_is_clickable(cx: &mut TestAppContext) {
         use crate::extensions_view::tests::click;
 
         let (panel, cx) = panel_window(cx);
