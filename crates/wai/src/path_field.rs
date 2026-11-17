@@ -221,6 +221,7 @@ impl RenderOnce for PathField {
                 .ghost()
                 .icon(Lucide::X)
                 .tooltip("Clear")
+                .accessibility_label("Clear")
                 .on_click(move |_, window, cx| put(&input, "", on_change.as_ref(), window, cx))
         });
         let segment = Button::new((self.id.clone(), "pick"))
@@ -231,13 +232,16 @@ impl RenderOnce for PathField {
             .border_color(line)
             .disabled(disabled)
             .map(|b| match editable {
-                true => b
-                    .w(px(SEGMENT))
-                    .icon(Lucide::FolderOpen)
-                    .tooltip(match pick {
+                true => {
+                    let what = match pick {
                         Pick::File => "Choose a file",
                         Pick::Folder => "Choose a folder",
-                    }),
+                    };
+                    b.w(px(SEGMENT))
+                        .icon(Lucide::FolderOpen)
+                        .tooltip(what)
+                        .accessibility_label(what)
+                }
                 false => b.px_2().text_size(px(12.)).label(if text.is_empty() {
                     "Choose…"
                 } else {

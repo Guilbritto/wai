@@ -158,6 +158,7 @@ pub(super) fn attachment(
                 .size(px(20.))
                 .icon(Lucide::X)
                 .tooltip("Remove")
+                .accessibility_label("Remove")
                 .on_click(on_remove),
         )
 }
