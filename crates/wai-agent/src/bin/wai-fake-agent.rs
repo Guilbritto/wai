@@ -60,10 +60,13 @@
 //! - `--cwd-file <path>`: write the process working directory there at start.
 //! - `--echo-mcp`: each turn answers with the MCP servers its session got at `session/new`,
 //!   `session/load` or `session/fork`: `mcp:<name>=<command>,…` (`mcp:` when none).
+//! - `--echo-meta`: each turn answers with the `_meta` of its session's last `session/load` or
+//!   `session/fork`: `meta:<json>` (`meta:` when none). It wins over `--models` and `--echo-mcp`.
 //!
 //! - `--models`: `session/new`, `load` and `fork` return a `model` option (`fake-small`,
 //!   `fake-large`) and an `effort` option (`low`, `high`); `session/set_config_option` stores the
-//!   value per session, and each turn answers `model:<current model id>`.
+//!   value per session, and each turn answers `model:<current model id>`. A session whose last
+//!   load or fork had a `_meta` also lists `fake-small[1m]` and `fake-large[1m]`.
 //! - `--config-mode`: with `--models`, a `mode` option (`ask`, `code`) joins them.
 //! - `--reject-config`: `session/set_config_option` fails.
 //! - `--steering`: advertise `_meta.steering.supported` and take `_session/steering`: during a
@@ -136,6 +139,7 @@ struct Opts {
     pid_file: Option<PathBuf>,
     cwd_file: Option<PathBuf>,
     echo_mcp: bool,
+    echo_meta: bool,
     models: bool,
     config_mode: bool,
     reject_config: bool,
@@ -171,6 +175,7 @@ fn parse_args() -> Opts {
         pid_file: None,
         cwd_file: None,
         echo_mcp: false,
+        echo_meta: false,
         models: false,
         config_mode: false,
         reject_config: false,
@@ -224,6 +229,7 @@ fn parse_args() -> Opts {
             "--pid-file" => opts.pid_file = Some(value().into()),
             "--cwd-file" => opts.cwd_file = Some(value().into()),
             "--echo-mcp" => opts.echo_mcp = true,
+            "--echo-meta" => opts.echo_meta = true,
             "--models" => opts.models = true,
             "--config-mode" => opts.config_mode = true,
             "--reject-config" => opts.reject_config = true,
@@ -246,6 +252,8 @@ struct Fake {
     subagents: AtomicBool,
     /// Per session: the MCP servers it got, as `--echo-mcp` reports them.
     mcp: Mutex<HashMap<String, String>>,
+    /// Per session: the `_meta` of its last load or fork.
+    meta: Mutex<HashMap<String, acp::Meta>>,
     /// `--models`: per session, the chosen value of each config option.
     config: Mutex<HashMap<String, HashMap<String, String>>>,
     /// Per session with a turn running: the texts steered into it.
@@ -266,6 +274,15 @@ impl Fake {
         mcp.insert(session.to_string(), names.join(","));
     }
 
+    /// What `session`'s last load or fork carried as `_meta`, if anything.
+    fn record_meta(&self, session: &acp::SessionId, meta: Option<&acp::Meta>) {
+        let mut all = self.meta.lock().expect("meta poisoned");
+        match meta {
+            Some(meta) => all.insert(session.to_string(), meta.clone()),
+            None => all.remove(&*session.0),
+        };
+    }
+
     /// `--models`: the config options of `session`, holding what it chose.
     fn config_options(&self, session: &acp::SessionId) -> Option<Vec<acp::SessionConfigOption>> {
         use acp::SessionConfigOptionCategory as C;
@@ -277,21 +294,22 @@ impl Fake {
             let value = chosen.get(&*session.0).and_then(|c| c.get(id));
             value.map_or(default, String::as_str).to_string()
         };
-        let select = |id, name, category, default, values: [(&'static str, &'static str); 2]| {
+        let select = |id, name, category, default, values: &[(&'static str, &'static str)]| {
             let values: Vec<_> = values
-                .into_iter()
-                .map(|(v, n)| acp::SessionConfigSelectOption::new(v, n))
+                .iter()
+                .map(|&(v, n)| acp::SessionConfigSelectOption::new(v, n))
                 .collect();
             acp::SessionConfigOption::select(id, name, current(id, default), values)
                 .category(category)
         };
+        let one_million = (self.meta.lock().expect("meta poisoned")).contains_key(&*session.0);
         let mode = self.opts.config_mode.then(|| {
             select(
                 "mode",
                 "Mode",
                 C::Mode,
                 "ask",
-                [("ask", "Ask"), ("code", "Code")],
+                &[("ask", "Ask"), ("code", "Code")],
             )
         });
         Some(
@@ -301,14 +319,23 @@ impl Fake {
                     "Model",
                     C::Model,
                     "fake-small",
-                    [("fake-small", "Fake Small"), ("fake-large", "Fake Large")],
+                    if one_million {
+                        &[
+                            ("fake-small", "Fake Small"),
+                            ("fake-large", "Fake Large"),
+                            ("fake-small[1m]", "Fake Small 1M"),
+                            ("fake-large[1m]", "Fake Large 1M"),
+                        ]
+                    } else {
+                        &[("fake-small", "Fake Small"), ("fake-large", "Fake Large")]
+                    },
                 ),
                 select(
                     "effort",
                     "Effort",
                     C::ThoughtLevel,
                     "low",
-                    [("low", "Low"), ("high", "High")],
+                    &[("low", "Low"), ("high", "High")],
                 ),
             ]
             .into_iter()
@@ -404,7 +431,13 @@ impl Fake {
             }
             None => (None, None),
         };
-        let reply = if self.opts.models {
+        let reply = if self.opts.echo_meta {
+            let meta = self.meta.lock().expect("meta poisoned");
+            let json = meta
+                .get(&*session.0)
+                .map(|m| serde_json::to_string(m).unwrap());
+            format!("meta:{}", json.unwrap_or_default())
+        } else if self.opts.models {
             let options = self.config_options(session).unwrap_or_default();
             let model = options.into_iter().next().and_then(|o| match o.kind {
                 acp::SessionConfigKind::Select(s) => Some(s.current_value.to_string()),
@@ -831,6 +864,7 @@ fn main() -> Result<(), Error> {
         forms: AtomicBool::new(false),
         subagents: AtomicBool::new(false),
         mcp: Mutex::default(),
+        meta: Mutex::default(),
         config: Mutex::default(),
         steered: Mutex::default(),
     });
@@ -940,6 +974,7 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                         );
                     }
                     fake.record_mcp(session, &request.mcp_servers);
+                    fake.record_meta(session, request.meta.as_ref());
                     send(
                         &cx,
                         session,
@@ -974,6 +1009,7 @@ async fn serve(fake: Arc<Fake>) -> Result<(), Error> {
                     }
                     let id = format!("fork-{}", fake.next_session.fetch_add(1, Ordering::Relaxed));
                     fake.record_mcp(&id.clone().into(), &request.mcp_servers);
+                    fake.record_meta(&id.clone().into(), request.meta.as_ref());
                     let options = fake.config_options(&id.clone().into());
                     responder.respond(
                         acp::ForkSessionResponse::new(id)

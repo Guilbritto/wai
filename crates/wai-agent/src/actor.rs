@@ -31,12 +31,14 @@ enum Command {
         id: SessionId,
         cwd: PathBuf,
         mcp: Vec<McpServer>,
+        meta: Option<Meta>,
         reply: Reply<SessionStarted>,
     },
     ForkSession {
         id: SessionId,
         cwd: PathBuf,
         mcp: Vec<McpServer>,
+        meta: Option<Meta>,
         reply: Reply<SessionStarted>,
     },
     CloseSession {
@@ -122,16 +124,19 @@ impl AgentHandle {
             .await
     }
 
+    /// `meta`: the request's `_meta`, for options only that agent understands.
     pub async fn load_session(
         &self,
         id: SessionId,
         cwd: PathBuf,
         mcp: Vec<McpServer>,
+        meta: Option<Meta>,
     ) -> Result<SessionStarted, AgentError> {
         self.request(|reply| Command::LoadSession {
             id,
             cwd,
             mcp,
+            meta,
             reply,
         })
         .await
@@ -144,11 +149,13 @@ impl AgentHandle {
         id: SessionId,
         cwd: PathBuf,
         mcp: Vec<McpServer>,
+        meta: Option<Meta>,
     ) -> Result<SessionStarted, AgentError> {
         self.request(|reply| Command::ForkSession {
             id,
             cwd,
             mcp,
+            meta,
             reply,
         })
         .await
@@ -675,12 +682,14 @@ async fn actor_loop(
                 id,
                 cwd,
                 mcp,
+                meta,
                 reply,
             } => request(
                 &cx,
                 broker,
                 acp::LoadSessionRequest::new(id.clone(), cwd)
-                    .mcp_servers(convert::mcp_servers(mcp)),
+                    .mcp_servers(convert::mcp_servers(mcp))
+                    .meta(meta),
                 reply,
                 |r| convert::session_started(id, r.modes, r.config_options),
             )?,
@@ -688,11 +697,14 @@ async fn actor_loop(
                 id,
                 cwd,
                 mcp,
+                meta,
                 reply,
             } => request(
                 &cx,
                 broker,
-                acp::ForkSessionRequest::new(id, cwd).mcp_servers(convert::mcp_servers(mcp)),
+                acp::ForkSessionRequest::new(id, cwd)
+                    .mcp_servers(convert::mcp_servers(mcp))
+                    .meta(meta),
                 reply,
                 |r| convert::session_started(r.session_id.to_string(), r.modes, r.config_options),
             )?,

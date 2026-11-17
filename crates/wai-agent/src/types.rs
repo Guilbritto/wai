@@ -30,6 +30,9 @@ pub struct McpServer {
     pub env: Vec<(String, String)>,
 }
 
+/// A request's `_meta`: options only the receiving agent understands.
+pub type Meta = serde_json::Map<String, serde_json::Value>;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionStarted {
     pub id: SessionId,

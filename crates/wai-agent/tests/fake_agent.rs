@@ -5,9 +5,9 @@ use std::time::Duration;
 use async_channel::Receiver;
 use wai_agent::{
     AgentCaps, AgentError, AgentEvent, AgentHandle, AgentSpec, BrokerError, Choice, ChoiceKind,
-    CommandInfo, ConfigCategory, ConfigOption, ConfigValue, FieldKind, McpServer,
-    PermissionRequest, PromptBlock, QuestionAnswer, QuestionRequest, SessionEvent, StopReason,
-    SubagentPatch, SubagentState, ToolContent, program, quote,
+    CommandInfo, ConfigCategory, ConfigOption, ConfigValue, FieldKind, McpServer, Meta,
+    PermissionRequest, PromptBlock, QuestionAnswer, QuestionRequest, SessionEvent, SessionStarted,
+    StopReason, SubagentPatch, SubagentState, ToolContent, program, quote,
 };
 
 fn run(test: impl Future<Output = ()>) {
@@ -551,7 +551,7 @@ fn load_session_replays_history() {
         let (agent, rx) = spawn(&[]);
         ready(&rx).await;
         let started = agent
-            .load_session("abc".into(), cwd(), vec![])
+            .load_session("abc".into(), cwd(), vec![], None)
             .await
             .unwrap();
         assert_eq!(started.id, "abc");
@@ -580,7 +580,7 @@ fn fork_replays_source_history() {
         let (agent, rx) = spawn(&[]);
         ready(&rx).await;
         let forked = agent
-            .fork_session("abc".into(), cwd(), vec![])
+            .fork_session("abc".into(), cwd(), vec![], None)
             .await
             .unwrap();
         assert_ne!(forked.id, "abc");
@@ -588,7 +588,7 @@ fn fork_replays_source_history() {
 
         // The fork holds the source's conversation: loading it replays it under the new id.
         agent
-            .load_session(forked.id.clone(), cwd(), vec![])
+            .load_session(forked.id.clone(), cwd(), vec![], None)
             .await
             .unwrap();
         let replay: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -606,7 +606,9 @@ fn fork_replays_source_history() {
             ]
         );
 
-        let missing = agent.fork_session("missing".into(), cwd(), vec![]).await;
+        let missing = agent
+            .fork_session("missing".into(), cwd(), vec![], None)
+            .await;
         assert!(
             matches!(missing, Err(AgentError::Protocol(_))),
             "{missing:?}"
@@ -644,14 +646,78 @@ fn mcp_servers_reach_the_agent() {
         );
 
         agent
-            .load_session("abc".into(), cwd(), vec![server("jira")])
+            .load_session("abc".into(), cwd(), vec![server("jira")], None)
             .await
             .unwrap();
         while rx.try_recv().is_ok() {} // the replay
         assert_eq!(turn("abc".into()).await, "mcp:jira=/opt/jira-mcp");
 
-        let forked = agent.fork_session("abc".into(), cwd(), vec![]).await;
+        let forked = agent.fork_session("abc".into(), cwd(), vec![], None).await;
         assert_eq!(turn(forked.unwrap().id).await, "mcp:");
+    });
+}
+
+/// The `_meta` given to `load_session` and `fork_session` reaches the agent (`--echo-meta`
+/// answers each turn with the session's last one); a load without it clears it.
+#[test]
+fn meta_reaches_load_and_fork() {
+    run(async {
+        let (agent, rx) = spawn(&["--echo-meta"]);
+        ready(&rx).await;
+        let meta: Meta = serde_json::from_str(r#"{"k":"v"}"#).unwrap();
+        let turn = |session: String| {
+            agent.prompt(session, hello());
+            let rx = rx.clone();
+            async move {
+                let events = until(&rx, |e| matches!(e, AgentEvent::TurnEnded { .. })).await;
+                agent_text(&events)
+            }
+        };
+
+        let session = agent.new_session(cwd(), vec![]).await.unwrap();
+        assert_eq!(turn(session.id).await, "meta:");
+
+        let load = |meta| agent.load_session("abc".into(), cwd(), vec![], meta);
+        load(Some(meta.clone())).await.unwrap();
+        while rx.try_recv().is_ok() {} // the replay
+        assert_eq!(turn("abc".into()).await, r#"meta:{"k":"v"}"#);
+        load(None).await.unwrap();
+        while rx.try_recv().is_ok() {}
+        assert_eq!(turn("abc".into()).await, "meta:");
+
+        let forked = agent.fork_session("abc".into(), cwd(), vec![], Some(meta));
+        assert_eq!(turn(forked.await.unwrap().id).await, r#"meta:{"k":"v"}"#);
+    });
+}
+
+/// `--models`: a session loaded with a `_meta` also lists the `[1m]` rows of its models.
+#[test]
+fn meta_lists_the_one_million_rows() {
+    run(async {
+        let (agent, rx) = spawn(&["--models"]);
+        ready(&rx).await;
+        let meta: Meta = serde_json::from_str(r#"{"k":"v"}"#).unwrap();
+        let models = |started: SessionStarted| {
+            let model = started
+                .config
+                .into_iter()
+                .find(|o| o.id == "model")
+                .unwrap();
+            model.values.into_iter().map(|v| v.id).collect::<Vec<_>>()
+        };
+
+        let long = agent.load_session("abc".into(), cwd(), vec![], Some(meta));
+        assert_eq!(
+            models(long.await.unwrap()),
+            [
+                "fake-small",
+                "fake-large",
+                "fake-small[1m]",
+                "fake-large[1m]"
+            ]
+        );
+        let short = agent.load_session("abc".into(), cwd(), vec![], None);
+        assert_eq!(models(short.await.unwrap()), ["fake-small", "fake-large"]);
     });
 }
 
@@ -1118,7 +1184,7 @@ fn read_flag_reports_its_location() {
         assert!(located(&events));
 
         agent
-            .load_session("abc".into(), cwd(), vec![])
+            .load_session("abc".into(), cwd(), vec![], None)
             .await
             .unwrap();
         let replay: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();

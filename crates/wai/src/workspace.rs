@@ -1711,7 +1711,7 @@ impl Workspace {
         let mcp = self.registry.read(cx).mcp_servers();
         let title = title.map(|t| format!("{t} (fork)"));
         cx.spawn_in(window, async move |this, cx| {
-            let forked = handle.fork_session(id, cwd.clone(), mcp).await;
+            let forked = handle.fork_session(id, cwd.clone(), mcp, None).await;
             this.update_in(cx, |this, window, cx| match forked {
                 Ok(started) => {
                     let Some(session) = this.loading_session(agent, started.id, cwd, window, cx)

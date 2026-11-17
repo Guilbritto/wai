@@ -133,7 +133,7 @@ fn write_a_file_then_resume() {
         let caps = ready(&rx).await;
         let t = Instant::now();
         agent
-            .load_session(session.id.clone(), dir.clone(), vec![])
+            .load_session(session.id.clone(), dir.clone(), vec![], None)
             .await
             .expect("load_session");
         let mut replayed = false;
@@ -162,13 +162,13 @@ fn write_a_file_then_resume() {
         if caps.fork {
             let t = Instant::now();
             let forked = agent
-                .fork_session(session.id.clone(), dir.clone(), vec![])
+                .fork_session(session.id.clone(), dir.clone(), vec![], None)
                 .await
                 .expect("fork_session");
             assert_ne!(forked.id, session.id);
             // claude-agent-acp answers a fork without replaying it: loading the copy does.
             agent
-                .load_session(forked.id.clone(), dir.clone(), vec![])
+                .load_session(forked.id.clone(), dir.clone(), vec![], None)
                 .await
                 .expect("load_session of the fork");
             let mut replayed = false;

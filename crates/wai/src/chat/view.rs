@@ -1086,7 +1086,7 @@ impl ChatSession {
         self.loading = true;
         let (id, cwd, registry) = (self.id.clone(), self.cwd.clone(), self.registry.clone());
         cx.spawn_in(window, async move |this, cx| {
-            let loaded = handle.load_session(id, cwd, mcp).await;
+            let loaded = handle.load_session(id, cwd, mcp, None).await;
             this.update_in(cx, |this, window, cx| {
                 this.loading = false;
                 if let Some(dir) = this.replayed.take() {
