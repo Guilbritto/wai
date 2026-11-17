@@ -514,8 +514,11 @@ impl ExtHost {
                     return;
                 };
                 if !allow_burst(&mut running.emitted, Instant::now()) {
-                    let msg = format!("{} emits too often; dropped {name:?}", id.as_str());
-                    return eprintln!("wai: {msg}");
+                    // Once per window: a flood must not flood the log too.
+                    if running.emitted.is_some_and(|(_, n)| n == EMIT_LIMIT + 1) {
+                        eprintln!("wai: {} emits too often; dropping events", id.as_str());
+                    }
+                    return;
                 }
                 for (other, running) in &self.running {
                     if other != id {
