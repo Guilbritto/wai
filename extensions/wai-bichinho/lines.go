@@ -44,7 +44,10 @@ var kinds = []struct {
 
 // pick returns a line for kind, {name} replaced.
 func (s *server) pick(kind string) string {
-	pool := fallback[kind] // Task 7: read s.st.Lines[kind] first
+	pool := s.st.Lines[kind]
+	if len(pool) == 0 {
+		pool = fallback[kind]
+	}
 	if len(pool) == 0 {
 		return ""
 	}

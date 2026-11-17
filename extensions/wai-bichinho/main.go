@@ -57,12 +57,18 @@ type server struct {
 	sent   map[string]string // the last tree sent per panel
 	prs    map[string]string // my open PRs, URL → reason, from wai-waycarbon; nil until its first event
 
+	claude    string // the CLI's path; "" without one
+	run       runner // nil until initialize finds claude
+	gen       chan pools
+	genBusy   bool
+	genFailed time.Time
+
 	talk                   speech
 	hungry, lonely, asleep bool // last frame's values
 }
 
 func newServer(out io.Writer, now func() time.Time, rng *rand.Rand) *server {
-	return &server{out: out, now: now, rng: rng, st: newState(), states: map[string]string{}, sent: map[string]string{}}
+	return &server{out: out, now: now, rng: rng, gen: make(chan pools, 1), st: newState(), states: map[string]string{}, sent: map[string]string{}}
 }
 
 func (s *server) write(v any) {
@@ -204,9 +210,11 @@ func (s *server) gotPRs(list []struct{ URL, Reason string }) {
 	case fix:
 		s.react("alert", "check PR")
 		s.say("pr_fix")
+		s.note("a PR needs a fix")
 	case approved:
 		s.react("happy", "approved!")
 		s.say("pr_approved")
+		s.note("a PR got approved")
 	}
 }
 
@@ -371,6 +379,7 @@ func (s *server) render() {
 	}
 	if lonely && !wasLonely {
 		s.say("lonely")
+		s.note("felt lonely")
 	}
 	if wasAsleep && !asleep {
 		s.say("wake")
@@ -395,6 +404,7 @@ func (s *server) tick() {
 		s.frame++
 	}
 	s.ticks++
+	s.maybeGenerate(s.now())
 	if s.ticks%listEvery == 0 && len(s.states) > 0 {
 		s.listID++
 		s.write(node{"jsonrpc": "2.0", "id": s.listID, "method": "sessions/list"})
@@ -414,7 +424,11 @@ func (s *server) act(action string, values map[string]any) {
 		}
 	case "feed":
 		if p != nil {
+			starving := p.Hunger(now) >= 90
 			if p.Feed(now) {
+				if starving {
+					s.note("was fed while starving")
+				}
 				s.react("happy", "yum")
 				s.say("feed")
 			} else {
@@ -426,7 +440,9 @@ func (s *server) act(action string, values map[string]any) {
 		s.call("panel/open", node{"panel": cardPanel})
 	case "hatch":
 		if s.st.Eggs > 0 {
-			s.st.Hatch(s.rng, now)
+			p := s.st.Hatch(s.rng, now)
+			sp := speciesByID(p.Species)
+			s.note(fmt.Sprintf("hatched %s, a %s %s", p.Name, strings.ToLower(rarities[sp.Rarity].name), sp.Name))
 			s.react("surprise", "hi!")
 			s.say("hatch")
 		}
@@ -458,6 +474,9 @@ func (s *server) handle(m message) {
 			dir, _ = os.Getwd()
 		}
 		s.path = filepath.Join(dir, stateFile)
+		if s.claude != "" {
+			s.run = claudeRunner(s.claude, dir)
+		}
 		s.load()
 		s.lastEvent = s.now()
 		s.ready = true
@@ -501,6 +520,12 @@ func (s *server) handle(m message) {
 		var p struct{ Reason string }
 		json.Unmarshal(m.Params, &p)
 		levelUp, egg := s.st.TurnEnded(p.Reason)
+		if levelUp {
+			s.note(fmt.Sprintf("reached level %d", level(s.st.Pet.XP)))
+		}
+		if egg {
+			s.note("found an egg")
+		}
 		switch {
 		case levelUp:
 			s.react("happy", "level up!")
@@ -580,11 +605,14 @@ func serve(s *server, in io.Reader, frames <-chan time.Time) {
 			s.handle(m)
 		case <-frames:
 			s.tick()
+		case p := <-s.gen:
+			s.gotPools(p, s.now())
 		}
 	}
 }
 
 func main() {
 	s := newServer(os.Stdout, time.Now, rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0)))
+	s.claude = findClaude()
 	serve(s, os.Stdin, time.NewTicker(frameEvery).C)
 }
