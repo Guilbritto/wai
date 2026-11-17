@@ -79,6 +79,30 @@ func TestArtFitsTheSlot(t *testing.T) {
 	}
 }
 
+// The ⋯ menu's row does not change while the pet animates, so the menu never wraps under it.
+func TestMenuStaysPutWhileAnimating(t *testing.T) {
+	now := time.Now()
+	s := newServer(&bytes.Buffer{}, func() time.Time { return now }, seeded())
+	s.st.Pet = &Pet{Species: "boitata", Shiny: true, FedAt: now, Love: 100, LovedAt: now}
+	s.focused = "a\x00s"
+	s.states[s.focused] = "working"
+	var first string
+	for s.frame = range 16 {
+		var row string
+		for _, kid := range s.promptTree(now)["children"].([]node) {
+			b, _ := json.Marshal(kid)
+			if strings.Contains(string(b), `"type":"menu"`) {
+				row = string(b)
+			}
+		}
+		if s.frame == 0 {
+			first = row
+		} else if row != first {
+			t.Fatalf("frame %d: the menu's row changed:\n%s\n%s", s.frame, first, row)
+		}
+	}
+}
+
 func TestHungerLoveAndLevels(t *testing.T) {
 	t0 := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
 	p := &Pet{FedAt: t0, Love: 60, LovedAt: t0}
@@ -170,8 +194,7 @@ func (h *harness) send(line string) []map[string]any {
 	return got
 }
 
-// promptOf is the prompt panel's art (first row) and its second row's badge and word, from the
-// last render.
+// promptOf is the prompt panel's badge (first row), art and word, from the last render.
 func promptOf(t *testing.T, msgs []map[string]any) (art, badge, word string) {
 	t.Helper()
 	for _, m := range msgs {
@@ -180,10 +203,9 @@ func promptOf(t *testing.T, msgs []map[string]any) (art, badge, word string) {
 			continue
 		}
 		kids := p["tree"].(map[string]any)["children"].([]any)
-		art = kids[0].(map[string]any)["children"].([]any)[0].(map[string]any)["text"].(string)
-		row := kids[1].(map[string]any)["children"].([]any)
-		badge = row[0].(map[string]any)["text"].(string)
-		word = row[1].(map[string]any)["text"].(string)
+		badge = kids[0].(map[string]any)["children"].([]any)[0].(map[string]any)["text"].(string)
+		art = kids[1].(map[string]any)["text"].(string)
+		word = kids[2].(map[string]any)["text"].(string)
 	}
 	if art == "" {
 		t.Fatalf("no prompt render in %v", msgs)

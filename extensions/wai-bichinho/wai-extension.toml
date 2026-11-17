@@ -1,6 +1,6 @@
 id = "wai-bichinho"
 name = "Bichinho"
-version = "0.2.0"
+version = "0.2.1"
 description = "A small pet beside your prompt box that grows with your agents' finished turns"
 api = "1.7"
 permissions = ["process", "panels", "sessions:read", "events:wai-waycarbon"]

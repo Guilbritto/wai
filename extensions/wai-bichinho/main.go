@@ -232,10 +232,12 @@ func (s *server) promptTree(now time.Time) node {
 	if p := s.st.Pet; p != nil {
 		badge = node{"type": "badge", "text": fmt.Sprintf("Lv %d", level(p.XP)), "tone": rarities[speciesByID(p.Species).Rarity].tone}
 	}
+	// The drawing gets a line of its own: its width changes between frames, so anything beside it
+	// would wrap under it and back. The menu sits by the badge, which does not animate.
 	return node{"type": "column", "children": []node{
-		// The menu shares the drawing's line: at 160 px it does not fit beside the status.
-		{"type": "row", "children": []node{{"type": "text", "text": draw(s.st.Pet, mood, s.frame), "mono": true}, {"type": "spacer"}, s.menu()}},
-		{"type": "row", "children": []node{badge, {"type": "text", "text": status, "muted": true}}},
+		{"type": "row", "children": []node{badge, {"type": "spacer"}, s.menu()}},
+		{"type": "text", "text": draw(s.st.Pet, mood, s.frame), "mono": true},
+		{"type": "text", "text": status, "muted": true},
 	}}
 }
 
