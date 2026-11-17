@@ -14,6 +14,7 @@ mod claude_plugins;
 mod diagnostics;
 mod editor;
 mod elsewhere;
+mod ext_bubble;
 mod ext_host;
 mod ext_panel;
 mod extensions_view;
