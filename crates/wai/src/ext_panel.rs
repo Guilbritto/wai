@@ -541,6 +541,7 @@ impl ExtPanel {
             | Node::Divider
             | Node::Spacer
             | Node::Kv(_) => leaf(node, k, cx),
+            Node::Bubble { .. } => div().into_any_element(),
             Node::Markdown(text) => TextView::markdown(("panel-md", k), SharedString::from(text))
                 .text_sm()
                 .on_link_click(|url, _, _, cx| {
