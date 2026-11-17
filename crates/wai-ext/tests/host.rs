@@ -710,29 +710,33 @@ fn emit_checks_name_and_size() {
         ".pr".into(),
         "-pr".into(),
     ];
+    let big = |len| {
+        format!(
+            "events/emit {}",
+            json!({"name": "big", "data": "x".repeat(len)})
+        )
+    };
     let mut calls: Vec<String> = (names.iter())
         .map(|n| format!("events/emit {}", json!({"name": n})))
         .collect();
-    for len in [16_382, 16_383] {
-        let data = "x".repeat(len);
-        calls.push(format!(
-            "events/emit {}",
-            json!({"name": "big", "data": data})
-        ));
-    }
-    let args: Vec<&str> = calls.iter().flat_map(|c| ["--call", c.as_str()]).collect();
-    let ext = installed(
-        tmp.path(),
-        &args,
-        vec![Permission::Process, Permission::Notify],
-    );
+    calls.push(big(16_382));
+    // Windows caps a command line near 32 Ki characters: one 16 KiB payload per process.
+    let spawn = |calls: &[String]| {
+        let args: Vec<&str> = calls.iter().flat_map(|c| ["--call", c.as_str()]).collect();
+        let ext = installed(
+            tmp.path(),
+            &args,
+            vec![Permission::Process, Permission::Notify],
+        );
+        ExtHandle::spawn(&ext, tmp.path())
+    };
     run(Duration::from_secs(10), async {
-        let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
-        let (events, replies) = until_replies(&rx, 8).await;
-        let big = json!("x".repeat(16_382));
+        let (_handle, rx) = spawn(&calls);
+        let (events, replies) = until_replies(&rx, 7).await;
+        let data = json!("x".repeat(16_382));
         assert_eq!(
             emitted(&events),
-            [(names[0].as_str(), &Value::Null), ("big", &big)]
+            [(names[0].as_str(), &Value::Null), ("big", &data)]
         );
         for id in [1u64, 7] {
             assert_eq!(replies[&id]["result"], Value::Null);
@@ -743,8 +747,12 @@ fn emit_checks_name_and_size() {
                 json!({"code": -32602, "message": format!("invalid event name {name:?}")})
             );
         }
+
+        let (_handle, rx) = spawn(&[big(16_383)]);
+        let (events, replies) = until_replies(&rx, 1).await;
+        assert!(emitted(&events).is_empty());
         assert_eq!(
-            replies[&8]["error"],
+            replies[&1]["error"],
             json!({"code": -32602, "message": "event data larger than 16 KiB"})
         );
     });
