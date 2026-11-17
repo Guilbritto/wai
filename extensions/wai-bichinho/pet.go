@@ -133,6 +133,12 @@ type State struct {
 	Turns int             `json:"turns"`
 	Seen  map[string]bool `json:"seen"` // species hatched; true once one was shiny
 	Past  []Pet           `json:"past,omitempty"`
+
+	Lines      map[string][]string `json:"lines,omitempty"` // Claude's pools for the pet born at LinesBorn
+	LinesBorn  time.Time           `json:"lines_born,omitempty"`
+	LinesLevel int                 `json:"lines_level,omitempty"`
+	LinesAt    time.Time           `json:"lines_at,omitempty"`
+	Diary      []Note              `json:"diary,omitempty"` // kept across pets
 }
 
 const (
@@ -214,6 +220,7 @@ func (st *State) Hatch(rng *rand.Rand, now time.Time) *Pet {
 	}
 	st.Seen[sp.ID] = st.Seen[sp.ID] || p.Shiny
 	st.Pet = p
+	st.Lines = nil
 	st.Eggs = max(0, st.Eggs-1)
 	return p
 }
@@ -254,6 +261,7 @@ var moods = map[string]mood{
 	"error":    {"x", "~", []string{"#"}, 1},
 	"hungry":   {"o", "O", nil, 1},
 	"sad":      {";", "n", nil, 1},
+	"talk":     {"o", "o", nil, 1},
 	"sleeping": {"-", "_", []string{"z", "zZ"}, 4},
 }
 
@@ -262,6 +270,9 @@ func draw(p *Pet, moodName string, frame int) string {
 	m := moods[moodName]
 	if moodName == "idle" && frame%8 == 7 {
 		m = moods["blink"]
+	}
+	if moodName == "talk" && frame%2 == 1 {
+		m.mouth = "_"
 	}
 	lines := eggArt
 	if p != nil {

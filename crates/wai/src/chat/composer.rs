@@ -31,6 +31,21 @@ pub struct PromptSlots {
 
 impl Global for PromptSlots {}
 
+/// Whether the prompt box holding the slots has text: bubbles (API 1.8) dim and wait meanwhile.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PromptTyping(pub bool);
+
+impl Global for PromptTyping {}
+
+/// Sets `PromptTyping` to `typing` when `owner` holds the prompt slots and the value changes.
+pub(crate) fn set_typing(owner: EntityId, typing: bool, cx: &mut App) {
+    let holds = cx.try_global::<PromptSlots>().and_then(|s| s.owner) == Some(owner);
+    let now = cx.try_global::<PromptTyping>().copied().unwrap_or_default();
+    if holds && now != PromptTyping(typing) {
+        cx.set_global(PromptTyping(typing));
+    }
+}
+
 /// The narrowest the prompt box gets for a slot: in a narrower pane the slots hide.
 pub(super) const MIN_FIELD: Pixels = px(360.);
 
@@ -279,4 +294,31 @@ pub(super) fn strip_label(
         .aria_label(text)
         // Registers the id so tests can find it.
         .test_support()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PromptSlots, PromptTyping, set_typing};
+    use gpui_kit::{AppContext as _, TestAppContext};
+
+    #[gpui_kit::test]
+    fn only_the_slot_owner_sets_typing(cx: &mut TestAppContext) {
+        let (a, b) = cx.update(|cx| (cx.new(|_| ()).entity_id(), cx.new(|_| ()).entity_id()));
+        cx.update(|cx| {
+            cx.set_global(PromptSlots {
+                owner: Some(a),
+                inside: None,
+                side: None,
+            });
+            set_typing(b, true, cx);
+            assert_eq!(
+                cx.try_global::<PromptTyping>().copied().unwrap_or_default(),
+                PromptTyping(false)
+            );
+            set_typing(a, true, cx);
+            assert_eq!(*cx.global::<PromptTyping>(), PromptTyping(true));
+            set_typing(a, false, cx);
+            assert_eq!(*cx.global::<PromptTyping>(), PromptTyping(false));
+        });
+    }
 }

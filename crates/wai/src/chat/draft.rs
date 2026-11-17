@@ -257,6 +257,10 @@ pub struct DraftView {
 impl EventEmitter<DraftEvent> for DraftView {}
 
 impl DraftView {
+    pub(crate) fn prompt_typed(&self, cx: &App) -> bool {
+        !self.input.read(cx).value().is_empty()
+    }
+
     pub fn new(
         agent: String,
         folder: PathBuf,
@@ -288,11 +292,14 @@ impl DraftView {
         let (places, branches) = (menu(false, window, cx), menu(true, window, cx));
         let modes = menu(false, window, cx);
         let subscriptions = vec![
-            cx.subscribe_in(&input, window, |_, _, event: &InputEvent, _, cx| {
+            cx.subscribe_in(&input, window, |this, _, event: &InputEvent, _, cx| {
                 match event {
                     // Shift+Enter inserted a newline already.
                     InputEvent::PressEnter { shift: false, .. } => cx.emit(DraftEvent::Send),
-                    InputEvent::Change => cx.emit(DraftEvent::Changed),
+                    InputEvent::Change => {
+                        composer::set_typing(cx.entity_id(), this.prompt_typed(cx), cx);
+                        cx.emit(DraftEvent::Changed);
+                    }
                     _ => {}
                 }
             }),
@@ -801,6 +808,7 @@ impl DraftView {
             let text = text.cloned().collect::<Vec<_>>().join("\n\n");
             self.input
                 .update(cx, |input, cx| input.set_value(text, window, cx));
+            super::composer::set_typing(cx.entity_id(), self.prompt_typed(cx), cx);
         }
         self.notice = error;
         cx.emit(DraftEvent::Changed);

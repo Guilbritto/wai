@@ -10,7 +10,7 @@
 //! - `text` (and `markdown`, `alert`, a multiline input's `value`) keep at most `TEXT_CHARS`
 //!   characters; a `log` keeps its last `LOG_CHARS`. Every other string is one line of at most
 //!   `LINE_CHARS` characters.
-//! - Ids are 1 to `MAX_ID` bytes. Buttons, form fields, sections and tabs share one set of ids: a
+//! - Ids are 1 to `MAX_ID` bytes. Buttons, form fields, sections, tabs and bubbles share one set of ids: a
 //!   repeated id makes that node `Unsupported`. List item, card, table row and menu item ids may
 //!   repeat.
 //! - Nodes are the tree's root, each element of a `children` array and each table cell that is
@@ -84,6 +84,13 @@ pub enum Node {
         subtitles: bool,
         fill: bool,
         plain: bool,
+    },
+    /// A speech bubble (API 1.8): wai animates it and sends `panel/action` with its id when it ends.
+    Bubble {
+        id: String,
+        text: Arc<str>,
+        tone: Tone,
+        sticky: bool,
     },
     Button {
         id: String,
@@ -432,6 +439,9 @@ pub fn icon_name(name: &str) -> bool {
         && (name.bytes()).all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// A bubble's text, in characters.
+pub const BUBBLE_CHARS: usize = 140;
+
 /// An extension item's text, in characters.
 pub const ITEM_TEXT_CHARS: usize = 32;
 
@@ -732,6 +742,18 @@ impl Parser {
                     plain: flag(o, "plain").unwrap_or(false),
                 }
             }
+            "bubble" => {
+                let text = line(o, "text")?;
+                Node::Bubble {
+                    id: id(o)?,
+                    text: match text.chars().count() {
+                        n if n > BUBBLE_CHARS => Arc::from(cut(&text, BUBBLE_CHARS - 1)),
+                        _ => text,
+                    },
+                    tone: tone(o).unwrap_or_default(),
+                    sticky: flag(o, "sticky").unwrap_or(false),
+                }
+            }
             "button" => {
                 let icon = icon(o);
                 Node::Button {
@@ -849,7 +871,8 @@ impl Parser {
         };
         // Only a node that is otherwise whole takes its id.
         match &node {
-            Node::Button { id, .. }
+            Node::Bubble { id, .. }
+            | Node::Button { id, .. }
             | Node::Input { id, .. }
             | Node::Select { id, .. }
             | Node::Path { id, .. }
@@ -959,6 +982,63 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::*;
+
+    #[test]
+    fn bubble_parses() {
+        let tree = parse(
+            &json!({"type": "bubble", "id": "say", "text": "Oi", "tone": "success", "sticky": true}),
+        );
+        assert_eq!(
+            tree,
+            Ok(Node::Bubble {
+                id: "say".into(),
+                text: "Oi".into(),
+                tone: Tone::Success,
+                sticky: true
+            })
+        );
+        let plain = parse(&json!({"type": "bubble", "id": "say", "text": "Oi"}));
+        assert_eq!(
+            plain,
+            Ok(Node::Bubble {
+                id: "say".into(),
+                text: "Oi".into(),
+                tone: Tone::Neutral,
+                sticky: false
+            })
+        );
+    }
+
+    #[test]
+    fn bubble_needs_id_and_text_and_is_cut() {
+        assert_eq!(
+            parse(&json!({"type": "bubble", "text": "Oi"})),
+            Ok(Node::Unsupported)
+        );
+        assert_eq!(
+            parse(&json!({"type": "bubble", "id": "say"})),
+            Ok(Node::Unsupported)
+        );
+        let Ok(Node::Bubble { text, .. }) =
+            parse(&json!({"type": "bubble", "id": "b", "text": "x".repeat(300)}))
+        else {
+            panic!()
+        };
+        assert_eq!(text.chars().count(), BUBBLE_CHARS);
+        assert!(text.ends_with('…'));
+    }
+
+    #[test]
+    fn bubble_id_joins_the_id_set() {
+        let tree = parse(&json!({"type": "column", "children": [
+            {"type": "button", "id": "x", "label": "B"},
+            {"type": "bubble", "id": "x", "text": "Oi"},
+        ]}));
+        let Ok(Node::Column { children, .. }) = tree else {
+            panic!()
+        };
+        assert_eq!(children[1], Node::Unsupported);
+    }
 
     #[test]
     fn item_state_is_clamped() {

@@ -202,10 +202,17 @@ func promptOf(t *testing.T, msgs []map[string]any) (art, badge, word string) {
 		if m["method"] != "panel/render" || p["panel"] != promptPanel {
 			continue
 		}
-		kids := p["tree"].(map[string]any)["children"].([]any)
-		badge = kids[0].(map[string]any)["children"].([]any)[0].(map[string]any)["text"].(string)
-		art = kids[1].(map[string]any)["text"].(string)
-		word = kids[2].(map[string]any)["text"].(string)
+		for _, k := range p["tree"].(map[string]any)["children"].([]any) {
+			n := k.(map[string]any)
+			switch {
+			case n["type"] == "row":
+				badge = n["children"].([]any)[0].(map[string]any)["text"].(string)
+			case n["type"] == "text" && n["mono"] == true:
+				art = n["text"].(string)
+			case n["type"] == "text" && n["muted"] == true:
+				word = n["text"].(string)
+			}
+		}
 	}
 	if art == "" {
 		t.Fatalf("no prompt render in %v", msgs)
@@ -350,5 +357,117 @@ func TestServeEndsAtEOF(t *testing.T) {
 	serve(s, strings.NewReader(in), nil)
 	if !strings.Contains(out.String(), `"panel":"pet"`) {
 		t.Errorf("no render: %s", out.String())
+	}
+}
+
+// bubbleOf is the bubble node in the last prompt render.
+func bubbleOf(msgs []map[string]any) (id, text string, ok bool) {
+	for _, m := range msgs {
+		p, _ := m["params"].(map[string]any)
+		if m["method"] != "panel/render" || p["panel"] != promptPanel {
+			continue
+		}
+		id, text, ok = "", "", false
+		for _, k := range p["tree"].(map[string]any)["children"].([]any) {
+			if n := k.(map[string]any); n["type"] == "bubble" {
+				id, _ = n["id"].(string)
+				text, _ = n["text"].(string)
+				ok = true
+			}
+		}
+	}
+	return
+}
+
+func sticky(msgs []map[string]any) bool {
+	for _, m := range msgs {
+		p, _ := m["params"].(map[string]any)
+		if m["method"] == "panel/render" && p["panel"] == promptPanel {
+			for _, k := range p["tree"].(map[string]any)["children"].([]any) {
+				if n := k.(map[string]any); n["type"] == "bubble" {
+					return n["sticky"] == true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (h *harness) action(action string) []map[string]any {
+	return h.send(`{"jsonrpc":"2.0","id":5,"method":"panel/action","params":{"panel":"pet","action_id":"` + action + `","values":{}}}`)
+}
+
+func (h *harness) bubbleDone(id string) []map[string]any {
+	return h.send(`{"jsonrpc":"2.0","id":6,"method":"panel/action","params":{"panel":"pet","action_id":"` + id + `","values":{"bubble":"timeout"}}}`)
+}
+
+func TestHatchSpeaks(t *testing.T) {
+	h := start(t, t.TempDir())
+	_, text, ok := bubbleOf(h.action("hatch"))
+	if !ok || !strings.Contains(text, h.s.st.Pet.Name) {
+		t.Errorf("hatch bubble %q %v", text, ok)
+	}
+}
+
+func TestNeedsYouIsStickyAndAnswered(t *testing.T) {
+	h := start(t, t.TempDir())
+	msgs := h.send(`{"jsonrpc":"2.0","method":"event/session_state","params":{"agent":"claude","session":"s2","state":"needs_you"}}`)
+	if _, _, ok := bubbleOf(msgs); !ok || !sticky(msgs) {
+		t.Fatalf("needs_you bubble: %v", msgs)
+	}
+	msgs = h.send(`{"jsonrpc":"2.0","method":"event/session_state","params":{"agent":"claude","session":"s2","state":"idle"}}`)
+	if _, _, ok := bubbleOf(msgs); ok {
+		t.Errorf("the answered bubble stays: %v", msgs)
+	}
+}
+
+func TestBubbleDoneFreesTheQueue(t *testing.T) {
+	h := start(t, t.TempDir())
+	id, _, _ := bubbleOf(h.action("hatch"))
+	h.bubbleDone(id)
+	h.now = h.now.Add(300 * time.Millisecond)
+	h.action("pet")
+	msgs := h.action("feed")
+	id, text, _ := bubbleOf(msgs)
+	if text != fallback["pet"][0] {
+		t.Fatalf("pet line first: %q", text)
+	}
+	h.bubbleDone(id)
+	h.now = h.now.Add(300 * time.Millisecond)
+	h.s.tick()
+	_, text, _ = bubbleOf(h.send(`{"jsonrpc":"2.0","method":"event/file_saved","params":{}}`))
+	if text != fallback["feed"][0] && text != fallback["full"][0] {
+		t.Errorf("feed line next: %q", text)
+	}
+}
+
+func TestFocusDropsNormalLine(t *testing.T) {
+	h := start(t, t.TempDir())
+	id, _, _ := bubbleOf(h.action("hatch"))
+	h.bubbleDone(id)
+	h.now = h.now.Add(300 * time.Millisecond)
+	if _, _, ok := bubbleOf(h.action("pet")); !ok {
+		t.Fatal("pet speaks")
+	}
+	if _, _, ok := bubbleOf(h.send(`{"jsonrpc":"2.0","method":"event/session_focused","params":{"agent":"claude","session":"s2"}}`)); ok {
+		t.Error("a focus switch leaves the bubble")
+	}
+}
+
+func TestMouthTalks(t *testing.T) {
+	h := start(t, t.TempDir())
+	h.send(`{"jsonrpc":"2.0","method":"event/session_focused","params":{"agent":"claude","session":"s1"}}`)
+	h.action("hatch")
+	h.now = h.now.Add(5 * time.Second)
+	h.s.st.Pet.Species = "tatu"
+	h.s.talk.cur = nil
+	h.s.say("pet")
+	frame := func() string {
+		h.s.tick()
+		art, _, _ := promptOf(t, h.send(`{"jsonrpc":"2.0","method":"event/file_saved","params":{}}`))
+		return strings.NewReplacer("·", "*").Replace(art)
+	}
+	if a, b := frame(), frame(); a == b {
+		t.Errorf("the mouth does not move:\n%s\n%s", a, b)
 	}
 }

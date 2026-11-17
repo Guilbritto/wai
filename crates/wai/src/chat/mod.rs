@@ -11,7 +11,7 @@ mod question;
 mod render;
 mod view;
 
-pub use composer::{PromptSlot, PromptSlots};
+pub use composer::{PromptSlot, PromptSlots, PromptTyping};
 pub(crate) use context::context_meta;
 pub use draft::{DraftData, DraftEvent, DraftView};
 #[cfg(test)]

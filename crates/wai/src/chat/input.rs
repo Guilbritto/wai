@@ -268,6 +268,7 @@ impl ChatSession {
         let attachments = std::mem::take(&mut self.attachments);
         self.input
             .update(cx, |input, cx| input.set_value("", window, cx));
+        super::composer::set_typing(cx.entity_id(), self.prompt_typed(cx), cx);
         let message = Message { text, attachments };
         match self.model.in_turn {
             false => self.send_message(message, cx),
@@ -402,6 +403,7 @@ impl ChatSession {
         self.input.update(cx, |input, cx| {
             input.set_value(text.to_string(), window, cx)
         });
+        super::composer::set_typing(cx.entity_id(), self.prompt_typed(cx), cx);
     }
 
     /// The text waiting in the prompt box.
@@ -678,6 +680,7 @@ impl ChatSession {
             input.set_value(text, window, cx);
             input.set_cursor_position(Position::new(last, u32::MAX), window, cx);
         });
+        super::composer::set_typing(cx.entity_id(), self.prompt_typed(cx), cx);
         cx.stop_propagation();
         cx.notify();
     }
