@@ -274,9 +274,13 @@ func oneLine(s string) string {
 		}
 		return r
 	}, s)
-	s = strings.Join(strings.Fields(s), " ")
-	if r := []rune(s); len(r) > 200 {
-		s = string(r[:200]) + "…"
+	return clip(strings.Join(strings.Fields(s), " "), 200)
+}
+
+// clip keeps the first n runes, with an ellipsis when it cut.
+func clip(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n]) + "…"
 	}
 	return s
 }

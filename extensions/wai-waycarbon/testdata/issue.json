@@ -1,0 +1,30 @@
+{
+  "key": "EC-1240",
+  "self": "https://waycarbon.atlassian.net/rest/api/2/issue/10001",
+  "fields": {
+    "summary": "New scope filter",
+    "status": {"name": "Code Review"},
+    "issuetype": {"name": "Story"},
+    "priority": {"name": "High"},
+    "assignee": {"displayName": "Ana Souza"},
+    "parent": {"key": "EC-1200", "fields": {"summary": "Scopes epic"}},
+    "subtasks": [
+      {"key": "EC-1241", "fields": {"summary": "[proto-repository] Add scope_id", "status": {"name": "Done"}}},
+      {"key": "EC-1242", "fields": {"summary": "[waycarbon-inventories] Filter by scope", "status": {"name": "Development"}}}
+    ],
+    "description": {
+      "type": "doc", "version": 1,
+      "content": [
+        {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Goal"}]},
+        {"type": "paragraph", "content": [{"type": "text", "text": "Filter emissions by "}, {"type": "text", "text": "scope", "marks": [{"type": "strong"}]}, {"type": "text", "text": "."}]},
+        {"type": "bulletList", "content": [
+          {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "proto field"}]}]},
+          {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "service filter"}]}]}
+        ]},
+        {"type": "codeBlock", "content": [{"type": "text", "text": "make migrate ENV=stg"}]},
+        {"type": "mediaSingle", "content": [{"type": "media", "attrs": {"id": "x"}}]},
+        {"type": "panel", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "See "}, {"type": "inlineCard", "attrs": {"url": "https://example.com/doc"}}, {"type": "hardBreak"}, {"type": "mention", "attrs": {"text": "@Ana"}}]}]}
+      ]
+    }
+  }
+}

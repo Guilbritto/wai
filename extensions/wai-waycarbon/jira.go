@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -47,7 +49,14 @@ func jira(ctx context.Context, args ...string) (string, error) {
 }
 
 // myCards is R45: `jira me` first, then the open cards assigned to that user.
-func myCards(ctx context.Context) ([]Card, error) {
+func myCards(ctx context.Context) ([]Card, error) { return assigned(ctx) }
+
+// sprintCards is myCards limited to the open sprints.
+func sprintCards(ctx context.Context) ([]Card, error) {
+	return assigned(ctx, "-q", "sprint in openSprints()")
+}
+
+func assigned(ctx context.Context, extra ...string) ([]Card, error) {
 	notLoggedIn := Problem("jira is not logged in — run jira init in a terminal")
 	me, err := jira(ctx, "me")
 	if err != nil {
@@ -64,7 +73,8 @@ func myCards(ctx context.Context) ([]Card, error) {
 	if user == "" {
 		return nil, notLoggedIn
 	}
-	cards, err := listCards(ctx, "-a", user, "-s~Done", "--plain", "--no-headers", "--columns", "key,summary,status")
+	args := append(append([]string{"-a", user, "-s~Done"}, extra...), "--plain", "--no-headers", "--columns", "key,summary,status")
+	cards, err := listCards(ctx, args...)
 	if err != nil {
 		if errors.Is(err, errSilent) {
 			return nil, Problem("jira issue list failed")
@@ -108,6 +118,142 @@ func moveCard(ctx context.Context, key string) error {
 	if done == "" {
 		done = "Done"
 	}
-	_, err := jira(ctx, "issue", "move", key, done)
+	return moveTo(ctx, key, done)
+}
+
+func moveTo(ctx context.Context, key, status string) error {
+	if !keyRe.MatchString(key) {
+		return Problem("not a card key: " + key)
+	}
+	_, err := jira(ctx, "issue", "move", key, status)
+	if errors.Is(err, errSilent) {
+		return Problem("jira issue move failed")
+	}
 	return err
+}
+
+// CardDetail is what the Jira tab shows for the selected card. Site is https://<host> of the instance.
+type CardDetail struct {
+	Key, Summary, Status, Type, Priority, Assignee, ParentKey, ParentSummary, Description, Site string
+	Subtasks                                                                                    []Card
+}
+
+type named = *struct{ Name string }
+
+func nameOf(n named) string {
+	if n == nil {
+		return ""
+	}
+	return n.Name
+}
+
+// viewCard reads `jira issue view KEY --raw`, the issue's JSON.
+func viewCard(ctx context.Context, key string) (CardDetail, error) {
+	if !keyRe.MatchString(key) {
+		return CardDetail{}, Problem("not a card key: " + key)
+	}
+	out, err := jira(ctx, "issue", "view", key, "--raw")
+	if errors.Is(err, errSilent) {
+		return CardDetail{}, Problem("jira issue view failed")
+	}
+	if err != nil {
+		return CardDetail{}, err
+	}
+	var r struct {
+		Key, Self string
+		Fields    struct {
+			Summary                     string
+			Status, Issuetype, Priority named
+			Assignee                    *struct{ DisplayName string }
+			Parent                      *struct {
+				Key    string
+				Fields struct{ Summary string }
+			}
+			Subtasks []*struct {
+				Key    string
+				Fields struct {
+					Summary string
+					Status  named
+				}
+			}
+			Description json.RawMessage
+		}
+	}
+	if err := json.Unmarshal([]byte(out), &r); err != nil {
+		return CardDetail{}, Problem("jira answered with unreadable data")
+	}
+	f := r.Fields
+	d := CardDetail{Key: r.Key, Summary: f.Summary, Status: nameOf(f.Status), Type: nameOf(f.Issuetype),
+		Priority: nameOf(f.Priority), Description: adfText(f.Description)}
+	if f.Assignee != nil {
+		d.Assignee = f.Assignee.DisplayName
+	}
+	if f.Parent != nil {
+		d.ParentKey, d.ParentSummary = f.Parent.Key, f.Parent.Fields.Summary
+	}
+	for _, st := range f.Subtasks {
+		if st != nil && keyRe.MatchString(st.Key) {
+			d.Subtasks = append(d.Subtasks, Card{st.Key, st.Fields.Summary, nameOf(st.Fields.Status)})
+		}
+	}
+	if u, err := url.Parse(r.Self); err == nil && u.Scheme == "https" && u.Host != "" {
+		d.Site = "https://" + u.Host
+	}
+	return d, nil
+}
+
+type adfNode struct {
+	Type, Text string
+	Attrs      struct{ Text, URL string }
+	Content    []adfNode
+}
+
+func (n adfNode) write(b *strings.Builder) {
+	switch n.Type {
+	case "text":
+		b.WriteString(n.Text)
+		return
+	case "hardBreak":
+		b.WriteString("\n")
+		return
+	case "mention", "emoji":
+		b.WriteString(n.Attrs.Text)
+		return
+	case "inlineCard":
+		b.WriteString(n.Attrs.URL)
+		return
+	case "listItem":
+		b.WriteString("• ")
+	}
+	// ponytail: an unknown node (table, panel, media) gives its children's text, never its JSON.
+	for _, c := range n.Content {
+		c.write(b)
+	}
+	switch n.Type {
+	case "paragraph", "heading", "codeBlock":
+		b.WriteString("\n")
+	}
+}
+
+// adfText is a description as plain text: a string as is (older sites send wiki markup), an Atlassian
+// document walked for its text. Blank lines are dropped; at most 4,000 runes.
+func adfText(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		var n adfNode
+		var te *json.UnmarshalTypeError
+		if err := json.Unmarshal(raw, &n); err != nil && !errors.As(err, &te) {
+			return ""
+		}
+		var b strings.Builder
+		n.write(&b)
+		s = b.String()
+	}
+	var lines []string
+	for _, l := range strings.Split(s, "\n") {
+		if l = strings.TrimRight(l, " \t\r"); strings.TrimSpace(l) != "" {
+			lines = append(lines, l)
+		}
+	}
+	return clip(strings.Join(lines, "\n"), 4000)
 }

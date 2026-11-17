@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -24,12 +25,14 @@ type PR struct {
 	Labels                   []string
 	Merged                   bool
 	LastReview               Review // the newest review by someone other than the author
+	State                    string // OPEN, MERGED or CLOSED
+	CreatedAt                time.Time
 }
 
 // Review is one submitted review: approved, changes requested or commented.
 type Review struct {
-	By, State string
-	At        time.Time
+	By, State, Body string
+	At              time.Time
 }
 
 // Snapshot is one GitHub refresh. Warn is a GraphQL error that came with usable data.
@@ -49,8 +52,10 @@ const query = `query($mine: String!, $requested: String!, $queue: String!, $merg
   queue: search(query: $queue, type: ISSUE, first: 50) { nodes { ...pr } }
   merged: search(query: $merged, type: ISSUE, first: 50) { nodes { ...pr } }
 }
-fragment pr on PullRequest {
-  number title url isDraft headRefName
+` + prFragment
+
+const prFragment = `fragment pr on PullRequest {
+  number title url isDraft headRefName state createdAt
   author { login }
   repository { nameWithOwner }
   reviewDecision mergeable mergeStateStatus
@@ -62,6 +67,8 @@ fragment pr on PullRequest {
 type gqlPR struct {
 	Number           int
 	Title, URL       string
+	State            string
+	CreatedAt        time.Time
 	IsDraft          bool
 	HeadRefName      string
 	Author           *struct{ Login string }
@@ -90,7 +97,8 @@ func (g *gqlPR) pr(merged bool) (PR, bool) {
 		return PR{}, false
 	}
 	p := PR{Number: g.Number, Title: g.Title, URL: g.URL, Branch: g.HeadRefName, Draft: g.IsDraft,
-		Review: g.ReviewDecision, Mergeable: g.Mergeable, MergeState: g.MergeStateStatus, Merged: merged}
+		Review: g.ReviewDecision, Mergeable: g.Mergeable, MergeState: g.MergeStateStatus, Merged: merged,
+		State: g.State, CreatedAt: g.CreatedAt}
 	if g.Repository != nil {
 		p.Repo = g.Repository.NameWithOwner
 	}
@@ -251,4 +259,187 @@ func ghLogin(ctx context.Context) (*exec.Cmd, <-chan string, <-chan error) {
 		exit <- err
 	}()
 	return cmd, code, exit
+}
+
+// Check is one CI check of a PR's last commit; State is the conclusion once it completed.
+type Check struct{ Name, State, URL string }
+
+// Thread is the first comment of an unresolved review thread.
+type Thread struct {
+	Author, Body, Path string
+	Line               int
+}
+
+// PRDetail is what the PRs tab shows for the selected PR, loaded only then.
+type PRDetail struct {
+	Additions, Deletions, Files int
+	Author                      string
+	Checks                      []Check // failed first
+	Reviews                     []Review
+	Threads                     []Thread
+}
+
+const detailQuery = `query($url: URI!) { resource(url: $url) { ... on PullRequest {
+  additions deletions changedFiles author { login }
+  commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 50) { nodes {
+    __typename
+    ... on CheckRun { name status conclusion detailsUrl }
+    ... on StatusContext { context state targetUrl } } } } } } }
+  reviews(last: 10) { nodes { author { login } state submittedAt body } }
+  reviewThreads(first: 30) { nodes { isResolved comments(first: 1) { nodes { author { login } body path line } } } }
+} } }`
+
+type login = *struct{ Login string }
+
+func loginOf(l login) string {
+	if l == nil {
+		return ""
+	}
+	return l.Login
+}
+
+func httpsOnly(u string) string {
+	if strings.HasPrefix(u, "https://") {
+		return u
+	}
+	return ""
+}
+
+var failed = map[string]bool{"FAILURE": true, "ERROR": true, "TIMED_OUT": true, "CANCELLED": true,
+	"ACTION_REQUIRED": true, "STARTUP_FAILURE": true}
+
+// graphql runs one gh GraphQL call and decodes its data into v. A failure that still printed data is
+// used (as fetchGitHub does), else it is the error.
+func graphql(ctx context.Context, v any, args ...string) error {
+	out, err := runCLI(ctx, "gh", append([]string{"api", "graphql"}, args...)...)
+	var r struct{ Data json.RawMessage }
+	if json.Unmarshal([]byte(out), &r) != nil || len(r.Data) == 0 || string(r.Data) == "null" || json.Unmarshal(r.Data, v) != nil {
+		var nf ErrNotFound
+		switch {
+		case errors.As(err, &nf):
+			return Problem("gh CLI not found")
+		case errors.Is(err, errSilent):
+			return Problem("gh api failed")
+		case err != nil:
+			return err
+		}
+		return Problem("GitHub answered with unreadable data")
+	}
+	return nil
+}
+
+// prDetail loads the size, checks, reviews and open threads of one PR.
+func prDetail(ctx context.Context, prURL string) (PRDetail, error) {
+	if !strings.HasPrefix(prURL, "https://") {
+		return PRDetail{}, Problem("not a PR link: " + prURL)
+	}
+	var r struct {
+		Resource *struct {
+			Additions, Deletions, ChangedFiles int
+			Author                             login
+			Commits                            *struct {
+				Nodes []*struct {
+					Commit *struct {
+						StatusCheckRollup *struct {
+							Contexts *struct {
+								Nodes []*struct {
+									Typename                             string `json:"__typename"`
+									Name, Status, Conclusion, DetailsURL string
+									Context, State, TargetURL            string
+								}
+							}
+						}
+					}
+				}
+			}
+			Reviews *struct {
+				Nodes []*struct {
+					Author      login
+					State, Body string
+					SubmittedAt time.Time
+				}
+			}
+			ReviewThreads *struct {
+				Nodes []*struct {
+					IsResolved bool
+					Comments   *struct {
+						Nodes []*struct {
+							Author     login
+							Body, Path string
+							Line       int
+						}
+					}
+				}
+			}
+		}
+	}
+	if err := graphql(ctx, &r, "-f", "query="+detailQuery, "-f", "url="+prURL); err != nil {
+		return PRDetail{}, err
+	}
+	g := r.Resource
+	if g == nil {
+		return PRDetail{}, Problem("GitHub has no PR at " + prURL)
+	}
+	d := PRDetail{Additions: g.Additions, Deletions: g.Deletions, Files: g.ChangedFiles, Author: loginOf(g.Author)}
+	if g.Commits != nil {
+		for _, c := range g.Commits.Nodes {
+			if c == nil || c.Commit == nil || c.Commit.StatusCheckRollup == nil || c.Commit.StatusCheckRollup.Contexts == nil {
+				continue
+			}
+			for _, x := range c.Commit.StatusCheckRollup.Contexts.Nodes {
+				switch {
+				case x == nil:
+				case x.Typename == "StatusContext":
+					d.Checks = append(d.Checks, Check{x.Context, x.State, httpsOnly(x.TargetURL)})
+				case x.Status == "COMPLETED":
+					d.Checks = append(d.Checks, Check{x.Name, x.Conclusion, httpsOnly(x.DetailsURL)})
+				default:
+					d.Checks = append(d.Checks, Check{x.Name, x.Status, httpsOnly(x.DetailsURL)})
+				}
+			}
+		}
+	}
+	sort.SliceStable(d.Checks, func(i, j int) bool { return failed[d.Checks[i].State] && !failed[d.Checks[j].State] })
+	if g.Reviews != nil {
+		for _, x := range g.Reviews.Nodes {
+			if x != nil {
+				d.Reviews = append(d.Reviews, Review{By: loginOf(x.Author), State: x.State, Body: clip(x.Body, 1000), At: x.SubmittedAt})
+			}
+		}
+	}
+	if g.ReviewThreads != nil {
+		for _, t := range g.ReviewThreads.Nodes {
+			if t == nil || t.IsResolved || t.Comments == nil || len(t.Comments.Nodes) == 0 || t.Comments.Nodes[0] == nil {
+				continue
+			}
+			c := t.Comments.Nodes[0]
+			d.Threads = append(d.Threads, Thread{loginOf(c.Author), clip(c.Body, 1000), c.Path, c.Line})
+		}
+	}
+	return d, nil
+}
+
+const searchQuery = `query($q: String!) { search(query: $q, type: ISSUE, first: 50) { nodes { ...pr } } }
+` + prFragment
+
+// searchPRs finds the org's PRs whose title has q, in any state, newest first. At most 50.
+func searchPRs(ctx context.Context, org, q string) ([]PR, error) {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return nil, nil
+	}
+	var r struct{ Search *struct{ Nodes []*gqlPR } }
+	if err := graphql(ctx, &r, "-f", "query="+searchQuery, "-f", "q="+q+" in:title is:pr org:"+org); err != nil {
+		return nil, err
+	}
+	var prs []PR
+	if r.Search != nil {
+		for _, g := range r.Search.Nodes {
+			if p, ok := g.pr(g != nil && g.State == "MERGED"); ok {
+				prs = append(prs, p)
+			}
+		}
+	}
+	sort.SliceStable(prs, func(i, j int) bool { return prs[i].CreatedAt.After(prs[j].CreatedAt) })
+	return prs, nil
 }
