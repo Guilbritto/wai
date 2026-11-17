@@ -236,7 +236,7 @@ A panel exists while your process runs, and its content is the last tree you ren
   - Closing the pane does not stop your extension, and what the user typed stays: the panel is the same when it opens again.
   - The pane closes when your process stops, fails, crashes or is disabled. Panes are not part of work areas and are not saved between runs.
 - **`prompt`** (API 1.6): inside the prompt box of the focused pane's session or draft, at its right, behind a divider. The box grows to the taller of the two.
-- **`prompt-side`** (API 1.6): beside that prompt box, at its right, in a box of its own. With `frame = false` (API 1.7) the box is not drawn, only your tree: use it when your tree's height changes, so the box does not grow and shrink with it.
+- **`prompt-side`** (API 1.6): beside that prompt box, at its right, in a box of its own. With `frame = false` (API 1.7) the box is not drawn and your tree floats: anchored to the prompt box's bottom, it grows up over what is above instead of moving it. Use it when your tree's height changes.
   - Only the focused pane's prompt box shows them: when the user focuses another pane, they move there. `event/session_focused` tells you which session that is.
   - `width` is the slot's width in px, 80 to 320 (a value outside is clamped). The default is 160 for `prompt` and 200 for `prompt-side`.
   - They hide while the prompt box would be left narrower than 360 px: in a narrow pane, or a split. `prompt` gives way last.

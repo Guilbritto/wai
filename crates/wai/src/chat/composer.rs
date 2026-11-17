@@ -86,9 +86,10 @@ pub(super) fn prompt_row(
     // Registers the id so tests can find it.
     .test_support();
     let side = side.map(|side| {
-        let frame = side.frame;
-        slot("prompt-side", side)
-            .when(frame, |el| {
+        let (frame, width) = (side.frame, side.width);
+        let el = slot("prompt-side", side);
+        match frame {
+            true => {
                 let el = el.rounded(px(20.)).border_1().overflow_hidden();
                 match dark {
                     true => el
@@ -96,9 +97,19 @@ pub(super) fn prompt_row(
                         .border_color(aurora::borda_forte()),
                     false => el.bg(theme.background).border_color(theme.input),
                 }
-            })
-            // Registers the id so tests can find it.
-            .test_support()
+                // Registers the id so tests can find it.
+                .test_support()
+                .into_any_element()
+            }
+            // Frameless, it floats: only its width is reserved, and anchored to the row's bottom
+            // it grows up over what is above instead of moving it.
+            false => div()
+                .flex_none()
+                .w(width)
+                .relative()
+                .child(el.absolute().bottom_0().left_0().test_support())
+                .into_any_element(),
+        }
     });
     let measure = canvas(
         move |bounds, _, cx| measured(bounds.size.width, cx),

@@ -1705,6 +1705,56 @@ pub(crate) mod tests {
         assert!(field.is_some() && inside.is_none() && side.is_none());
     }
 
+    /// API 1.7: a frameless `prompt-side` panel floats. Anchored to the prompt box's bottom, a
+    /// taller tree grows up over what is above: the draft's prompt box does not move.
+    #[gpui_kit::test]
+    fn frameless_side_panel_moves_nothing(cx: &mut TestAppContext) {
+        use gpui_kit::{px, size};
+        use wai_ext::PanelLocation;
+        use wai_ext::panel::parse;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = "id = \"pet\"\nname = \"Pet\"\nversion = \"1.0.0\"\napi = \"1.7\"\n\
+            permissions = [\"process\", \"panels\"]\n\
+            [process]\ncommand = \"bin/run\"\n\
+            [[contributes.panels]]\nid = \"out\"\ntitle = \"Out\"\nlocation = \"prompt-side\"\n\
+            frame = false\n";
+        install(tmp.path(), &config, manifest, "", "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        cx.simulate_resize(size(px(1400.), px(800.)));
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        wait_until(cx, "the panel", |cx| {
+            host.read_with(cx, |h, _| {
+                h.prompt_panel(PanelLocation::PromptSide).is_some()
+            })
+        });
+        cx.simulate_keystrokes("secondary-n");
+        let slot = host.read_with(cx, |h, _| {
+            h.prompt_panel(PanelLocation::PromptSide)
+                .map(|p| p.view.clone())
+                .unwrap()
+        });
+        let draw = |lines: usize, cx: &mut VisualTestContext| {
+            let text = vec!["x"; lines].join("\n");
+            let tree = parse(&json!({"type": "text", "text": text}));
+            slot.update(cx, |p, cx| p.set_tree(tree, cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                ["draft-composer", "prompt-side"].map(|id| window.find(id).bounds())
+            })
+        };
+        let [field, _] = draw(1, cx);
+        let [moved, side] = draw(40, cx);
+        assert_eq!(moved, field);
+        assert!(side.size.height > field.size.height * 2., "{side:?}");
+        assert!(
+            (side.bottom() - field.bottom()).abs() < px(0.5),
+            "{side:?} {field:?}"
+        );
+    }
+
     /// The real wai-bichinho, built with `go`, draws its egg beside the focused prompt box.
     #[cfg(unix)]
     #[gpui_kit::test]
