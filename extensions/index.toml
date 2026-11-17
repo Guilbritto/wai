@@ -78,30 +78,61 @@ sha256 = "aecd5ab4762464d4d8dc2aaab524fbc803e4ff02ac4fd7f9766614b53005ba7e"
 [[extensions]]
 id = "wai-waycarbon"
 name = "WayCarbon"
-version = "0.5.1"
-description = "What needs you at WayCarbon: PRs, reviews, Jira cards and help requests, one click from the right /waycarbon command"
+version = "0.6.0"
+description = "What needs you at WayCarbon: PRs, reviews and Jira cards, one click from the right /waycarbon command"
 repository = "https://github.com/Guilbritto/wai"
 
 [extensions.packages.darwin-arm64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.5.1/wai-waycarbon-0.5.1-darwin-arm64.tar.gz"
-sha256 = "1df433988d20cf95b1c24103ae4c6b3db1fb649c107fa353687341b38d3ce887"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.6.0/wai-waycarbon-0.6.0-darwin-arm64.tar.gz"
+sha256 = "850e516b4e4ecfc9dd1665bf1b40aadf7d522eb70b26c8c425eb087b96bd9011"
 
 [extensions.packages.darwin-x64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.5.1/wai-waycarbon-0.5.1-darwin-x64.tar.gz"
-sha256 = "bcd40e75cefa96be45d3d2ac92d26cad02590e0fb29858238251aa26a232901a"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.6.0/wai-waycarbon-0.6.0-darwin-x64.tar.gz"
+sha256 = "b87fe8d08193558ba897658c324c69b2accd9155085def823d2d3f04d483aa0c"
 
 [extensions.packages.linux-arm64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.5.1/wai-waycarbon-0.5.1-linux-arm64.tar.gz"
-sha256 = "1e213306f3bab8696e5c60f70ccf7779e115b0042d77c75e03a0870c6222d469"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.6.0/wai-waycarbon-0.6.0-linux-arm64.tar.gz"
+sha256 = "430d81f56c0ab5e5a98bbbf1e1762951d40017fa12f375a102da03848296cde0"
 
 [extensions.packages.linux-x64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.5.1/wai-waycarbon-0.5.1-linux-x64.tar.gz"
-sha256 = "a470de07a147cc855250bce87dd0d20a8107c60c48742bbb69ba13fdc9ea8ee8"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.6.0/wai-waycarbon-0.6.0-linux-x64.tar.gz"
+sha256 = "093c4480eccb80e0adfdd47731fd7e25498e282442daa8864e5ae481d2b03558"
 
 [extensions.packages.windows-arm64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.5.1/wai-waycarbon-0.5.1-windows-arm64.tar.gz"
-sha256 = "df637f902e9ef1c4da60213f0a40cdb4bd9c8abdee8c3f419bc22ac4ef4a4287"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.6.0/wai-waycarbon-0.6.0-windows-arm64.tar.gz"
+sha256 = "fed12c8deec58cf3547331df585b820f3904cde4c894c6e53ea59c7309b88e22"
 
 [extensions.packages.windows-x64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.5.1/wai-waycarbon-0.5.1-windows-x64.tar.gz"
-sha256 = "b0bf504882a0298b3a9a04b6b4064b64dfe7d48472797354fb2aacab71563b7a"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-waycarbon-v0.6.0/wai-waycarbon-0.6.0-windows-x64.tar.gz"
+sha256 = "f8aad456e01257beb046535b7f93ccb6fcca60182222b3721bb7f4cc539d2393"
+
+[[extensions]]
+id = "wai-bichinho"
+name = "Bichinho"
+version = "0.1.0"
+description = "A small pet in your prompt box that grows with your agents' finished turns"
+repository = "https://github.com/Guilbritto/wai"
+
+[extensions.packages.darwin-arm64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.1.0/wai-bichinho-0.1.0-darwin-arm64.tar.gz"
+sha256 = "bcf8c0d2cc575c1705e03f22221b1f8426cc177be0f2a84271803e97520ac3d9"
+
+[extensions.packages.darwin-x64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.1.0/wai-bichinho-0.1.0-darwin-x64.tar.gz"
+sha256 = "e8963c0ca32b3474116e7541303096b9a6c09f842c181bf0deef578994781fa6"
+
+[extensions.packages.linux-arm64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.1.0/wai-bichinho-0.1.0-linux-arm64.tar.gz"
+sha256 = "d7f224c39ce9ab6e3cde8e6ae59a40525acea4cc5fa0f63c75c0bd53c32282cc"
+
+[extensions.packages.linux-x64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.1.0/wai-bichinho-0.1.0-linux-x64.tar.gz"
+sha256 = "196d29b2a2622d67b9be93c86720e4750697c20fae62a0537e6fd615ef3bfde4"
+
+[extensions.packages.windows-arm64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.1.0/wai-bichinho-0.1.0-windows-arm64.tar.gz"
+sha256 = "8e1bb8f0bf2c2050f1e9e29914f77581f52bdd1f410e00a3975a24d3a9b23cf7"
+
+[extensions.packages.windows-x64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.1.0/wai-bichinho-0.1.0-windows-x64.tar.gz"
+sha256 = "7a6d9c6fafefeeab1a6446970f649ee8c70277249090e17f6db7641b15e32797"
