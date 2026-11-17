@@ -105,3 +105,14 @@ sha256 = "c986c37eac6e5f5eec87263aa7187c2c92f4fc0a7ed0fdd8b3980ad4032a30ea"
 [extensions.packages.windows-x64]
 url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.2.1/wai-bichinho-0.2.1-windows-x64.tar.gz"
 sha256 = "2a5e9c02068f57c62d9c385a6a3765e770d9462503b8c31ad03d9034eab79b80"
+
+[[extensions]]
+id = "wai-navegador"
+name = "Navegador"
+version = "0.1.0"
+description = "Gives agents a browser: Playwright's MCP server, started with npx"
+repository = "https://github.com/Guilbritto/wai"
+
+[extensions.packages.any]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-navegador-v0.1.0/wai-navegador-0.1.0-any.tar.gz"
+sha256 = "654b6560ff8c307387cd268806630c6f224d681214b0e1d83e78d0e88072116c"
