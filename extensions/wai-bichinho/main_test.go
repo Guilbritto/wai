@@ -350,6 +350,26 @@ func TestPREvents(t *testing.T) {
 	}
 }
 
+func TestFirstPRsToFixSpeak(t *testing.T) {
+	h := start(t, t.TempDir())
+	id, _, _ := bubbleOf(h.action("hatch"))
+	h.bubbleDone(id)
+	h.now = h.now.Add(time.Minute)
+	pr := `{"jsonrpc":"2.0","method":"event/ext","params":{"source":"wai-waycarbon","name":"prs.mine","data":{"prs":[{"url":"https://github.com/o/r/pull/1","reason":"ci_failed"}]}}}`
+	id, text, _ := bubbleOf(h.send(pr))
+	if text != fallback["pr_fix"][0] {
+		t.Fatalf("a PR to fix at launch is said: %q", text)
+	}
+	if _, w := h.s.mood(h.now); w != "fix PR" {
+		t.Errorf("no flash for an old PR: %q", w)
+	}
+	h.bubbleDone(id)
+	h.now = h.now.Add(time.Minute)
+	if _, _, ok := bubbleOf(h.send(pr)); ok {
+		t.Error("the same PRs are said again")
+	}
+}
+
 func TestServeEndsAtEOF(t *testing.T) {
 	var out bytes.Buffer
 	s := newServer(&out, time.Now, seeded())

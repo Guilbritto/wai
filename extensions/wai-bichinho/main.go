@@ -194,19 +194,24 @@ func plural(n int, one, many string) string {
 }
 
 // gotPRs takes wai-waycarbon's prs.mine, the whole state each time, and flashes what changed since
-// the last one; the first only records, so a restart does not shout about old PRs.
+// the last one; the first only says once that PRs wait for a fix, without a flash or a note, so a
+// restart does not shout about old PRs.
 func (s *server) gotPRs(list []struct{ URL, Reason string }) {
 	prs := map[string]string{}
-	fix, approved := false, false
+	first := s.prs == nil
+	fix, approved, waiting := false, false, false
 	for _, p := range list {
 		prs[p.URL] = p.Reason
-		if s.prs != nil && s.prs[p.URL] != p.Reason {
+		waiting = waiting || attention(p.Reason)
+		if !first && s.prs[p.URL] != p.Reason {
 			fix = fix || attention(p.Reason)
 			approved = approved || p.Reason == "approved"
 		}
 	}
 	s.prs = prs
 	switch {
+	case first && waiting:
+		s.say("pr_fix")
 	case fix:
 		s.react("alert", "check PR")
 		s.say("pr_fix")
