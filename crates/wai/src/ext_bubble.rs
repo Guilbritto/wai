@@ -145,9 +145,9 @@ impl Bubble {
         }
     }
 
-    /// Something changes over time: popping, typing, holding, or leaving. False once ended or collapsed.
+    /// Something changes over time: popping, typing, holding, or leaving. False once ended, or collapsed and not leaving.
     pub(crate) fn animating(&self, _now: Instant) -> bool {
-        !self.ended && !self.collapsed()
+        !self.ended && (self.leaving.is_some() || !self.collapsed())
     }
 
     pub(crate) fn ended(&self) -> bool {
@@ -232,6 +232,18 @@ mod tests {
         assert!(look.collapsed);
         assert_eq!(look.left, 0.);
         assert!(!b.animating(t0 + ms(60_000)));
+    }
+
+    #[test]
+    fn clicked_collapsed_bubble_keeps_animating_until_it_leaves() {
+        let t0 = Instant::now();
+        let mut b = Bubble::new("Ei!".into(), true, t0);
+        assert_eq!(b.advance(t0 + ms(7_000), false), None);
+        assert!(!b.animating(t0 + ms(7_000)));
+        assert!(b.click(t0 + ms(7_000)));
+        assert!(b.animating(t0 + ms(7_000)));
+        assert_eq!(b.advance(t0 + ms(7_150), false), Some(Ended::Click));
+        assert!(!b.animating(t0 + ms(7_150)));
     }
 
     #[test]
