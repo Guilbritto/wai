@@ -26,7 +26,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::{Map, Value};
 use wai_ext::panel::{
-    ButtonStyle, Column, Confirm, Item, Node, Pick, Tab, TableRow, Tone, TooLarge,
+    ButtonStyle, Column, Confirm, Item, Node, Pick, Tab, TableRow, TextStyle, Tone, TooLarge,
 };
 
 use crate::campo;
@@ -36,6 +36,7 @@ use crate::path_field::{self, PathField};
 const TWO_LINE_ROW: f32 = 42.;
 /// A table row, or a list row of one line.
 const ROW_HEIGHT: f32 = 30.;
+const PLAIN_ROW_HEIGHT: f32 = 32.;
 /// The space between loose rows.
 const ROW_GAP: f32 = 4.;
 /// A list, table or log without `fill` shows at most this many rows (lines) and scrolls the rest.
@@ -410,10 +411,10 @@ impl ExtPanel {
                 items,
                 subtitles,
                 fill,
-                ..
+                plain,
             } => {
                 let fill = *fill && at.column;
-                return (self.list(k, items, *subtitles, fill, cx), fill);
+                return (self.list(k, items, *subtitles, *plain, fill, cx), fill);
             }
             Node::Table {
                 columns,
@@ -904,16 +905,21 @@ impl ExtPanel {
         k: usize,
         items: &Arc<[Option<Item>]>,
         subtitles: bool,
+        plain: bool,
         fill: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let height = if subtitles { TWO_LINE_ROW } else { ROW_HEIGHT };
+        let height = match (subtitles, plain) {
+            (true, _) => TWO_LINE_ROW,
+            (false, true) => PLAIN_ROW_HEIGHT,
+            (false, false) => ROW_HEIGHT,
+        };
         let rows = items.len().min(LIST_ROWS) as f32;
         let height = height + ROW_GAP;
         let (items, this) = (items.clone(), cx.weak_entity());
         uniform_list(("panel-list", k), items.len(), move |range, _, cx| {
             range
-                .map(|ix| row(ix, items[ix].as_ref(), height, &this, cx))
+                .map(|ix| row(ix, items[ix].as_ref(), height, plain, &this, cx))
                 .collect::<Vec<_>>()
         })
         .w_full()
@@ -1106,6 +1112,7 @@ fn row(
     ix: usize,
     item: Option<&Item>,
     height: f32,
+    plain: bool,
     panel: &WeakEntity<ExtPanel>,
     cx: &App,
 ) -> AnyElement {
@@ -1125,19 +1132,71 @@ fn row(
             .truncate()
             .child(s)
     });
+    let muted = theme.muted_foreground;
     let title = div()
         .text_sm()
+        .when(plain, |el| el.font_weight(FontWeight::SEMIBOLD))
+        .min_w_0()
         .truncate()
         .child(SharedString::from(&item.title));
-    let item = campo::loose_row(cx)
+    let note = (item.note.as_ref()).map(|n| {
+        let n = SharedString::from(n);
+        div()
+            .text_sm()
+            .text_color(muted)
+            .min_w_0()
+            .truncate()
+            .child(n)
+    });
+    let icon = (item.icon.as_deref().and_then(lucide)).map(|icon| {
+        div()
+            .id(name("panel-item-icon", &item.id))
+            .flex_none()
+            .child(
+                Icon::new(icon)
+                    .small()
+                    .text_color(tone_color(item.tone, cx)),
+            )
+            .test_support()
+    });
+    let lead = (item.lead.as_ref()).map(|l| {
+        div()
+            .flex_none()
+            .text_xs()
+            .text_color(muted)
+            .child(SharedString::from(l))
+    });
+    let violet = campo::violet(cx);
+    let base = match plain {
+        true => h_flex()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .hover(move |el| el.bg(violet.opacity(0.16)))
+            .when(item.selected, |el| {
+                el.border_color(violet).bg(campo::glass_hover(cx))
+            }),
+        false => campo::loose_row(cx).when(item.selected, |el| el.border_color(violet)),
+    };
+    // Title and note share one truncating line; a subtitle goes under the title when there is one.
+    let text = h_flex()
+        .gap_2()
+        .min_w_0()
+        .overflow_hidden()
+        .child(title)
+        .children(note);
+    let item = base
         .h(px(height))
         .px_2()
         .gap_2()
         .text_color(theme.foreground)
         .id(("panel-item", ix))
         .cursor_pointer()
-        .child(v_flex().flex_1().min_w_0().child(title).children(subtitle))
-        .children((item.badge.as_ref()).map(|b| campo::badge(b.to_string(), Tone::Neutral, cx)))
+        .when(item.indent, |el| el.pl(px(16.)))
+        .children(icon)
+        .children(lead)
+        .child(v_flex().flex_1().min_w_0().child(text).children(subtitle))
+        .children((item.badge.as_ref()).map(|b| campo::badge(b.to_string(), item.tone, cx)))
         .on_click(move |_, _, cx| {
             panel
                 .update(cx, |panel, cx| panel.act(action.clone(), cx))
@@ -1223,15 +1282,24 @@ fn leaf(node: &Node, k: usize, cx: &App) -> AnyElement {
             text,
             muted: dim,
             mono,
-            ..
-        } => div()
-            .text_sm()
-            .when(*dim, |el| el.text_color(muted))
-            .when(*mono, |el| {
-                el.font_family(cx.theme().mono_font_family.clone())
-            })
-            .child(SharedString::from(text))
-            .into_any_element(),
+            style,
+        } => match style {
+            TextStyle::Label => campo::label(text.to_string(), cx),
+            TextStyle::Plain => div().text_sm().child(SharedString::from(text)),
+            TextStyle::Strong => div()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(SharedString::from(text)),
+            TextStyle::Heading => div()
+                .text_base()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(SharedString::from(text)),
+        }
+        .when(*dim, |el| el.text_color(muted))
+        .when(*mono, |el| {
+            el.font_family(cx.theme().mono_font_family.clone())
+        })
+        .into_any_element(),
         Node::Badge { text, tone } => h_flex()
             .child(campo::badge(text.to_string(), *tone, cx))
             .into_any_element(),
@@ -1775,6 +1843,9 @@ mod tests {
                 {"type": "button", "id": "b", "label": "B", "icon": "copy", "disabled": true},
                 {"type": "badge", "text": "d", "tone": "danger"},
                 {"type": "progress", "value": 0.4},
+                {"type": "text", "text": "T", "style": "heading"},
+                {"type": "text", "text": "T", "style": "strong"},
+                {"type": "text", "text": "T", "style": "label", "mono": true, "muted": true},
                 {"type": "path", "id": "pa", "pick": "file"},
                 {"type": "path", "id": "pb", "pick": "folder", "editable": false, "value": "/opt"},
             ]}),
@@ -1786,6 +1857,68 @@ mod tests {
         assert!(shown(("panel-row", 1usize), cx));
         assert!(shown(("panel-log-line", 1usize), cx));
         assert!(lucide("git-pull-request").is_some() && lucide("no-such-icon").is_none());
+    }
+
+    /// A plain list's rows draw the icon, tone, selection, lead and note; a click still sends the id.
+    #[gpui_kit::test]
+    fn plain_list_rows_carry_icon_tone_and_selection(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        show(
+            &panel,
+            json!({"type": "column", "children": [{"type": "list", "plain": true, "items": [
+                {"id": "a", "title": "A", "icon": "check", "tone": "success", "badge": "Approved",
+                 "selected": true, "lead": "inventories", "note": "x"},
+                {"id": "b", "title": "B", "indent": true},
+            ]}]}),
+            cx,
+        );
+        assert!(shown(name("panel-item-icon:a"), cx));
+        assert!(!shown(name("panel-item-icon:b"), cx));
+        click(("panel-item", 1usize), cx);
+        assert_eq!(sent(&actions), ["b"]);
+    }
+
+    /// An icon the panel does not know drops only the icon.
+    #[gpui_kit::test]
+    fn unknown_item_icon_still_renders_the_row(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        show(
+            &panel,
+            json!({"type": "column", "children": [{"type": "list", "plain": true, "items": [
+                {"id": "a", "title": "A", "icon": "no-such-icon"},
+            ]}]}),
+            cx,
+        );
+        assert!(shown(("panel-item", 0usize), cx));
+        assert!(!shown(name("panel-item-icon:a"), cx));
+        assert!(cx.debug_bounds("panel-unsupported").is_none());
+        click(("panel-item", 0usize), cx);
+        assert_eq!(sent(&actions), ["a"]);
+    }
+
+    /// Lead, title and note stay on one line: the long row is as tall as a short one.
+    #[gpui_kit::test]
+    fn long_item_text_stays_on_one_line(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        let long = "w".repeat(300);
+        show(
+            &panel,
+            json!({"type": "column", "width": 200, "children": [{"type": "list", "plain": true, "items": [
+                {"id": "s", "title": "Short"},
+                {"id": "l", "title": long, "lead": long, "note": long},
+            ]}]}),
+            cx,
+        );
+        let height = |ix: usize, cx: &mut VisualTestContext| {
+            cx.update(|window, _| window.find(("panel-item", ix)).bounds().size.height)
+        };
+        assert_eq!(height(1, cx), height(0, cx));
     }
 
     /// A path field sends its path with `~` expanded; one outside home goes as it is.
