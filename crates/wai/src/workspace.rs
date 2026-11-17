@@ -304,6 +304,8 @@ pub struct Workspace {
     /// The bar items the user hid, and the rail's order; kept in `state.json`.
     pub(crate) hidden: BTreeSet<String>,
     pub(crate) rail_order: Vec<String>,
+    /// Ids of the Claude sessions at 1M (see `context_meta`); kept in `state.json`.
+    pub(crate) long_context: BTreeSet<String>,
     /// The agent commands and shells the user allowed; kept in `state.json`, never in
     /// `settings.toml`.
     pub approved: BTreeSet<String>,
@@ -516,6 +518,7 @@ impl Workspace {
             }),
             open_folded: false,
             hidden: BTreeSet::new(),
+            long_context: BTreeSet::new(),
             rail_order: Vec::new(),
             approved,
             shell,
@@ -878,6 +881,8 @@ impl Workspace {
                 group.color = (ix % GROUP_COLORS.len()) as u8;
             }
         }
+        // Before the loads: each one's `_meta` follows it.
+        self.long_context = state.long_context;
         let mut panes: [Option<Entity<ChatSession>>; MAX_PANES] = Default::default();
         for saved in state.open_sessions {
             let (agent, id, cwd) = (&saved.agent, &saved.session_id, &saved.cwd);
@@ -1065,6 +1070,7 @@ impl Workspace {
             active_file,
             open_folded: self.open_folded,
             hidden: self.hidden.clone(),
+            long_context: self.long_context.clone(),
             rail_order: self.rail_order.clone(),
         };
         // ponytail: a few hundred bytes on the UI thread; move to the background executor if
@@ -1235,6 +1241,15 @@ impl Workspace {
                     this.save_state(cx);
                 }
                 ChatEvent::Bound => return this.claim(session, cx),
+                ChatEvent::ContextChanged => {
+                    let s = session.read(cx);
+                    if s.long_context {
+                        this.long_context.insert(s.id.clone());
+                    } else {
+                        this.long_context.remove(&s.id);
+                    }
+                    return this.save_state(cx);
+                }
                 ChatEvent::RateLimit(r) => return this.set_rate_limit(r.clone(), cx),
                 ChatEvent::OpenFile { path, line } => {
                     return this.open_file(path.clone(), Some(*line), window, cx);
@@ -1710,10 +1725,15 @@ impl Workspace {
         };
         let mcp = self.registry.read(cx).mcp_servers();
         let title = title.map(|t| format!("{t} (fork)"));
+        let long = self.long_context.contains(&id);
         cx.spawn_in(window, async move |this, cx| {
-            let forked = handle.fork_session(id, cwd.clone(), mcp, None).await;
+            let meta = crate::chat::context_meta(long);
+            let forked = handle.fork_session(id, cwd.clone(), mcp, meta).await;
             this.update_in(cx, |this, window, cx| match forked {
                 Ok(started) => {
+                    if long {
+                        this.long_context.insert(started.id.clone());
+                    }
                     let Some(session) = this.loading_session(agent, started.id, cwd, window, cx)
                     else {
                         return;
@@ -1742,6 +1762,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<Entity<ChatSession>> {
         let handle = self.registry.update(cx, |r, cx| r.handle(&agent, cx))?;
+        let long = self.long_context.contains(&id);
         let started = SessionStarted {
             id,
             modes: Vec::new(),
@@ -1749,8 +1770,11 @@ impl Workspace {
             config: Vec::new(),
         };
         let registry = self.registry.downgrade();
-        let session =
-            cx.new(|cx| ChatSession::new(agent, started, cwd, handle, registry, window, cx));
+        let session = cx.new(|cx| {
+            let mut s = ChatSession::new(agent, started, cwd, handle, registry, window, cx);
+            s.long_context = long;
+            s
+        });
         self.add_session(session.clone(), window, cx);
         Some(session)
     }
@@ -5424,6 +5448,144 @@ pub(crate) mod tests {
         });
         assert!(workspace.read_with(cx, |w, _| w.sessions.is_empty()));
         assert_eq!(AppState::load(&path).open_sessions, []);
+    }
+
+    /// Once `session` is idle, sends "hi": the `--echo-meta` fake's reply, `meta:<json>`.
+    fn meta_reply(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> String {
+        let idle = |cx: &mut VisualTestContext| {
+            session.read_with(cx, |s, _| s.model.state == TurnState::Idle)
+        };
+        wait_until(cx, "the load", idle);
+        assert!(session.update(cx, |s, cx| s.send_settled("hi", cx)));
+        let echoed = |cx: &mut VisualTestContext| {
+            session.read_with(cx, |s, _| {
+                let idle = s.model.state == TurnState::Idle;
+                let reply = s.model.items.iter().find_map(|item| match item {
+                    ChatItem::Agent { text } if text.starts_with("meta:") => Some(text.clone()),
+                    _ => None,
+                });
+                reply.filter(|_| idle)
+            })
+        };
+        wait_until(cx, "the reply", |cx| echoed(cx).is_some());
+        echoed(cx).unwrap()
+    }
+
+    const ONE_MILLION: &str = r#""CLAUDE_CODE_DISABLE_1M_CONTEXT":"0""#;
+
+    fn reload(session: &Entity<ChatSession>, long: bool, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            session.update(cx, |s, cx| {
+                s.long_context = long;
+                s.load(false, window, cx)
+            })
+        });
+    }
+
+    #[gpui_kit::test]
+    fn long_session_loads_with_meta(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--echo-meta"));
+        let session = start_now(&workspace, cx);
+        let id = session.read_with(cx, |s, _| s.id.clone());
+        workspace.update(cx, |w, _| w.long_context.insert(id));
+        reload(&session, true, cx);
+        let reply = meta_reply(&session, cx);
+        assert!(reply.starts_with(r#"meta:{"claudeCode""#), "{reply}");
+        assert!(reply.contains(ONE_MILLION), "{reply}");
+    }
+
+    #[gpui_kit::test]
+    fn short_session_loads_without_meta(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--echo-meta"));
+        let session = start_now(&workspace, cx);
+        reload(&session, false, cx);
+        assert_eq!(meta_reply(&session, cx), "meta:");
+    }
+
+    /// A 1M session comes back at 1M, whether restored at launch or reopened from History.
+    #[gpui_kit::test]
+    fn restore_sends_meta_for_long_ids(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = AppState {
+            open_sessions: vec![saved("fake", "abc", 0)],
+            long_context: ["abc".to_string()].into(),
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        let flags = format!(
+            "--echo-meta --sessions 2 --sessions-cwd {}",
+            wai_agent::quote(std::env::temp_dir())
+        );
+        let (workspace, cx) = open_at(cx, fake_settings(&flags), Some(path.clone()));
+        launch(&workspace, cx);
+        let session = pane_session(&workspace, 0, cx);
+        assert!(session.read_with(cx, |s, _| s.long_context));
+        assert!(meta_reply(&session, cx).contains(ONE_MILLION));
+        assert!(AppState::load(&path).long_context.contains("abc"));
+
+        let rows = load_history(&workspace, 2, cx);
+        let row = rows.iter().find(|r| r.id != "abc").unwrap().clone();
+        workspace.update(cx, |w, _| w.long_context.insert(row.id.clone()));
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&row, true, window, cx)));
+        let session = workspace.read_with(cx, |w, cx| w.session("fake", &row.id, cx).unwrap());
+        assert!(session.read_with(cx, |s, _| s.long_context));
+        assert!(meta_reply(&session, cx).contains(ONE_MILLION));
+    }
+
+    #[gpui_kit::test]
+    fn fork_inherits_long_context(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let flags = format!(
+            "--echo-meta --sessions 1 --sessions-cwd {}",
+            wai_agent::quote(std::env::temp_dir())
+        );
+        let (workspace, cx) = open(cx, fake_settings(&flags));
+        let rows = load_history(&workspace, 1, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.resume(&rows[0], false, window, cx)));
+        let source = pane_session(&workspace, 0, cx);
+        source.update(cx, |s, cx| {
+            s.long_context = true;
+            cx.emit(ChatEvent::ContextChanged);
+        });
+        assert!(workspace.read_with(cx, |w, _| w.long_context.contains(&rows[0].id)));
+
+        let (id, cwd) = (rows[0].id.clone(), rows[0].cwd.clone());
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| w.fork("fake".into(), id, None, cwd, window, cx))
+        });
+        wait_until(cx, "the fork", |cx| {
+            workspace.read_with(cx, |w, _| w.panes.len() == 2)
+        });
+        let fork = pane_session(&workspace, 1, cx);
+        let fork_id = fork.read_with(cx, |s, _| s.id.clone());
+        assert!(workspace.read_with(cx, |w, _| w.long_context.contains(&fork_id)));
+        assert!(fork.read_with(cx, |s, _| s.long_context));
+        assert!(meta_reply(&fork, cx).contains(ONE_MILLION));
+    }
+
+    /// A 1M session the agent no longer has keeps its size for a launch that can load it.
+    #[gpui_kit::test]
+    fn failed_load_keeps_long_context(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = AppState {
+            open_sessions: vec![saved("fake", "missing-1", 0)],
+            long_context: ["missing-1".to_string()].into(),
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        let (workspace, cx) = open_at(cx, fake_settings("--echo-meta"), Some(path.clone()));
+        launch(&workspace, cx);
+        wait_until(cx, "the failure", |cx| {
+            workspace.read_with(cx, |w, _| w.sessions.is_empty())
+        });
+        assert!(workspace.read_with(cx, |w, _| w.long_context.contains("missing-1")));
+        assert!(AppState::load(&path).long_context.contains("missing-1"));
     }
 
     /// R57: an extension's sessions reuse the pane of its last one (R61: unless the user is in

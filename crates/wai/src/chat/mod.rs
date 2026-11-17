@@ -1,6 +1,7 @@
 mod agents;
 mod commands;
 mod composer;
+mod context;
 mod draft;
 mod edits;
 mod input;
@@ -11,6 +12,7 @@ mod render;
 mod view;
 
 pub use composer::{PromptSlot, PromptSlots};
+pub(crate) use context::context_meta;
 pub use draft::{DraftData, DraftEvent, DraftView};
 #[cfg(test)]
 pub use input::Attachment;

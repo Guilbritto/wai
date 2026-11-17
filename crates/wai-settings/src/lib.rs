@@ -533,6 +533,10 @@ pub struct AppState {
     pub hidden: BTreeSet<String>,
     /// The rail's keys in the user's order.
     pub rail_order: Vec<String>,
+    /// Ids of the Claude sessions that run with a 1M context window (the rest run at 200k).
+    // ponytail: ids of deleted sessions stay in the set; prune when it shows up in state size.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub long_context: BTreeSet<String>,
 }
 
 /// A named group of open sessions.
@@ -608,6 +612,7 @@ impl Default for AppState {
             open_folded: false,
             hidden: BTreeSet::new(),
             rail_order: Vec::new(),
+            long_context: BTreeSet::new(),
         }
     }
 }
@@ -1047,6 +1052,7 @@ mod tests {
             shown_area: Some(0),
             hidden: ["wai.files".to_string()].into(),
             rail_order: vec!["wai.search".to_string()],
+            long_context: BTreeSet::new(),
         };
         state.save(&path).unwrap();
         assert_eq!(AppState::load(&path), state);
@@ -1080,6 +1086,36 @@ mod tests {
         let old = r#"{"groups":[{"name":"g","collapsed":false,"sessions":[]}]}"#;
         std::fs::write(&path, old).unwrap();
         assert_eq!(AppState::load(&path).groups[0].color, 0);
+    }
+
+    #[test]
+    fn long_context_round_trips() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("state.json");
+        let state = AppState {
+            long_context: ["fake-1".to_string()].into(),
+            ..AppState::default()
+        };
+        state.save(&path).unwrap();
+        assert_eq!(AppState::load(&path).long_context, state.long_context);
+        // None at all leaves the key out.
+        AppState::default().save(&path).unwrap();
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("long_context")
+        );
+    }
+
+    #[test]
+    fn state_without_long_context_loads() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("state.json");
+        let old = r#"{"open_sessions":[{"agent":"a","session_id":"s","cwd":"/","pane":0}]}"#;
+        std::fs::write(&path, old).unwrap();
+        let state = AppState::load(&path);
+        assert_eq!(state.open_sessions[0].session_id, "s");
+        assert!(state.long_context.is_empty());
     }
 
     #[test]

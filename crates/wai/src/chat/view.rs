@@ -69,6 +69,8 @@ pub enum ChatEvent {
     Hide,
     /// Esc or Stop in a chat whose session has not started: back to the draft.
     StopStart,
+    /// The session's `long_context` changed.
+    ContextChanged,
 }
 
 /// Brings `map[key]` up to date with `text`: creates it, pushes the new tail, or starts over
@@ -164,6 +166,8 @@ pub struct ChatSession {
     settling: usize,
     /// A history resume or restore is replaying: not a turn, whatever the state says.
     loading: bool,
+    /// Runs with a 1M context window: loads carry `context_meta`.
+    pub(crate) long_context: bool,
     /// Queued text going back to the prompt box at the next frame (which has the window).
     pub(super) unsent: Option<String>,
     /// The `/` menu's selected row, its scroll, and whether Esc closed it.
@@ -273,6 +277,7 @@ impl ChatSession {
             first: None,
             settling: 0,
             loading: false,
+            long_context: false,
             unsent: None,
             menu_ix: 0,
             menu_scroll: ScrollHandle::new(),
@@ -1085,8 +1090,9 @@ impl ChatSession {
         self.since = None;
         self.loading = true;
         let (id, cwd, registry) = (self.id.clone(), self.cwd.clone(), self.registry.clone());
+        let meta = super::context::context_meta(self.long_context);
         cx.spawn_in(window, async move |this, cx| {
-            let loaded = handle.load_session(id, cwd, mcp, None).await;
+            let loaded = handle.load_session(id, cwd, mcp, meta).await;
             this.update_in(cx, |this, window, cx| {
                 this.loading = false;
                 if let Some(dir) = this.replayed.take() {
