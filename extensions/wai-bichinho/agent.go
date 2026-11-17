@@ -75,7 +75,7 @@ func persona(p *Pet) string {
 	default:
 		b.WriteString(" You are grown: use full short sentences that may recall your diary.")
 	}
-	b.WriteString("\n\nRules: write in Brazilian Portuguese. At most 60 characters per line. No emoji except ♥, and no quotes. Never mention being an AI and never give coding advice. Keep it friendly.")
+	b.WriteString("\n\nRules: write in Brazilian Portuguese. At most 60 characters per line. No emoji except ♥, and no quotes. Never mention being an AI and never give coding advice. Never mention the owner's email, account, name or any other personal data from your context; talk only about yourself. Keep it friendly.")
 	return b.String()
 }
 

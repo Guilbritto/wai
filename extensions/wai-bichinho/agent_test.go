@@ -27,6 +27,11 @@ func TestPersonaFollowsStats(t *testing.T) {
 			t.Errorf("persona has %q:\n%s", no, p)
 		}
 	}
+	for _, xp := range []int{0, 625} {
+		if !strings.Contains(persona(petWith([4]int{5, 5, 5, 5}, xp)), "Never mention the owner's email, account, name or any other personal data") {
+			t.Errorf("no privacy rule at xp %d", xp)
+		}
+	}
 	if !strings.Contains(p, "baby talk") || strings.Contains(p, "diary") {
 		t.Errorf("level 1:\n%s", p)
 	}
