@@ -670,3 +670,38 @@ fn one_million_context_via_meta() {
         std::fs::remove_dir_all(&dir).ok();
     })
 }
+
+/// A session with no turn yet (opened with a prefilled prompt) switches to 1M too: the load
+/// finds no transcript to resume.
+#[test]
+#[ignore = "spawns the real Claude adapter; needs a signed-in Claude Code"]
+fn zero_turn_session_loads_with_meta() {
+    run(async {
+        let dir = std::env::temp_dir().join(format!("wai-real-claude-0t-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = wai_settings::canonical(&dir);
+        let meta: Meta = serde_json::from_value(serde_json::json!({"claudeCode": {"options": {
+            "settings": {"env": {"CLAUDE_CODE_DISABLE_1M_CONTEXT": "0"}},
+            "env": {"CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS": "1000000"}
+        }}}))
+        .unwrap();
+        let (agent, rx) = spawn();
+        ready(&rx).await;
+        let id = agent
+            .new_session(dir.clone(), vec![])
+            .await
+            .expect("new")
+            .id;
+        let loaded = agent
+            .load_session(id.clone(), dir.clone(), vec![], Some(meta))
+            .await;
+        println!("zero-turn load: {:?}", loaded.as_ref().map(|_| ()));
+        loaded.expect("a session with no turn loads");
+        while rx.try_recv().is_ok() {}
+        let (_, size) = sized_turn(&agent, &rx, &id, "Reply with the word ok.").await;
+        println!("zero-turn load + meta: size {size}");
+        assert!(size >= 900_000, "the meta turns 1M on");
+        agent.shutdown().await;
+        std::fs::remove_dir_all(&dir).ok();
+    })
+}
