@@ -55,6 +55,8 @@ jobs:
       - run: go test ./...
         if: runner.os != 'Windows'
         working-directory: extensions/wai-rotinas
+      - run: go vet ./... && go test ./...
+        working-directory: docs/storybook
 
   licenses:
     runs-on: ubuntu-latest

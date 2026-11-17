@@ -1,0 +1,24 @@
+id = "wai-storybook"
+name = "Storybook"
+version = "0.1.0"
+description = "Development only, never published: every panel and bar-item component of the extension API, live, with its JSON"
+api = "1.5"
+permissions = ["process", "panels", "bar"]
+
+[process]
+command = "bin/wai-storybook"
+
+[[contributes.commands]]
+id = "open"
+title = "Storybook: open"
+
+[[contributes.panels]]
+id = "stories"
+title = "Storybook"
+icon = "book-open"
+location = "main"
+
+[[contributes.items]]
+id = "story"
+bar = "bottom"
+title = "Storybook"

@@ -1,0 +1,429 @@
+[
+  {
+    "id": "layout",
+    "title": "Layout",
+    "stories": [
+      {
+        "id": "column",
+        "title": "column",
+        "note": "Stacks children vertically",
+        "nodes": [
+          { "type": "column", "children": [
+            { "type": "text", "text": "First" },
+            { "type": "text", "text": "Second" },
+            { "type": "text", "text": "Third" }
+          ] }
+        ]
+      },
+      {
+        "id": "row",
+        "title": "row",
+        "note": "Side by side; wraps when there is no room",
+        "nodes": [
+          { "type": "row", "children": [
+            { "type": "icon", "name": "git-branch" },
+            { "type": "text", "text": "main" },
+            { "type": "badge", "text": "3 ahead", "tone": "info" }
+          ] },
+          { "type": "row", "children": [
+            { "type": "badge", "text": "alpha" }, { "type": "badge", "text": "beta" }, { "type": "badge", "text": "gamma" },
+            { "type": "badge", "text": "delta" }, { "type": "badge", "text": "epsilon" }, { "type": "badge", "text": "zeta" },
+            { "type": "badge", "text": "eta" }, { "type": "badge", "text": "theta" }, { "type": "badge", "text": "iota" },
+            { "type": "badge", "text": "kappa" }, { "type": "badge", "text": "lambda" }, { "type": "badge", "text": "omicron" }
+          ] }
+        ]
+      },
+      {
+        "id": "card",
+        "title": "card",
+        "note": "Bordered; header is icon, title, subtitle, badge. With id the whole card is clickable",
+        "nodes": [
+          { "type": "card", "children": [{ "type": "text", "text": "A card with no header" }] },
+          { "type": "card", "title": "Deploy", "subtitle": "staging, 2 min ago", "badge": "ok", "icon": "rocket",
+            "children": [{ "type": "text", "text": "Children go below the header", "muted": true }] },
+          { "type": "card", "id": "card-click", "title": "Clickable card", "subtitle": "Click, Enter or Space sends panel/action card-click", "icon": "mouse-pointer-click" }
+        ]
+      },
+      {
+        "id": "section",
+        "title": "section",
+        "note": "Collapsible; open is an initial value",
+        "nodes": [
+          { "type": "section", "id": "section-open", "title": "Open section", "badge": "2", "children": [
+            { "type": "text", "text": "Collapse me: the state survives re-renders" }
+          ] },
+          { "type": "section", "id": "section-closed", "title": "Closed section", "open": false, "children": [
+            { "type": "text", "text": "Hidden until expanded" }
+          ] }
+        ]
+      },
+      {
+        "id": "tabs",
+        "title": "tabs",
+        "note": "API 1.5. Switching is local; hidden form fields keep their values",
+        "nodes": [
+          { "type": "tabs", "id": "tabs-demo", "value": "two", "tabs": [
+            { "id": "one", "title": "One", "children": [{ "type": "text", "text": "First tab" }] },
+            { "id": "two", "title": "Two", "badge": "3", "children": [{ "type": "text", "text": "Starts selected (value = two)" }] },
+            { "id": "three", "title": "Three", "children": [
+              { "type": "input", "id": "tabs-demo-input", "placeholder": "Type, switch tabs, come back" }
+            ] }
+          ] }
+        ]
+      },
+      {
+        "id": "divider",
+        "title": "divider",
+        "note": "A horizontal line",
+        "nodes": [
+          { "type": "text", "text": "Above" },
+          { "type": "divider" },
+          { "type": "text", "text": "Below" }
+        ]
+      },
+      {
+        "id": "spacer",
+        "title": "spacer",
+        "note": "In a row, takes the free space",
+        "nodes": [
+          { "type": "row", "children": [
+            { "type": "text", "text": "Left" }, { "type": "spacer" }, { "type": "text", "text": "Right" }
+          ] },
+          { "type": "row", "children": [
+            { "type": "icon", "name": "inbox" }, { "type": "text", "text": "Inbox" }, { "type": "spacer" },
+            { "type": "button", "id": "spacer-btn", "label": "Refresh", "icon": "refresh-cw" }
+          ] }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "content",
+    "title": "Content",
+    "stories": [
+      {
+        "id": "text",
+        "title": "text",
+        "note": "Up to 10,000 characters; muted and mono",
+        "nodes": [
+          { "type": "text", "text": "Plain text" },
+          { "type": "text", "text": "Muted text", "muted": true },
+          { "type": "text", "text": "Monospace text: go build ./...", "mono": true },
+          { "type": "text", "text": "Long text wraps. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris." }
+        ]
+      },
+      {
+        "id": "markdown",
+        "title": "markdown",
+        "note": "Up to 10,000 characters",
+        "nodes": [
+          { "type": "markdown", "text": "## Heading\n\nSome **bold**, *italic* and `inline code`, with a [link](https://lucide.dev/icons).\n\n- one\n- two\n  - nested\n\n1. first\n2. second\n\n> A quote\n\n```go\nfmt.Println(\"code block\")\n```" }
+        ]
+      },
+      {
+        "id": "badge",
+        "title": "badge",
+        "note": "tone: neutral (default), info, success, warning, danger",
+        "nodes": [
+          { "type": "row", "children": [
+            { "type": "badge", "text": "neutral" },
+            { "type": "badge", "text": "info", "tone": "info" },
+            { "type": "badge", "text": "success", "tone": "success" },
+            { "type": "badge", "text": "warning", "tone": "warning" },
+            { "type": "badge", "text": "danger", "tone": "danger" }
+          ] }
+        ]
+      },
+      {
+        "id": "icon",
+        "title": "icon",
+        "note": "Any bundled Lucide name, kebab-case; same tones as badge",
+        "nodes": [
+          { "type": "row", "children": [
+            { "type": "icon", "name": "git-pull-request" },
+            { "type": "icon", "name": "info", "tone": "info" },
+            { "type": "icon", "name": "circle-check", "tone": "success" },
+            { "type": "icon", "name": "triangle-alert", "tone": "warning" },
+            { "type": "icon", "name": "circle-x", "tone": "danger" },
+            { "type": "icon", "name": "database" },
+            { "type": "icon", "name": "rocket" },
+            { "type": "icon", "name": "terminal" }
+          ] }
+        ]
+      },
+      {
+        "id": "link",
+        "title": "link",
+        "note": "https:// or http:// only; opens the browser, sends no action",
+        "nodes": [
+          { "type": "link", "text": "Lucide icons", "url": "https://lucide.dev/icons" }
+        ]
+      },
+      {
+        "id": "alert",
+        "title": "alert",
+        "note": "tone: info, success, warning, danger; title optional",
+        "nodes": [
+          { "type": "alert", "tone": "info", "title": "Info", "text": "Something you may want to know." },
+          { "type": "alert", "tone": "success", "title": "Success", "text": "It worked." },
+          { "type": "alert", "tone": "warning", "title": "Warning", "text": "Restoring replaces the target database." },
+          { "type": "alert", "tone": "danger", "title": "Danger", "text": "The build failed." },
+          { "type": "alert", "tone": "info", "text": "An alert without a title." }
+        ]
+      },
+      {
+        "id": "kv",
+        "title": "kv",
+        "note": "Keys and values, one line each; at most 200",
+        "nodes": [
+          { "type": "kv", "items": [
+            { "key": "Branch", "value": "development" },
+            { "key": "Started", "value": "14:02" },
+            { "key": "By", "value": "you" }
+          ] }
+        ]
+      },
+      {
+        "id": "progress",
+        "title": "progress",
+        "note": "value from 0 to 1, clamped",
+        "nodes": [
+          { "type": "progress", "value": 0 },
+          { "type": "progress", "value": 0.4 },
+          { "type": "progress", "value": 1 }
+        ]
+      },
+      {
+        "id": "spinner",
+        "title": "spinner",
+        "note": "label optional",
+        "nodes": [
+          { "type": "spinner" },
+          { "type": "spinner", "label": "Loading pull requests…" }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "data",
+    "title": "Lists & tables",
+    "stories": [
+      {
+        "id": "list",
+        "title": "list",
+        "note": "Clicking an item sends panel/action with its id; 12 rows then scrolls (fill: grows)",
+        "nodes": [
+          { "type": "list", "items": [
+            { "id": "list:1", "title": "EC-1234 Paginate the inventory list", "subtitle": "In progress", "badge": "3" },
+            { "id": "list:2", "title": "EC-1235 Fix the date filter", "subtitle": "Code review" },
+            { "id": "list:3", "title": "EC-1236 Export to CSV", "badge": "new" }
+          ] }
+        ]
+      },
+      {
+        "id": "table",
+        "title": "table",
+        "note": "Cells: string, text, badge, link, icon, button, menu, spinner, progress. Rows with id are clickable",
+        "nodes": [
+          { "type": "table",
+            "columns": [
+              { "title": "", "width": 28 },
+              { "title": "Repo", "width": 90 },
+              { "title": "Title" },
+              { "title": "CI", "width": 90 },
+              { "title": "Done", "width": 80 },
+              { "title": "", "width": 70 },
+              { "title": "", "width": 36 }
+            ],
+            "rows": [
+              { "id": "row:wai#42", "cells": [
+                { "type": "icon", "name": "git-pull-request", "tone": "success" },
+                "wai",
+                { "type": "link", "text": "Extension panels v2", "url": "https://github.com/example/wai/pull/42" },
+                { "type": "badge", "text": "passing", "tone": "success" },
+                { "type": "progress", "value": 1 },
+                { "type": "button", "id": "table-open-42", "label": "Open" },
+                { "type": "menu", "items": [
+                  { "id": "checkout:wai#42", "label": "Check out" },
+                  { "id": "close:wai#42", "label": "Close", "danger": true,
+                    "confirm": { "title": "Close pull request #42?", "text": "Its branch stays.", "confirm_label": "Close" } }
+                ] }
+              ] },
+              { "id": "row:api#317", "cells": [
+                { "type": "icon", "name": "git-pull-request", "tone": "info" },
+                "api",
+                { "type": "text", "text": "Paginate the inventory list", "muted": true },
+                { "type": "spinner", "label": "running" },
+                { "type": "progress", "value": 0.6 },
+                { "type": "button", "id": "table-open-317", "label": "Open" },
+                { "type": "menu", "items": [{ "id": "checkout:api#317", "label": "Check out" }] }
+              ] },
+              { "cells": [
+                { "type": "icon", "name": "git-pull-request-closed", "tone": "danger" },
+                "web",
+                "A row without id is not clickable",
+                { "type": "badge", "text": "failing", "tone": "danger" },
+                { "type": "progress", "value": 0.2 }
+              ] }
+            ] }
+        ]
+      },
+      {
+        "id": "log",
+        "title": "log",
+        "note": "Monospace with Copy; ANSI codes stripped; follow keeps it at the bottom. The Actions tab shows fill",
+        "nodes": [
+          { "type": "log", "follow": false, "text": "$ go test ./...\n\u001b[32mok\u001b[0m  \twai-rotinas\t0.41s\n\u001b[33mwarning\u001b[0m: 2 roles skipped\n\u001b[31mFAIL\u001b[0m\twai-waycarbon\t1.02s\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13 (scroll)\nline 14" }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "controls",
+    "title": "Controls",
+    "stories": [
+      {
+        "id": "button",
+        "title": "button",
+        "note": "style: default, primary, danger; icon, disabled, confirm",
+        "nodes": [
+          { "type": "row", "children": [
+            { "type": "button", "id": "btn-default", "label": "Default" },
+            { "type": "button", "id": "btn-primary", "label": "Primary", "style": "primary" },
+            { "type": "button", "id": "btn-danger", "label": "Danger", "style": "danger" },
+            { "type": "button", "id": "btn-icon", "label": "With icon", "icon": "refresh-cw" },
+            { "type": "button", "id": "btn-disabled", "label": "Disabled", "disabled": true }
+          ] },
+          { "type": "row", "children": [
+            { "type": "button", "id": "btn-confirm", "label": "Confirm first", "icon": "circle-question-mark",
+              "confirm": { "title": "Run it?", "text": "Only Confirm sends panel/action." } },
+            { "type": "button", "id": "btn-confirm-danger", "label": "Delete", "style": "danger", "icon": "trash",
+              "confirm": { "title": "Delete everything?", "text": "The confirm button is red for danger.", "confirm_label": "Delete" } }
+          ] }
+        ]
+      },
+      {
+        "id": "menu",
+        "title": "menu",
+        "note": "A button with a dropdown; icon defaults to ellipsis; at most 50 items",
+        "nodes": [
+          { "type": "row", "children": [
+            { "type": "menu", "items": [
+              { "id": "menu:rename", "label": "Rename" },
+              { "id": "menu:duplicate", "label": "Duplicate" }
+            ] },
+            { "type": "menu", "label": "Actions", "icon": "settings", "items": [
+              { "id": "menu:export", "label": "Export" },
+              { "id": "menu:delete", "label": "Delete", "danger": true,
+                "confirm": { "title": "Delete it?", "confirm_label": "Delete" } }
+            ] }
+          ] }
+        ]
+      },
+      {
+        "id": "input",
+        "title": "input",
+        "note": "Text field; multiline with rows (default 4, at most 20). Values arrive with every action",
+        "nodes": [
+          { "type": "input", "id": "input-plain", "placeholder": "Placeholder only" },
+          { "type": "input", "id": "input-value", "placeholder": "Snapshot id", "value": "2026-11-12" },
+          { "type": "input", "id": "input-multi", "placeholder": "Multiline, 3 rows", "multiline": true, "rows": 3 }
+        ]
+      },
+      {
+        "id": "select",
+        "title": "select",
+        "note": "At most 100 options; with no value, the first",
+        "nodes": [
+          { "type": "select", "id": "select-first", "options": ["staging", "dev", "production"] },
+          { "type": "select", "id": "select-value", "options": ["staging", "dev", "production"], "value": "dev" }
+        ]
+      },
+      {
+        "id": "checkbox",
+        "title": "checkbox",
+        "note": "Sent as a boolean",
+        "nodes": [
+          { "type": "checkbox", "id": "check-on", "label": "Checked", "checked": true },
+          { "type": "checkbox", "id": "check-off", "label": "Unchecked" }
+        ]
+      },
+      {
+        "id": "form",
+        "title": "form",
+        "note": "Any action carries every field of the panel: submit and look at the Actions tab",
+        "nodes": [
+          { "type": "row", "children": [
+            { "type": "spacer" },
+            { "type": "button", "id": "form-submit", "label": "Submit", "style": "primary", "icon": "send" }
+          ] }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "bar",
+    "title": "Bar item",
+    "stories": [
+      {
+        "id": "item-update",
+        "title": "item/update",
+        "note": "Drives this extension's bottom-bar item. Text cut to 32 characters; no text and no icon hides it",
+        "nodes": [
+          { "type": "input", "id": "bar-text", "placeholder": "Text", "value": "Storybook" },
+          { "type": "input", "id": "bar-icon", "placeholder": "Lucide icon", "value": "book-open" },
+          { "type": "select", "id": "bar-tone", "options": ["neutral", "info", "success", "warning", "danger"], "value": "info" },
+          { "type": "checkbox", "id": "bar-card", "label": "Hover card (API 1.4)", "checked": true },
+          { "type": "row", "children": [
+            { "type": "button", "id": "bar-update", "label": "Update item", "style": "primary", "icon": "panel-bottom" },
+            { "type": "button", "id": "bar-hide", "label": "Hide item", "icon": "eye-off" }
+          ] }
+        ]
+      },
+      {
+        "id": "item-card",
+        "title": "card",
+        "note": "Display only: column, row, text, badge, progress, icon, divider, spacer, kv; 200 nodes, 8 levels",
+        "nodes": [
+          { "type": "column", "children": [
+            { "type": "row", "children": [
+              { "type": "icon", "name": "book-open", "tone": "info" },
+              { "type": "text", "text": "Hover card" },
+              { "type": "spacer" },
+              { "type": "badge", "text": "API 1.4", "tone": "info" }
+            ] },
+            { "type": "kv", "items": [
+              { "key": "Nodes", "value": "display only" },
+              { "key": "Click", "value": "goes to the item" }
+            ] },
+            { "type": "divider" },
+            { "type": "row", "children": [
+              { "type": "text", "text": "Current session" },
+              { "type": "spacer" },
+              { "type": "text", "text": "40% used", "muted": true }
+            ] },
+            { "type": "progress", "value": 0.4 }
+          ] }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "edge",
+    "title": "Unsupported",
+    "stories": [
+      {
+        "id": "unsupported",
+        "title": "Unsupported element",
+        "note": "Unknown type, missing field, unknown icon, non-http link, malformed confirm",
+        "nodes": [
+          { "type": "carousel" },
+          { "type": "button", "label": "No id" },
+          { "type": "icon", "name": "not-an-icon" },
+          { "type": "link", "text": "ftp", "url": "ftp://example.com" },
+          { "type": "button", "id": "edge-confirm", "label": "Delete", "confirm": { "text": "No title" } }
+        ]
+      }
+    ]
+  }
+]
