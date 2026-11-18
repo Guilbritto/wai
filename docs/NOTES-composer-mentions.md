@@ -1,7 +1,7 @@
 # Composer: images in order and `@` file mentions (research)
 
-Research from 2026-11-16. Nothing here is designed or approved: it feeds a brainstorm to run after the
-"Campo" visual redesign.
+Research from 2026-11-16. The design built from it is
+`docs/superpowers/specs/2026-11-17-composer-mentions-design.md`.
 
 ## What the owner wants
 
