@@ -4,6 +4,7 @@
 mod agents;
 mod agents_view;
 mod app;
+mod appearance;
 mod areas;
 mod aurora;
 mod bars;
