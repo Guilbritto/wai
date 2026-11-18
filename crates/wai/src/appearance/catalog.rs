@@ -47,6 +47,10 @@ impl ThemeCatalog {
             .collect()
     }
 
+    pub fn has_name(&self, name: &str) -> bool {
+        self.themes.iter().any(|t| t.config.name == name)
+    }
+
     pub fn find(&self, name: &str, mode: ThemeMode) -> Option<&CatalogTheme> {
         self.themes
             .iter()

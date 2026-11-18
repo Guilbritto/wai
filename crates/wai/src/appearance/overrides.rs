@@ -47,10 +47,12 @@ fn color(value: &toml::Value) -> Option<String> {
 }
 
 /// The theme's config and `"wai"` object with `overrides` applied: the global keys first, then
-/// the table named after the theme. A key or value that is not valid is skipped with a notice.
+/// the table named after the theme. A key or value that is not valid, or a table that is neither
+/// a color key group nor a theme (`is_theme`), is skipped with a notice.
 pub(crate) fn apply(
     theme: &CatalogTheme,
     overrides: &toml::Table,
+    is_theme: &dyn Fn(&str) -> bool,
 ) -> (ThemeConfig, Map<String, Value>, Vec<String>) {
     let color_keys = names(serde_json::to_value(ThemeConfigColors::default()).unwrap_or_default());
     let syntax_keys = names(
@@ -62,6 +64,7 @@ pub(crate) fn apply(
 
     // (key, value) in application order.
     let (mut global, mut scoped) = (Vec::new(), Vec::new());
+    let mut notices = Vec::new();
     for (key, value) in overrides {
         match value {
             toml::Value::Table(table) => {
@@ -72,6 +75,8 @@ pub(crate) fn apply(
                     for (k, v) in table {
                         flatten(k, v, &mut scoped);
                     }
+                } else if !is_theme(key) {
+                    notices.push(format!("Ignored color override \"{key}\": unknown table."));
                 }
             }
             _ => global.push((key.clone(), value.clone())),
@@ -80,7 +85,6 @@ pub(crate) fn apply(
 
     let mut config = (*theme.config).clone();
     let mut wai = theme.wai.clone();
-    let mut notices = Vec::new();
     let mut colors_json = serde_json::to_value(&config.colors).unwrap_or_default();
     let mut highlight_json =
         serde_json::to_value(config.highlight.clone().unwrap_or_default()).unwrap_or_default();
@@ -138,6 +142,10 @@ mod tests {
         toml::from_str(text).unwrap()
     }
 
+    fn known(name: &str) -> bool {
+        name.starts_with("wai Aurora")
+    }
+
     fn bundled(name: &str, mode: ThemeMode) -> CatalogTheme {
         let (catalog, _) = catalog::load(BUNDLED, None, &[]);
         catalog.find(name, mode).unwrap().clone()
@@ -156,14 +164,14 @@ mod tests {
             "##,
         );
         let dark = bundled("wai Aurora", ThemeMode::Dark);
-        let (config, _, notices) = apply(&dark, &overrides);
+        let (config, _, notices) = apply(&dark, &overrides, &known);
         assert!(notices.is_empty(), "{notices:?}");
         assert_eq!(config.colors.primary.as_deref(), Some("#222222"));
         assert_eq!(config.colors.ring.as_deref(), Some("#aabbcc"));
         assert_eq!(config.colors.secondary.as_deref(), Some("#333333"));
 
         let light = bundled("wai Aurora Light", ThemeMode::Light);
-        let (config, _, notices) = apply(&light, &overrides);
+        let (config, _, notices) = apply(&light, &overrides, &known);
         assert!(notices.is_empty(), "{notices:?}");
         assert_eq!(config.colors.primary.as_deref(), Some("#111111"));
         assert_eq!(config.colors.secondary.as_deref(), Some("#333333"));
@@ -188,7 +196,7 @@ mod tests {
             "backdrop.glow_1" = "#112233"
             "##,
         );
-        let (config, wai, notices) = apply(&dark, &overrides);
+        let (config, wai, notices) = apply(&dark, &overrides, &known);
         assert!(notices.is_empty(), "{notices:?}");
         let keyword = config.highlight.as_ref().unwrap().syntax.style("keyword");
         assert_eq!(keyword.unwrap().color, Some(Hsla::from(rgb(0xff8800))));
@@ -215,9 +223,11 @@ mod tests {
             [syntax]
             keyword = "#ff8800"
             nothing = "#ffffff"
+            [typo]
+            background = "#ffffff"
             "##,
         );
-        let (config, _, notices) = apply(&dark, &overrides);
+        let (config, _, notices) = apply(&dark, &overrides, &known);
         assert_eq!(config.colors.primary.as_deref(), Some("#00ff00"));
         let keyword = config.highlight.as_ref().unwrap().syntax.style("keyword");
         assert_eq!(keyword.unwrap().color, Some(Hsla::from(rgb(0xff8800))));
@@ -234,6 +244,7 @@ mod tests {
                 format!("Ignored color override \"overlay\": {hint}."),
                 format!("Ignored color override \"ring\": {hint}."),
                 "Ignored color override \"syntax.nothing\": unknown key.".to_string(),
+                "Ignored color override \"typo\": unknown table.".to_string(),
                 "Ignored color override \"wai.nothing\": unknown key.".to_string(),
             ]
         );

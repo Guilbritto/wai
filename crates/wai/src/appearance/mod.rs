@@ -111,7 +111,8 @@ fn apply_with(
     let theme = &settings.theme;
     let mut chosen = |name: &Option<String>, mode, bundled| {
         let picked = pick(&catalog, name.as_deref(), mode, bundled, &mut notices);
-        let (config, wai, found) = overrides::apply(&picked, &theme.overrides);
+        let (config, wai, found) =
+            overrides::apply(&picked, &theme.overrides, &|n| catalog.has_name(n));
         (std::rc::Rc::new(config), wai, found)
     };
     let (light, light_wai, light_notices) = chosen(&theme.light, ThemeMode::Light, BUNDLED_LIGHT);
