@@ -5840,6 +5840,49 @@ pub(crate) mod tests {
         wait_until(cx, "the fallback drawn", |cx| background(cx) == bundled);
     }
 
+    #[gpui_kit::test]
+    fn disabled_extension_theme_leaves_the_catalog(cx: &mut TestAppContext) {
+        use crate::appearance::catalog::ThemeCatalog;
+        use gpui_kit::component::ThemeMode;
+        use wai_ext::{ExtStore, Source};
+
+        let (workspace, cx, dir) = live(cx, Settings::default(), None);
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("themes")).unwrap();
+        std::fs::write(
+            src.join(wai_ext::MANIFEST_FILE),
+            "id = \"sunset\"\nname = \"Sunset\"\nversion = \"0.1.0\"\n\
+             [contributes]\nthemes = [\"themes/sunset.json\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("themes/sunset.json"),
+            r##"{"name":"set","themes":[{"name":"Sunset","mode":"dark","colors":{"background":"#201008"}}]}"##,
+        )
+        .unwrap();
+        let has = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                ThemeCatalog::global(cx)
+                    .find("Sunset", ThemeMode::Dark)
+                    .is_some()
+            })
+        };
+        let start = |cx: &mut VisualTestContext| {
+            workspace.update(cx, |w, cx| w.start_extensions(cx));
+            cx.run_until_parked();
+        };
+
+        let mut store = ExtStore::open(dir.path());
+        let staged = store.stage(&Source::Folder(src)).unwrap();
+        let id = store.commit(staged, Vec::new()).unwrap();
+        start(cx);
+        assert!(has(cx), "an enabled extension's theme is listed");
+
+        store.set_enabled(&id, false).unwrap();
+        start(cx);
+        assert!(!has(cx), "a disabled extension's theme is gone");
+    }
+
     /// The test platform cannot flip the app's appearance, so the observer's handler runs
     /// directly; it reads the platform's (light) appearance, as the observer does on a change.
     #[gpui_kit::test]
