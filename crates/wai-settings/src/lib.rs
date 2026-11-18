@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 mod approve;
 pub mod claude;
 mod edit;
+pub mod fonts;
 pub use approve::{Approval, is_approved, seed_approved, unapproved};
 pub use edit::{Change, write_change};
 
@@ -1083,7 +1084,7 @@ mod tests {
         ] {
             write(d.path(), ".wai/settings.toml", body);
             let (s, notices) = Settings::load(u.path(), Some(d.path())).unwrap();
-            assert_eq!(notices, [want.clone()], "{body}");
+            assert_eq!(notices, std::slice::from_ref(&want), "{body}");
             assert_eq!(s.interface.font_size, Some(17.0), "{body}");
             assert_eq!(s.editor.font_family.as_deref(), Some("B"), "{body}");
             assert_eq!(s.terminal.font_size, Some(12.0), "{body}");
