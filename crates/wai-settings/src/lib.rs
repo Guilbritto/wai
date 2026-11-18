@@ -68,6 +68,8 @@ pub struct Settings {
     /// Agent id -> the id of the model (config value) it starts with; user settings only.
     pub models: BTreeMap<String, String>,
     pub terminal: TerminalSettings,
+    pub interface: FontArea,
+    pub editor: FontArea,
     pub theme: ThemeSettings,
     pub updates: UpdateSettings,
     pub conversation: ConversationSettings,
@@ -83,6 +85,16 @@ pub struct AgentConfig {
 #[serde(default)]
 pub struct TerminalSettings {
     pub shell: Option<String>,
+    pub font_family: Option<String>,
+    pub font_size: Option<f32>,
+}
+
+/// The font keys of `[interface]` and `[editor]`; user settings only (see `Settings::load`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct FontArea {
+    pub font_family: Option<String>,
+    pub font_size: Option<f32>,
 }
 
 /// The repository wai's releases are published from.
@@ -122,6 +134,10 @@ pub struct ExtensionSettings {
 #[serde(default)]
 pub struct ConversationSettings {
     pub processing: Processing,
+    pub font_family: Option<String>,
+    pub font_size: Option<f32>,
+    pub code_font_family: Option<String>,
+    pub code_font_size: Option<f32>,
 }
 
 /// What a transcript shows of the agent's steps (tool calls and thinking).
@@ -180,6 +196,8 @@ impl Default for Settings {
                 .collect(),
             models: BTreeMap::new(),
             terminal: TerminalSettings::default(),
+            interface: FontArea::default(),
+            editor: FontArea::default(),
             theme: ThemeSettings::default(),
             updates: UpdateSettings::default(),
             conversation: ConversationSettings::default(),
@@ -296,6 +314,27 @@ impl Settings {
             let Some(mut layer) = layer else {
                 return Ok(None);
             };
+            // Fonts are personal: the terminal table goes whole below, but a project that only
+            // set its fonts must not get the commands notice.
+            let mut fonts = ["interface", "editor"]
+                .map(|key| layer.remove(key))
+                .iter()
+                .any(Option::is_some);
+            if let Some(toml::Value::Table(terminal)) = layer.get_mut("terminal") {
+                fonts |= ["font_family", "font_size"]
+                    .map(|key| terminal.remove(key))
+                    .iter()
+                    .any(Option::is_some);
+                if terminal.is_empty() {
+                    layer.remove("terminal");
+                }
+            }
+            if fonts {
+                notices.push(format!(
+                    "Ignored font settings from {}: only user settings can change fonts.",
+                    path.display()
+                ));
+            }
             let stripped = ["agents", "terminal"].map(|key| layer.remove(key));
             if stripped.iter().any(Option::is_some) {
                 notices.push(format!(
@@ -1008,6 +1047,59 @@ mod tests {
             (t.mode, t.light.as_deref()),
             (ThemeChoice::Light, Some("M"))
         );
+    }
+
+    #[test]
+    fn project_font_keys_are_ignored_with_notice() {
+        let u = tempfile::tempdir().unwrap();
+        write(
+            u.path(),
+            "settings.toml",
+            "[interface]\nfont_family = \"A\"\nfont_size = 17\n[editor]\nfont_family = \"B\"\nfont_size = 14\n[terminal]\nfont_family = \"C\"\nfont_size = 12\n[conversation]\nfont_family = \"D\"\nfont_size = 15\ncode_font_family = \"E\"\ncode_font_size = 11\n",
+        );
+        let (s, notices) = Settings::load(u.path(), None).unwrap();
+        assert!(notices.is_empty());
+        assert_eq!(s.interface.font_family.as_deref(), Some("A"));
+        assert_eq!(s.interface.font_size, Some(17.0));
+        assert_eq!(s.editor.font_family.as_deref(), Some("B"));
+        assert_eq!(s.editor.font_size, Some(14.0));
+        assert_eq!(s.terminal.font_family.as_deref(), Some("C"));
+        assert_eq!(s.terminal.font_size, Some(12.0));
+        assert_eq!(s.conversation.font_family.as_deref(), Some("D"));
+        assert_eq!(s.conversation.font_size, Some(15.0));
+        assert_eq!(s.conversation.code_font_family.as_deref(), Some("E"));
+        assert_eq!(s.conversation.code_font_size, Some(11.0));
+
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join(".wai").join("settings.toml");
+        let want = format!(
+            "Ignored font settings from {}: only user settings can change fonts.",
+            path.display()
+        );
+        for body in [
+            "[interface]\nfont_size = 30\n",
+            "[editor]\nfont_family = \"X\"\n",
+            "[terminal]\nfont_size = 30\n",
+        ] {
+            write(d.path(), ".wai/settings.toml", body);
+            let (s, notices) = Settings::load(u.path(), Some(d.path())).unwrap();
+            assert_eq!(notices, [want.clone()], "{body}");
+            assert_eq!(s.interface.font_size, Some(17.0), "{body}");
+            assert_eq!(s.editor.font_family.as_deref(), Some("B"), "{body}");
+            assert_eq!(s.terminal.font_size, Some(12.0), "{body}");
+        }
+        // The terminal table was already a user-only table: `shell` stays dropped, only its
+        // font keys add the font notice.
+        write(
+            d.path(),
+            ".wai/settings.toml",
+            "[terminal]\nshell = \"/bin/evil\"\nfont_family = \"X\"\n",
+        );
+        let (s, notices) = Settings::load(u.path(), Some(d.path())).unwrap();
+        assert_eq!(s.terminal.shell, None);
+        assert_eq!(s.terminal.font_family.as_deref(), Some("C"));
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        assert_eq!(notices[0], want);
     }
 
     #[test]
