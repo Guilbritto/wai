@@ -3,3 +3,4 @@
 
 pub(crate) mod catalog;
 pub(crate) mod colors;
+pub(crate) mod overrides;
