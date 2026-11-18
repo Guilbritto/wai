@@ -30,6 +30,7 @@ use wai_ext::panel::{
     ButtonStyle, Column, Confirm, Item, Node, Pick, Tab, TableRow, TextStyle, Tone, TooLarge,
 };
 
+use crate::appearance::fonts;
 use crate::campo;
 use crate::chat::PromptTyping;
 use crate::ext_bubble::{self, Bubble, Ended};
@@ -438,6 +439,7 @@ impl ExtPanel {
                         Button::new("cancel")
                             .label("Cancel")
                             .on_click(|_, window, cx| window.close_dialog(cx)),
+                        cx,
                     ))
                     .child(
                         Button::new("confirm")
@@ -445,7 +447,7 @@ impl ExtPanel {
                             .track_focus(&focus)
                             .map(|b| match danger {
                                 true => campo::danger(b, cx),
-                                false => campo::primary(b),
+                                false => campo::primary(b, cx),
                             })
                             .on_click(move |_, window, cx| {
                                 window.close_dialog(cx);
@@ -645,7 +647,7 @@ impl ExtPanel {
                         div().h(px(6.))
                     } else {
                         div()
-                            .text_size(px(10.))
+                            .text_size(fonts::ui(cx, 10.))
                             .font_weight(FontWeight::BOLD)
                             .text_color(muted)
                             .line_height(px(11.))
@@ -758,10 +760,10 @@ impl ExtPanel {
                         b.tooltip(label.clone()).accessibility_label(label)
                     })
                     .map(|b| match style {
-                        ButtonStyle::Primary => campo::primary(b),
+                        ButtonStyle::Primary => campo::primary(b, cx),
                         ButtonStyle::Danger => campo::danger(b, cx),
                         ButtonStyle::Default if only => campo::icon(b),
-                        ButtonStyle::Default => campo::button(b),
+                        ButtonStyle::Default => campo::button(b, cx),
                     })
                     .when_some(icon, |b, icon| b.icon(icon))
                     .disabled(*disabled)
@@ -825,7 +827,7 @@ impl ExtPanel {
                         let input = Input::new(state)
                             .small()
                             .when_some(icon.as_deref().and_then(lucide), |i, icon| {
-                                i.prefix(Icon::new(icon).small().text_color(muted))
+                                i.prefix(Icon::new(icon).with_size(px(14.)).text_color(muted))
                             })
                             .when(*clear && typed, |i| {
                                 i.suffix(
@@ -997,7 +999,7 @@ impl ExtPanel {
                                 .justify_center()
                                 .rounded(px(campo::RADIUS))
                                 .bg(recessed)
-                                .child(Icon::new(icon).small().text_color(muted))
+                                .child(Icon::new(icon).with_size(px(14.)).text_color(muted))
                         }))
                         .child(
                             v_flex()
@@ -1025,7 +1027,9 @@ impl ExtPanel {
                                     .opacity(0.)
                                     .group_hover("panel-card", |s| s.opacity(1.))
                                     .child(
-                                        Icon::new(Lucide::ChevronRight).small().text_color(muted),
+                                        Icon::new(Lucide::ChevronRight)
+                                            .with_size(px(14.))
+                                            .text_color(muted),
                                     ),
                             )
                         })
@@ -1094,7 +1098,7 @@ impl ExtPanel {
                     .aria_expanded(open)
                     .focus_visible(move |el| el.border_color(ring))
                     .tab_index(0)
-                    .child(Icon::new(chevron).xsmall().text_color(muted))
+                    .child(Icon::new(chevron).with_size(px(12.)).text_color(muted))
                     .child(
                         campo::label(title.to_string(), cx)
                             .flex_none()
@@ -1243,15 +1247,14 @@ impl ExtPanel {
                     let href = url.clone();
                     let button = Button::new(name("panel-link", url)).small().icon(icon);
                     let label = SharedString::from(text);
-                    let button = match icon_only {
-                        true => {
-                            campo::icon(button.accessibility_label(label.clone())).tooltip(label)
+                    let button =
+                        match icon_only {
+                            true => campo::icon(button.accessibility_label(label.clone()))
+                                .tooltip(label),
+                            false => campo::button(button.label(label), cx)
+                                .tooltip(SharedString::from(url)),
                         }
-                        false => {
-                            campo::button(button.label(label)).tooltip(SharedString::from(url))
-                        }
-                    }
-                    .on_click(move |_, _, cx| cx.open_url(&href));
+                        .on_click(move |_, _, cx| cx.open_url(&href));
                     own(button, at)
                 } else {
                     let url = SharedString::from(url);
@@ -1269,7 +1272,7 @@ impl ExtPanel {
                                     h_flex()
                                         .gap_1()
                                         .child(SharedString::from(text))
-                                        .child(Icon::new(Lucide::ExternalLink).xsmall()),
+                                        .child(Icon::new(Lucide::ExternalLink).with_size(px(12.))),
                                 ),
                         )
                         .test_support()
@@ -1296,7 +1299,7 @@ impl ExtPanel {
                     .ghost()
                     .when_some(icon, |b, icon| b.icon(icon))
                     .map(|b| match label {
-                        Some(l) => campo::button(b.label(SharedString::from(l))),
+                        Some(l) => campo::button(b.label(SharedString::from(l)), cx),
                         None => campo::icon(b),
                     })
                     .dropdown_menu(move |menu, _, _| {
@@ -1374,7 +1377,7 @@ impl ExtPanel {
             .px_2()
             .gap_2()
             .flex_none()
-            .text_size(px(10.5))
+            .text_size(fonts::ui(cx, 10.5))
             .font_weight(FontWeight::BOLD)
             .text_color(campo::dim(cx))
             .children((columns.iter()).map(|c| cell(c.width).child(c.title.to_uppercase())));
@@ -1523,7 +1526,7 @@ impl ExtPanel {
             .border_color(campo::line(cx))
             .bg(campo::recessed(cx))
             .font_family(theme.mono_font_family.clone())
-            .text_size(px(11.))
+            .text_size(fonts::ui(cx, 11.))
             .map(|el| match fill {
                 true => el.flex_1().min_h_0(),
                 false => el
@@ -1582,7 +1585,7 @@ fn row(
             .flex_none()
             .child(
                 Icon::new(icon)
-                    .small()
+                    .with_size(px(14.))
                     .text_color(tone_color(item.tone, cx)),
             )
             .test_support()
@@ -1756,7 +1759,7 @@ fn leaf(node: &Node, k: usize, cx: &App) -> AnyElement {
             .into_any_element(),
         Node::Icon { name, tone } => match lucide(name) {
             Some(icon) => Icon::new(icon)
-                .small()
+                .with_size(px(14.))
                 .text_color(tone_color(*tone, cx))
                 .into_any_element(),
             None => unsupported(cx),
@@ -1842,7 +1845,7 @@ fn unsupported(cx: &App) -> AnyElement {
         .border_color(campo::line(cx))
         .text_xs()
         .text_color(muted)
-        .child(Icon::new(Lucide::CircleQuestionMark).xsmall())
+        .child(Icon::new(Lucide::CircleQuestionMark).with_size(px(12.)))
         .child("Unsupported element")
         .into_any_element()
 }

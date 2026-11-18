@@ -215,6 +215,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn wai_icons_are_pinned_to_px() {
+        let chain =
+            Regex::new(r"Icon::new\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)\s*\.(?:x)?small\(\)")
+                .unwrap();
+        let found: Vec<_> = (sources().into_iter())
+            .filter(|(f, _)| !f.starts_with("appearance/"))
+            .filter(|(_, text)| chain.is_match(text))
+            .map(|(f, _)| f)
+            .collect();
+        assert!(found.is_empty(), "rem-sized icons in {found:?}");
+    }
+
+    #[gpui_kit::test]
+    fn display_font_sizes_follow_interface(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.interface.font_size = Some(20.);
+        run(cx, &settings, None, &[]);
+        cx.update(|cx| {
+            assert_eq!(super::fonts::ui(cx, 28.), px(35.));
+            assert_eq!(super::fonts::ui(cx, 42.), px(52.5));
+        });
+        let found = offenders(
+            |f| f.starts_with("appearance/") || f == "terminal_view.rs" || f.starts_with("chat/"),
+            |l| l.contains("text_size(px("),
+        );
+        assert!(found.is_empty(), "fixed text sizes:\n{}", found.join("\n"));
+    }
+
     fn fonts(cx: &mut TestAppContext) -> ResolvedFonts {
         cx.update(|cx| cx.global::<Fonts>().0.clone())
     }

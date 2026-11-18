@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use std::rc::Rc;
 
 use crate::appearance::colors::Palette;
+use crate::appearance::fonts;
 use gpui_kit::base::{ResizeHandleRenderer, ResizeHandleState};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, h_flex};
@@ -261,7 +262,7 @@ pub(crate) fn badge(text: impl Into<SharedString>, cx: &App) -> Div {
         .border_1()
         .border_color(border)
         .bg(fill)
-        .text_size(px(11.))
+        .text_size(fonts::ui(cx, 11.))
         .text_color(color)
         .child(text.into())
 }
@@ -281,7 +282,7 @@ pub(crate) fn soon(cx: &App) -> Div {
         .border_1()
         .border_color(color.opacity(0.35))
         .bg(color.opacity(0.10))
-        .text_size(px(10.5))
+        .text_size(fonts::ui(cx, 10.5))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(color)
         .child("Coming soon")

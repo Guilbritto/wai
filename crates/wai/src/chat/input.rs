@@ -752,7 +752,7 @@ impl ChatSession {
 
     /// The folder, branch and agent, as read-only chips on the box's top edge.
     fn render_strip(&self, cx: &App) -> impl IntoElement + use<> {
-        let icon = |name| Some(Icon::new(name).xsmall().into_any_element());
+        let icon = |name| Some(Icon::new(name).with_size(px(12.)).into_any_element());
         let (folder, head) = match &self.place {
             Some(p) => (folder_name(&p.folder), Some(p)),
             None => (folder_name(&self.cwd), self.head.as_ref()),
@@ -827,7 +827,7 @@ impl ChatSession {
                         .bottom_0()
                         .flex()
                         .items_center()
-                        .child(Icon::new(gpui_kit::assets::IconName::Shield).xsmall()),
+                        .child(Icon::new(gpui_kit::assets::IconName::Shield).with_size(px(12.))),
                 )
                 .into_any_element()
         };

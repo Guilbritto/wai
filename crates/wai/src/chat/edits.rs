@@ -507,6 +507,7 @@ impl ChatSession {
                         Button::new("cancel")
                             .label("Cancel")
                             .on_click(|_, window, cx| window.close_dialog(cx)),
+                        cx,
                     ))
                     .child(
                         campo::danger(Button::new("revert-confirm").label("Revert"), cx)

@@ -20,6 +20,7 @@ use wai_ext::panel::Pick;
 use wai_settings::claude::{ClaudeData, Stamp};
 use wai_settings::{Change, Processing, SeenModel, Settings, ThemeChoice, agent_label, builtin};
 
+use crate::appearance::fonts;
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::campo;
 use crate::extensions_view::ExtensionsView;
@@ -319,7 +320,7 @@ fn named(label: impl Into<SharedString>, hint: Option<SharedString>, cx: &App) -
         )
         .children(hint.map(|h| {
             div()
-                .text_size(px(12.5))
+                .text_size(fonts::ui(cx, 12.5))
                 .text_color(cx.theme().muted_foreground)
                 .child(h)
         }))
@@ -838,7 +839,7 @@ impl SettingsView {
             div()
                 .debug_selector(move || selector)
                 .pl(indent)
-                .text_size(px(12.))
+                .text_size(fonts::ui(cx, 12.))
                 .text_color(muted)
                 .child(format!("Adapter {a}"))
         });
@@ -847,7 +848,7 @@ impl SettingsView {
             div()
                 .debug_selector(move || selector)
                 .pl(indent)
-                .text_size(px(12.))
+                .text_size(fonts::ui(cx, 12.))
                 .text_color(muted)
                 .child(note.clone())
         });
@@ -926,7 +927,7 @@ impl SettingsView {
             )),
             _ => field(
                 div()
-                    .text_size(px(12.))
+                    .text_size(fonts::ui(cx, 12.))
                     .text_color(cx.theme().muted_foreground)
                     .child("Start a session or press Test to see the models."),
             ),
@@ -944,7 +945,7 @@ impl SettingsView {
             .gap_1()
             .items_center()
             .cursor_pointer()
-            .text_size(px(12.5))
+            .text_size(fonts::ui(cx, 12.5))
             .text_color(muted)
             .hover(|el| el.text_color(cx.theme().foreground))
             .child(
@@ -953,7 +954,7 @@ impl SettingsView {
                 } else {
                     IconName::ChevronRight
                 })
-                .small(),
+                .with_size(px(14.)),
             )
             .child("Advanced")
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_advanced(&id, cx)))
@@ -1018,7 +1019,7 @@ impl SettingsView {
                 .id(id)
                 .aria_label(line.clone())
                 .test_support()
-                .text_size(px(12.5))
+                .text_size(fonts::ui(cx, 12.5))
                 .text_color(color)
                 .child(line)
         };
@@ -1210,7 +1211,7 @@ impl Render for SettingsView {
                             .px(px(10.))
                             .pt(px(14.))
                             .pb(px(6.))
-                            .text_size(px(11.))
+                            .text_size(fonts::ui(cx, 11.))
                             .text_color(faint)
                             .children(
                                 (*label == "Claude")
@@ -1229,11 +1230,12 @@ impl Render for SettingsView {
                             .rounded(px(8.))
                             .cursor_pointer()
                             .child(div().flex_1().min_w_0().child(s.title()))
-                            .children(
-                                s.is_soon().then(|| {
-                                    div().text_size(px(10.)).text_color(soon).child("Soon")
-                                }),
-                            )
+                            .children(s.is_soon().then(|| {
+                                div()
+                                    .text_size(fonts::ui(cx, 10.))
+                                    .text_color(soon)
+                                    .child("Soon")
+                            }))
                             .children(count.map(|n| {
                                 div()
                                     .min_w(px(22.))
@@ -1286,7 +1288,7 @@ impl Render for SettingsView {
                                 .child(
                                     div()
                                         .font_family(DISPLAY_FONT)
-                                        .text_size(px(24.))
+                                        .text_size(fonts::ui(cx, 24.))
                                         .font_weight(FontWeight::BOLD)
                                         .child(section.title()),
                                 )
@@ -1322,7 +1324,7 @@ impl Render for SettingsView {
                         .child(
                             div()
                                 .font_family(DISPLAY_FONT)
-                                .text_size(px(20.))
+                                .text_size(fonts::ui(cx, 20.))
                                 .font_weight(FontWeight::BOLD)
                                 .child("Not in wai yet"),
                         )
@@ -1346,7 +1348,7 @@ impl Render for SettingsView {
                             .id("settings-title")
                             .flex_none()
                             .font_family(DISPLAY_FONT)
-                            .text_size(px(14.))
+                            .text_size(fonts::ui(cx, 14.))
                             .font_weight(FontWeight::BOLD)
                             .child("Settings")
                             .test_support(),

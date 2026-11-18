@@ -13,6 +13,7 @@ use wai_ext::Bar;
 use wai_ext::panel::clamp;
 
 use crate::app::{OpenPalette, ToggleAgents, ToggleSidebar, ToggleTerminal};
+use crate::appearance::fonts;
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::bars::{TOP_ITEMS, drawn, ext_item, hide_entries, hide_menu};
 use crate::chat::TurnState;
@@ -99,14 +100,14 @@ impl Workspace {
             .child(
                 div()
                     .font_family(DISPLAY_FONT)
-                    .text_size(px(15.))
+                    .text_size(fonts::ui(cx, 15.))
                     .font_weight(FontWeight::BOLD)
                     .child("wai"),
             );
         let project = aurora::pill(cx)
             .debug_selector(|| "topbar-project".into())
             .min_w_0()
-            .child(Icon::new(IconName::Folder).xsmall())
+            .child(Icon::new(IconName::Folder).with_size(px(12.)))
             .child(div().min_w_0().truncate().child(folder_name(&self.project)));
         // Clipped: in a very narrow window the brand and status give way, not the actions.
         let left = h_flex()

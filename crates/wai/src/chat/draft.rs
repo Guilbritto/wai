@@ -166,9 +166,9 @@ impl Pick {
     fn row(&self, full: bool) -> Div {
         let row = h_flex().gap_2().items_center().min_w_0();
         let row = match self.lead {
-            Lead::Folder => row.child(Icon::new(IconName::Folder).xsmall()),
+            Lead::Folder => row.child(Icon::new(IconName::Folder).with_size(px(12.))),
             Lead::Glyph(glyph, color) => row.child(div().text_color(color).child(glyph)),
-            Lead::Icon(icon) => row.child(Icon::new(icon).xsmall()),
+            Lead::Icon(icon) => row.child(Icon::new(icon).with_size(px(12.))),
             Lead::None => row,
         };
         let title = match (full, &self.chip) {

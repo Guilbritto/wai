@@ -7,6 +7,8 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::*;
 use wai_ext::panel::Tone;
 
+use crate::appearance::fonts;
+
 /// Height of every clickable control in a row: field, select, button, menu trigger.
 pub(crate) const H: f32 = 28.;
 /// Control corners.
@@ -72,22 +74,22 @@ pub(crate) fn tint(tone: Tone, cx: &App) -> (Hsla, Hsla, Hsla) {
 }
 
 /// The default button: glass (the theme's `button.*`), 28 px, 12 px semibold.
-pub(crate) fn button(b: Button) -> Button {
+pub(crate) fn button(b: Button, cx: &App) -> Button {
     Styled::h(b, px(H))
         .px_3()
-        .text_size(px(12.))
+        .text_size(fonts::ui(cx, 12.))
         .font_weight(FontWeight::SEMIBOLD)
 }
 
 /// The one filled button: cyan.
-pub(crate) fn primary(b: Button) -> Button {
-    button(b.primary())
+pub(crate) fn primary(b: Button, cx: &App) -> Button {
+    button(b.primary(), cx)
 }
 
 /// Tinted red (the theme's `button.danger.*`) in a red border.
 pub(crate) fn danger(b: Button, cx: &App) -> Button {
     let (_, _, border) = tint(Tone::Danger, cx);
-    button(b.danger()).border_1().border_color(border)
+    button(b.danger(), cx).border_1().border_color(border)
 }
 
 /// An icon-only button: a 28 px square.
@@ -98,7 +100,7 @@ pub(crate) fn icon(b: Button) -> Button {
 /// A small uppercase label: table and section headers, settings groups.
 pub(crate) fn label(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
-        .text_size(px(10.5))
+        .text_size(fonts::ui(cx, 10.5))
         .font_weight(FontWeight::BOLD)
         .text_color(cx.theme().muted_foreground)
         .child(text.into().to_uppercase())
@@ -126,7 +128,7 @@ pub(crate) fn badge(text: impl Into<SharedString>, tone: Tone, cx: &App) -> Div 
         .px(px(6.))
         .rounded(px(6.))
         .bg(fill)
-        .text_size(px(10.5))
+        .text_size(fonts::ui(cx, 10.5))
         .font_weight(FontWeight::BOLD)
         .text_color(color)
         .child(text.into())

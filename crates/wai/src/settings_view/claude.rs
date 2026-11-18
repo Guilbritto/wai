@@ -443,7 +443,7 @@ impl SettingsView {
                         } else {
                             IconName::ChevronRight
                         })
-                        .small()
+                        .with_size(px(14.))
                         .text_color(faint),
                     )
                     .child(

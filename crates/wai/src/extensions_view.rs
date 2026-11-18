@@ -23,6 +23,7 @@ use wai_ext::panel::clamp;
 use wai_ext::{ExtId, ExtStore, Installed, Permission, RequiredPlugin, Source, Staged};
 use wai_settings::{Change, Settings, write_change};
 
+use crate::appearance::fonts;
 use crate::claude_plugins::{self, INSTALL_TIMEOUT};
 use crate::ext_host::{ExtHost, ExtStatus};
 use crate::marketplace::{self, Entry, Listings};
@@ -711,7 +712,7 @@ impl Render for ExtensionsView {
             h_flex()
                 .gap_2()
                 .pt_2()
-                .text_size(px(11.))
+                .text_size(fonts::ui(cx, 11.))
                 .text_color(theme.muted_foreground)
                 .child(text)
                 .children(count.map(|n| n.to_string()))

@@ -318,7 +318,7 @@ pub(crate) fn plan_row(entry: &PlanEntry, cx: &App) -> impl IntoElement {
         .gap_1()
         .text_xs()
         .text_color(theme.foreground)
-        .child(Icon::new(icon).xsmall().text_color(color))
+        .child(Icon::new(icon).with_size(px(12.)).text_color(color))
         .child(
             div()
                 .flex_1()

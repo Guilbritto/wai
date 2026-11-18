@@ -11,6 +11,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex
 use gpui_kit::*;
 use wai_project::{Entry, FsChange, list_dir};
 
+use crate::appearance::fonts;
 use crate::{aurora, sidebar};
 
 /// A file clicked in the tree; the workspace opens it.
@@ -191,9 +192,11 @@ impl FileTree {
                 false => IconName::ChevronRight,
             };
             let chevron = Icon::new(chevron)
-                .xsmall()
+                .with_size(px(12.))
                 .text_color(theme.muted_foreground);
-            let folder = Icon::new(Lucide::Folder).xsmall().text_color(theme.blue);
+            let folder = Icon::new(Lucide::Folder)
+                .with_size(px(12.))
+                .text_color(theme.blue);
             (chevron.into_any_element(), folder.into_any_element())
         } else {
             let (text, mark) = file_mark(&entry.name);
@@ -201,7 +204,7 @@ impl FileTree {
                 .w(px(12.))
                 .flex_none()
                 .text_center()
-                .text_size(px(10.))
+                .text_size(fonts::ui(cx, 10.))
                 .text_color(mark.color(cx))
                 .child(text);
             (
@@ -320,10 +323,10 @@ impl Render for FileTree {
             .pt(px(6.))
             .pb(px(3.))
             .cursor_pointer()
-            .text_size(px(10.5))
+            .text_size(fonts::ui(cx, 10.5))
             .font_weight(FontWeight::BOLD)
             .text_color(theme.muted_foreground)
-            .child(Icon::new(chevron).xsmall())
+            .child(Icon::new(chevron).with_size(px(12.)))
             .child(div().min_w_0().truncate().child(name.to_uppercase()))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle(root.clone(), cx)))
             .test_support();

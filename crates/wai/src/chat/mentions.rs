@@ -251,7 +251,11 @@ impl Render for Mentions {
                 .when(ix == selected, |el| {
                     el.bg(theme.accent).text_color(theme.accent_foreground)
                 })
-                .child(Icon::new(icon).xsmall().text_color(theme.muted_foreground))
+                .child(
+                    Icon::new(icon)
+                        .with_size(px(12.))
+                        .text_color(theme.muted_foreground),
+                )
                 .child(div().flex_none().child(entry.name.clone()))
                 .child(
                     div()

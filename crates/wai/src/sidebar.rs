@@ -21,6 +21,7 @@ use wai_settings::{SessionGroup, WorkArea};
 
 use crate::agents::AgentStatus;
 use crate::app::{FilterSessions, NewSession, ToggleSidebar};
+use crate::appearance::fonts;
 use crate::aurora;
 use crate::bars::{HideEntry, hide_menu};
 use crate::chat::{ChatItem, ChatModel, ChatSession, DraftView, TurnState};
@@ -340,7 +341,7 @@ impl Workspace {
                 .cursor_pointer()
                 .border_1()
                 .border_color(gpui_kit::transparent_black())
-                .text_size(px(10.5))
+                .text_size(fonts::ui(cx, 10.5))
                 .font_weight(FontWeight::EXTRA_BOLD)
                 .aria_label(label.clone())
                 .focus_visible(move |el| el.border_color(ring))
@@ -419,7 +420,7 @@ impl Workspace {
                             .justify_center()
                             .bg(theme.warning)
                             .text_color(aurora::noite(cx))
-                            .text_size(px(9.5))
+                            .text_size(fonts::ui(cx, 9.5))
                             .font_weight(FontWeight::EXTRA_BOLD)
                             .child(count)
                             .test_support(),
@@ -456,7 +457,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(9.))
+                    .text_size(fonts::ui(cx, 9.))
                     .child(initials(&title))
                     .into_any_element(),
             };
@@ -726,7 +727,7 @@ impl Workspace {
                             .pr(px(6.))
                             .pt(px(6.))
                             .pb(px(3.))
-                            .text_size(px(10.5))
+                            .text_size(fonts::ui(cx, 10.5))
                             .font_weight(FontWeight::BOLD)
                             .text_color(theme.muted_foreground)
                             .child(div().flex_1().child("WORK AREAS"))
@@ -777,7 +778,7 @@ impl Workspace {
             .rounded(px(5.))
             .border_1()
             .border_color(cx.theme().border)
-            .text_size(px(10.))
+            .text_size(fonts::ui(cx, 10.))
             .text_color(faint)
             .child(FILTER_KEY);
         div()
@@ -787,7 +788,11 @@ impl Workspace {
             .child(
                 Input::new(&self.sessions_filter)
                     .small()
-                    .prefix(Icon::new(IconName::Search).xsmall().text_color(faint))
+                    .prefix(
+                        Icon::new(IconName::Search)
+                            .with_size(px(12.))
+                            .text_color(faint),
+                    )
                     .suffix(kbd),
             )
             .test_support()
@@ -1041,7 +1046,7 @@ impl Workspace {
             .pl(px(4.))
             .pr(px(6.))
             .gap(px(2.))
-            .text_size(px(11.5))
+            .text_size(fonts::ui(cx, 11.5))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(fg2(cx))
             .child(
@@ -1099,7 +1104,7 @@ impl Workspace {
                                 div()
                                     .id(("group-needs", ix))
                                     .flex_none()
-                                    .text_size(px(10.5))
+                                    .text_size(fonts::ui(cx, 10.5))
                                     .text_color(warn)
                                     .aria_label(text.clone())
                                     .child(text)
@@ -1161,7 +1166,7 @@ impl Workspace {
             .pl(px(4.))
             .pr(px(6.))
             .gap(px(2.))
-            .text_size(px(11.5))
+            .text_size(fonts::ui(cx, 11.5))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(fg2(cx))
             .child(
@@ -1222,7 +1227,7 @@ impl Workspace {
                                 div()
                                     .id(("work-area-needs", ix))
                                     .flex_none()
-                                    .text_size(px(10.5))
+                                    .text_size(fonts::ui(cx, 10.5))
                                     .text_color(warn)
                                     .aria_label(text.clone())
                                     .child(text)
@@ -1356,7 +1361,7 @@ impl Workspace {
                     div()
                         .id(("open-age", ix))
                         .flex_none()
-                        .text_size(px(10.5))
+                        .text_size(fonts::ui(cx, 10.5))
                         .text_color(faint)
                         .aria_label(age.clone())
                         .child(age)
@@ -1605,7 +1610,7 @@ impl Workspace {
             .h(px(23.))
             .px(px(8.))
             .rounded(px(7.))
-            .text_size(px(12.))
+            .text_size(fonts::ui(cx, 12.))
             .child(
                 h_flex()
                     .id(("history", ix))
@@ -1639,7 +1644,7 @@ impl Workspace {
                     .children(date.map(|date| {
                         div()
                             .flex_none()
-                            .text_size(px(10.5))
+                            .text_size(fonts::ui(cx, 10.5))
                             .text_color(faint)
                             .child(date)
                     }))
@@ -1692,7 +1697,7 @@ pub(crate) fn panel_title(label: &str, cx: &App) -> Div {
         .px(px(6.))
         .pt(px(4.))
         .pb(px(6.))
-        .text_size(px(11.))
+        .text_size(fonts::ui(cx, 11.))
         .font_weight(FontWeight::BOLD)
         .text_color(cx.theme().muted_foreground)
         .child(div().flex_1().child(label.to_uppercase()))
@@ -1704,7 +1709,7 @@ fn no_match_hint(cx: &App) -> impl IntoElement + use<> {
         .id("sessions-no-match")
         .px(px(8.))
         .py(px(4.))
-        .text_size(px(11.))
+        .text_size(fonts::ui(cx, 11.))
         .text_color(faint(cx))
         .aria_label("No sessions match")
         .child("No sessions match")
@@ -1765,7 +1770,7 @@ fn section_header(
         .border_1()
         .border_color(gpui_kit::transparent_black())
         .cursor_pointer()
-        .text_size(px(10.5))
+        .text_size(fonts::ui(cx, 10.5))
         .font_weight(FontWeight::BOLD)
         .text_color(theme.muted_foreground)
         .role(Role::Button)
@@ -1812,7 +1817,7 @@ fn two_line_row(active: bool, grouped: bool, cx: &App) -> Div {
         .px(px(8.))
         .ml(px(if grouped { 14. } else { 4. }))
         .rounded(px(9.))
-        .text_size(px(13.))
+        .text_size(fonts::ui(cx, 13.))
 }
 
 /// A row's buttons (`chip_button`) on a small glass chip at its top right, shown while the row
@@ -1876,7 +1881,7 @@ fn line_two(id: impl Into<ElementId>, detail: Detail, live: usize, cx: &App) -> 
     div()
         .id(id)
         .truncate()
-        .text_size(px(11.))
+        .text_size(fonts::ui(cx, 11.))
         .text_color(theme.muted_foreground)
         .aria_label(text.clone())
         .child(StyledText::new(text).with_highlights(highlight))

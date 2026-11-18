@@ -13,6 +13,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex
 use gpui_kit::*;
 use wai_project::{MAX_MATCHES, Match, SearchHandle, SearchQuery, search_in};
 
+use crate::appearance::fonts;
 use crate::files::file_mark;
 use crate::sidebar;
 use crate::workspace::folder_name;
@@ -246,13 +247,13 @@ impl SearchView {
                 sidebar::row(false, cx)
                     .id(("search-file", ix))
                     .pl(px(8.))
-                    .child(Icon::new(chevron).xsmall().text_color(muted))
+                    .child(Icon::new(chevron).with_size(px(12.)).text_color(muted))
                     .child(
                         div()
                             .w(px(12.))
                             .flex_none()
                             .text_center()
-                            .text_size(px(10.))
+                            .text_size(fonts::ui(cx, 10.))
                             .text_color(mark.color(cx))
                             .child(text),
                     )
@@ -290,7 +291,7 @@ impl SearchView {
                             .px_1p5()
                             .rounded_full()
                             .bg(muted.opacity(0.15))
-                            .text_size(px(10.))
+                            .text_size(fonts::ui(cx, 10.))
                             .text_color(muted)
                             .child(count.to_string())
                             .test_support(),
@@ -317,7 +318,7 @@ impl SearchView {
                     .aria_selected(active)
                     .pl(px(24.))
                     .font_family(theme.mono_font_family.clone())
-                    .text_size(px(12.))
+                    .text_size(fonts::ui(cx, 12.))
                     .child(
                         div()
                             .flex_none()

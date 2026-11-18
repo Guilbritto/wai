@@ -26,7 +26,7 @@ fn strip_icon(id: impl Into<ElementId>, icon: IconName, fg: Hsla) -> Stateful<Di
         .cursor_pointer()
         .text_color(fg.alpha(0.7))
         .hover(|el| el.text_color(fg).bg(fg.alpha(0.1)))
-        .child(Icon::new(icon).xsmall())
+        .child(Icon::new(icon).with_size(px(12.)))
 }
 
 /// The tab's text: the shell's title without control characters, cut to 24 characters, else

@@ -34,6 +34,7 @@ use crate::app::{
     ClosePane, FocusNextPane, NewSession, OpenFolder, OpenSettings, Quit, Save, ToggleTerminal,
     theme_mode,
 };
+use crate::appearance::fonts;
 use crate::chat::{
     ChatEvent, ChatSession, DraftView, PromptSlot, PromptSlots, PromptTyping, TurnState, signed_out,
 };
@@ -2628,6 +2629,7 @@ impl Workspace {
                         Button::new("cancel")
                             .label("Cancel")
                             .on_click(|_, window, cx| window.close_dialog(cx)),
+                        cx,
                     ))
                     .child(
                         campo::danger(Button::new("confirm").label(confirm), cx)
@@ -3279,7 +3281,7 @@ impl Workspace {
                     .child(
                         div()
                             .font_family(aurora::DISPLAY_FONT)
-                            .text_size(px(20.))
+                            .text_size(fonts::ui(cx, 20.))
                             .font_weight(FontWeight::BOLD)
                             .child("Start a session"),
                     )
@@ -3336,7 +3338,7 @@ impl Workspace {
                 .text_color(theme.foreground)
                 .into_any_element(),
             None => div()
-                .text_size(px(9.))
+                .text_size(fonts::ui(cx, 9.))
                 .font_weight(FontWeight::EXTRA_BOLD)
                 .child(crate::sidebar::initials(&title))
                 .into_any_element(),
@@ -3364,7 +3366,7 @@ impl Workspace {
                     .min_w_0()
                     .truncate()
                     .font_family(aurora::DISPLAY_FONT)
-                    .text_size(px(14.))
+                    .text_size(fonts::ui(cx, 14.))
                     .font_weight(FontWeight::BOLD)
                     .child(title),
             )
@@ -3373,7 +3375,7 @@ impl Workspace {
                     .flex_shrink(1.)
                     .min_w_0()
                     .truncate()
-                    .text_size(px(12.))
+                    .text_size(fonts::ui(cx, 12.))
                     .text_color(theme.muted_foreground)
                     .child(ext_name),
             )

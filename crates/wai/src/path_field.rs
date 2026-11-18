@@ -12,6 +12,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_ext::panel::Pick;
 
+use crate::appearance::fonts;
 use crate::campo;
 
 /// The picker segment on the right.
@@ -184,7 +185,7 @@ impl RenderOnce for PathField {
                 .flex_1()
                 .min_w_0()
                 .font_family(mono)
-                .text_size(px(11.5))
+                .text_size(fonts::ui(cx, 11.5))
                 .into_any_element(),
             false => div()
                 .id((self.id.clone(), "choose"))
@@ -197,7 +198,7 @@ impl RenderOnce for PathField {
                 .border_color(transparent_black())
                 .when(text.is_empty(), |el| el.text_color(dim))
                 .when(!text.is_empty(), |el| {
-                    el.font_family(mono).text_size(px(11.5))
+                    el.font_family(mono).text_size(fonts::ui(cx, 11.5))
                 })
                 .child(if text.is_empty() {
                     self.placeholder.clone()
@@ -242,11 +243,14 @@ impl RenderOnce for PathField {
                         .tooltip(what)
                         .accessibility_label(what)
                 }
-                false => b.px_2().text_size(px(12.)).label(if text.is_empty() {
-                    "Choose…"
-                } else {
-                    "Change…"
-                }),
+                false => b
+                    .px_2()
+                    .text_size(fonts::ui(cx, 12.))
+                    .label(if text.is_empty() {
+                        "Choose…"
+                    } else {
+                        "Change…"
+                    }),
             })
             .on_click(opener);
         let (input, on_change) = (self.input.clone(), self.on_change.clone());
@@ -261,7 +265,7 @@ impl RenderOnce for PathField {
                 div()
                     .pl_2()
                     .pr_1()
-                    .child(Icon::new(icon).small().text_color(muted)),
+                    .child(Icon::new(icon).with_size(px(14.)).text_color(muted)),
             )
             .child(body)
             .children(clear)
