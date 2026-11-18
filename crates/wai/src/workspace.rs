@@ -7,8 +7,8 @@ use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, Theme, h_flex, h_resizable, resizable_panel,
-    v_flex, v_resizable,
+    ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, h_resizable, resizable_panel, v_flex,
+    v_resizable,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -32,9 +32,8 @@ use crate::agents::{AgentRegistry, AgentStatus, RegistryEvent};
 use crate::agents_view::{AgentsView, ShowSession};
 use crate::app::{
     ClosePane, FocusNextPane, NewSession, OpenFolder, OpenSettings, Quit, Save, ToggleTerminal,
-    theme_mode,
 };
-use crate::appearance::fonts;
+use crate::appearance::{self, fonts};
 use crate::chat::{
     ChatEvent, ChatSession, DraftView, PromptSlot, PromptSlots, PromptTyping, TurnState, signed_out,
 };
@@ -188,6 +187,14 @@ fn touches(batch: &[FsChange], path: &Path) -> bool {
     })
 }
 
+/// Whether the batch names something inside `dir`, or lost track of what changed.
+fn touches_under(batch: &[FsChange], dir: &Path) -> bool {
+    batch.iter().any(|change| match change {
+        FsChange::Rescan => true,
+        FsChange::Changed(paths) => paths.iter().any(|p| p.starts_with(dir)),
+    })
+}
+
 /// The window's root view: the top bar over sidebar | chat panes over the terminal panel, each a
 /// card on the aurora.
 pub struct Workspace {
@@ -263,6 +270,8 @@ pub struct Workspace {
     settings_view: Option<WeakEntity<SettingsView>>,
     /// The load notices already shown: a reload pushes only new ones.
     load_notices: Vec<String>,
+    /// The enabled extensions' theme files, as the last `appearance::apply` got them.
+    theme_files: Vec<(String, PathBuf)>,
     /// The last run's sessions `restore` could not reopen (their agent is not in the settings, or
     /// its command waits for an answer): saved again, for a launch that can.
     unrestored: Vec<OpenSession>,
@@ -487,6 +496,7 @@ impl Workspace {
             settings_watch: None,
             settings_view: None,
             load_notices: Vec::new(),
+            theme_files: Vec::new(),
             unrestored: Vec::new(),
             #[cfg(test)]
             applied: 0,
@@ -582,6 +592,7 @@ impl Workspace {
     pub fn watch_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let _ = std::fs::create_dir_all(&self.user_dir);
         let file = canonical(&self.user_dir).join("settings.toml");
+        let themes = canonical(&self.user_dir).join("themes");
         let (watcher, changes) = match ProjectWatcher::start(&canonical(&self.user_dir)) {
             Ok(started) => started,
             Err(e) => {
@@ -595,7 +606,7 @@ impl Workspace {
                 while let Ok(more) = changes.try_recv() {
                     batch.push(more);
                 }
-                if !touches(&batch, &file) {
+                if !touches(&batch, &file) && !touches_under(&batch, &themes) {
                     continue;
                 }
                 let reloaded = this.update_in(cx, |this, window, cx| {
@@ -635,10 +646,15 @@ impl Workspace {
             self.applied += 1;
         }
         self.settings_error = None;
-        if new.theme.mode != self.settings.theme.mode {
-            Theme::change(theme_mode(new.theme.mode, cx), Some(window), cx);
-            window.refresh();
-        }
+        let mut notices = notices;
+        notices.extend(appearance::apply(
+            &new,
+            Some(&self.user_dir),
+            &self.theme_files,
+            Some(window),
+            cx,
+        ));
+        window.refresh();
         let processing = new.conversation.processing;
         for session in &self.sessions {
             session.update(cx, |s, cx| s.set_processing(processing, cx));
@@ -681,6 +697,27 @@ impl Workspace {
         }
         self.sync_drafts(cx);
         self.sync_settings_view(cx);
+        cx.notify();
+    }
+
+    /// Loads the themes (the user folder's, the extensions') and applies the current settings
+    /// again; notices not shown yet are pushed.
+    pub(crate) fn reapply_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let notices = appearance::apply(
+            &self.settings,
+            Some(&self.user_dir),
+            &self.theme_files,
+            Some(window),
+            cx,
+        );
+        window.refresh();
+        for notice in &notices {
+            if !self.load_notices.contains(notice) {
+                let shown = Notification::warning(notice.clone()).autohide(false);
+                window.push_notification(shown, cx);
+                self.load_notices.push(notice.clone());
+            }
+        }
         cx.notify();
     }
 
@@ -5726,6 +5763,46 @@ pub(crate) mod tests {
         wait_until(cx, "the light theme", |cx| {
             cx.update(|_, cx| !cx.theme().is_dark())
         });
+    }
+
+    #[gpui_kit::test]
+    fn theme_file_in_the_folder_loads_live(cx: &mut TestAppContext) {
+        use crate::appearance::catalog::ThemeCatalog;
+        use gpui_kit::component::ThemeMode;
+
+        let (_workspace, cx, dir) = live(cx, Settings::default(), None);
+        let has = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                ThemeCatalog::global(cx)
+                    .find("Mine", ThemeMode::Dark)
+                    .is_some()
+            })
+        };
+        let background =
+            |cx: &mut VisualTestContext| cx.update(|_, cx| cx.theme().colors.background);
+        let bundled = background(cx);
+        std::fs::write(
+            dir.path().join("settings.toml"),
+            "[theme]\ndark = \"Mine\"\n",
+        )
+        .unwrap();
+        cx.run_until_parked();
+        assert!(!has(cx));
+        let themes = dir.path().join("themes");
+        std::fs::create_dir(&themes).unwrap();
+        let file = themes.join("mine.json");
+        std::fs::write(
+            &file,
+            r##"{"name":"set","themes":[{"name":"Mine","mode":"dark","colors":{"background":"#101010"}}]}"##,
+        )
+        .unwrap();
+        wait_until(cx, "the theme in the catalog", |cx| has(cx));
+        wait_until(cx, "the selected theme drawn", |cx| {
+            background(cx) != bundled
+        });
+        std::fs::remove_file(&file).unwrap();
+        wait_until(cx, "the theme gone", |cx| !has(cx));
+        wait_until(cx, "the fallback drawn", |cx| background(cx) == bundled);
     }
 
     #[gpui_kit::test]

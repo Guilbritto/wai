@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use gpui_kit::component::input::CursorBlink;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{Theme, ThemeMode, TitleBar, WindowExt as _};
+use gpui_kit::component::{Theme, TitleBar, WindowExt as _};
 use gpui_kit::*;
-use wai_settings::{Settings, Template, ThemeChoice, unapproved};
+use wai_settings::{Settings, Template, unapproved};
 
 use crate::settings_view::Section;
 use crate::workspace::{CHOOSE_AI, Workspace};
@@ -35,10 +35,6 @@ actions!(
         FilterSessions
     ]
 );
-
-pub fn theme_mode(theme: ThemeChoice, cx: &App) -> ThemeMode {
-    crate::appearance::effective_mode(theme, cx.window_appearance())
-}
 
 /// Everything a window needs before it opens: components, theme, caret blink, keymap.
 pub fn init(settings: &Settings, cx: &mut App) {
@@ -188,6 +184,8 @@ pub fn run(
                     w.watch_settings(window, cx);
                     // Before `restore`: a saved session may be an extension agent's.
                     w.start_extensions(cx);
+                    // The user folder's and the extensions' themes need the real folders.
+                    w.reapply_appearance(window, cx);
                     w.restore(window, cx);
                     // `restore` may have checked already, through `set_project`.
                     if matches!(w.mcp, crate::settings_view::claude::McpCheck::NotRun) {
