@@ -38,7 +38,7 @@ const FILTER_KEY: &str = if cfg!(target_os = "macos") {
 };
 
 /// The groups' swatches, in the order new groups take them.
-pub(crate) const GROUP_COLORS: [fn() -> Hsla; 6] = [
+pub(crate) const GROUP_COLORS: [fn(&App) -> Hsla; 6] = [
     aurora::lilas,
     aurora::boreal,
     aurora::ceu,
@@ -320,6 +320,7 @@ impl Workspace {
             .filter(|s| matches!(s.read(cx).status(), TurnState::NeedsYou))
             .count();
         let ring = theme.ring;
+        let lilas = aurora::lilas(cx);
         let (idle, selected) = (theme.muted_foreground, theme.foreground);
         let (fill, border, hover) = (
             theme.list_active,
@@ -358,7 +359,7 @@ impl Workspace {
                             .bottom(px(7.))
                             .w(px(2.))
                             .rounded(px(2.))
-                            .bg(aurora::lilas()),
+                            .bg(aurora::lilas(cx)),
                     ),
                     false => el.text_color(idle).hover(move |el| el.bg(hover)),
                 })
@@ -417,7 +418,7 @@ impl Workspace {
                             .items_center()
                             .justify_center()
                             .bg(theme.warning)
-                            .text_color(aurora::noite())
+                            .text_color(aurora::noite(cx))
                             .text_size(px(9.5))
                             .font_weight(FontWeight::EXTRA_BOLD)
                             .child(count)
@@ -520,7 +521,7 @@ impl Workspace {
                         .drag_over(move |style, drag: &RailDrag, _, _| {
                             let at = |k: &str| order.iter().position(|o| o == k);
                             let line = match dark {
-                                true => aurora::lilas().alpha(0.45),
+                                true => lilas.alpha(0.45),
                                 false => ring,
                             };
                             match (at(&drag.key), at(&over)) {
@@ -1029,7 +1030,7 @@ impl Workspace {
         };
         let input = self.renaming(&Renamed::Group(ix));
         let name = group.name.clone();
-        let swatch = GROUP_COLORS[group.color as usize % GROUP_COLORS.len()]();
+        let swatch = GROUP_COLORS[group.color as usize % GROUP_COLORS.len()](cx);
         let (faint, warn) = (faint(cx), theme.warning);
         let workspace = cx.entity().downgrade();
         h_flex()
@@ -1592,7 +1593,7 @@ impl Workspace {
         let elsewhere = self.elsewhere.contains(&summary.id)
             && self.session("claude", &summary.id, cx).is_none();
         let amber = match cx.theme().is_dark() {
-            true => aurora::ambar(),
+            true => aurora::ambar(cx),
             false => cx.theme().warning,
         };
         aurora::tab(false, cx)
@@ -1713,7 +1714,7 @@ fn no_match_hint(cx: &App) -> impl IntoElement + use<> {
 /// Faint text: counts, times, the filter's key (the mockup's `--dim`).
 fn faint(cx: &App) -> Hsla {
     match cx.theme().is_dark() {
-        true => aurora::nevoa_2(),
+        true => aurora::nevoa_2(cx),
         false => cx.theme().muted_foreground,
     }
 }
@@ -1721,7 +1722,7 @@ fn faint(cx: &App) -> Hsla {
 /// Secondary text: group names (the mockup's `--fg2`).
 fn fg2(cx: &App) -> Hsla {
     match cx.theme().is_dark() {
-        true => aurora::tinta_2(),
+        true => aurora::tinta_2(cx),
         false => cx.theme().foreground,
     }
 }
@@ -1820,7 +1821,7 @@ fn two_line_row(active: bool, grouped: bool, cx: &App) -> Div {
 fn hover_chip(cx: &App) -> Div {
     let theme = cx.theme();
     let (fill, border) = match theme.is_dark() {
-        true => (aurora::card_fill(), aurora::borda()),
+        true => (aurora::card_fill(cx), aurora::borda(cx)),
         false => (theme.background, theme.border),
     };
     h_flex()
@@ -2040,7 +2041,7 @@ pub(crate) mod tests {
         cx.update(|cx| {
             app::init(&Settings::default(), cx);
             let color = status_color(&TurnState::Working, cx.theme());
-            assert_eq!(aurora::hex(color), aurora::hex(aurora::boreal()));
+            assert_eq!(aurora::hex(color), aurora::hex(aurora::boreal(cx)));
         });
     }
 

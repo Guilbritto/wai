@@ -55,7 +55,7 @@ impl Workspace {
         let starting = self.drafts.iter().filter(|d| d.read(cx).starting.is_some());
         let working = working + starting.count();
         let (on, off, warn) = if dark {
-            (aurora::boreal(), aurora::nevoa_2(), aurora::ambar())
+            (aurora::boreal(cx), aurora::nevoa_2(cx), aurora::ambar(cx))
         } else {
             // Light's warning (yellow-500) reads ~1.5:1 on the pill; the text colour reads.
             (theme.cyan, theme.muted_foreground, theme.foreground)

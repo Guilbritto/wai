@@ -205,8 +205,8 @@ impl AgentsView {
                             .rounded(px(2.))
                             .bg(linear_gradient(
                                 90.,
-                                linear_color_stop(aurora::boreal(), 0.),
-                                linear_color_stop(aurora::lilas(), 1.),
+                                linear_color_stop(aurora::boreal(cx), 0.),
+                                linear_color_stop(aurora::lilas(cx), 1.),
                             )),
                     )
             }))

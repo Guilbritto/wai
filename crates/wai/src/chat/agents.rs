@@ -38,22 +38,22 @@ pub(super) fn sub_stat(sub: &Subagent) -> String {
 pub(super) fn state_look(sub: &Subagent, cx: &App) -> (&'static str, Hsla, &'static str) {
     let theme = cx.theme();
     let pick = |aurora: Hsla, light: Hsla| if theme.is_dark() { aurora } else { light };
-    let cyan = pick(aurora::boreal(), theme.info);
+    let cyan = pick(aurora::boreal(cx), theme.info);
     match sub.state {
         SubagentState::Running => ("○", cyan, "running"),
-        SubagentState::NeedsYou => ("○", pick(aurora::ambar(), theme.warning), "needs you"),
+        SubagentState::NeedsYou => ("○", pick(aurora::ambar(cx), theme.warning), "needs you"),
         SubagentState::Done | SubagentState::Ended => {
-            ("✓", pick(aurora::ok(), theme.success), "done")
+            ("✓", pick(aurora::ok(cx), theme.success), "done")
         }
-        SubagentState::Stopped => ("✗", pick(aurora::erro(), theme.danger), "stopped"),
-        SubagentState::Failed => ("✗", pick(aurora::erro(), theme.danger), "failed"),
+        SubagentState::Stopped => ("✗", pick(aurora::erro(cx), theme.danger), "stopped"),
+        SubagentState::Failed => ("✗", pick(aurora::erro(cx), theme.danger), "failed"),
         // Parked by the agent's exit (`wind_down`).
         SubagentState::Unknown if sub.ended.is_some() => {
-            ("✗", pick(aurora::erro(), theme.danger), "stopped")
+            ("✗", pick(aurora::erro(cx), theme.danger), "stopped")
         }
         SubagentState::Unknown => (
             "○",
-            pick(aurora::nevoa(), theme.muted_foreground),
+            pick(aurora::nevoa(cx), theme.muted_foreground),
             "starting",
         ),
     }
@@ -77,10 +77,10 @@ impl ChatSession {
         let dark = theme.is_dark();
         let pick = |aurora: Hsla, light: Hsla| if dark { aurora } else { light };
         let (fg, fg2, muted, faint) = (
-            pick(aurora::tinta(), theme.foreground),
-            pick(aurora::tinta_2(), theme.foreground),
-            pick(aurora::nevoa(), theme.muted_foreground),
-            pick(aurora::nevoa_2(), theme.muted_foreground),
+            pick(aurora::tinta(cx), theme.foreground),
+            pick(aurora::tinta_2(cx), theme.foreground),
+            pick(aurora::nevoa(cx), theme.muted_foreground),
+            pick(aurora::nevoa_2(cx), theme.muted_foreground),
         );
         // The cursor's row while the list has the keys, else the open drawer's, else `main`.
         let cursor = self.agent_cursor.map(|c| c.min(subs.len()));
@@ -315,10 +315,10 @@ impl ChatSession {
         let dark = theme.is_dark();
         let (fg, fg2, muted, faint) = match dark {
             true => (
-                aurora::tinta(),
-                aurora::tinta_2(),
-                aurora::nevoa(),
-                aurora::nevoa_2(),
+                aurora::tinta(cx),
+                aurora::tinta_2(cx),
+                aurora::nevoa(cx),
+                aurora::nevoa_2(cx),
             ),
             false => (
                 theme.foreground,
@@ -393,7 +393,7 @@ impl ChatSession {
                 .py(px(6.))
                 .border_b_1()
                 .border_color(if dark {
-                    aurora::borda()
+                    aurora::borda(cx)
                 } else {
                     cx.theme().border
                 })
@@ -434,7 +434,11 @@ impl ChatSession {
             .px(px(12.))
             .py(px(7.))
             .border_b_1()
-            .border_color(if dark { aurora::borda() } else { theme.border })
+            .border_color(if dark {
+                aurora::borda(cx)
+            } else {
+                theme.border
+            })
             .text_size(px(12.))
             .child(div().text_color(color).child(mark))
             .child(
@@ -493,7 +497,7 @@ impl ChatSession {
         let panel = match dark {
             true => panel
                 .border_color(theme.list_active_border)
-                .bg(aurora::noite_2().alpha(0.95))
+                .bg(aurora::noite_2(cx).alpha(0.95))
                 .shadow(vec![
                     BoxShadow::new(px(0.), px(-10.), hsla(0., 0., 0., 0.5)).blur_radius(px(20.)),
                 ]),

@@ -145,7 +145,7 @@ mod tests {
         cx.update(|cx| {
             app::init(&Default::default(), cx);
             let (fill, text, border) = super::tint(Tone::Danger, cx);
-            assert_eq!(hex(text), hex(erro()));
+            assert_eq!(hex(text), hex(erro(cx)));
             assert!((fill.a - 0.15).abs() < 0.01);
             assert!((border.a - 0.38).abs() < 0.01);
         });

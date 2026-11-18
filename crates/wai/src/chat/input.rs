@@ -289,12 +289,12 @@ pub(super) fn send_button(disabled: bool, cx: &App) -> Button {
         .disabled(disabled);
     match (dark, disabled) {
         // A disabled button replays these over its own disabled colors.
-        (true, true) => send.bg(aurora::vidro()).text_color(aurora::nevoa()),
+        (true, true) => send.bg(aurora::vidro(cx)).text_color(aurora::nevoa(cx)),
         (true, false) => aurora::filled(
             send,
-            aurora::boreal(),
-            aurora::boreal().blend(hsla(0., 0., 1., 0.2)),
-            rgb(0x0b1024).into(),
+            aurora::boreal(cx),
+            aurora::boreal(cx).blend(hsla(0., 0., 1., 0.2)),
+            aurora::on_boreal(),
             cx,
         ),
         (false, _) => send.primary(),
@@ -562,13 +562,13 @@ impl ChatSession {
             match dark {
                 true => aurora::filled(
                     stop,
-                    aurora::erro().alpha(0.18),
-                    aurora::erro().alpha(0.28),
-                    aurora::erro(),
+                    aurora::erro(cx).alpha(0.18),
+                    aurora::erro(cx).alpha(0.28),
+                    aurora::erro(cx),
                     cx,
                 )
                 .border_1()
-                .border_color(aurora::erro().alpha(0.5)),
+                .border_color(aurora::erro(cx).alpha(0.5)),
                 false => stop.danger(),
             }
             .size(px(36.))
@@ -597,12 +597,12 @@ impl ChatSession {
             );
         let field = match (dark, focused) {
             (true, true) => field
-                .bg(aurora::noite_2().alpha(0.78))
+                .bg(aurora::noite_2(cx).alpha(0.78))
                 .border_color(theme.ring)
                 .shadow(campo::halo(cx)),
             (true, false) => field
-                .bg(aurora::noite_2().alpha(0.78))
-                .border_color(aurora::borda_forte()),
+                .bg(aurora::noite_2(cx).alpha(0.78))
+                .border_color(aurora::borda_forte(cx)),
             (false, true) => field
                 .bg(theme.background)
                 .border_color(theme.ring)
@@ -616,8 +616,8 @@ impl ChatSession {
             let secs = started.map_or(0, |d| d.as_secs());
             let waiting = self.model.state == TurnState::NeedsYou;
             let (ring, text) = match (dark, waiting) {
-                (true, true) => (aurora::ambar(), aurora::ambar()),
-                (true, false) => (aurora::boreal(), aurora::nevoa()),
+                (true, true) => (aurora::ambar(cx), aurora::ambar(cx)),
+                (true, false) => (aurora::boreal(cx), aurora::nevoa(cx)),
                 (false, true) => (warning, warning),
                 (false, false) => (success, theme.muted_foreground),
             };
@@ -643,7 +643,7 @@ impl ChatSession {
                         .id("turn-status-time")
                         .flex_none()
                         .text_color(match dark {
-                            true => aurora::nevoa(),
+                            true => aurora::nevoa(cx),
                             false => theme.muted_foreground,
                         })
                         .child(format!("{} · Esc to stop", elapsed(secs)))
@@ -769,7 +769,7 @@ impl ChatSession {
         // Claude's mark, as the mockup's agent chip shows it.
         let star = (self.agent == "claude").then(|| {
             div()
-                .text_color(aurora::brasa())
+                .text_color(aurora::brasa(cx))
                 .child("✳")
                 .into_any_element()
         });

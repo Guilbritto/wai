@@ -130,7 +130,7 @@ pub(super) fn frame(
             frame
                 .border_color(accent.alpha(0.55))
                 .bg(accent.alpha(0.08)),
-            aurora::brasa(),
+            aurora::brasa(cx),
         ),
         // Warning (yellow-500) text reads ~1.9:1 on white.
         false => (frame.border_color(theme.warning), theme.muted_foreground),
@@ -164,22 +164,26 @@ fn choice(n: Option<usize>, choice: &PermissionChoice, highlighted: bool, cx: &A
     let dark = theme.is_dark();
     let (fill, hover, border) = match (dark, highlighted) {
         (true, true) => (
-            aurora::lilas().alpha(0.16),
-            aurora::lilas().alpha(0.24),
-            aurora::lilas().alpha(0.45),
+            aurora::lilas(cx).alpha(0.16),
+            aurora::lilas(cx).alpha(0.24),
+            aurora::lilas(cx).alpha(0.45),
         ),
-        (true, false) => (aurora::vidro(), aurora::vidro_forte(), aurora::borda()),
+        (true, false) => (
+            aurora::vidro(cx),
+            aurora::vidro_forte(cx),
+            aurora::borda(cx),
+        ),
         (false, true) => (theme.secondary, theme.secondary_hover, theme.ring),
         (false, false) => (theme.secondary, theme.secondary_hover, theme.border),
     };
     let text = match (dark, reject) {
-        (true, true) => aurora::erro(),
-        (true, false) => aurora::tinta(),
+        (true, true) => aurora::erro(cx),
+        (true, false) => aurora::tinta(cx),
         (false, true) => theme.danger,
         (false, false) => theme.foreground,
     };
     let (badge, badge_text) = match dark {
-        true => (aurora::brasa().alpha(0.18), rgb(0xffb68a).into()),
+        true => (aurora::brasa(cx).alpha(0.18), aurora::brasa_text()),
         false => (theme.background, theme.muted_foreground),
     };
     let number = n.map(|n| {
@@ -235,7 +239,7 @@ pub fn card(
                 .on_click(move |_, window, cx| on_choose(&c, window, cx))
         }));
     frame(
-        aurora::boreal(),
+        aurora::boreal(cx),
         "PERMISSION REQUESTED",
         request.title.clone(),
         cx,
@@ -254,7 +258,7 @@ pub fn card(
 pub fn closed(id: ElementId, title: &str, answer: &str, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
     let strong = match theme.is_dark() {
-        true => aurora::tinta(),
+        true => aurora::tinta(cx),
         false => theme.foreground,
     };
     boxed_line(cx)

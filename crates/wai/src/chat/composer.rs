@@ -87,7 +87,7 @@ pub(super) fn prompt_row(
                 slot("prompt-slot", inside)
                     .border_l_1()
                     .border_color(match dark {
-                        true => aurora::borda(),
+                        true => aurora::borda(cx),
                         false => theme.border,
                     })
                     // Registers the id so tests can find it.
@@ -105,8 +105,8 @@ pub(super) fn prompt_row(
                 let el = el.rounded(px(20.)).border_1().overflow_hidden();
                 match dark {
                     true => el
-                        .bg(aurora::noite_2().alpha(0.78))
-                        .border_color(aurora::borda_forte()),
+                        .bg(aurora::noite_2(cx).alpha(0.78))
+                        .border_color(aurora::borda_forte(cx)),
                     false => el.bg(theme.background).border_color(theme.input),
                 }
                 // Registers the id so tests can find it.
@@ -155,7 +155,7 @@ pub(super) fn strip(id: &'static str, cx: &App) -> Stateful<Div> {
     match theme.is_dark() {
         true => tab
             .bg(hsla(0., 0., 1., 0.035))
-            .border_color(aurora::borda()),
+            .border_color(aurora::borda(cx)),
         false => tab.border_color(theme.border),
     }
 }
@@ -178,8 +178,8 @@ pub(super) fn chip(
     let theme = cx.theme();
     let dark = theme.is_dark();
     let (text, hover) = match (dark, bar) {
-        (true, true) => (aurora::nevoa(), aurora::nevoa()),
-        (true, false) => (aurora::tinta_2(), aurora::tinta()),
+        (true, true) => (aurora::nevoa(cx), aurora::nevoa(cx)),
+        (true, false) => (aurora::tinta_2(cx), aurora::tinta(cx)),
         (false, _) => (theme.muted_foreground, theme.foreground),
     };
     let fill = theme.muted;
@@ -196,7 +196,7 @@ pub(super) fn chip(
         .text_color(text)
         .hover(move |el| {
             let fill = match dark {
-                true => aurora::vidro(),
+                true => aurora::vidro(cx),
                 false => fill,
             };
             el.bg(fill).text_color(hover)
@@ -223,7 +223,7 @@ pub(super) fn strip_label(
 ) -> impl IntoElement + use<> {
     let theme = cx.theme();
     let color = match theme.is_dark() {
-        true => aurora::tinta_2(),
+        true => aurora::tinta_2(cx),
         false => theme.muted_foreground,
     };
     h_flex()

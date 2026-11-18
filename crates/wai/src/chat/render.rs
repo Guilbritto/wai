@@ -31,9 +31,9 @@ fn user_bubble(cx: &App) -> Div {
         .border_1();
     match theme.is_dark() {
         true => bubble
-            .bg(aurora::lilas().alpha(0.22))
-            .border_color(aurora::lilas().alpha(0.5))
-            .text_color(aurora::tinta()),
+            .bg(aurora::lilas(cx).alpha(0.22))
+            .border_color(aurora::lilas(cx).alpha(0.5))
+            .text_color(aurora::tinta(cx)),
         false => bubble.bg(theme.secondary).border_color(theme.border),
     }
 }
@@ -139,7 +139,7 @@ fn card_segment(edges: CardEdges, cx: &App) -> Div {
     match theme.is_dark() {
         true => seg
             .bg(hsla(0., 0., 1., 0.035))
-            .border_color(aurora::borda()),
+            .border_color(aurora::borda(cx)),
         false => seg.border_color(theme.border),
     }
 }
@@ -149,7 +149,7 @@ pub(super) fn glass(el: Div, cx: &App) -> Div {
     let theme = cx.theme();
     let el = el.border_1();
     match theme.is_dark() {
-        true => el.bg(aurora::vidro()).border_color(aurora::borda()),
+        true => el.bg(aurora::vidro(cx)).border_color(aurora::borda(cx)),
         false => el.border_color(theme.border),
     }
 }
@@ -159,13 +159,13 @@ fn status_icon(status: ToolStatus, cx: &App) -> Icon {
     let theme = cx.theme();
     let dark = theme.is_dark();
     let (icon, color) = match (status, dark) {
-        (ToolStatus::Pending, true) => (IconName::Ellipsis, aurora::nevoa_2()),
+        (ToolStatus::Pending, true) => (IconName::Ellipsis, aurora::nevoa_2(cx)),
         (ToolStatus::Pending, false) => (IconName::Ellipsis, theme.muted_foreground),
-        (ToolStatus::InProgress, true) => (IconName::Loader, aurora::nevoa()),
+        (ToolStatus::InProgress, true) => (IconName::Loader, aurora::nevoa(cx)),
         (ToolStatus::InProgress, false) => (IconName::Loader, theme.foreground),
-        (ToolStatus::Completed, true) => (IconName::Check, aurora::ok()),
+        (ToolStatus::Completed, true) => (IconName::Check, aurora::ok(cx)),
         (ToolStatus::Completed, false) => (IconName::Check, theme.success),
-        (ToolStatus::Failed, true) => (IconName::CircleX, aurora::erro()),
+        (ToolStatus::Failed, true) => (IconName::CircleX, aurora::erro(cx)),
         (ToolStatus::Failed, false) => (IconName::CircleX, theme.danger),
     };
     Icon::new(icon).size(px(14.)).flex_none().text_color(color)
@@ -196,8 +196,8 @@ fn step_title(title: &str, cx: &App) -> impl IntoElement + use<> {
     let (text, ranges) = code_ranges(title);
     let style = match theme.is_dark() {
         true => HighlightStyle {
-            color: Some(aurora::tinta_2()),
-            background_color: Some(aurora::vidro()),
+            color: Some(aurora::tinta_2(cx)),
+            background_color: Some(aurora::vidro(cx)),
             ..Default::default()
         },
         false => HighlightStyle {
@@ -226,8 +226,8 @@ pub(super) fn step_line(cx: &App) -> Div {
         .cursor_pointer();
     match theme.is_dark() {
         true => line
-            .text_color(aurora::nevoa())
-            .hover(|el| el.text_color(aurora::tinta())),
+            .text_color(aurora::nevoa(cx))
+            .hover(|el| el.text_color(aurora::tinta(cx))),
         false => line
             .text_color(theme.muted_foreground)
             .hover(|el| el.text_color(theme.foreground)),
@@ -248,9 +248,9 @@ pub(super) fn boxed_line(cx: &App) -> Div {
         .cursor_pointer();
     match theme.is_dark() {
         true => line
-            .bg(aurora::vidro())
-            .border_color(aurora::borda())
-            .text_color(aurora::nevoa()),
+            .bg(aurora::vidro(cx))
+            .border_color(aurora::borda(cx))
+            .text_color(aurora::nevoa(cx)),
         false => line
             .border_color(theme.border)
             .text_color(theme.muted_foreground),
@@ -269,9 +269,9 @@ pub(super) fn output_box(cx: &App) -> Div {
         .text_size(px(11.));
     match theme.is_dark() {
         true => out
-            .bg(aurora::noite())
-            .border_color(aurora::borda())
-            .text_color(aurora::nevoa()),
+            .bg(aurora::noite(cx))
+            .border_color(aurora::borda(cx))
+            .text_color(aurora::nevoa(cx)),
         false => out
             .bg(theme.muted)
             .border_color(theme.border)
@@ -390,7 +390,7 @@ impl ChatSession {
     fn card_header(&self, ix: usize, cx: &App) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let (star, name) = match theme.is_dark() {
-            true => (aurora::brasa(), aurora::brasa()),
+            true => (aurora::brasa(cx), aurora::brasa(cx)),
             false => (theme.warning, theme.muted_foreground),
         };
         h_flex()
@@ -449,7 +449,7 @@ impl ChatSession {
                 .size(px(12.))
                 .flex_none()
                 .text_color(match cx.theme().is_dark() {
-                    true => aurora::nevoa_2(),
+                    true => aurora::nevoa_2(cx),
                     false => cx.theme().muted_foreground,
                 }),
             )
@@ -508,7 +508,7 @@ impl ChatSession {
                     });
                 let say = div().flex_1().min_w_0().py(px(4.)).children(text);
                 let say = match dark {
-                    true => say.text_color(aurora::tinta()),
+                    true => say.text_color(aurora::tinta(cx)),
                     false => say,
                 };
                 h_flex()
@@ -527,7 +527,7 @@ impl ChatSession {
                             .id(("thought", ix))
                             .child(Icon::new(IconName::Asterisk).size(px(14.)).text_color(
                                 match dark {
-                                    true => aurora::nevoa_2(),
+                                    true => aurora::nevoa_2(cx),
                                     false => muted,
                                 },
                             ))
@@ -588,11 +588,11 @@ impl ChatSession {
                     .text_size(px(11.5))
                     .child(div().min_w_0().child(text.clone()));
                 let pill = match (kind, dark) {
-                    (NoticeKind::Info, true) => pill.text_color(aurora::nevoa_2()),
+                    (NoticeKind::Info, true) => pill.text_color(aurora::nevoa_2(cx)),
                     (NoticeKind::Error, true) => pill
-                        .text_color(aurora::erro())
-                        .bg(aurora::erro().alpha(0.12))
-                        .border_color(aurora::erro().alpha(0.4)),
+                        .text_color(aurora::erro(cx))
+                        .bg(aurora::erro(cx).alpha(0.12))
+                        .border_color(aurora::erro(cx).alpha(0.4)),
                     (NoticeKind::Info, false) => pill.text_color(muted),
                     (NoticeKind::Error, false) => pill.text_color(theme.danger),
                 };
@@ -649,7 +649,7 @@ impl ChatSession {
                         .size(px(12.))
                         .flex_none()
                         .text_color(match cx.theme().is_dark() {
-                            true => aurora::nevoa_2(),
+                            true => aurora::nevoa_2(cx),
                             false => cx.theme().muted_foreground,
                         })
                 }),
@@ -728,7 +728,11 @@ impl ChatSession {
             SubagentState::Unknown if sub.ended.is_none() => "Running",
             _ => "Failed",
         };
-        let violet = if dark { aurora::lilas() } else { theme.primary };
+        let violet = if dark {
+            aurora::lilas(cx)
+        } else {
+            theme.primary
+        };
         let (kind, task) = match &sub.kind {
             Some(kind) => (kind.as_str(), sub.title.as_str()),
             None => (sub.title.as_str(), ""),
@@ -772,7 +776,7 @@ impl ChatSession {
         let card = match dark {
             true => card
                 .bg(hsla(0., 0., 1., 0.024))
-                .border_color(aurora::borda()),
+                .border_color(aurora::borda(cx)),
             false => card.border_color(theme.border),
         };
         // Registers the id so tests can find and click it.
@@ -904,8 +908,8 @@ impl ChatSession {
             true => stack
                 .rounded(px(16.))
                 .border_1()
-                .border_color(aurora::borda_forte())
-                .bg(aurora::noite_2().alpha(0.72))
+                .border_color(aurora::borda_forte(cx))
+                .bg(aurora::noite_2(cx).alpha(0.72))
                 // CSS `0 12px 40px -12px`: GPUI's blur radius is half the CSS one.
                 .shadow(vec![
                     BoxShadow::new(px(0.), px(12.), hsla(0., 0., 0., 0.8))

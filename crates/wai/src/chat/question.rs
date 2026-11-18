@@ -152,7 +152,7 @@ pub fn card(
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let id = request.id;
-    let card = super::permission::frame(aurora::lilas(), "QUESTION", request.message.clone(), cx)
+    let card = super::permission::frame(aurora::lilas(cx), "QUESTION", request.message.clone(), cx)
         .id(("waiting-question", id));
     let form = forms
         .entry(id)

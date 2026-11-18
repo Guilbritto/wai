@@ -148,6 +148,8 @@ mod tests {
     use gpui_kit::{Hsla, TestAppContext, rgb};
     use wai_settings::{FontArea, ThemeSettings};
 
+    use regex::Regex;
+
     use super::*;
 
     fn run(
@@ -163,6 +165,54 @@ mod tests {
             let installed = |f: &str| installed.contains(&f);
             apply_with(settings, user_dir, &[], None, cx, &installed)
         })
+    }
+
+    /// Every source file under `crates/wai/src` as (path relative to it, text).
+    fn sources() -> Vec<(String, String)> {
+        fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, root, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let rel = path
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                    out.push((rel, std::fs::read_to_string(&path).unwrap()));
+                }
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut out = Vec::new();
+        walk(&root, &root, &mut out);
+        out
+    }
+
+    /// Lines of `text` (with their file) matching `bad`, outside the files `skip` says to skip.
+    fn offenders(skip: impl Fn(&str) -> bool, bad: impl Fn(&str) -> bool) -> Vec<String> {
+        let mut found = Vec::new();
+        for (file, text) in sources().into_iter().filter(|(f, _)| !skip(f)) {
+            for (n, line) in text.lines().enumerate().filter(|(_, l)| bad(l)) {
+                found.push(format!("{file}:{}: {}", n + 1, line.trim()));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn views_paint_from_the_theme() {
+        let calls = Regex::new(r"aurora::(noite|noite_2|boreal|lilas|magenta|ceu|brasa|ambar|erro|tinta|tinta_2|nevoa|nevoa_2|ok|vidro|vidro_forte|borda|borda_forte|card_fill)\(\)").unwrap();
+        let found = offenders(
+            |f| f == "aurora.rs" || f.starts_with("appearance/") || f == "terminal_view.rs",
+            |l| calls.is_match(l) || l.contains("rgb(0x"),
+        );
+        assert!(
+            found.is_empty(),
+            "fixed colors in views:\n{}",
+            found.join("\n")
+        );
     }
 
     fn fonts(cx: &mut TestAppContext) -> ResolvedFonts {

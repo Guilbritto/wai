@@ -237,7 +237,7 @@ fn column(inner: Div) -> Div {
 /// Hairlines between rows and around the header.
 fn divider(cx: &App) -> Hsla {
     if cx.theme().is_dark() {
-        aurora::borda()
+        aurora::borda(cx)
     } else {
         cx.theme().border
     }
@@ -247,7 +247,7 @@ fn divider(cx: &App) -> Hsla {
 pub(crate) fn card(rows: impl IntoIterator<Item = Div>, cx: &App) -> Div {
     let theme = cx.theme();
     let fill = if theme.is_dark() {
-        aurora::vidro()
+        aurora::vidro(cx)
     } else {
         theme.background
     };
@@ -1122,7 +1122,7 @@ impl Render for SettingsView {
         let (warning, danger) = (cx.theme().warning, cx.theme().danger);
         let muted = cx.theme().muted_foreground;
         let dark = cx.theme().is_dark();
-        let faint = if dark { aurora::nevoa_2() } else { muted };
+        let faint = if dark { aurora::nevoa_2(cx) } else { muted };
         let section = self.section;
         // Rows with the same card title share a card.
         let mut cards: Vec<(&str, Vec<Div>)> = Vec::new();
@@ -1193,7 +1193,7 @@ impl Render for SettingsView {
             );
             titled("Advanced", card([file], cx), cx)
         });
-        let soon = if dark { aurora::ambar() } else { warning };
+        let soon = if dark { aurora::ambar(cx) } else { warning };
         let nav_fill = if dark {
             white().opacity(0.018)
         } else {
@@ -1214,7 +1214,7 @@ impl Render for SettingsView {
                             .text_color(faint)
                             .children(
                                 (*label == "Claude")
-                                    .then(|| div().text_color(aurora::brasa()).child("✳")),
+                                    .then(|| div().text_color(aurora::brasa(cx)).child("✳")),
                             )
                             .child(label.to_uppercase()),
                     )

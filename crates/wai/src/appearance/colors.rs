@@ -61,7 +61,6 @@ pub(crate) struct Palette {
 impl Global for Palette {}
 
 impl Palette {
-    #[allow(dead_code)]
     pub fn global(cx: &App) -> &Self {
         cx.global::<Self>()
     }

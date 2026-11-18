@@ -5,6 +5,7 @@
 use std::borrow::Cow;
 use std::rc::Rc;
 
+use crate::appearance::colors::Palette;
 use gpui_kit::base::{ResizeHandleRenderer, ResizeHandleState};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, h_flex};
@@ -31,75 +32,87 @@ fn white(alpha: f32) -> Hsla {
 }
 
 /// Window background.
-pub(crate) fn noite() -> Hsla {
-    rgb(0x070a18).into()
+pub(crate) fn noite(cx: &App) -> Hsla {
+    Palette::global(cx).noite
 }
 /// Popovers, dialogs, menus.
-pub(crate) fn noite_2() -> Hsla {
-    rgb(0x0d1230).into()
+pub(crate) fn noite_2(cx: &App) -> Hsla {
+    Palette::global(cx).noite_2
 }
 /// Primary, focus ring, "working", send.
-pub(crate) fn boreal() -> Hsla {
-    rgb(0x36e2c0).into()
+pub(crate) fn boreal(cx: &App) -> Hsla {
+    Palette::global(cx).boreal
 }
 /// Active tab, selection, focused card, user bubble.
-pub(crate) fn lilas() -> Hsla {
-    rgb(0x8d72ff).into()
+pub(crate) fn lilas(cx: &App) -> Hsla {
+    Palette::global(cx).lilas
 }
-pub(crate) fn magenta() -> Hsla {
-    rgb(0xff6ec7).into()
+pub(crate) fn magenta(cx: &App) -> Hsla {
+    Palette::global(cx).magenta
 }
 /// Info, links.
-pub(crate) fn ceu() -> Hsla {
-    rgb(0x5bb8ff).into()
+pub(crate) fn ceu(cx: &App) -> Hsla {
+    Palette::global(cx).ceu
 }
 /// Agent header star, eyebrows, numbered badges.
-pub(crate) fn brasa() -> Hsla {
-    rgb(0xff8f4f).into()
+pub(crate) fn brasa(cx: &App) -> Hsla {
+    Palette::global(cx).brasa
 }
 /// Warning, "needs you".
-pub(crate) fn ambar() -> Hsla {
-    rgb(0xffc15a).into()
+pub(crate) fn ambar(cx: &App) -> Hsla {
+    Palette::global(cx).ambar
 }
-pub(crate) fn erro() -> Hsla {
-    rgb(0xff6b8b).into()
+pub(crate) fn erro(cx: &App) -> Hsla {
+    Palette::global(cx).erro
 }
 /// Text.
-pub(crate) fn tinta() -> Hsla {
-    rgb(0xeceffe).into()
+pub(crate) fn tinta(cx: &App) -> Hsla {
+    Palette::global(cx).tinta
 }
 /// Secondary text.
-pub(crate) fn tinta_2() -> Hsla {
-    rgb(0xc4cbeb).into()
+pub(crate) fn tinta_2(cx: &App) -> Hsla {
+    Palette::global(cx).tinta_2
 }
 /// Muted text.
-pub(crate) fn nevoa() -> Hsla {
-    rgb(0x8f99c2).into()
+pub(crate) fn nevoa(cx: &App) -> Hsla {
+    Palette::global(cx).nevoa
 }
 /// Faint text.
-pub(crate) fn nevoa_2() -> Hsla {
-    rgb(0x626c98).into()
+pub(crate) fn nevoa_2(cx: &App) -> Hsla {
+    Palette::global(cx).nevoa_2
 }
 /// A step that finished.
-pub(crate) fn ok() -> Hsla {
-    rgb(0x46e39a).into()
+pub(crate) fn ok(cx: &App) -> Hsla {
+    Palette::global(cx).ok
 }
 /// Hover, chips, inputs.
-pub(crate) fn vidro() -> Hsla {
-    white(0.055)
+pub(crate) fn vidro(cx: &App) -> Hsla {
+    Palette::global(cx).vidro
 }
-pub(crate) fn vidro_forte() -> Hsla {
-    white(0.09)
+pub(crate) fn vidro_forte(cx: &App) -> Hsla {
+    Palette::global(cx).vidro_forte
 }
-pub(crate) fn borda() -> Hsla {
-    white(0.1)
+pub(crate) fn borda(cx: &App) -> Hsla {
+    Palette::global(cx).borda
 }
-pub(crate) fn borda_forte() -> Hsla {
-    white(0.16)
+pub(crate) fn borda_forte(cx: &App) -> Hsla {
+    Palette::global(cx).borda_forte
+}
+/// Text on a filled `boreal` button: no palette key of its own.
+pub(crate) fn on_boreal() -> Hsla {
+    rgb(0x0b1024).into()
+}
+/// The `rs` file mark's orange, which the mockup draws and the palette has no key for.
+pub(crate) fn orange() -> Hsla {
+    rgb(0xff9a5a).into()
+}
+/// The numbered badge's text, a light `brasa`.
+pub(crate) fn brasa_text() -> Hsla {
+    rgb(0xffb68a).into()
 }
 /// A card's fill (the Central's `.painel-cartao`).
-pub(crate) fn card_fill() -> Hsla {
-    Hsla::from(rgb(0x080b1c)).alpha(0.84)
+pub(crate) fn card_fill(cx: &App) -> Hsla {
+    Palette::global(cx).card_fill
 }
 
 /// The static aurora behind the cards, dark only: the Central's `.aurora` base gradient and its
@@ -109,19 +122,34 @@ pub(crate) fn backdrop(cx: &App) -> Option<AnyElement> {
     if !cx.theme().is_dark() {
         return None;
     }
+    // Opacities of the Central's three blobs; a theme without glow colors paints none.
+    let glows = Palette::global(cx).glows;
+    if glows.iter().all(Option::is_none) {
+        return None;
+    }
     let blobs = canvas(
         |_, _, _| {},
-        |bounds, _, window, _| {
+        move |bounds, _, window, _| {
             let (w, h) = (bounds.size.width, bounds.size.height);
             let vmax = w.max(h) / 100.;
             // Center, colour. A 28 vmax disc blurred by 7 vmax peaks near the colour's alpha and
             // fades out around 23 vmax, like the Central's radial gradients.
             let blobs = [
-                (point(vmax * 14., vmax * 2.), boreal().alpha(0.30)),
-                (point(w - vmax * 10., vmax * 8.), lilas().alpha(0.34)),
-                (point(vmax * 44., h + vmax * 10.), magenta().alpha(0.20)),
+                (
+                    point(vmax * 14., vmax * 2.),
+                    glows[0].map(|c| c.alpha(0.30)),
+                ),
+                (
+                    point(w - vmax * 10., vmax * 8.),
+                    glows[1].map(|c| c.alpha(0.34)),
+                ),
+                (
+                    point(vmax * 44., h + vmax * 10.),
+                    glows[2].map(|c| c.alpha(0.20)),
+                ),
             ];
             for (center, color) in blobs {
+                let Some(color) = color else { continue };
                 let disc =
                     Bounds::centered_at(bounds.origin + center, size(vmax * 28., vmax * 28.));
                 let shadow = BoxShadow::new(px(0.), px(0.), color).blur_radius(vmax * 7.);
@@ -159,12 +187,12 @@ pub(crate) fn card(focused: bool, cx: &App) -> Div {
             .overflow_hidden();
     }
     let (border, glow) = if focused {
-        (lilas().alpha(0.5), lilas().alpha(0.8))
+        (lilas(cx).alpha(0.5), lilas(cx).alpha(0.8))
     } else {
-        (borda(), lilas().alpha(0.45))
+        (borda(cx), lilas(cx).alpha(0.45))
     };
     div()
-        .bg(card_fill())
+        .bg(card_fill(cx))
         .border_1()
         .border_color(border)
         .rounded(px(16.))
@@ -202,7 +230,7 @@ pub(crate) fn card_bar(cx: &App) -> Div {
 pub(crate) fn pill(cx: &App) -> Div {
     let theme = cx.theme();
     let (fill, border, text) = if theme.is_dark() {
-        (vidro(), borda(), tinta_2())
+        (vidro(cx), borda(cx), tinta_2(cx))
     } else {
         (theme.secondary, theme.border, theme.secondary_foreground)
     };
@@ -223,7 +251,7 @@ pub(crate) fn pill(cx: &App) -> Div {
 pub(crate) fn badge(text: impl Into<SharedString>, cx: &App) -> Div {
     let theme = cx.theme();
     let (fill, border, color) = if theme.is_dark() {
-        (vidro_forte(), borda(), tinta_2())
+        (vidro_forte(cx), borda(cx), tinta_2(cx))
     } else {
         (theme.muted, theme.border, theme.muted_foreground)
     };
@@ -242,7 +270,7 @@ pub(crate) fn badge(text: impl Into<SharedString>, cx: &App) -> Div {
 pub(crate) fn soon(cx: &App) -> Div {
     let theme = cx.theme();
     let color = if theme.is_dark() {
-        ambar()
+        ambar(cx)
     } else {
         theme.warning
     };
@@ -278,11 +306,11 @@ pub(crate) fn tab(active: bool, cx: &App) -> Div {
         };
     }
     if active {
-        base.bg(lilas().alpha(0.16))
-            .border_color(lilas().alpha(0.45))
-            .text_color(tinta())
+        base.bg(lilas(cx).alpha(0.16))
+            .border_color(lilas(cx).alpha(0.45))
+            .text_color(tinta(cx))
     } else {
-        base.text_color(nevoa()).hover(|el| el.bg(vidro()))
+        base.text_color(nevoa(cx)).hover(|el| el.bg(vidro(cx)))
     }
 }
 
@@ -292,7 +320,7 @@ pub(crate) fn tab(active: bool, cx: &App) -> Div {
 pub(crate) fn drop_target(style: StyleRefinement, cx: &App) -> StyleRefinement {
     let theme = cx.theme();
     let (fill, border, radius) = if theme.is_dark() {
-        (lilas().alpha(0.16), lilas().alpha(0.45), 15.)
+        (lilas(cx).alpha(0.16), lilas(cx).alpha(0.45), 15.)
     } else {
         (theme.drop_target, theme.ring, 11.)
     };
@@ -357,13 +385,13 @@ mod tests {
             app::init(&Settings::default(), cx);
             let theme = cx.theme();
             assert_eq!(theme.theme_name(), "wai Aurora");
-            assert_eq!(hex(theme.background), hex(noite()));
-            assert_eq!(hex(theme.primary), hex(boreal()));
+            assert_eq!(hex(theme.background), hex(noite(cx)));
+            assert_eq!(hex(theme.primary), hex(boreal(cx)));
             assert_eq!(hex(theme.ring), 0x8d72ff73);
             // Keys the theme file misspells are skipped silently (Default Dark's own
             // `link.foreground` and `drag_border` are).
-            assert_eq!(hex(theme.link), hex(ceu()));
-            assert_eq!(hex(theme.drag_border), hex(lilas()));
+            assert_eq!(hex(theme.link), hex(ceu(cx)));
+            assert_eq!(hex(theme.drag_border), hex(lilas(cx)));
         });
     }
 

@@ -94,6 +94,30 @@ struct Pick {
     /// An `ambar` pill beside the chip's text.
     count: Option<usize>,
     disabled: bool,
+    tones: Tones,
+}
+
+/// The palette colors a row draws with; a menu has no `cx` when it draws its closed chip.
+#[derive(Clone, Copy)]
+struct Tones {
+    ambar: Hsla,
+    nevoa: Hsla,
+}
+
+impl Tones {
+    fn of(cx: &App) -> Self {
+        Self {
+            ambar: aurora::ambar(cx),
+            nevoa: aurora::nevoa(cx),
+        }
+    }
+
+    fn on(self, mut items: Vec<Pick>) -> Vec<Pick> {
+        for item in &mut items {
+            item.tones = self;
+        }
+        items
+    }
 }
 
 impl Pick {
@@ -107,6 +131,10 @@ impl Pick {
             chip: None,
             count: None,
             disabled: false,
+            tones: Tones {
+                ambar: gpui_kit::transparent_black(),
+                nevoa: gpui_kit::transparent_black(),
+            },
         }
     }
 
@@ -154,20 +182,22 @@ impl Pick {
                     .px(px(6.))
                     .rounded_full()
                     .text_size(px(11.5))
-                    .text_color(aurora::ambar())
-                    .bg(aurora::ambar().opacity(0.12))
+                    .text_color(self.tones.ambar)
+                    .bg(self.tones.ambar.opacity(0.12))
                     .child(count.to_string());
                 el.child(pill)
             });
         }
-        row.when(self.disabled, |el| el.text_xs().text_color(aurora::nevoa()))
-            .when_some(self.detail.clone(), |el, detail| {
-                let text = div().truncate().text_xs().text_color(aurora::nevoa());
-                el.child(text.child(detail))
-            })
-            .when_some(self.tag, |el, tag| {
-                el.child(div().text_xs().text_color(aurora::nevoa()).child(tag))
-            })
+        row.when(self.disabled, |el| {
+            el.text_xs().text_color(self.tones.nevoa)
+        })
+        .when_some(self.detail.clone(), |el, detail| {
+            let text = div().truncate().text_xs().text_color(self.tones.nevoa);
+            el.child(text.child(detail))
+        })
+        .when_some(self.tag, |el, tag| {
+            el.child(div().text_xs().text_color(self.tones.nevoa).child(tag))
+        })
     }
 }
 
@@ -206,12 +236,12 @@ type Picks = SearchableVec<Pick>;
 type Menu = Entity<SelectState<Picks>>;
 
 /// The agent's mark, as the mockup draws it; an agent without one shows none.
-fn glyph(agent: &str) -> Lead {
+fn glyph(agent: &str, cx: &App) -> Lead {
     match agent {
-        "claude" => Lead::Glyph("✳", aurora::brasa()),
-        "codex" => Lead::Glyph("◎", aurora::tinta_2()),
-        "copilot" => Lead::Glyph("◉", rgb(0x5bb8ff).into()),
-        "antigravity" => Lead::Glyph("▲", aurora::magenta()),
+        "claude" => Lead::Glyph("✳", aurora::brasa(cx)),
+        "codex" => Lead::Glyph("◎", aurora::tinta_2(cx)),
+        "copilot" => Lead::Glyph("◉", aurora::ceu(cx)),
+        "antigravity" => Lead::Glyph("▲", aurora::magenta(cx)),
         _ => Lead::None,
     }
 }
@@ -614,6 +644,7 @@ impl DraftView {
     }
 
     fn sync_menus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tones = Tones::of(cx);
         if !std::mem::take(&mut self.menus_stale) {
             return;
         }
@@ -626,13 +657,13 @@ impl DraftView {
         items.push(Pick::new(CLONE, "Clone repository…"));
         let current = self.folder.to_string_lossy().into_owned();
         self.folders.update(cx, |select, cx| {
-            select.set_items(items.into(), window, cx);
+            select.set_items(tones.on(items).into(), window, cx);
             select.set_selected_value(&current, window, cx);
         });
 
         let mut items: Vec<Pick> = (self.data.agents.iter())
             .map(|id| Pick {
-                lead: glyph(id),
+                lead: glyph(id, cx),
                 tag: (self.installed.get(id) == Some(&false)).then_some("Not installed"),
                 ..Pick::new(id.clone(), agent_label(id))
             })
@@ -642,7 +673,7 @@ impl DraftView {
         ));
         let current = self.agent.clone();
         self.agents.update(cx, |select, cx| {
-            select.set_items(items.into(), window, cx);
+            select.set_items(tones.on(items).into(), window, cx);
             select.set_selected_value(&current, window, cx);
         });
 
@@ -658,7 +689,7 @@ impl DraftView {
         )));
         let current = self.model.clone();
         self.models.update(cx, |select, cx| {
-            select.set_items(items.into(), window, cx);
+            select.set_items(tones.on(items).into(), window, cx);
             match &current {
                 Some(model) => select.set_selected_value(model, window, cx),
                 None => select.set_selected_index(None, window, cx),
@@ -674,7 +705,7 @@ impl DraftView {
             .collect();
         let current = self.mode.clone();
         self.modes.update(cx, |select, cx| {
-            select.set_items(items.into(), window, cx);
+            select.set_items(tones.on(items).into(), window, cx);
             match &current {
                 Some(mode) => select.set_selected_value(mode, window, cx),
                 None => select.set_selected_index(None, window, cx),
@@ -728,6 +759,7 @@ impl DraftView {
     }
 
     fn sync_git_menus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tones = Tones::of(cx);
         let Some(repo) = self.repo.clone() else {
             return;
         };
@@ -754,7 +786,7 @@ impl DraftView {
         };
         let current = if self.worktree { WORKTREE } else { LOCAL };
         self.places.update(cx, |select, cx| {
-            select.set_items(vec![local, new].into(), window, cx);
+            select.set_items(tones.on(vec![local, new]).into(), window, cx);
             select.set_selected_value(&current.to_string(), window, cx);
         });
 
@@ -766,7 +798,7 @@ impl DraftView {
             (None, false) => CURRENT.to_string(),
         };
         self.branches.update(cx, |select, cx| {
-            select.set_items(items.into(), window, cx);
+            select.set_items(tones.on(items).into(), window, cx);
             select.set_selected_value(&selected, window, cx);
         });
     }
@@ -859,7 +891,7 @@ impl Render for DraftView {
         let theme = cx.theme();
         let dark = theme.is_dark();
         let muted = match dark {
-            true => aurora::nevoa_2(),
+            true => aurora::nevoa_2(cx),
             false => theme.muted_foreground,
         };
         let dragged = DraggedSession {
@@ -890,7 +922,7 @@ impl Render for DraftView {
                     .flex_none()
                     .border_dashed()
                     .text_color(match dark {
-                        true => aurora::nevoa(),
+                        true => aurora::nevoa(cx),
                         false => theme.muted_foreground,
                     })
                     .child("Draft · starts when you send"),
@@ -1029,12 +1061,12 @@ impl Render for DraftView {
             );
         let prompt = match (dark, focused) {
             (true, true) => prompt
-                .bg(aurora::noite_2().alpha(0.78))
+                .bg(aurora::noite_2(cx).alpha(0.78))
                 .border_color(theme.ring)
                 .shadow(campo::halo(cx)),
             (true, false) => prompt
-                .bg(aurora::noite_2().alpha(0.78))
-                .border_color(aurora::borda_forte()),
+                .bg(aurora::noite_2(cx).alpha(0.78))
+                .border_color(aurora::borda_forte(cx)),
             (false, true) => prompt
                 .bg(theme.background)
                 .border_color(theme.ring)
@@ -1086,9 +1118,9 @@ impl Render for DraftView {
                         .border_1()
                         .text_size(px(11.))
                         .font_family(theme.mono_font_family.clone())
-                        .bg(aurora::vidro())
-                        .border_color(aurora::borda())
-                        .text_color(aurora::nevoa())
+                        .bg(aurora::vidro(cx))
+                        .border_color(aurora::borda(cx))
+                        .text_color(aurora::nevoa(cx))
                         .child(keys.to_string()),
                 )
                 .child(what)

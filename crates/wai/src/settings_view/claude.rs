@@ -425,7 +425,7 @@ impl SettingsView {
         open: bool,
         cx: &mut Context<Self>,
     ) -> Div {
-        let (muted, faint) = (cx.theme().muted_foreground, aurora::nevoa_2());
+        let (muted, faint) = (cx.theme().muted_foreground, aurora::nevoa_2(cx));
         let title = group.title.clone();
         let header = h_flex()
             .gap_2()
