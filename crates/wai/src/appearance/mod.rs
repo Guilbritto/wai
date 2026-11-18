@@ -81,9 +81,11 @@ pub(crate) fn apply(
     .into_iter()
     .any(Option::is_some);
     // The platform's font list is costly: only read when a family is set.
-    let names = any_family
-        .then(|| cx.text_system().all_font_names())
-        .unwrap_or_default();
+    let names = if any_family {
+        cx.text_system().all_font_names()
+    } else {
+        Vec::new()
+    };
     let installed = |family: &str| names.iter().any(|n| n == family);
     apply_with(settings, user_dir, ext_files, window, cx, &installed)
 }

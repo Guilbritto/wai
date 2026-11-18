@@ -34,6 +34,7 @@ pub(crate) struct ThemeCatalog {
 impl Global for ThemeCatalog {}
 
 impl ThemeCatalog {
+    #[allow(dead_code)]
     pub fn global(cx: &App) -> &Self {
         cx.global::<Self>()
     }
