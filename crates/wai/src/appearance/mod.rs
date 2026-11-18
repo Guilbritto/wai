@@ -2,3 +2,4 @@
 //! wai's own `Fonts` and `Palette`.
 
 pub(crate) mod catalog;
+pub(crate) mod colors;
