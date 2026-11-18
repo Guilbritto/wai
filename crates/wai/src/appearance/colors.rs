@@ -2,7 +2,7 @@
 //! A key a theme leaves out is derived from the theme's base colors.
 
 use gpui_kit::component::{ThemeColor, try_parse_color};
-use gpui_kit::{App, Global, Hsla};
+use gpui_kit::{App, Global, Hsla, hsla};
 use serde_json::{Map, Value};
 
 /// The keys of a theme's `"wai"` object, glows last.
@@ -26,6 +26,15 @@ pub(crate) const KEYS: &[&str] = &[
     "borda",
     "borda_forte",
     "card_fill",
+    "control.recessed",
+    "control.glass",
+    "control.glass_hover",
+    "control.dim",
+    "on_boreal",
+    "mark.orange",
+    "brasa_text",
+    "backdrop.top",
+    "backdrop.bottom",
     "backdrop.glow_1",
     "backdrop.glow_2",
     "backdrop.glow_3",
@@ -54,6 +63,15 @@ pub(crate) struct Palette {
     pub borda: Hsla,
     pub borda_forte: Hsla,
     pub card_fill: Hsla,
+    pub control_recessed: Hsla,
+    pub control_glass: Hsla,
+    pub control_glass_hover: Hsla,
+    pub control_dim: Hsla,
+    pub on_boreal: Hsla,
+    pub mark_orange: Hsla,
+    pub brasa_text: Hsla,
+    pub backdrop_top: Hsla,
+    pub backdrop_bottom: Hsla,
     /// The three backdrop blobs' base colors; `None` where the theme sets none.
     pub glows: [Option<Hsla>; 3],
 }
@@ -80,6 +98,7 @@ impl Palette {
             }
         };
         let c = colors;
+        let (black, white) = (hsla(0., 0., 0., 1.), hsla(0., 0., 1., 1.));
         let palette = Palette {
             noite: get("noite", c.background),
             noite_2: get("noite_2", c.popover),
@@ -100,6 +119,15 @@ impl Palette {
             borda: get("borda", c.border),
             borda_forte: get("borda_forte", c.border),
             card_fill: get("card_fill", c.background.opacity(0.84)),
+            control_recessed: get("control.recessed", black.alpha(0.2)),
+            control_glass: get("control.glass", c.foreground.opacity(0.045)),
+            control_glass_hover: get("control.glass_hover", c.foreground.opacity(0.09)),
+            control_dim: get("control.dim", c.muted_foreground),
+            on_boreal: get("on_boreal", c.primary_foreground),
+            mark_orange: get("mark.orange", c.warning),
+            brasa_text: get("brasa_text", c.warning.blend(white.alpha(0.35))),
+            backdrop_top: get("backdrop.top", c.background.blend(black.alpha(0.25))),
+            backdrop_bottom: get("backdrop.bottom", c.background),
             glows: GLOWS.map(|key| {
                 let value = wai.get(key)?;
                 parse(value)
@@ -131,7 +159,7 @@ pub(crate) fn parse(value: &Value) -> Result<Hsla, String> {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::{hsla, rgb};
+    use gpui_kit::{hsla, rgb, rgba};
     use serde_json::json;
 
     use super::*;
@@ -165,8 +193,34 @@ mod tests {
             "borda" => white(0.1),
             "borda_forte" => white(0.16),
             "card_fill" => Hsla::from(rgb(0x080b1c)).alpha(0.84),
+            "on_boreal" => rgb(0x0b1024).into(),
+            "mark.orange" => rgb(0xff9a5a).into(),
+            "brasa_text" => rgb(0xffb68a).into(),
+            "backdrop.top" => rgb(0x060816).into(),
+            "backdrop.bottom" => rgb(0x0a0e24).into(),
             _ => unreachable!("{key}"),
         }
+    }
+
+    /// The `campo.rs` constants, which differed per mode.
+    fn old_control(key: &str, dark: bool) -> Hsla {
+        let (d, l) = match key {
+            "control.recessed" => (0x0000_0033, 0x1419_3a0a),
+            "control.glass" => (0xffff_ff0b, 0xffff_ffff),
+            "control.glass_hover" => (0xffff_ff17, 0x1419_3a0a),
+            "control.dim" => (0x626c_98ff, 0x8a91_adff),
+            _ => unreachable!("{key}"),
+        };
+        rgba(if dark { d } else { l }).into()
+    }
+
+    fn control_fields(p: &Palette) -> [(&'static str, Hsla); 4] {
+        [
+            ("control.recessed", p.control_recessed),
+            ("control.glass", p.control_glass),
+            ("control.glass_hover", p.control_glass_hover),
+            ("control.dim", p.control_dim),
+        ]
     }
 
     fn fields(p: &Palette) -> Vec<(&'static str, Hsla)> {
@@ -190,6 +244,9 @@ mod tests {
             ("borda", p.borda),
             ("borda_forte", p.borda_forte),
             ("card_fill", p.card_fill),
+            ("on_boreal", p.on_boreal),
+            ("mark.orange", p.mark_orange),
+            ("brasa_text", p.brasa_text),
         ]
     }
 
@@ -208,6 +265,13 @@ mod tests {
             assert!(notices.is_empty(), "{notices:?}");
             for (key, color) in fields(&palette) {
                 assert_eq!(color, old(key), "{name} {key}");
+            }
+            for (key, color) in control_fields(&palette) {
+                assert_eq!(color, old_control(key, mode == Dark), "{name} {key}");
+            }
+            if mode == Dark {
+                assert_eq!(palette.backdrop_top, old("backdrop.top"));
+                assert_eq!(palette.backdrop_bottom, old("backdrop.bottom"));
             }
         }
     }
@@ -257,8 +321,20 @@ mod tests {
             ("borda", colors.border),
             ("borda_forte", colors.border),
             ("card_fill", colors.background.opacity(0.84)),
+            ("control.recessed", hsla(0., 0., 0., 0.2)),
+            ("control.glass", colors.foreground.opacity(0.045)),
+            ("control.glass_hover", colors.foreground.opacity(0.09)),
+            ("control.dim", colors.muted_foreground),
+            ("on_boreal", colors.primary_foreground),
+            ("mark.orange", colors.warning),
+            ("brasa_text", colors.warning.blend(hsla(0., 0., 1., 0.35))),
         ];
-        let got = fields(&p);
+        let got: Vec<_> = fields(&p).into_iter().chain(control_fields(&p)).collect();
+        assert_eq!(
+            p.backdrop_top,
+            colors.background.blend(hsla(0., 0., 0., 0.25))
+        );
+        assert_eq!(p.backdrop_bottom, colors.background);
         for (key, want) in expected {
             let (_, have) = got.iter().find(|(k, _)| *k == key).unwrap();
             assert_eq!(*have, want, "{key}");

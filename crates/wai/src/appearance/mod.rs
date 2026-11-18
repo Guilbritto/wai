@@ -201,12 +201,28 @@ mod tests {
         found
     }
 
+    /// A hex color or `hsla(..)` that is not pure white or black (a hue the theme should own).
+    fn has_hue_literal(line: &str) -> bool {
+        let hex = Regex::new(r"0x([0-9a-fA-F_]{6,})\b").unwrap();
+        let hsla = Regex::new(r"\bhsla\(\s*([^,]*),\s*([^,]*),\s*([^,]*),").unwrap();
+        let hue_hex = !line.contains("CREATE_NO_WINDOW")
+            && hex.captures_iter(line).any(|c| {
+                let digits = c[1].replace('_', "");
+                !matches!(&digits[..6], "ffffff" | "000000")
+            });
+        let hue_hsla = hsla.captures_iter(line).any(|c| {
+            let num = |i: usize| c[i].trim().parse::<f32>().ok();
+            !(num(2) == Some(0.) && matches!(num(3), Some(l) if l == 0. || l == 1.))
+        });
+        hue_hex || hue_hsla
+    }
+
     #[test]
     fn views_paint_from_the_theme() {
         let calls = Regex::new(r"aurora::(noite|noite_2|boreal|lilas|magenta|ceu|brasa|ambar|erro|tinta|tinta_2|nevoa|nevoa_2|ok|vidro|vidro_forte|borda|borda_forte|card_fill)\(\)").unwrap();
         let found = offenders(
             |f| f == "aurora.rs" || f.starts_with("appearance/") || f == "terminal_view.rs",
-            |l| calls.is_match(l) || l.contains("rgb(0x"),
+            |l| calls.is_match(l) || has_hue_literal(l),
         );
         assert!(
             found.is_empty(),

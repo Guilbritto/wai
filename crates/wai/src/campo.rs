@@ -7,6 +7,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::*;
 use wai_ext::panel::Tone;
 
+use crate::appearance::colors::Palette;
 use crate::appearance::fonts;
 
 /// Height of every clickable control in a row: field, select, button, menu trigger.
@@ -14,37 +15,34 @@ pub(crate) const H: f32 = 28.;
 /// Control corners.
 pub(crate) const RADIUS: f32 = 8.;
 
-fn pick(cx: &App, dark: u32, light: u32) -> Hsla {
-    rgba(if cx.theme().is_dark() { dark } else { light }).into()
-}
-
 /// Inputs, selects and logs sit below the surface.
 pub(crate) fn recessed(cx: &App) -> Hsla {
-    pick(cx, 0x0000_0033, 0x1419_3a0a)
+    Palette::global(cx).control_recessed
 }
 /// Cards, list rows, the default button.
 pub(crate) fn glass(cx: &App) -> Hsla {
-    pick(cx, 0xffff_ff0b, 0xffff_ffff)
+    Palette::global(cx).control_glass
 }
 pub(crate) fn glass_hover(cx: &App) -> Hsla {
-    pick(cx, 0xffff_ff17, 0x1419_3a0a)
+    Palette::global(cx).control_glass_hover
 }
 /// A control's border.
 pub(crate) fn line(cx: &App) -> Hsla {
-    pick(cx, 0xffff_ff1a, 0x1419_3a1f)
+    cx.theme().border
 }
 /// Faint text: table headers, placeholders.
 pub(crate) fn dim(cx: &App) -> Hsla {
-    pick(cx, 0x626c_98ff, 0x8a91_adff)
+    Palette::global(cx).control_dim
 }
 /// Hovered rows, the active tab, focus.
 pub(crate) fn violet(cx: &App) -> Hsla {
-    pick(cx, 0x8d72_ffff, 0x7b5c_f0ff)
+    cx.theme().ring.alpha(1.)
 }
 
 /// The focus halo: 3 px of violet around the control.
 pub(crate) fn halo(cx: &App) -> Vec<BoxShadow> {
-    let color = pick(cx, 0x8d72_ff33, 0x7b5c_f02e);
+    let alpha = if cx.theme().is_dark() { 0x33 } else { 0x2e };
+    let color = cx.theme().ring.alpha(alpha as f32 / 255.);
     vec![BoxShadow::new(px(0.), px(0.), color).spread_radius(px(3.))]
 }
 

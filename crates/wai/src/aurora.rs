@@ -14,7 +14,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Axis, Bounds, BoxShadow, Corners, Div, FontWeight, Hsla, InteractiveElement,
     IntoElement, ParentElement, SharedString, StyleRefinement, Styled, canvas, div, hsla,
-    linear_color_stop, linear_gradient, point, px, rgb, size,
+    linear_color_stop, linear_gradient, point, px, size,
 };
 
 /// Nunito Bold (OFL 1.1, `assets/fonts/OFL.txt`), for the brand and titles.
@@ -99,17 +99,17 @@ pub(crate) fn borda(cx: &App) -> Hsla {
 pub(crate) fn borda_forte(cx: &App) -> Hsla {
     Palette::global(cx).borda_forte
 }
-/// Text on a filled `boreal` button: no palette key of its own.
-pub(crate) fn on_boreal() -> Hsla {
-    rgb(0x0b1024).into()
+/// Text on a filled `boreal` button.
+pub(crate) fn on_boreal(cx: &App) -> Hsla {
+    Palette::global(cx).on_boreal
 }
 /// The `rs` file mark's orange, which the mockup draws and the palette has no key for.
-pub(crate) fn orange() -> Hsla {
-    rgb(0xff9a5a).into()
+pub(crate) fn orange(cx: &App) -> Hsla {
+    Palette::global(cx).mark_orange
 }
 /// The numbered badge's text, a light `brasa`.
-pub(crate) fn brasa_text() -> Hsla {
-    rgb(0xffb68a).into()
+pub(crate) fn brasa_text(cx: &App) -> Hsla {
+    Palette::global(cx).brasa_text
 }
 /// A card's fill (the Central's `.painel-cartao`).
 pub(crate) fn card_fill(cx: &App) -> Hsla {
@@ -159,10 +159,11 @@ pub(crate) fn backdrop(cx: &App) -> Option<AnyElement> {
         },
     )
     .size_full();
+    let palette = Palette::global(cx);
     let base = linear_gradient(
         180.,
-        linear_color_stop(rgb(0x060816), 0.),
-        linear_color_stop(rgb(0x0a0e24), 1.),
+        linear_color_stop(palette.backdrop_top, 0.),
+        linear_color_stop(palette.backdrop_bottom, 1.),
     );
     let backdrop = div()
         .debug_selector(|| "aurora-backdrop".into())

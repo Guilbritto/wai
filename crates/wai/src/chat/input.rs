@@ -295,7 +295,7 @@ pub(super) fn send_button(disabled: bool, cx: &App) -> Button {
             send,
             aurora::boreal(cx),
             aurora::boreal(cx).blend(hsla(0., 0., 1., 0.2)),
-            aurora::on_boreal(),
+            aurora::on_boreal(cx),
             cx,
         ),
         (false, _) => send.primary(),

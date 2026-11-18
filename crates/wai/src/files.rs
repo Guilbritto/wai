@@ -251,7 +251,7 @@ impl Mark {
         let theme = cx.theme();
         match self {
             // The mockup's `rs` orange has no Aurora token.
-            Mark::Orange => aurora::orange(),
+            Mark::Orange => aurora::orange(cx),
             Mark::Blue => theme.blue,
             Mark::Amber => aurora::ambar(cx),
             Mark::Cyan => theme.cyan,
