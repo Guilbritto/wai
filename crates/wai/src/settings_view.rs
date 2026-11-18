@@ -2563,7 +2563,7 @@ mod tests {
         let settings = view(&workspace, cx);
         let input = settings.read_with(cx, |v, _| v.font_inputs[ix].clone());
         input.update_in(cx, |i, window, cx| i.focus(window, cx));
-        cx.simulate_keystrokes("cmd-a backspace");
+        cx.simulate_keystrokes("secondary-a backspace");
         cx.simulate_input(text);
         ((workspace, settings), cx, dir)
     }

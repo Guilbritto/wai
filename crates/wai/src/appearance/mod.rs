@@ -194,7 +194,7 @@ mod tests {
                         .strip_prefix(root)
                         .unwrap()
                         .to_string_lossy()
-                        .into_owned();
+                        .replace('\\', "/");
                     out.push((rel, std::fs::read_to_string(&path).unwrap()));
                 }
             }
