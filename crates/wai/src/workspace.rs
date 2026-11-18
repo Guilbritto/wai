@@ -22,8 +22,8 @@ use wai_ext::{CommandSpec, ExtEvent, ExtId, HostEvent, PROMPT_WIDTH, PanelLocati
 use wai_project::{FsChange, ProjectWatcher};
 use wai_settings::{
     AgentConfig, AppState, Approval, Change, OpenSession, SeenModel, SeenModes, Settings, Template,
-    agent_label, config_dir, is_approved, load_templates, seed_approved, shown, unapproved,
-    write_change,
+    ThemeChoice, agent_label, config_dir, is_approved, load_templates, seed_approved, shown,
+    unapproved, write_change,
 };
 use wai_settings::{SessionGroup, WorkArea};
 use wai_terminal::DEFAULT_BG;
@@ -361,6 +361,9 @@ impl Workspace {
             .shell
             .clone()
             .filter(|s| approved.contains(s));
+        let appearance = cx.observe_window_appearance(window, |this, window, cx| {
+            this.appearance_changed(window, cx)
+        });
         let routing = cx.subscribe(&registry, |this, _, event, cx| this.route(event, cx));
         // The process ends ~200 ms after the quit hooks: nothing it started may outlive it. The
         // agents are signalled and the extensions killed first: stopping a shell that ignores
@@ -543,6 +546,7 @@ impl Workspace {
             update_blocker: None,
             focus,
             _subscriptions: vec![
+                appearance,
                 routing,
                 quit,
                 open_file,
@@ -719,6 +723,13 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    /// The OS switched between light and dark: `System` mode follows it.
+    fn appearance_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.theme.mode == ThemeChoice::System {
+            self.reapply_appearance(window, cx);
+        }
     }
 
     /// Shows the launch's load notices (R15) and records them: a reload pushes only new ones.
@@ -5803,6 +5814,46 @@ pub(crate) mod tests {
         std::fs::remove_file(&file).unwrap();
         wait_until(cx, "the theme gone", |cx| !has(cx));
         wait_until(cx, "the fallback drawn", |cx| background(cx) == bundled);
+    }
+
+    /// The test platform cannot flip the app's appearance, so the observer's handler runs
+    /// directly; it reads the platform's (light) appearance, as the observer does on a change.
+    #[gpui_kit::test]
+    fn system_mode_switches_with_the_os(cx: &mut TestAppContext) {
+        let system = Settings {
+            theme: ThemeSettings {
+                mode: ThemeChoice::System,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (workspace, cx) = open(cx, Settings::default());
+        assert!(cx.update(|_, cx| cx.theme().is_dark()));
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.settings = system;
+                w.appearance_changed(window, cx)
+            })
+        });
+        assert!(cx.update(|_, cx| !cx.theme().is_dark()));
+
+        let dark = Settings {
+            theme: ThemeSettings {
+                mode: ThemeChoice::Dark,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        cx.update(|window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.settings = dark;
+                w.appearance_changed(window, cx)
+            })
+        });
+        assert!(
+            cx.update(|_, cx| !cx.theme().is_dark()),
+            "a fixed mode ignores the OS"
+        );
     }
 
     #[gpui_kit::test]
