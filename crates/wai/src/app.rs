@@ -37,21 +37,14 @@ actions!(
 );
 
 pub fn theme_mode(theme: ThemeChoice, cx: &App) -> ThemeMode {
-    match theme {
-        ThemeChoice::Dark => ThemeMode::Dark,
-        ThemeChoice::Light => ThemeMode::Light,
-        ThemeChoice::System => match cx.window_appearance() {
-            WindowAppearance::Dark | WindowAppearance::VibrantDark => ThemeMode::Dark,
-            WindowAppearance::Light | WindowAppearance::VibrantLight => ThemeMode::Light,
-        },
-    }
+    crate::appearance::effective_mode(theme, cx.window_appearance())
 }
 
 /// Everything a window needs before it opens: components, theme, caret blink, keymap.
 pub fn init(settings: &Settings, cx: &mut App) {
     gpui_kit::init(cx);
     crate::aurora::register(cx);
-    Theme::change(theme_mode(settings.theme.mode, cx), None, cx);
+    crate::appearance::apply(settings, None, &[], None, cx);
     // A focused editor otherwise blinks its caret forever (~0.9% CPU while idle).
     Theme::update(cx, |theme| {
         theme.cursor_blink = CursorBlink::default().with_idle_timeout(Duration::from_secs(5))

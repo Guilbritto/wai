@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use gpui_kit::base::{ResizeHandleRenderer, ResizeHandleState};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Theme, ThemeRegistry, h_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, Axis, Bounds, BoxShadow, Corners, Div, FontWeight, Hsla, InteractiveElement,
@@ -18,23 +18,12 @@ use gpui_kit::{
 /// Nunito Bold (OFL 1.1, `assets/fonts/OFL.txt`), for the brand and titles.
 pub(crate) const DISPLAY_FONT: &str = "Nunito";
 const FONT: &[u8] = include_bytes!("../assets/fonts/Nunito-Bold.ttf");
-const THEME: &str = include_str!("../assets/theme/aurora.json");
 
-/// Adds the display font and makes "wai Aurora" the dark theme and "wai Aurora Light" the light one. Between `gpui_kit::init` (the
-/// global theme exists) and `Theme::change` (which applies it).
+/// Adds the display font. The themes load in `appearance::apply`.
 pub(crate) fn register(cx: &mut App) {
     if let Err(err) = cx.text_system().add_fonts(vec![Cow::Borrowed(FONT)]) {
         eprintln!("wai: the display font did not load: {err:#}");
     }
-    let registry = ThemeRegistry::global_mut(cx);
-    registry
-        .load_themes_from_str(THEME)
-        .expect("aurora.json is a theme set");
-    let dark = registry.themes()["wai Aurora"].clone();
-    let light = registry.themes()["wai Aurora Light"].clone();
-    let theme = Theme::global_mut(cx);
-    theme.dark_theme = dark;
-    theme.light_theme = light;
 }
 
 fn white(alpha: f32) -> Hsla {
