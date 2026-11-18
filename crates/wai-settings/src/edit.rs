@@ -7,7 +7,14 @@ use crate::{Processing, SettingsError, ThemeChoice, read_config};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Change {
     DefaultAgent(String),
-    Theme(ThemeChoice),
+    ThemeMode(ThemeChoice),
+    /// The theme picked for the dark or light mode; `None` removes the key.
+    ThemeName {
+        dark: bool,
+        name: Option<String>,
+    },
+    FontFamily(FontKey, Option<String>),
+    FontSize(FontKey, Option<f32>),
     Shell(Option<String>),
     AgentCommand {
         agent: String,
@@ -24,6 +31,29 @@ pub enum Change {
     AddIndex(String),
 }
 
+/// The area of the settings a font key belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontKey {
+    Interface,
+    Editor,
+    Terminal,
+    Chat,
+    ChatCode,
+}
+
+impl FontKey {
+    /// The table and the `font_family`/`font_size` key names of this area.
+    fn keys(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Interface => ("interface", "font_family", "font_size"),
+            Self::Editor => ("editor", "font_family", "font_size"),
+            Self::Terminal => ("terminal", "font_family", "font_size"),
+            Self::Chat => ("conversation", "font_family", "font_size"),
+            Self::ChatCode => ("conversation", "code_font_family", "code_font_size"),
+        }
+    }
+}
+
 fn table<'a>(parent: &'a mut Table, name: &str) -> &'a mut Table {
     let item = parent
         .entry(name)
@@ -36,6 +66,24 @@ fn table<'a>(parent: &'a mut Table, name: &str) -> &'a mut Table {
     let t = item.as_table_mut().expect("just made a table");
     t.set_implicit(true);
     t
+}
+
+/// `[theme]`; a legacy `theme = "x"` becomes `[theme] mode = "x"` first.
+fn theme_table(root: &mut Table) -> &mut Table {
+    if let Some(mode) = root.get("theme").and_then(|i| i.as_str()).map(String::from) {
+        // The comment lines above the old key stay above the new header.
+        let above = root
+            .key("theme")
+            .and_then(|k| k.leaf_decor().prefix().and_then(|p| p.as_str()))
+            .map(String::from);
+        root.remove("theme");
+        let t = table(root, "theme");
+        set(t, "mode", Some(value(mode)));
+        if let Some(above) = above {
+            t.decor_mut().set_prefix(above);
+        }
+    }
+    table(root, "theme")
 }
 
 fn set(t: &mut Table, key: &str, v: Option<toml_edit::Item>) {
@@ -79,13 +127,32 @@ pub fn write_change(user_dir: &Path, change: &Change) -> Result<(), SettingsErro
         Change::DefaultAgent(id) => {
             set(root, "default_agent", Some(value(id.as_str())));
         }
-        Change::Theme(theme) => {
-            let name = match theme {
+        Change::ThemeMode(mode) => {
+            let name = match mode {
                 ThemeChoice::Dark => "dark",
                 ThemeChoice::Light => "light",
                 ThemeChoice::System => "system",
             };
-            set(root, "theme", Some(value(name)));
+            // A legacy `theme = "x"` is rewritten in place, keeping its comment.
+            if root.get("theme").is_some_and(Item::is_str) {
+                set(root, "theme", Some(value(name)));
+            } else {
+                set(theme_table(root), "mode", Some(value(name)));
+            }
+        }
+        Change::ThemeName { dark, name } => {
+            let key = if *dark { "dark" } else { "light" };
+            set(theme_table(root), key, name.as_deref().map(value));
+        }
+        Change::FontFamily(font, family) => {
+            let (area, key, _) = font.keys();
+            set(table(root, area), key, family.as_deref().map(value));
+        }
+        Change::FontSize(font, size) => {
+            let (area, _, key) = font.keys();
+            // Through the text, so 13.3 is written as 13.3 and not as its f64 widening.
+            let size = size.and_then(|s| s.to_string().parse::<f64>().ok());
+            set(table(root, area), key, size.map(value));
         }
         Change::Shell(shell) => set(
             table(root, "terminal"),
@@ -138,9 +205,13 @@ mod tests {
     #[test]
     fn write_keeps_comments_and_creates_the_file() {
         let d = tempfile::tempdir().unwrap();
-        write_change(d.path(), &Change::Theme(ThemeChoice::Light)).unwrap();
+        write_change(d.path(), &Change::ThemeMode(ThemeChoice::Light)).unwrap();
         let p = d.path().join("settings.toml");
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "theme = \"light\"\n");
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "[theme]\nmode = \"light\"\n"
+        );
+        std::fs::remove_file(&p).unwrap();
         std::fs::write(&p, "# mine\ntheme = \"light\" # keep\n").unwrap();
         write_change(d.path(), &Change::DefaultAgent("codex".into())).unwrap();
         write_change(
@@ -207,7 +278,7 @@ mod tests {
             "theme = \"light\" # keep\nmodels = { codex = \"a\", other = \"y\" }\nterminal = { shell = \"a\", x = 1 }\n",
         )
         .unwrap();
-        write_change(d.path(), &Change::Theme(ThemeChoice::Dark)).unwrap();
+        write_change(d.path(), &Change::ThemeMode(ThemeChoice::Dark)).unwrap();
         write_change(
             d.path(),
             &Change::Model {
@@ -224,7 +295,7 @@ mod tests {
             "# mine\ntheme = \"light\" # keep\n[agents.codex]\n# cmd\ncommand = \"a\" # c\n",
         )
         .unwrap();
-        write_change(d.path(), &Change::Theme(ThemeChoice::Dark)).unwrap();
+        write_change(d.path(), &Change::ThemeMode(ThemeChoice::Dark)).unwrap();
         write_change(
             d.path(),
             &Change::AgentCommand {
@@ -265,11 +336,99 @@ mod tests {
     }
 
     #[test]
+    fn theme_keys_are_written() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.toml");
+        let read = || std::fs::read_to_string(&p).unwrap();
+        let name = |dark, n: Option<&str>| Change::ThemeName {
+            dark,
+            name: n.map(String::from),
+        };
+        std::fs::write(&p, "# mine\ntheme = \"light\"\n").unwrap();
+        write_change(d.path(), &name(true, Some("Night"))).unwrap();
+        assert_eq!(
+            read(),
+            "# mine\n[theme]\nmode = \"light\"\ndark = \"Night\"\n"
+        );
+        write_change(d.path(), &name(false, Some("Day"))).unwrap();
+        write_change(d.path(), &Change::ThemeMode(ThemeChoice::System)).unwrap();
+        let (s, _) = Settings::load(d.path(), None).unwrap();
+        assert_eq!(s.theme.mode, ThemeChoice::System);
+        assert_eq!(s.theme.dark.as_deref(), Some("Night"));
+        assert_eq!(s.theme.light.as_deref(), Some("Day"));
+        assert!(read().starts_with("# mine\n"));
+        write_change(d.path(), &name(true, None)).unwrap();
+        let (s, _) = Settings::load(d.path(), None).unwrap();
+        assert_eq!(
+            (s.theme.dark, s.theme.light.as_deref()),
+            (None, Some("Day"))
+        );
+        // A mode written over a legacy string keeps the string form and its comment.
+        std::fs::write(&p, "theme = \"light\" # keep\n").unwrap();
+        write_change(d.path(), &Change::ThemeMode(ThemeChoice::System)).unwrap();
+        assert_eq!(read(), "theme = \"system\" # keep\n");
+    }
+
+    #[test]
+    fn font_keys_are_written_and_removed() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.toml");
+        std::fs::write(&p, "# mine\n[terminal]\nshell = \"zsh\" # keep\n").unwrap();
+        let areas = [
+            FontKey::Interface,
+            FontKey::Editor,
+            FontKey::Terminal,
+            FontKey::Chat,
+            FontKey::ChatCode,
+        ];
+        for (i, area) in areas.into_iter().enumerate() {
+            let family = Change::FontFamily(area, Some(format!("F{i}")));
+            write_change(d.path(), &family).unwrap();
+            write_change(
+                d.path(),
+                &Change::FontSize(area, Some(12.0 + i as f32 + 0.3)),
+            )
+            .unwrap();
+        }
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            text.starts_with("# mine\n[terminal]\nshell = \"zsh\" # keep\n"),
+            "{text}"
+        );
+        assert!(text.contains("code_font_size = 16.3"), "{text}");
+        let (s, _) = Settings::load(d.path(), None).unwrap();
+        assert_eq!(s.terminal.shell.as_deref(), Some("zsh"));
+        assert_eq!(s.interface.font_family.as_deref(), Some("F0"));
+        assert_eq!(s.interface.font_size, Some(12.3));
+        assert_eq!(s.editor.font_family.as_deref(), Some("F1"));
+        assert_eq!(s.terminal.font_family.as_deref(), Some("F2"));
+        assert_eq!(s.terminal.font_size, Some(14.3));
+        assert_eq!(s.conversation.font_family.as_deref(), Some("F3"));
+        assert_eq!(s.conversation.font_size, Some(15.3));
+        assert_eq!(s.conversation.code_font_family.as_deref(), Some("F4"));
+        assert_eq!(s.conversation.code_font_size, Some(16.3));
+        for area in areas {
+            write_change(d.path(), &Change::FontFamily(area, None)).unwrap();
+            write_change(d.path(), &Change::FontSize(area, None)).unwrap();
+        }
+        let (s, _) = Settings::load(d.path(), None).unwrap();
+        assert_eq!(s.terminal.shell.as_deref(), Some("zsh"));
+        assert_eq!(s.interface, crate::FontArea::default());
+        assert_eq!(s.conversation.font_family, None);
+        assert_eq!(s.conversation.code_font_size, None);
+        assert!(
+            std::fs::read_to_string(&p)
+                .unwrap()
+                .contains("shell = \"zsh\" # keep")
+        );
+    }
+
+    #[test]
     fn write_refuses_a_broken_file() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("settings.toml"), "theme = [").unwrap();
         assert!(matches!(
-            write_change(d.path(), &Change::Theme(ThemeChoice::Dark)),
+            write_change(d.path(), &Change::ThemeMode(ThemeChoice::Dark)),
             Err(SettingsError::Parse { .. })
         ));
         assert_eq!(

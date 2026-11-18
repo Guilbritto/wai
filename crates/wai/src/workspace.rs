@@ -5753,7 +5753,7 @@ pub(crate) mod tests {
         let (workspace, cx, _dir) = live(cx, Settings::default(), None);
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| {
-                w.change_setting(Change::Theme(ThemeChoice::Light), window, cx)
+                w.change_setting(Change::ThemeMode(ThemeChoice::Light), window, cx)
             })
         });
         wait_until(cx, "the light theme", |cx| {
@@ -6360,7 +6360,7 @@ pub(crate) mod tests {
         click("approval-deny", cx);
         cx.update(|window, cx| {
             workspace.update(cx, |w, cx| {
-                w.change_setting(Change::Theme(ThemeChoice::Light), window, cx);
+                w.change_setting(Change::ThemeMode(ThemeChoice::Light), window, cx);
                 w.reload_settings(window, cx);
             })
         });

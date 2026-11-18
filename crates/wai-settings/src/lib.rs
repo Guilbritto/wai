@@ -8,7 +8,7 @@ pub mod claude;
 mod edit;
 pub mod fonts;
 pub use approve::{Approval, is_approved, seed_approved, unapproved};
-pub use edit::{Change, write_change};
+pub use edit::{Change, FontKey, write_change};
 
 /// An agent wai knows how to start, with the hints Settings shows when it is not ready.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

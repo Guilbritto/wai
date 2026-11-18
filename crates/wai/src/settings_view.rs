@@ -550,7 +550,7 @@ impl SettingsView {
                     if let Some(choice) = choice
                         && *choice != this.data.settings.theme.mode
                     {
-                        this.change(Change::Theme(*choice), cx);
+                        this.change(Change::ThemeMode(*choice), cx);
                     }
                 },
             ),
@@ -1918,10 +1918,10 @@ mod tests {
     fn theme_change_writes_the_user_file(cx: &mut TestAppContext) {
         let (workspace, cx, dir) = settings_ws(cx);
         workspace.update_in(cx, |w, window, cx| {
-            w.change_setting(Change::Theme(ThemeChoice::Light), window, cx)
+            w.change_setting(Change::ThemeMode(ThemeChoice::Light), window, cx)
         });
         let text = std::fs::read_to_string(dir.path().join("settings.toml")).unwrap();
-        assert!(text.contains("theme = \"light\""), "{text}");
+        assert!(text.contains("[theme]\nmode = \"light\""), "{text}");
     }
 
     /// Conversation has the processing mode: its three choices, and a pick is written.
@@ -1980,7 +1980,9 @@ mod tests {
         view.read_with(cx, |v, _| {
             assert_eq!(v.banner().unwrap(), "settings.toml has an error: x")
         });
-        view.update(cx, |v, cx| v.change(Change::Theme(ThemeChoice::Light), cx));
+        view.update(cx, |v, cx| {
+            v.change(Change::ThemeMode(ThemeChoice::Light), cx)
+        });
         cx.run_until_parked();
         assert!(!dir.path().join("settings.toml").exists());
     }
