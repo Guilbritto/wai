@@ -19,6 +19,7 @@ use super::input::{
 };
 use super::mentions::{self, Mentions};
 use super::view::ChatSession;
+use crate::appearance::fonts;
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::campo;
 use crate::git::{self, Repo};
@@ -102,6 +103,9 @@ struct Pick {
 struct Tones {
     ambar: Hsla,
     nevoa: Hsla,
+    /// The chat's 12 px and 11.5 px text.
+    small: Pixels,
+    count: Pixels,
 }
 
 impl Tones {
@@ -109,6 +113,8 @@ impl Tones {
         Self {
             ambar: aurora::ambar(cx),
             nevoa: aurora::nevoa(cx),
+            small: fonts::chat(cx, 12.),
+            count: fonts::chat(cx, 11.5),
         }
     }
 
@@ -134,6 +140,8 @@ impl Pick {
             tones: Tones {
                 ambar: gpui_kit::transparent_black(),
                 nevoa: gpui_kit::transparent_black(),
+                small: px(0.),
+                count: px(0.),
             },
         }
     }
@@ -181,7 +189,7 @@ impl Pick {
                 let pill = div()
                     .px(px(6.))
                     .rounded_full()
-                    .text_size(px(11.5))
+                    .text_size(self.tones.count)
                     .text_color(self.tones.ambar)
                     .bg(self.tones.ambar.opacity(0.12))
                     .child(count.to_string());
@@ -189,14 +197,22 @@ impl Pick {
             });
         }
         row.when(self.disabled, |el| {
-            el.text_xs().text_color(self.tones.nevoa)
+            el.text_size(self.tones.small).text_color(self.tones.nevoa)
         })
         .when_some(self.detail.clone(), |el, detail| {
-            let text = div().truncate().text_xs().text_color(self.tones.nevoa);
+            let text = div()
+                .truncate()
+                .text_size(self.tones.small)
+                .text_color(self.tones.nevoa);
             el.child(text.child(detail))
         })
         .when_some(self.tag, |el, tag| {
-            el.child(div().text_xs().text_color(self.tones.nevoa).child(tag))
+            el.child(
+                div()
+                    .text_size(self.tones.small)
+                    .text_color(self.tones.nevoa)
+                    .child(tag),
+            )
         })
     }
 }
@@ -909,7 +925,7 @@ impl Render for DraftView {
                     .min_w_0()
                     .truncate()
                     .font_family(DISPLAY_FONT)
-                    .text_size(px(14.))
+                    .text_size(fonts::chat(cx, 14.))
                     .font_weight(FontWeight::BOLD)
                     .cursor_grab()
                     .child("New session")
@@ -936,7 +952,7 @@ impl Render for DraftView {
             v_flex()
                 .id("draft-notice")
                 .gap_1()
-                .text_size(px(13.))
+                .text_size(fonts::chat(cx, 13.))
                 .child(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
@@ -973,7 +989,7 @@ impl Render for DraftView {
             cloning.or_else(|| self.notice.clone()).map(|notice| {
                 div()
                     .id("draft-notice")
-                    .text_size(px(13.))
+                    .text_size(fonts::chat(cx, 13.))
                     .text_color(theme.danger)
                     .child(notice)
                     // Registers the id so tests can find it.
@@ -1116,7 +1132,7 @@ impl Render for DraftView {
                         .px(px(5.))
                         .rounded(px(5.))
                         .border_1()
-                        .text_size(px(11.))
+                        .text_size(fonts::chat(cx, 11.))
                         .font_family(theme.mono_font_family.clone())
                         .bg(aurora::vidro(cx))
                         .border_color(aurora::borda(cx))
@@ -1129,7 +1145,7 @@ impl Render for DraftView {
             .justify_between()
             .px(px(6.))
             .pt(px(8.))
-            .text_size(px(12.))
+            .text_size(fonts::chat(cx, 12.))
             .text_color(muted)
             .child(
                 h_flex()
@@ -1148,20 +1164,24 @@ impl Render for DraftView {
                     .child(
                         div()
                             .font_family(DISPLAY_FONT)
-                            .text_size(px(42.))
+                            .text_size(fonts::chat(cx, 42.))
                             .font_weight(FontWeight::EXTRA_BOLD)
                             .mb(px(6.))
                             .child("What are we building?"),
                     )
                     .child(
                         div()
-                            .text_size(px(14.))
+                            .text_size(fonts::chat(cx, 14.))
                             .text_color(muted)
                             .child("Pick where and with whom. Nothing starts until you send."),
                     ),
             )
             .child(mentions::keys(
-                v_flex().relative().child(row).child(self.mentions.clone()),
+                v_flex()
+                    .relative()
+                    .font_family(fonts::chat_family(cx))
+                    .child(row)
+                    .child(self.mentions.clone()),
                 &self.mentions,
             ))
             .child(hints);

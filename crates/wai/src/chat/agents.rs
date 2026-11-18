@@ -13,6 +13,7 @@ use super::model::{ChatItem, Said, Subagent, elapsed};
 use super::render::{output_box, tokens};
 use super::view::{ChatSession, sync_markdown};
 use crate::agents_view::{MAX_PLAN_ROWS, plan_row};
+use crate::appearance::fonts;
 use crate::aurora;
 
 /// A row's height and the gap between rows: the list shows `ROWS` rows and scrolls past them.
@@ -125,7 +126,7 @@ impl ChatSession {
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(11.5))
+                        .text_size(fonts::chat(cx, 11.5))
                         .text_color(faint)
                         .child(stat),
                 )
@@ -209,7 +210,7 @@ impl ChatSession {
                 .px(px(14.))
                 .pt(px(2.))
                 .font_family(theme.font_family.clone())
-                .text_size(px(10.5))
+                .text_size(fonts::chat(cx, 10.5))
                 .text_color(faint)
                 .child("↑↓ navigate · Enter open · Esc back to main")
                 // Registers the id so tests can find it.
@@ -222,7 +223,7 @@ impl ChatSession {
             .pb(px(8.))
             .mt(px(-4.))
             .font_family(theme.mono_font_family.clone())
-            .text_size(px(12.))
+            .text_size(fonts::chat(cx, 12.))
             .child(list)
             .children(hint);
         Some(el.into_any_element())
@@ -400,7 +401,7 @@ impl ChatSession {
                 .children(sub.plan.iter().take(MAX_PLAN_ROWS).map(|e| plan_row(e, cx)))
                 .children((sub.plan.len() > MAX_PLAN_ROWS).then(|| {
                     div()
-                        .text_xs()
+                        .text_size(fonts::chat(cx, 12.))
                         .text_color(muted)
                         .child(format!("+{} more", sub.plan.len() - MAX_PLAN_ROWS))
                 }))
@@ -439,7 +440,7 @@ impl ChatSession {
             } else {
                 theme.border
             })
-            .text_size(px(12.))
+            .text_size(fonts::chat(cx, 12.))
             .child(div().text_color(color).child(mark))
             .child(
                 div()
@@ -480,7 +481,7 @@ impl ChatSession {
             .overflow_y_scroll()
             .track_scroll(&self.drawer_scroll)
             .font_family(theme.mono_font_family.clone())
-            .text_size(px(11.5))
+            .text_size(fonts::chat(cx, 11.5))
             .text_color(fg2)
             .children(body_rows)
             .children(answer);

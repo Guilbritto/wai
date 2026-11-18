@@ -244,6 +244,29 @@ mod tests {
         assert!(found.is_empty(), "fixed text sizes:\n{}", found.join("\n"));
     }
 
+    #[gpui_kit::test]
+    fn chat_text_follows_chat_size(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.conversation.font_size = Some(26.);
+        run(cx, &settings, None, &[]);
+        cx.update(|cx| {
+            assert_eq!(super::fonts::chat(cx, 13.), px(26.));
+            assert_eq!(super::fonts::chat(cx, 12.), px(24.));
+            assert_eq!(
+                super::fonts::ui(cx, 13.),
+                px(13.),
+                "the interface keeps its size"
+            );
+        });
+        let fixed = Regex::new(r"text_size\(px\(|\.text_(xs|sm|base)\(\)").unwrap();
+        let found = offenders(|f| !f.starts_with("chat/"), |l| fixed.is_match(l));
+        assert!(
+            found.is_empty(),
+            "fixed chat text sizes:\n{}",
+            found.join("\n")
+        );
+    }
+
     fn fonts(cx: &mut TestAppContext) -> ResolvedFonts {
         cx.update(|cx| cx.global::<Fonts>().0.clone())
     }

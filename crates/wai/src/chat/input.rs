@@ -26,6 +26,7 @@ use super::view::{ChatEvent, ChatSession};
 use super::{composer, mentions};
 use crate::agents::AgentStatus;
 use crate::app::CancelTurn;
+use crate::appearance::fonts;
 use crate::workspace::folder_name;
 use crate::{aurora, campo};
 
@@ -586,6 +587,7 @@ impl ChatSession {
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let field = v_flex()
             .id("prompt-box")
+            .font_family(fonts::chat_family(cx))
             .rounded(px(20.))
             .border_1()
             .capture_key_down(
@@ -633,7 +635,7 @@ impl ChatSession {
                 .id("turn-status")
                 .gap(px(10.))
                 .px_3()
-                .text_size(px(12.5))
+                .text_size(fonts::chat(cx, 12.5))
                 .text_color(text)
                 .child(mark)
                 .child(div().min_w_0().truncate().child(doing))

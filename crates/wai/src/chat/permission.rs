@@ -11,6 +11,7 @@ use wai_agent::{ChoiceKind, FileDiff, PermissionChoice, PermissionRequest};
 
 use super::edits::{DiffLine, bounded_diff};
 use super::render::boxed_line;
+use crate::appearance::fonts;
 use crate::aurora::{self, DISPLAY_FONT};
 
 /// What a choice button calls.
@@ -72,7 +73,7 @@ impl DiffView {
             let (on_open, at) = (on_open.clone(), self.at.clone());
             div()
                 .id(id)
-                .text_sm()
+                .text_size(fonts::chat(cx, 14.))
                 .cursor_pointer()
                 .on_click(move |_, window, cx| on_open(&at, window, cx))
         };
@@ -139,7 +140,7 @@ pub(super) fn frame(
         .gap_1()
         .child(
             div()
-                .text_size(px(11.))
+                .text_size(fonts::chat(cx, 11.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(eyebrow_color)
                 .child(eyebrow),
@@ -147,7 +148,7 @@ pub(super) fn frame(
         .child(
             div()
                 .font_family(DISPLAY_FONT)
-                .text_size(px(16.))
+                .text_size(fonts::chat(cx, 16.))
                 .font_weight(FontWeight::BOLD)
                 .child(title.into()),
         );

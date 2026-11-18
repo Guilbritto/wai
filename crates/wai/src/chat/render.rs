@@ -17,6 +17,7 @@ use super::agents::state_look;
 use super::model::{ChatItem, NoticeKind, ToolItem, TurnState, UsageInfo, show_label};
 use super::view::{ChatEvent, ChatSession, Mode};
 use super::{permission, question};
+use crate::appearance::fonts;
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::workspace::{Dragged, DraggedSession};
 
@@ -48,7 +49,7 @@ pub(super) fn pinned_message(
     cx: &App,
 ) -> Stateful<Div> {
     let caption = div()
-        .text_xs()
+        .text_size(fonts::chat(cx, 12.))
         .text_color(cx.theme().muted_foreground)
         .child(caption);
     h_flex()
@@ -221,7 +222,7 @@ pub(super) fn step_line(cx: &App) -> Div {
     let line = h_flex()
         .gap(px(8.))
         .py(px(3.))
-        .text_size(px(13.))
+        .text_size(fonts::chat(cx, 13.))
         .font_weight(FontWeight::NORMAL)
         .cursor_pointer();
     match theme.is_dark() {
@@ -243,7 +244,7 @@ pub(super) fn boxed_line(cx: &App) -> Div {
         .py(px(5.))
         .rounded(px(8.))
         .border_1()
-        .text_size(px(13.))
+        .text_size(fonts::chat(cx, 13.))
         .font_weight(FontWeight::NORMAL)
         .cursor_pointer();
     match theme.is_dark() {
@@ -266,7 +267,7 @@ pub(super) fn output_box(cx: &App) -> Div {
         .rounded(px(6.))
         .border_1()
         .font_family(theme.mono_font_family.clone())
-        .text_size(px(11.));
+        .text_size(fonts::chat(cx, 11.));
     match theme.is_dark() {
         true => out
             .bg(aurora::noite(cx))
@@ -303,7 +304,7 @@ impl ChatSession {
                     .truncate()
                     .cursor_grab()
                     .font_family(DISPLAY_FONT)
-                    .text_size(px(14.))
+                    .text_size(fonts::chat(cx, 14.))
                     .font_weight(FontWeight::BOLD)
                     .aria_label(title.clone())
                     .child(title)
@@ -397,7 +398,7 @@ impl ChatSession {
             .id(("reply-head", ix))
             .gap_1()
             .mb(px(6.))
-            .text_size(px(12.5))
+            .text_size(fonts::chat(cx, 12.5))
             .font_weight(FontWeight::SEMIBOLD)
             .child(div().text_color(star).child("✦"))
             .child(
@@ -490,22 +491,24 @@ impl ChatSession {
                             });
                         text.unwrap_or_default().into()
                     });
-                let text =
-                    self.texts.get(&ix).map(|md| {
-                        TextView::new(&md.state).code_block_actions(move |block, _, _| {
-                            h_flex()
-                                .gap_1()
-                                .children(block.lang().map(|lang| {
-                                    div().text_xs().text_color(muted).child(lang.clone())
-                                }))
-                                .child(
-                                    Clipboard::new("copy-code")
-                                        .value(block.code())
-                                        .tooltip("Copy code")
-                                        .accessibility_label("Copy code"),
-                                )
-                        })
-                    });
+                let text = self.texts.get(&ix).map(|md| {
+                    TextView::new(&md.state).code_block_actions(move |block, _, cx| {
+                        h_flex()
+                            .gap_1()
+                            .children(block.lang().map(|lang| {
+                                div()
+                                    .text_size(fonts::chat(cx, 12.))
+                                    .text_color(muted)
+                                    .child(lang.clone())
+                            }))
+                            .child(
+                                Clipboard::new("copy-code")
+                                    .value(block.code())
+                                    .tooltip("Copy code")
+                                    .accessibility_label("Copy code"),
+                            )
+                    })
+                });
                 let say = div().flex_1().min_w_0().py(px(4.)).children(text);
                 let say = match dark {
                     true => say.text_color(aurora::tinta(cx)),
@@ -585,7 +588,7 @@ impl ChatSession {
                     .min_h(px(26.))
                     .py_1()
                     .max_w_full()
-                    .text_size(px(11.5))
+                    .text_size(fonts::chat(cx, 11.5))
                     .child(div().min_w_0().child(text.clone()));
                 let pill = match (kind, dark) {
                     (NoticeKind::Info, true) => pill.text_color(aurora::nevoa_2(cx)),
@@ -747,7 +750,7 @@ impl ChatSession {
             .py(px(5.))
             .border_1()
             .rounded(px(9.))
-            .text_size(px(12.))
+            .text_size(fonts::chat(cx, 12.))
             .cursor_pointer()
             .child(div().text_color(tone).child(mark))
             .child(
@@ -760,7 +763,7 @@ impl ChatSession {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(10.5))
+                    .text_size(fonts::chat(cx, 10.5))
                     .rounded(px(6.))
                     .px(px(6.))
                     .py(px(1.))
@@ -948,6 +951,7 @@ impl Render for ChatSession {
         let empty = self.model.items.is_empty() && self.model.state == TurnState::Idle;
         let messages = div()
             .id("transcript")
+            .font_family(fonts::chat_family(cx))
             .relative()
             .flex_1()
             .min_h_0()

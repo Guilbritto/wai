@@ -8,6 +8,7 @@ use gpui_kit::*;
 use wai_agent::CommandInfo;
 
 use super::view::ChatSession;
+use crate::appearance::fonts;
 
 /// A row's height: the list shows 8 rows and scrolls past them.
 const ROW: f32 = 28.;
@@ -119,7 +120,7 @@ impl ChatSession {
             .border_1()
             .border_color(theme.border)
             .bg(theme.popover)
-            .text_size(px(13.))
+            .text_size(fonts::chat(cx, 13.))
             .text_color(theme.popover_foreground)
             // Registers the id so tests can find it.
             .test_support();

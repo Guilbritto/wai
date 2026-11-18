@@ -6,6 +6,7 @@ use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use crate::appearance::fonts;
 use crate::aurora;
 use crate::ext_panel::ExtPanel;
 
@@ -192,7 +193,7 @@ pub(super) fn chip(
         .h(px(if bar { 28. } else { 30. }))
         .px(px(4.))
         .rounded_full()
-        .text_size(px(if bar { 13. } else { 13.5 }))
+        .text_size(fonts::chat(cx, if bar { 13. } else { 13.5 }))
         .text_color(text)
         .hover(move |el| {
             let fill = match dark {
@@ -235,7 +236,7 @@ pub(super) fn strip_label(
         .px(px(10.))
         .gap(px(6.))
         .items_center()
-        .text_size(px(13.5))
+        .text_size(fonts::chat(cx, 13.5))
         .text_color(color)
         .children(mark)
         .child(div().min_w_0().truncate().child(text.clone()))

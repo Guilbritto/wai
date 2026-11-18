@@ -33,6 +33,7 @@ use wai_agent::{FileDiff, Location};
 use super::model::{ChatItem, EditedFile, ToolItem, TurnState};
 use super::permission::OnOpen;
 use super::view::{ChatEvent, ChatSession};
+use crate::appearance::fonts;
 use crate::sidebar::canonical;
 use crate::{campo, editor};
 
@@ -353,7 +354,7 @@ impl ChatSession {
                     .into_any_element()
             } else {
                 div()
-                    .text_sm()
+                    .text_size(fonts::chat(cx, 14.))
                     .text_color(muted)
                     .child("Reverted")
                     .into_any_element()
@@ -373,7 +374,7 @@ impl ChatSession {
                         .when(steps > 1, |el| {
                             el.child(
                                 div()
-                                    .text_sm()
+                                    .text_size(fonts::chat(cx, 14.))
                                     .text_color(muted)
                                     .child(format!("{steps} edits")),
                             )
@@ -387,11 +388,12 @@ impl ChatSession {
                         )
                         .child(revert),
                 )
-                .children(
-                    file.failed
-                        .clone()
-                        .map(|why| div().text_sm().text_color(theme.danger).child(why)),
-                )
+                .children(file.failed.clone().map(|why| {
+                    div()
+                        .text_size(fonts::chat(cx, 14.))
+                        .text_color(theme.danger)
+                        .child(why)
+                }))
         });
         let count = match files.len() {
             1 => "1 file".to_string(),

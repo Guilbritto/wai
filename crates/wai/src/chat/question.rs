@@ -15,6 +15,7 @@ use serde_json::{Map, Value};
 use wai_agent::{Choice, FieldKind, QuestionAnswer, QuestionField, QuestionRequest};
 
 use super::view::ChatSession;
+use crate::appearance::fonts;
 use crate::{aurora, campo};
 
 /// What the user entered so far in an open question's form, per field.
@@ -215,9 +216,14 @@ pub fn card(
 }
 
 /// An option's secondary text, under its label.
-fn option_description(choice: &Choice, muted: Hsla) -> Option<Div> {
+fn option_description(choice: &Choice, muted: Hsla, cx: &App) -> Option<Div> {
     let description = choice.description.clone()?;
-    Some(div().text_sm().text_color(muted).child(description))
+    Some(
+        div()
+            .text_size(fonts::chat(cx, 14.))
+            .text_color(muted)
+            .child(description),
+    )
 }
 
 /// The field's title (`*` when required), description and control.
@@ -242,7 +248,7 @@ fn render_field(
                     let on = *selected == Some(ix);
                     Radio::new(c.value.clone())
                         .label(c.label.clone())
-                        .children(option_description(c, muted))
+                        .children(option_description(c, muted, cx))
                         // With a description, the option is a loose row: all of it clicks.
                         .when(c.description.is_some(), |r| {
                             r.w_full()
@@ -266,7 +272,7 @@ fn render_field(
             .children(choices.iter().zip(picked).enumerate().map(|(n, (c, on))| {
                 Checkbox::new(n)
                     .label(c.label.clone())
-                    .children(option_description(c, muted))
+                    .children(option_description(c, muted, cx))
                     .checked(*on)
                     .on_click(edit(id, i, cx, move |state, on: &bool| {
                         if let FieldState::Choices(picked) = state {
@@ -291,12 +297,12 @@ fn render_field(
     v_flex()
         .gap_1()
         .child(div().font_weight(FontWeight::MEDIUM).child(title))
-        .children(
-            field
-                .description
-                .clone()
-                .map(|d| div().text_sm().text_color(muted).child(d)),
-        )
+        .children(field.description.clone().map(|d| {
+            div()
+                .text_size(fonts::chat(cx, 14.))
+                .text_color(muted)
+                .child(d)
+        }))
         .child(control)
 }
 

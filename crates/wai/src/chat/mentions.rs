@@ -16,6 +16,7 @@ use gpui_kit::*;
 use wai_project::Entry;
 
 use super::input::{file_token, slashed};
+use crate::appearance::fonts;
 
 /// A row's height: the list shows 8 rows and scrolls past them.
 const ROW: f32 = 28.;
@@ -287,7 +288,7 @@ impl Render for Mentions {
             .border_1()
             .border_color(theme.border)
             .bg(theme.popover)
-            .text_size(px(13.))
+            .text_size(fonts::chat(cx, 13.))
             .text_color(theme.popover_foreground)
             .children(rows)
             // Registers the id so tests can find it.
