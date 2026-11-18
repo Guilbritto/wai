@@ -6,5 +6,5 @@ mod walk;
 mod watch;
 
 pub use search::{MAX_MATCHES, Match, SearchHandle, SearchQuery, search, search_in};
-pub use tree::{Entry, list_dir};
+pub use tree::{Entry, list_all, list_dir};
 pub use watch::{FsChange, ProjectWatcher};

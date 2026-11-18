@@ -2,15 +2,12 @@
 //! chips on its top edge, the chips of its bottom bar, and the extension panels drawn in and
 //! beside it.
 
-use gpui_kit::assets::IconName as Lucide;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use super::input::Attachment;
+use crate::aurora;
 use crate::ext_panel::ExtPanel;
-use crate::{aurora, campo};
 
 /// An extension's prompt panel (API 1.6), its width, and whether a side one has a box (API 1.7).
 #[derive(Clone, PartialEq)]
@@ -140,55 +137,6 @@ pub(super) fn prompt_row(
         .child(measure)
         .child(v_flex().flex_1().min_w_0().child(strip).child(field))
         .children(side)
-}
-
-/// Attachment `ix`: a 28 px glass chip with its kind's icon, its name and an × inside.
-pub(super) fn attachment(
-    ix: usize,
-    attachment: &Attachment,
-    on_remove: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    cx: &App,
-) -> Stateful<Div> {
-    let icon = match attachment.is_image() {
-        true => Lucide::Image,
-        false => Lucide::File,
-    };
-    h_flex()
-        .id(("attachment", ix))
-        .h(px(campo::H))
-        .max_w(px(220.))
-        .gap_1p5()
-        .pl_1()
-        .pr_0p5()
-        .rounded(px(campo::RADIUS))
-        .border_1()
-        .border_color(campo::line(cx))
-        .bg(campo::glass(cx))
-        .text_size(px(12.))
-        .child(
-            h_flex()
-                .size(px(20.))
-                .flex_none()
-                .justify_center()
-                .rounded(px(5.))
-                .bg(campo::recessed(cx))
-                .child(
-                    Icon::new(icon)
-                        .xsmall()
-                        .text_color(cx.theme().muted_foreground),
-                ),
-        )
-        .child(div().min_w_0().truncate().child(attachment.name.clone()))
-        .child(
-            Button::new(("attachment-remove", ix))
-                .ghost()
-                .xsmall()
-                .size(px(20.))
-                .icon(Lucide::X)
-                .tooltip("Remove")
-                .accessibility_label("Remove")
-                .on_click(on_remove),
-        )
 }
 
 /// `.strip`: one tab sitting on the composer's top edge, 18 px in from its left. Add the chips

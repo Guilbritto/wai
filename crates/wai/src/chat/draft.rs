@@ -13,7 +13,11 @@ use gpui_kit::*;
 use wai_settings::{SeenModel, SeenModes, agent_label, builtin, canonical, shown};
 
 use super::composer;
-use super::input::{Attachment, attach_button, paste_into, pick_paths, send_button};
+use super::input::{
+    Message, attach_button, insert_files, joined, paste_into, pick_paths, send_button, token_pill,
+    trimmed,
+};
+use super::mentions::{self, Mentions};
 use super::view::ChatSession;
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::campo;
@@ -232,7 +236,8 @@ pub struct DraftView {
     /// The chat of a send in flight: the draft shows it until the session starts.
     pub starting: Option<Entity<ChatSession>>,
     pub(super) input: Entity<TextareaState>,
-    pub(crate) attachments: Vec<Attachment>,
+    /// The `@` menu over the prompt box.
+    mentions: Entity<Mentions>,
     /// A worktree is being created for this draft: the next send waits for it to be recorded.
     pub(crate) creating: bool,
     pub(crate) data: DraftData,
@@ -298,6 +303,8 @@ impl DraftView {
                     InputEvent::PressEnter { shift: false, .. } => cx.emit(DraftEvent::Send),
                     InputEvent::Change => {
                         composer::set_typing(cx.entity_id(), this.prompt_typed(cx), cx);
+                        this.mentions
+                            .update(cx, |m, cx| m.changed(&this.folder, cx));
                         cx.emit(DraftEvent::Changed);
                     }
                     _ => {}
@@ -358,8 +365,8 @@ impl DraftView {
             notice: None,
             cloning: None,
             starting: None,
+            mentions: cx.new(|_| Mentions::new(input.clone())),
             input,
-            attachments: Vec::new(),
             creating: false,
             data,
             installed: HashMap::new(),
@@ -785,9 +792,9 @@ impl DraftView {
             && !self.text(cx).is_empty()
     }
 
-    /// What goes out: the draft keeps both, in case the start fails.
-    pub(crate) fn message(&self, cx: &App) -> (String, Vec<Attachment>) {
-        (self.text(cx), self.attachments.clone())
+    /// What goes out, its files in place: the draft keeps it, in case the start fails.
+    pub(crate) fn message(&self, cx: &App) -> Message {
+        trimmed(&self.input.read(cx).content())
     }
 
     /// Back to editing, with `error` (if any) shown above the prompt and what was typed in the
@@ -795,17 +802,13 @@ impl DraftView {
     pub fn fail(
         &mut self,
         error: Option<String>,
-        leftover: (String, Vec<Attachment>),
+        leftover: Message,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (leftover, files) = leftover;
         self.starting = None;
-        self.attachments.extend(files);
-        if !leftover.is_empty() {
-            let text = [self.text(cx), leftover];
-            let text = text.iter().filter(|t| !t.is_empty());
-            let text = text.cloned().collect::<Vec<_>>().join("\n\n");
+        if !leftover.text().is_empty() {
+            let text = joined([self.input.read(cx).content(), leftover]);
             self.input
                 .update(cx, |input, cx| input.set_value(text, window, cx));
             super::composer::set_typing(cx.entity_id(), self.prompt_typed(cx), cx);
@@ -815,21 +818,21 @@ impl DraftView {
         cx.notify();
     }
 
-    fn attach(&mut self, paths: &ExternalPaths, _: &mut Window, cx: &mut Context<Self>) {
-        self.attach_paths(paths.paths(), cx);
+    /// Dropped or picked files go in at the caret.
+    pub(crate) fn attach(
+        &mut self,
+        paths: &[PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        insert_files(&self.input, paths, &self.folder, window, cx);
     }
 
-    fn attach_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        self.attachments
-            .extend(paths.iter().map(|path| Attachment::new(path)));
-        cx.notify();
-    }
-
-    fn pick_files(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picked = pick_paths(cx);
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             if let Some(paths) = picked.await {
-                this.update(cx, |this, cx| this.attach_paths(&paths, cx))
+                this.update_in(cx, |this, window, cx| this.attach(&paths, window, cx))
                     .ok();
             }
         })
@@ -892,13 +895,6 @@ impl Render for DraftView {
                     })
                     .child("Draft · starts when you send"),
             );
-        let chips = self.attachments.iter().enumerate().map(|(ix, attachment)| {
-            let remove = cx.listener(move |this, _, _, cx| {
-                this.attachments.remove(ix);
-                cx.notify();
-            });
-            composer::attachment(ix, attachment, remove, cx)
-        });
         let missing = (self.installed() == Some(false)).then(|| {
             let label = agent_label(&self.agent);
             let command = self.data.commands.get(&self.agent);
@@ -1011,19 +1007,17 @@ impl Render for DraftView {
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         });
         let this = cx.entity().downgrade();
-        let textarea =
-            Textarea::new(&self.input)
-                .appearance(false)
-                .on_paste(move |item, window, cx| {
-                    let paste = |s: &mut Self, cx: &mut Context<Self>| {
-                        let pasted = paste_into(&mut s.attachments, item, window, cx);
-                        if pasted {
-                            cx.notify();
-                        }
-                        pasted
-                    };
-                    this.update(cx, paste).unwrap_or(false)
-                });
+        let textarea = Textarea::new(&self.input)
+            .appearance(false)
+            .token(|token, _, _| token_pill(token))
+            .on_paste(move |item, window, cx| {
+                let Some((input, folder)) = (this.upgrade())
+                    .map(|this| (this.read(cx).input.clone(), this.read(cx).folder.clone()))
+                else {
+                    return false;
+                };
+                paste_into(&input, &folder, item, window, cx)
+            });
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let prompt = v_flex()
             .id("draft-composer")
@@ -1050,9 +1044,6 @@ impl Render for DraftView {
         let content = v_flex()
             .gap_2()
             .children(notice)
-            .when(!self.attachments.is_empty(), |el| {
-                el.child(h_flex().gap_2().flex_wrap().children(chips))
-            })
             // A taller prompt panel: the text takes the height, the bar stays at the bottom.
             .child(div().flex_grow(1.).child(textarea))
             .child(
@@ -1137,11 +1128,16 @@ impl Render for DraftView {
                             .child("Pick where and with whom. Nothing starts until you send."),
                     ),
             )
-            .child(row)
+            .child(mentions::keys(
+                v_flex().relative().child(row).child(self.mentions.clone()),
+                &self.mentions,
+            ))
             .child(hints);
         v_flex()
             .key_context("DraftView")
-            .on_drop(cx.listener(Self::attach))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.attach(paths.paths(), window, cx)
+            }))
             .size_full()
             .child(header)
             .child(

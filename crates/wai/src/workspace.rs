@@ -1449,7 +1449,7 @@ impl Workspace {
         self.save_state(cx);
     }
 
-    /// A draft row's ×: discards `draft`, after asking when it holds text or attachments.
+    /// A draft row's ×: discards `draft`, after asking when it holds text or files.
     pub(crate) fn close_draft(
         &mut self,
         draft: &Entity<DraftView>,
@@ -1457,7 +1457,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let d = draft.read(cx);
-        if d.text(cx).is_empty() && d.attachments.is_empty() {
+        if d.text(cx).is_empty() {
             return self.discard_draft(draft, window, cx);
         }
         let draft = draft.clone();
@@ -3699,9 +3699,7 @@ pub(crate) mod tests {
     use super::{Pane, Workspace};
     use crate::agents::{AgentStatus, RegistryEvent};
     use crate::app::{self, ToggleTerminal};
-    use crate::chat::{
-        Attachment, ChatEvent, ChatItem, ChatSession, NoticeKind, TurnState, signed_out,
-    };
+    use crate::chat::{ChatEvent, ChatItem, ChatSession, NoticeKind, TurnState, signed_out};
     use crate::notify;
     use crate::sidebar::canonical;
 
@@ -3992,10 +3990,7 @@ pub(crate) mod tests {
         let (workspace, cx) = open(cx, fake_settings("--require-auth"));
         cx.simulate_keystrokes("secondary-n");
         let draft = workspace.read_with(cx, |w, _| w.drafts[0].clone());
-        draft.update(cx, |d, cx| {
-            d.attachments.push(Attachment::new(&file));
-            cx.notify();
-        });
+        cx.update(|window, cx| draft.update(cx, |d, cx| d.attach(&[file], window, cx)));
         cx.simulate_input("hello");
         cx.simulate_keystrokes("enter");
 
@@ -4004,8 +3999,7 @@ pub(crate) mod tests {
         });
         draft.read_with(cx, |d, cx| {
             assert!(d.starting.is_none());
-            assert_eq!(d.text(cx), "hello");
-            assert_eq!(d.attachments.len(), 1);
+            assert_eq!(d.text(cx), "@a.txt hello");
         });
         workspace.read_with(cx, |w, _| {
             assert!(w.sessions.is_empty());

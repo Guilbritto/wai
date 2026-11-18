@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use gpui_kit::component::input::InputContent;
 use gpui_kit::*;
 use wai_agent::{AgentError, ConfigCategory, SessionStarted};
 use wai_settings::{agent_label, shown};
@@ -95,18 +96,18 @@ impl Workspace {
         }
         let (agent, folder, model) = (d.agent.clone(), d.folder.clone(), d.model.clone());
         let mode = d.mode.clone();
-        let (text, attachments) = d.message(cx);
+        let message = d.message(cx);
         let (repo, worktree, branch) = (d.repo.clone(), d.worktree, d.branch.clone());
         if !folder.is_dir() {
             let error = format!("The folder {} no longer exists.", shown(&folder));
             return draft.update(cx, |d, cx| {
-                d.fail(Some(error), Default::default(), window, cx)
+                d.fail(Some(error), InputContent::new(""), window, cx)
             });
         }
         let Some(handle) = self.registry.update(cx, |r, cx| r.handle(&agent, cx)) else {
             let error = format!("No agent named {agent} in the settings or extensions.");
             return draft.update(cx, |d, cx| {
-                d.fail(Some(error), Default::default(), window, cx)
+                d.fail(Some(error), InputContent::new(""), window, cx)
             });
         };
         let job = match (repo, worktree, branch) {
@@ -114,7 +115,7 @@ impl Workspace {
             (Some(repo), true, base) => {
                 let base = base.unwrap_or_else(|| repo.default.clone());
                 Some(GitJob::Worktree {
-                    slug: git::slug(&text),
+                    slug: git::slug(message.text()),
                     repo,
                     base,
                 })
@@ -122,7 +123,7 @@ impl Workspace {
             (Some(repo), false, Some(branch)) if Some(&branch) != repo.current.as_ref() => {
                 if let Some(error) = self.shared_folder(&draft, &repo.root, &branch, cx) {
                     return draft.update(cx, |d, cx| {
-                        d.fail(Some(error), Default::default(), window, cx)
+                        d.fail(Some(error), InputContent::new(""), window, cx)
                     });
                 }
                 Some(GitJob::Checkout { branch })
@@ -138,8 +139,7 @@ impl Workspace {
                 folder,
                 handle,
                 registry.clone(),
-                text,
-                attachments,
+                message.clone(),
                 window,
                 cx,
             )
@@ -438,7 +438,7 @@ mod tests {
     use gpui_kit::{ElementId, Entity, TestAppContext, VisualTestContext};
     use wai_settings::Settings;
 
-    use crate::chat::{Attachment, ChatItem, ChatSession, DraftView, TurnState, signed_out};
+    use crate::chat::{ChatItem, ChatSession, DraftView, TurnState, signed_out};
     use crate::git::tests::{cloned, git, repo_with};
     use crate::git::{self, SUBMODULE_HINT};
     use crate::sidebar::canonical;
@@ -1151,21 +1151,20 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn attachments_added_while_starting_go_back_to_the_draft(cx: &mut TestAppContext) {
+    fn files_added_while_starting_go_back_to_the_draft(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let tmp = tempfile::tempdir().unwrap();
         let (own, added) = (tmp.path().join("draft.txt"), tmp.path().join("chat.txt"));
         let (settings, gate) = gated("", tmp.path());
         let (workspace, cx) = open(cx, settings);
         let draft = new_draft(&workspace, cx);
-        draft.update(cx, |d, _| d.attachments.push(Attachment::new(&own)));
+        cx.update(|window, cx| draft.update(cx, |d, cx| d.attach(&[own], window, cx)));
         type_and_send(cx, "build it");
         let chat = draft.read_with(cx, |d, _| d.starting.clone().expect("starting"));
-        chat.update(cx, |c, _| c.attachments.push(Attachment::new(&added)));
+        cx.update(|window, cx| chat.update(cx, |c, cx| c.attach(&[added], window, cx)));
         cx.simulate_keystrokes("escape");
-        draft.read_with(cx, |d, _| {
-            let names: Vec<_> = d.attachments.iter().map(|a| a.name.as_str()).collect();
-            assert_eq!(names, ["draft.txt", "chat.txt"]);
+        draft.read_with(cx, |d, cx| {
+            assert_eq!(d.text(cx), "@draft.txt build it\n\n@chat.txt");
         });
         std::fs::write(&gate, "").unwrap();
     }

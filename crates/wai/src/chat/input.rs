@@ -1,25 +1,29 @@
-//! The prompt box: a multi-line input, chips for the files dropped, pasted or picked, the
-//! messages queued during a turn, Send and Stop.
+//! The prompt box: a multi-line input whose files (dropped, pasted, picked or mentioned with `@`)
+//! sit in its text as tokens, the messages queued during a turn, Send and Stop.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::Engine as _;
+use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{MoveDown, MoveUp, Position, Textarea};
+use gpui_kit::component::input::{
+    InlineToken, InlineTokenContext, InlineTokenSpan, InputContent, InputToken, MoveDown, MoveUp,
+    Position, Textarea, TextareaState,
+};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{Select, SelectDelegate, SelectState};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex,
     v_flex,
 };
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::{AgentCaps, ConfigCategory, PromptBlock};
 
-use super::composer;
 use super::model::{ChatItem, NoticeKind, TurnState, elapsed};
 use super::view::{ChatEvent, ChatSession};
+use super::{composer, mentions};
 use crate::agents::AgentStatus;
 use crate::app::CancelTurn;
 use crate::workspace::folder_name;
@@ -27,111 +31,45 @@ use crate::{aurora, campo};
 
 const IMAGE_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
-/// A file dropped, pasted or picked, ready to go out with the next prompt.
-#[derive(Clone)]
-pub struct Attachment {
-    pub(crate) name: String,
-    path: PathBuf,
-    block: PromptBlock,
+/// A message: the prompt box's text with a token per file in it, each token's id the file's path.
+pub(super) type Message = InputContent;
+
+/// Where pasted images are written.
+fn pasted_dir() -> PathBuf {
+    std::env::temp_dir().join("wai-pasted")
 }
 
-impl Attachment {
-    pub(super) fn is_image(&self) -> bool {
-        matches!(self.block, PromptBlock::Image { .. })
-    }
-
-    /// png/jpeg/gif/webp up to 5 MB become images; anything else a resource link.
-    pub fn new(path: &Path) -> Self {
-        let name = path.file_name().map_or_else(
-            || wai_settings::shown(path),
-            |n| n.to_string_lossy().into_owned(),
-        );
-        let block = image(path).unwrap_or_else(|| PromptBlock::Resource {
-            path: path.to_path_buf(),
-        });
-        let path = path.to_path_buf();
-        Self { name, path, block }
-    }
-
-    /// A pasted image, written to a file of its own so an agent without images can read it.
-    /// What agents take as an image is kept as it is; an SVG stays a file; any other format
-    /// becomes a PNG.
-    pub fn pasted(image: &gpui_kit::Image) -> anyhow::Result<Self> {
-        use gpui_kit::ImageFormat as F;
-        let kept = match image.format {
-            F::Png => Some("png"),
-            F::Jpeg => Some("jpg"),
-            F::Gif => Some("gif"),
-            F::Webp => Some("webp"),
-            F::Svg => Some("svg"),
-            F::Bmp | F::Tiff | F::Ico | F::Pnm => None,
-        };
-        let (ext, bytes) = match kept {
-            Some(ext) => (ext, image.bytes.clone()),
-            None => {
-                let mut png = std::io::Cursor::new(Vec::new());
-                image::load_from_memory(&image.bytes)?
-                    .write_to(&mut png, image::ImageFormat::Png)?;
-                ("png", png.into_inner())
-            }
-        };
-        // ponytail: never deleted; the system clears its temporary folder.
-        let dir = std::env::temp_dir().join("wai-pasted");
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{:x}.{ext}", image.id));
-        std::fs::write(&path, bytes)?;
-        let attachment = Self::new(&path);
-        Ok(Self {
-            name: format!("Pasted image.{ext}"),
-            ..attachment
-        })
-    }
-}
-
-/// A prompt's text and attachments, before it goes out.
-pub(super) struct Message {
-    pub(super) text: String,
-    pub(super) attachments: Vec<Attachment>,
-}
-
-impl Message {
-    /// What the transcript shows of it: the text, then `Attached: <names>`.
-    pub(super) fn shown(&self) -> String {
-        if self.attachments.is_empty() {
-            return self.text.clone();
+/// A pasted image, written to a file of its own so an agent without images can read it; its path.
+/// What agents take as an image is kept as it is; an SVG stays a file; any other format becomes a
+/// PNG.
+pub(super) fn save_pasted(image: &gpui_kit::Image) -> anyhow::Result<PathBuf> {
+    use gpui_kit::ImageFormat as F;
+    let kept = match image.format {
+        F::Png => Some("png"),
+        F::Jpeg => Some("jpg"),
+        F::Gif => Some("gif"),
+        F::Webp => Some("webp"),
+        F::Svg => Some("svg"),
+        F::Bmp | F::Tiff | F::Ico | F::Pnm => None,
+    };
+    let (ext, bytes) = match kept {
+        Some(ext) => (ext, image.bytes.clone()),
+        None => {
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::load_from_memory(&image.bytes)?.write_to(&mut png, image::ImageFormat::Png)?;
+            ("png", png.into_inner())
         }
-        let names: Vec<_> = self.attachments.iter().map(|a| a.name.as_str()).collect();
-        format!("{}\nAttached: {}", self.text, names.join(", "))
-            .trim_start()
-            .to_string()
-    }
+    };
+    // ponytail: never deleted; the system clears its temporary folder.
+    let dir = pasted_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{:x}.{ext}", image.id));
+    std::fs::write(&path, bytes)?;
+    Ok(path)
 }
 
-/// The messages sent, oldest first, as typed: without the `Attached:` line `shown` adds, and
-/// none that only attached files. ponytail: a typed line starting `Attached: ` is cut too; keep
-/// the typed text per row if that bites.
-fn sent(items: &[ChatItem]) -> Vec<&str> {
-    (items.iter())
-        .filter_map(|item| match item {
-            ChatItem::User { text } | ChatItem::Steered { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .map(|t| t.rsplit_once("\nAttached: ").map_or(t, |(t, _)| t))
-        .filter(|t| !t.is_empty() && !t.starts_with("Attached: "))
-        .collect()
-}
-
-/// What `attachment` sends: an image goes as its file to an agent that takes no images.
-pub(super) fn prompt_block(attachment: &Attachment, images: bool) -> PromptBlock {
-    match &attachment.block {
-        PromptBlock::Image { .. } if !images => PromptBlock::Resource {
-            path: attachment.path.clone(),
-        },
-        block => block.clone(),
-    }
-}
-
-fn image(path: &Path) -> Option<PromptBlock> {
+/// The mime type of a png/jpeg/gif/webp up to 5 MB: a file that goes to agents as an image.
+fn image_mime(path: &Path) -> Option<&'static str> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     let mime = match ext.as_str() {
         "png" => "image/png",
@@ -140,20 +78,175 @@ fn image(path: &Path) -> Option<PromptBlock> {
         "webp" => "image/webp",
         _ => return None,
     };
-    if std::fs::metadata(path).ok()?.len() > IMAGE_MAX_BYTES {
-        return None;
-    }
+    (std::fs::metadata(path).ok()?.len() <= IMAGE_MAX_BYTES).then_some(mime)
+}
+
+/// What the file at `path` sends: an image to an agent that takes them, else a resource link.
+fn file_block(path: &Path, images: bool) -> PromptBlock {
+    let resource = || PromptBlock::Resource {
+        path: path.to_path_buf(),
+    };
+    let Some(mime) = image_mime(path).filter(|_| images) else {
+        return resource();
+    };
     // ponytail: read on the UI thread; bounded by the 5 MB cap.
-    let bytes = std::fs::read(path).ok()?;
-    Some(PromptBlock::Image {
-        mime: mime.into(),
-        base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+    match std::fs::read(path) {
+        Ok(bytes) => PromptBlock::Image {
+            mime: mime.into(),
+            base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        },
+        Err(_) => resource(),
+    }
+}
+
+/// What `message` sends, in its order: the text between its files, each file where it stands.
+/// Blank runs of text are left out.
+pub(super) fn prompt_blocks(message: &Message, images: bool) -> Vec<PromptBlock> {
+    let text = message.text();
+    let mut blocks = Vec::new();
+    let push_text = |blocks: &mut Vec<PromptBlock>, run: &str| {
+        if !run.trim().is_empty() {
+            blocks.push(PromptBlock::Text(run.to_string()));
+        }
+    };
+    let mut at = 0;
+    for span in message.tokens() {
+        push_text(&mut blocks, &text[at..span.range().start]);
+        blocks.push(file_block(Path::new(span.token().id().as_ref()), images));
+        at = span.range().end;
+    }
+    push_text(&mut blocks, &text[at..]);
+    blocks
+}
+
+/// `text` with `tokens` laid on it; a token that does not fit is left out.
+fn with_tokens(
+    text: impl Into<SharedString>,
+    tokens: impl IntoIterator<Item = (Range<usize>, InlineToken)>,
+) -> Message {
+    (tokens.into_iter()).fold(InputContent::new(text), |content, (range, token)| {
+        content.clone().with_token(range, token).unwrap_or(content)
     })
 }
 
-/// ⌘V of files copied in Finder or of an image attaches them; `false` lets text paste.
+/// `message` without its leading and trailing blanks.
+pub(super) fn trimmed(message: &Message) -> Message {
+    let text = message.text();
+    let start = text.len() - text.trim_start().len();
+    let spans = message.tokens().iter().map(|span| {
+        let range = span.range();
+        (range.start - start..range.end - start, span.token().clone())
+    });
+    with_tokens(text.trim().to_string(), spans)
+}
+
+/// The `messages` that hold anything, trimmed, a blank line apart.
+pub(super) fn joined(messages: impl IntoIterator<Item = Message>) -> Message {
+    let (mut text, mut spans) = (String::new(), Vec::new());
+    for message in messages.into_iter().map(|m| trimmed(&m)) {
+        if message.text().is_empty() {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        let at = text.len();
+        text.push_str(message.text());
+        spans.extend(message.tokens().iter().map(|span| {
+            let range = span.range();
+            (range.start + at..range.end + at, span.token().clone())
+        }));
+    }
+    with_tokens(text, spans)
+}
+
+/// The messages sent, oldest first, as typed.
+fn sent(items: &[ChatItem]) -> Vec<&str> {
+    (items.iter())
+        .filter_map(|item| match item {
+            ChatItem::User { text } | ChatItem::Steered { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// The number after the highest `[Image #n]` among `tokens`, from 1.
+fn next_image(tokens: &[InlineTokenSpan]) -> usize {
+    let number = |span: &InlineTokenSpan| {
+        let text = span.token().text();
+        let n = text.strip_prefix("[Image #")?.strip_suffix(']')?;
+        n.parse::<usize>().ok()
+    };
+    tokens.iter().filter_map(number).max().unwrap_or(0) + 1
+}
+
+/// The token for the file or folder at `path` in a box already holding `tokens`. Its text: an
+/// image's `[Image #n]`, else `@` and the path from `folder` (just its name outside it), a folder's
+/// with a trailing `/`. Its label: `Image #n` for a pasted image, else the name.
+pub(super) fn file_token(path: &Path, folder: &Path, tokens: &[InlineTokenSpan]) -> InlineToken {
+    let name = path.file_name().map_or_else(
+        || wai_settings::shown(path),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let id = path.to_string_lossy().into_owned();
+    if image_mime(path).is_some() {
+        let image = format!("Image #{}", next_image(tokens));
+        let label = match path.starts_with(pasted_dir()) {
+            true => image.clone(),
+            false => name,
+        };
+        return InlineToken::new(id, format!("[{image}]")).with_label(label);
+    }
+    let inside = (path.strip_prefix(folder).ok()).filter(|p| !p.as_os_str().is_empty());
+    let shown = inside.map_or_else(|| name.clone(), |p| p.to_string_lossy().into_owned());
+    let slash = if path.is_dir() { "/" } else { "" };
+    InlineToken::new(id, format!("@{shown}{slash}")).with_label(name)
+}
+
+/// Puts a token for each of `paths` at the caret of `input`, each followed by a space.
+pub(super) fn insert_files(
+    input: &Entity<TextareaState>,
+    paths: &[PathBuf],
+    folder: &Path,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    input.update(cx, |input, cx| {
+        for path in paths {
+            // Off the word before it, as a typed mention would be.
+            let before = input.value()[..input.selected_range().start]
+                .chars()
+                .next_back();
+            if before.is_some_and(|c| !c.is_whitespace()) {
+                input.insert(" ", window, cx);
+            }
+            let token = file_token(path, folder, input.tokens());
+            if input.replace_with_token(token, window, cx).is_ok() {
+                input.insert(" ", window, cx);
+            }
+        }
+    });
+}
+
+/// A token as a pill: its kind's icon, then its label.
+pub(super) fn token_pill(token: &InlineTokenContext) -> InputToken {
+    let text = token.token().text();
+    let icon = if text.starts_with("[Image #") {
+        Lucide::Image
+    } else if text.ends_with('/') {
+        Lucide::Folder
+    } else {
+        Lucide::File
+    };
+    InputToken::new(token).icon(Icon::new(icon))
+}
+
+/// ⌘V of files copied in Finder or of an image puts them in `input` at the caret; `false` lets
+/// text paste.
 pub(super) fn paste_into(
-    attachments: &mut Vec<Attachment>,
+    input: &Entity<TextareaState>,
+    folder: &Path,
     item: &ClipboardItem,
     window: &mut Window,
     cx: &mut App,
@@ -161,12 +254,12 @@ pub(super) fn paste_into(
     for entry in item.entries() {
         match entry {
             ClipboardEntry::ExternalPaths(paths) => {
-                attachments.extend(paths.paths().iter().map(|path| Attachment::new(path)));
+                insert_files(input, paths.paths(), folder, window, cx);
                 return true;
             }
             ClipboardEntry::Image(image) => {
-                match Attachment::pasted(image) {
-                    Ok(attachment) => attachments.push(attachment),
+                match save_pasted(image) {
+                    Ok(path) => insert_files(input, &[path], folder, window, cx),
                     Err(e) => window.push_notification(
                         Notification::warning(format!("Could not attach the image: {e}")),
                         cx,
@@ -238,10 +331,7 @@ impl ChatSession {
         let Some(n) = (key.key.parse::<usize>().ok()).filter(|n| (1..=9).contains(n)) else {
             return;
         };
-        if key.modifiers.modified()
-            || !self.input.read(cx).value().is_empty()
-            || !self.attachments.is_empty()
-        {
+        if key.modifiers.modified() || !self.input.read(cx).value().is_empty() {
             return;
         }
         let Some(ChatItem::Permission { request, .. }) = self.model.waiting.first() else {
@@ -255,21 +345,19 @@ impl ChatSession {
         self.answer(id, &choice, cx);
     }
 
-    /// Sends the prompt and the attachments: from an idle session as a prompt; during a turn
-    /// into it when the agent steers, else into the queue until it ends.
+    /// Sends the prompt, its files with it: from an idle session as a prompt; during a turn into
+    /// it when the agent steers, else into the queue until it ends.
     pub(super) fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_starting() || (!self.model.in_turn && self.model.state != TurnState::Idle) {
             return;
         }
-        let text = self.input.read(cx).value().trim().to_string();
-        if text.is_empty() && self.attachments.is_empty() {
+        let message = trimmed(&self.input.read(cx).content());
+        if message.text().is_empty() {
             return;
         }
-        let attachments = std::mem::take(&mut self.attachments);
         self.input
             .update(cx, |input, cx| input.set_value("", window, cx));
         super::composer::set_typing(cx.entity_id(), self.prompt_typed(cx), cx);
-        let message = Message { text, attachments };
         match self.model.in_turn {
             false => self.send_message(message, cx),
             true if self.caps(cx).is_some_and(|c| c.steering) => self.steer(message, cx),
@@ -282,15 +370,12 @@ impl ChatSession {
 
     fn send_message(&mut self, message: Message, cx: &mut Context<Self>) {
         let blocks = self.blocks(&message, cx);
-        self.submit(blocks, &message.shown(), cx);
+        self.submit(blocks, message.text(), cx);
     }
 
-    /// What `message` sends: its text, then each attachment.
+    /// What `message` sends: its text and files, in their order.
     pub(super) fn blocks(&self, message: &Message, cx: &App) -> Vec<PromptBlock> {
-        let images = self.caps(cx).is_some_and(|c| c.images);
-        let text = (!message.text.is_empty()).then(|| PromptBlock::Text(message.text.clone()));
-        let files = message.attachments.iter().map(|a| prompt_block(a, images));
-        text.into_iter().chain(files).collect()
+        prompt_blocks(message, self.caps(cx).is_some_and(|c| c.images))
     }
 
     /// Sends `message` into the running turn; it shows as the user's once the turn took it. With
@@ -298,7 +383,7 @@ impl ChatSession {
     pub(super) fn steer(&mut self, message: Message, cx: &mut Context<Self>) {
         let blocks = self.blocks(&message, cx);
         let (handle, id) = (self.handle.clone(), self.id.clone());
-        let shown = message.shown();
+        let shown = message.text().to_string();
         self.model.steer_sent(&shown);
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -335,18 +420,12 @@ impl ChatSession {
     }
 
     /// The queue once a turn ends: after a normal end it goes out as one prompt, its texts a blank
-    /// line apart; else its text and attachments go back to the prompt box, unsent.
+    /// line apart; else it goes back to the prompt box, unsent.
     pub(super) fn release_queue(&mut self, send: bool, cx: &mut Context<Self>) {
         if self.queued.is_empty() {
             return;
         }
-        let queued = std::mem::take(&mut self.queued);
-        let texts: Vec<&str> = (queued.iter().map(|m| m.text.as_str()))
-            .filter(|t| !t.is_empty())
-            .collect();
-        let text = texts.join("\n\n");
-        let attachments = queued.into_iter().flat_map(|m| m.attachments).collect();
-        let message = Message { text, attachments };
+        let message = joined(std::mem::take(&mut self.queued));
         if send {
             return self.send_message(message, cx);
         }
@@ -354,30 +433,21 @@ impl ChatSession {
         cx.notify();
     }
 
-    /// Puts a queued message back in the prompt box: its attachments first among the chips, its
-    /// text after any text already taken back, a blank line apart.
+    /// Puts a queued message back in the prompt box, after any already taken back, a blank line
+    /// apart.
     pub(super) fn take_back(&mut self, message: Message) {
-        self.attachments.splice(0..0, message.attachments);
-        self.unsent = Some(match self.unsent.take() {
-            Some(held) if !held.is_empty() && !message.text.is_empty() => {
-                format!("{held}\n\n{}", message.text)
-            }
-            Some(held) if message.text.is_empty() => held,
-            _ => message.text,
-        });
+        self.unsent = Some(joined(self.unsent.take().into_iter().chain([message])));
     }
 
-    /// Puts the text taken back from the queue in the prompt box, before what was typed since.
+    /// Puts what was taken back from the queue in the prompt box, before what was typed since.
     pub(super) fn sync_unsent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = self.unsent.take() else {
+        let Some(held) = self.unsent.take() else {
             return;
         };
-        let draft = self.input.read(cx).value().trim().to_string();
-        let parts: Vec<String> = [text, draft]
-            .into_iter()
-            .filter(|t| !t.is_empty())
-            .collect();
-        self.prefill(&parts.join("\n\n"), window, cx);
+        let content = joined([held, self.input.read(cx).content()]);
+        self.input
+            .update(cx, |input, cx| input.set_value(content, window, cx));
+        super::composer::set_typing(cx.entity_id(), self.prompt_typed(cx), cx);
     }
 
     /// Sends `text` as a prompt, leaving the prompt box alone (an extension's `sessions/prompt`).
@@ -433,31 +503,28 @@ impl ChatSession {
         }
     }
 
-    pub(super) fn attach(&mut self, paths: &ExternalPaths, _: &mut Window, cx: &mut Context<Self>) {
-        self.attach_paths(paths.paths(), cx);
-    }
-
-    fn attach_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        self.attachments
-            .extend(paths.iter().map(|path| Attachment::new(path)));
-        cx.notify();
+    /// Dropped or picked files go in at the caret.
+    pub(crate) fn attach(
+        &mut self,
+        paths: &[PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        insert_files(&self.input, paths, &self.cwd, window, cx);
     }
 
     fn paste(&mut self, item: &ClipboardItem, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let pasted = paste_into(&mut self.attachments, item, window, cx);
-        if pasted {
-            cx.notify();
-        }
-        pasted
+        paste_into(&self.input, &self.cwd, item, window, cx)
     }
 
-    fn pick_files(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picked = pick_paths(cx);
-        cx.spawn(async move |this, cx| {
-            if let Some(paths) = picked.await {
-                this.update(cx, |this, cx| this.attach_paths(&paths, cx))
-                    .ok();
-            }
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(paths) = picked.await else {
+                return;
+            };
+            this.update_in(cx, |this, window, cx| this.attach(&paths, window, cx))
+                .ok();
         })
         .detach();
     }
@@ -476,13 +543,6 @@ impl ChatSession {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let busy = matches!(self.model.state, TurnState::Working | TurnState::NeedsYou);
-        let chips = self.attachments.iter().enumerate().map(|(ix, attachment)| {
-            let remove = cx.listener(move |this, _, _, cx| {
-                this.attachments.remove(ix);
-                cx.notify();
-            });
-            composer::attachment(ix, attachment, remove, cx)
-        });
         let theme = cx.theme();
         let dark = theme.is_dark();
         let (success, warning) = (theme.success, theme.warning);
@@ -509,7 +569,7 @@ impl ChatSession {
             .rounded(px(18.))
         });
         // During a turn too: the message goes into the turn, or waits in the queue.
-        let empty = self.input.read(cx).value().trim().is_empty() && self.attachments.is_empty();
+        let empty = self.input.read(cx).value().trim().is_empty();
         let disabled = empty
             || self.is_starting()
             || !(self.model.in_turn || self.model.state == TurnState::Idle);
@@ -590,20 +650,17 @@ impl ChatSession {
         let attach = attach_button()
             .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx)));
         let this = cx.entity().downgrade();
-        let textarea =
-            Textarea::new(&self.input)
-                .appearance(false)
-                .on_paste(move |item, window, cx| {
-                    let paste = |s: &mut Self, cx: &mut Context<Self>| s.paste(item, window, cx);
-                    this.update(cx, paste).unwrap_or(false)
-                });
+        let textarea = Textarea::new(&self.input)
+            .appearance(false)
+            .token(|token, _, _| token_pill(token))
+            .on_paste(move |item, window, cx| {
+                let paste = |s: &mut Self, cx: &mut Context<Self>| s.paste(item, window, cx);
+                this.update(cx, paste).unwrap_or(false)
+            });
         let strip = self.render_strip(cx);
         let bar = self.render_bar(attach, stop, send, window, cx);
         let content = v_flex()
             .gap_2()
-            .when(!self.attachments.is_empty(), |el| {
-                el.child(h_flex().gap_2().flex_wrap().children(chips))
-            })
             // A taller prompt panel: the text takes the height, the bar stays at the bottom.
             .child(div().flex_grow(1.).child(textarea))
             .child(bar);
@@ -631,7 +688,8 @@ impl ChatSession {
             v_flex()
                 .relative()
                 .child(row)
-                .children(self.render_menu(cx)),
+                .children(self.render_menu(cx))
+                .child(self.mentions.clone()),
         );
         let prompt = prompt
             .capture_action(
@@ -640,19 +698,20 @@ impl ChatSession {
             .capture_action(
                 cx.listener(|this, _: &MoveDown, window, cx| this.recall(false, window, cx)),
             );
-        self.agent_keys(self.menu_keys(prompt, cx), cx)
+        let prompt = mentions::keys(self.menu_keys(prompt, cx), &self.mentions);
+        self.agent_keys(prompt, cx)
     }
 
     /// ↑ in an empty prompt box puts the last message sent back in it, caret at its end, and each
     /// further ↑ the one before; ↓ walks forward again, past the newest to an empty box. Only
     /// while the box holds nothing or the recalled message unedited, the caret on its first (↑)
-    /// or last (↓) line, and neither the `/` menu nor the agent list has the keys.
+    /// or last (↓) line, and neither a menu nor the agent list has the keys.
     fn recall(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
         let input = self.input.read(cx);
         if !input.focus_handle(cx).is_focused(window)
             || self.agent_cursor.is_some()
-            || !self.attachments.is_empty()
             || self.menu(cx).is_some()
+            || self.mentions.read(cx).is_open(cx)
         {
             return;
         }
@@ -813,10 +872,15 @@ fn spin_angle(elapsed: Duration) -> Radians {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::time::Duration;
 
-    use super::{Attachment, IMAGE_MAX_BYTES, prompt_block, spin_angle};
+    use super::{
+        IMAGE_MAX_BYTES, Message, file_token, joined, next_image, prompt_blocks, save_pasted,
+        spin_angle, trimmed, with_tokens,
+    };
     use base64::Engine as _;
+    use gpui_kit::component::input::InlineToken;
     use gpui_kit::{Image, ImageFormat};
     use wai_agent::PromptBlock;
 
@@ -830,74 +894,138 @@ mod tests {
         (mime.clone(), bytes)
     }
 
+    /// `text` with a token for each `(its text, its id)`, found in order.
+    fn message(text: &str, tokens: &[(&str, &str)]) -> Message {
+        let mut at = 0;
+        let mut spans = Vec::new();
+        for &(token, id) in tokens {
+            let start = at + text[at..].find(token).unwrap();
+            at = start + token.len();
+            spans.push((start..at, InlineToken::new(id, token)));
+        }
+        with_tokens(text.to_string(), spans)
+    }
+
+    fn spans(message: &Message) -> Vec<(usize, usize, String)> {
+        (message.tokens().iter())
+            .map(|s| (s.range().start, s.range().end, s.token().id().to_string()))
+            .collect()
+    }
+
     #[test]
     fn ring_turns_an_eighth_per_tick() {
         let deg = |ms| spin_angle(Duration::from_millis(ms)).0.to_degrees().round();
         assert_eq!([0, 125, 250, 1000, 1125].map(deg), [0., 45., 90., 0., 45.]);
     }
 
-    /// A pasted PNG goes inline as it is, under a name of its own.
+    /// A pasted PNG is kept as it is, in a file of its own, and goes as an image.
     #[test]
-    fn pasted_png_attaches_inline() {
+    fn pasted_png_goes_as_an_image() {
         let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
-        let a = Attachment::pasted(&Image::from_bytes(ImageFormat::Png, png.clone())).unwrap();
-        assert_eq!(a.name, "Pasted image.png");
-        assert_eq!(decoded(&a.block), ("image/png".into(), png));
-        assert!(a.path.exists(), "kept on disk for agents without images");
+        let path = save_pasted(&Image::from_bytes(ImageFormat::Png, png.clone())).unwrap();
+        assert_eq!(path.extension().unwrap(), "png");
+        let token = file_token(&path, Path::new("/elsewhere"), &[]);
+        assert_eq!(
+            (token.text().as_ref(), token.label().as_ref()),
+            ("[Image #1]", "Image #1")
+        );
+        let id = path.to_string_lossy();
+        let blocks = prompt_blocks(&message("[Image #1]", &[("[Image #1]", &id)]), true);
+        assert_eq!(decoded(&blocks[0]), ("image/png".into(), png));
     }
 
-    /// A TIFF (what Preview and Safari copy) is not an image agents take: it goes as a PNG.
+    /// A TIFF (what Preview and Safari copy) is not an image agents take: it is saved as a PNG.
     #[test]
-    fn pasted_tiff_attaches_as_png() {
+    fn pasted_tiff_is_saved_as_png() {
         let mut tiff = std::io::Cursor::new(Vec::new());
         image::RgbImage::new(2, 2)
             .write_to(&mut tiff, image::ImageFormat::Tiff)
             .unwrap();
-        let image = Image::from_bytes(ImageFormat::Tiff, tiff.into_inner());
-        let a = Attachment::pasted(&image).unwrap();
-        assert_eq!(a.name, "Pasted image.png");
-        let (mime, bytes) = decoded(&a.block);
-        assert_eq!(mime, "image/png");
-        assert_eq!(&bytes[..4], b"\x89PNG");
+        let path = save_pasted(&Image::from_bytes(ImageFormat::Tiff, tiff.into_inner())).unwrap();
+        assert_eq!(path.extension().unwrap(), "png");
+        assert_eq!(&std::fs::read(&path).unwrap()[..4], b"\x89PNG");
     }
 
-    /// An agent that takes no images gets an image attachment as its file.
+    /// Text and files go in the order they were typed; an agent that takes no images gets an
+    /// image as its file, as does an image past 5 MB.
     #[test]
-    fn without_image_support_images_go_as_files() {
-        let a = Attachment::pasted(&Image::from_bytes(ImageFormat::Png, vec![1])).unwrap();
-        assert!(matches!(prompt_block(&a, true), PromptBlock::Image { .. }));
-        assert_eq!(
-            prompt_block(&a, false),
-            PromptBlock::Resource {
-                path: a.path.clone()
-            }
+    fn files_go_where_they_stand() {
+        let dir = tempfile::tempdir().unwrap();
+        let (small, big, notes) = (
+            dir.path().join("a.PNG"),
+            dir.path().join("b.png"),
+            dir.path().join("c.md"),
         );
-    }
-
-    #[test]
-    fn small_images_inline_and_the_rest_link() {
-        let dir = std::env::temp_dir().join(format!("wai-attach-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let small = dir.join("a.PNG");
-        let big = dir.join("b.png");
-        let text = dir.join("c.md");
         std::fs::write(&small, [1, 2, 3]).unwrap();
         std::fs::write(&big, vec![0; IMAGE_MAX_BYTES as usize + 1]).unwrap();
-        std::fs::write(&text, "x").unwrap();
-
-        let blocks: Vec<_> = [&small, &big, &text]
-            .map(|p| Attachment::new(p).block)
-            .into();
-        std::fs::remove_dir_all(&dir).unwrap();
-
+        std::fs::write(&notes, "x").unwrap();
+        let id = |p: &Path| p.to_string_lossy().into_owned();
+        let (small_id, big_id, notes_id) = (id(&small), id(&big), id(&notes));
+        let text = "compare [Image #1] with [Image #2] \n @c.md and";
+        let tokens = [
+            ("[Image #1]", &*small_id),
+            ("[Image #2]", &big_id),
+            ("@c.md", &notes_id),
+        ];
+        let message = message(text, &tokens);
+        assert_eq!(message.tokens().len(), 3);
+        let image = PromptBlock::Image {
+            mime: "image/png".into(),
+            base64: "AQID".into(),
+        };
+        let resource = |path: &Path| PromptBlock::Resource {
+            path: path.to_path_buf(),
+        };
         assert_eq!(
-            blocks[0],
-            PromptBlock::Image {
-                mime: "image/png".into(),
-                base64: "AQID".into()
-            }
+            prompt_blocks(&message, true),
+            [
+                PromptBlock::Text("compare ".into()),
+                image,
+                PromptBlock::Text(" with ".into()),
+                resource(&big),
+                resource(&notes),
+                PromptBlock::Text(" and".into()),
+            ]
         );
-        assert_eq!(blocks[1], PromptBlock::Resource { path: big });
-        assert_eq!(blocks[2], PromptBlock::Resource { path: text });
+        assert_eq!(prompt_blocks(&message, false)[1], resource(&small));
+    }
+
+    #[test]
+    fn trimming_and_joining_keep_tokens_on_their_text() {
+        let a = message("  see @a.rs  ", &[("@a.rs", "/p/a.rs")]);
+        let a = trimmed(&a);
+        assert_eq!(
+            (a.text().as_ref(), spans(&a)),
+            ("see @a.rs", vec![(4, 9, "/p/a.rs".into())])
+        );
+        let b = message("@b.rs", &[("@b.rs", "/p/b.rs")]);
+        let both = joined([message(" ", &[]), a, b]);
+        assert_eq!(both.text().as_ref(), "see @a.rs\n\n@b.rs");
+        assert_eq!(
+            spans(&both),
+            [(4, 9, "/p/a.rs".into()), (11, 16, "/p/b.rs".into())]
+        );
+    }
+
+    #[test]
+    fn tokens_read_as_images_paths_or_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "").unwrap();
+        std::fs::write(root.join("shot.png"), [1]).unwrap();
+        let text = |path: &Path, tokens: &[_]| file_token(path, root, tokens).text().to_string();
+        assert_eq!(text(&root.join("src/main.rs"), &[]), "@src/main.rs");
+        assert_eq!(text(&root.join("src"), &[]), "@src/");
+        assert_eq!(text(Path::new("/other/notes.md"), &[]), "@notes.md");
+        let image = file_token(&root.join("shot.png"), root, &[]);
+        assert_eq!(
+            (image.text().as_ref(), image.label().as_ref()),
+            ("[Image #1]", "shot.png")
+        );
+        let tokens = [("[Image #4]", "/a.png"), ("[Image #2]", "/b.png")];
+        let held = message("[Image #4] [Image #2]", &tokens);
+        assert_eq!(next_image(held.tokens()), 5);
+        assert_eq!(text(&root.join("shot.png"), held.tokens()), "[Image #5]");
     }
 }

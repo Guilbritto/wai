@@ -863,7 +863,7 @@ impl ChatSession {
                 pinned_message(
                     ("queued", ix).into(),
                     "Queued",
-                    &message.shown(),
+                    message.text(),
                     Some(remove),
                     cx,
                 )
@@ -1010,7 +1010,9 @@ impl Render for ChatSession {
         v_flex()
             .key_context("ChatSession")
             .on_action(cx.listener(Self::cancel))
-            .on_drop(cx.listener(Self::attach))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.attach(paths.paths(), window, cx)
+            }))
             .size_full()
             .child(self.render_header(cx))
             .child(messages.children(drawer).children(waiting))

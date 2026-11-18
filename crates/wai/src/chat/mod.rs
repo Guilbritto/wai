@@ -5,6 +5,7 @@ mod context;
 mod draft;
 mod edits;
 mod input;
+mod mentions;
 mod model;
 mod permission;
 mod question;
@@ -14,8 +15,6 @@ mod view;
 pub use composer::{PromptSlot, PromptSlots, PromptTyping};
 pub(crate) use context::context_meta;
 pub use draft::{DraftData, DraftEvent, DraftView};
-#[cfg(test)]
-pub use input::Attachment;
 #[cfg(test)]
 pub use model::NoticeKind;
 pub use model::{ChatItem, ChatModel, TurnState, signed_out};

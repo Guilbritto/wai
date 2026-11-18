@@ -51,6 +51,34 @@ pub fn list_dir(root: &Path, dir: &Path, global_ignores: bool) -> io::Result<Vec
     Ok(entries)
 }
 
+/// Every file and folder below `root` that `list_dir` would show, at most `max` of them (the walk
+/// stops there): shallow ones first, then by path ignoring case. What `@` mentions offer.
+/// ponytail: depth-first, so a project past `max` loses its deepest folders' entries in walk order;
+/// walk breadth-first if that bites.
+pub fn list_all(root: &Path, global_ignores: bool, max: usize) -> Vec<Entry> {
+    let walk = walk::walker(root, root, global_ignores)
+        .filter_entry(|e| e.file_name() != ".git")
+        .build();
+    let mut entries: Vec<_> = walk
+        .flatten()
+        .filter(|e| e.depth() > 0)
+        .take(max)
+        .map(|e| Entry {
+            name: e.file_name().to_string_lossy().into_owned(),
+            is_dir: e.file_type().is_some_and(|t| t.is_dir()),
+            path: e.into_path(),
+        })
+        .collect();
+    entries.sort_by_cached_key(|e| {
+        let path = e.path.strip_prefix(root).unwrap_or(&e.path);
+        (
+            path.components().count(),
+            path.to_string_lossy().to_lowercase(),
+        )
+    });
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -179,6 +207,46 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&child.stdout).contains("1 passed"),
             "the child ran the test"
+        );
+    }
+
+    #[test]
+    fn list_all_walks_the_project_shallow_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for d in [".git/objects", "node_modules/pkg", "src/nested"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for f in [
+            ".gitignore",
+            "node_modules/pkg/i.js",
+            "src/nested/deep.rs",
+            "src/main.rs",
+            "B.md",
+        ] {
+            fs::write(root.join(f), "node_modules/\n").unwrap();
+        }
+        let shown = |max| -> Vec<String> {
+            let entries = list_all(root, false, max);
+            let rel = |e: &Entry| e.path.strip_prefix(root).unwrap().display().to_string();
+            entries.iter().map(rel).collect()
+        };
+        assert_eq!(
+            shown(100),
+            [
+                ".gitignore",
+                "B.md",
+                "src",
+                "src/main.rs",
+                "src/nested",
+                "src/nested/deep.rs"
+            ]
+        );
+        assert_eq!(shown(2).len(), 2);
+        assert!(
+            list_all(root, false, 100)
+                .iter()
+                .any(|e| e.name == "src" && e.is_dir)
         );
     }
 }

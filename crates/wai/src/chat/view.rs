@@ -18,7 +18,8 @@ use wai_agent::{
 use wai_settings::Processing;
 
 use super::edits::open_line;
-use super::input::{Attachment, Message};
+use super::input::{Message, joined};
+use super::mentions::Mentions;
 use super::model::{ChatItem, ChatModel, NoticeKind, TurnState, UNSUPPORTED_QUESTION};
 use super::permission::DiffView;
 use super::question::QuestionForm;
@@ -157,7 +158,8 @@ pub struct ChatSession {
     pub model: ChatModel,
     pub(super) handle: AgentHandle,
     pub(super) input: Entity<TextareaState>,
-    pub(crate) attachments: Vec<Attachment>,
+    /// The `@` menu over the prompt box.
+    pub(super) mentions: Entity<Mentions>,
     /// Sent during a turn to an agent that cannot steer: they go out when it ends.
     pub(super) queued: Vec<Message>,
     /// The message of a session that is starting; it goes out once the session exists.
@@ -172,8 +174,8 @@ pub struct ChatSession {
     pub(super) context_picker: Option<Entity<SelectState<Vec<&'static str>>>>,
     /// A Context switch reloaded the session: take the options the agent reports again.
     pub(super) retake: bool,
-    /// Queued text going back to the prompt box at the next frame (which has the window).
-    pub(super) unsent: Option<String>,
+    /// Queued messages going back to the prompt box at the next frame (which has the window).
+    pub(super) unsent: Option<Message>,
     /// The `/` menu's selected row, its scroll, and whether Esc closed it.
     pub(super) menu_ix: usize,
     pub(super) menu_scroll: ScrollHandle,
@@ -255,6 +257,7 @@ impl ChatSession {
                         // The `/` menu opens again, at its top.
                         InputEvent::Change => {
                             (this.menu_ix, this.menu_closed) = (0, false);
+                            this.mentions.update(cx, |m, cx| m.changed(&this.cwd, cx));
                             // Typing is back in the prompt, out of the agent list.
                             this.agent_cursor = None;
                             super::composer::set_typing(cx.entity_id(), this.prompt_typed(cx), cx);
@@ -264,6 +267,7 @@ impl ChatSession {
                     }
                 }),
             ];
+        let mentions = cx.new(|_| Mentions::new(input.clone()));
         let mut this = Self {
             model: ChatModel::default(),
             agent,
@@ -281,7 +285,7 @@ impl ChatSession {
             replayed: None,
             handle,
             input,
-            attachments: Vec::new(),
+            mentions,
             queued: Vec::new(),
             first: None,
             settling: 0,
@@ -328,7 +332,7 @@ impl ChatSession {
         this
     }
 
-    /// A chat for a session that has not started: it shows `text` at once and prompts it when
+    /// A chat for a session that has not started: it shows `message` at once and prompts it when
     /// `started` gives the session its id.
     #[allow(clippy::too_many_arguments)]
     pub fn pending(
@@ -336,8 +340,7 @@ impl ChatSession {
         cwd: PathBuf,
         handle: AgentHandle,
         registry: WeakEntity<AgentRegistry>,
-        text: String,
-        attachments: Vec<Attachment>,
+        message: Message,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -348,8 +351,7 @@ impl ChatSession {
             config: Vec::new(),
         };
         let mut this = Self::new(agent, none, cwd, handle, registry, window, cx);
-        let message = Message { text, attachments };
-        let ix = this.update_model(cx, |m| m.push_user(&message.shown()));
+        let ix = this.update_model(cx, |m| m.push_user(message.text()));
         this.first = Some(message);
         this.sync_rows(Some(ix), cx);
         this
@@ -413,20 +415,11 @@ impl ChatSession {
         }
     }
 
-    /// What the user typed here while the session started, and the messages queued, with the
-    /// attachments of the chat and then of the queued messages: it goes back to the draft.
-    pub fn leftover(&self, cx: &App) -> (String, Vec<Attachment>) {
-        let typed = self.input.read(cx).value().trim().to_string();
-        let queued = self.queued.iter().map(|m| m.text.clone());
-        let parts: Vec<String> = std::iter::once(typed)
-            .chain(queued)
-            .filter(|t| !t.is_empty())
-            .collect();
-        let files = (self.attachments.iter())
-            .chain(self.queued.iter().flat_map(|m| &m.attachments))
-            .cloned()
-            .collect();
-        (parts.join("\n\n"), files)
+    /// What the user typed here while the session started, then the messages queued, a blank
+    /// line apart: it goes back to the draft.
+    pub fn leftover(&self, cx: &App) -> Message {
+        let typed = self.input.read(cx).content();
+        joined(std::iter::once(typed).chain(self.queued.iter().cloned()))
     }
 
     /// Sends `text` as a prompt once the picked model and mode are in place (an extension's
@@ -437,10 +430,7 @@ impl ChatSession {
             return false;
         }
         let ix = self.update_model(cx, |m| m.push_user(text));
-        self.first = Some(Message {
-            text: text.into(),
-            attachments: Vec::new(),
-        });
+        self.first = Some(Message::new(text.to_string()));
         self.sync_rows(Some(ix), cx);
         self.send_first(cx);
         cx.notify();
@@ -1203,7 +1193,7 @@ mod tests {
 
     use super::ChatSession;
     use crate::agents::RegistryEvent;
-    use crate::chat::input::{Attachment, Message};
+    use crate::chat::input::{Message, insert_files};
     use crate::chat::model::{
         ChatItem, EditedFile, NoticeKind, Subagent, TurnState, UNSUPPORTED_QUESTION,
     };
@@ -1378,10 +1368,7 @@ mod tests {
         let (workspace, cx) = open(cx, fake_settings("--steering"));
         let session = start_session(&workspace, cx);
 
-        let late = Message {
-            text: "late".into(),
-            attachments: Vec::new(),
-        };
+        let late = Message::new("late");
         session.update(cx, |s, cx| s.steer(late, cx));
         wait_until(cx, "the reply", |cx| {
             state(&session, cx) == TurnState::Idle && last_agent_text(&session, cx).is_some()
@@ -1438,10 +1425,7 @@ mod tests {
         // Review focus 2: a long message shows at most 3 lines.
         let long: Vec<String> = (1..=10).map(|i| format!("line {i}")).collect();
         session.update(cx, |s, cx| {
-            s.queued.push(Message {
-                text: long.join("\n"),
-                attachments: Vec::new(),
-            });
+            s.queued.push(Message::new(long.join("\n")));
             cx.notify()
         });
         let height = |ix: usize, cx: &mut VisualTestContext| {
@@ -1467,8 +1451,8 @@ mod tests {
         assert_eq!(typed(&session, cx), "second");
     }
 
-    /// Stop with messages queued: nothing goes out; their text and attachments go back into the
-    /// prompt box, ahead of what was typed since.
+    /// Stop with messages queued: nothing goes out; they go back into the prompt box, their files
+    /// with them, ahead of what was typed since.
     #[gpui_kit::test]
     fn stop_puts_queued_messages_back_in_the_prompt_box(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
@@ -1482,9 +1466,13 @@ mod tests {
         wait_until(cx, "the first chunk", |cx| {
             last_agent_text(&session, cx).is_some()
         });
-        session.update(cx, |s, _| s.attachments.push(Attachment::new(&file)));
+        cx.update(|window, cx| {
+            let s = session.read(cx);
+            let (input, cwd) = (s.input.clone(), s.cwd.clone());
+            insert_files(&input, std::slice::from_ref(&file), &cwd, window, cx);
+        });
         send("held", cx);
-        assert!(session.read_with(cx, |s, _| s.attachments.is_empty()));
+        assert_eq!(typed(&session, cx), "");
         cx.simulate_input("draft");
         cx.simulate_keystrokes("escape");
 
@@ -1496,13 +1484,11 @@ mod tests {
             session.read_with(cx, |s, _| s.model.items.last() == Some(&cancelled))
         });
         cx.update(|window, cx| window.render_frame(cx));
-        assert_eq!(typed(&session, cx), "held\n\ndraft");
-        let names = session.read_with(cx, |s, _| {
-            (s.attachments.iter())
-                .map(|a| a.name.clone())
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(names, ["notes.md"]);
+        assert_eq!(typed(&session, cx), "@notes.md held\n\ndraft");
+        let tokens = session.read_with(cx, |s, cx| s.input.read(cx).tokens().to_vec());
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].range(), 0..9);
+        assert_eq!(tokens[0].token().id().as_ref(), file.to_string_lossy());
         assert!(!shows(("queued", 0usize), cx));
         assert_eq!(user_texts(&session, cx), ["go"]);
     }
@@ -1531,17 +1517,16 @@ mod tests {
         assert!(shows("stop", cx));
     }
 
-    /// ⌘V of an image or of files copied in Finder attaches them; text pastes as text.
+    /// ⌘V of an image or of files copied in Finder puts them at the caret; text pastes as text.
     #[gpui_kit::test]
-    fn paste_attaches_images_and_files(cx: &mut TestAppContext) {
+    fn paste_puts_images_and_files_in_the_text(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, fake_settings(""));
         let session = start_session(&workspace, cx);
         let names = |cx: &mut VisualTestContext| {
-            session.read_with(cx, |s, _| {
-                s.attachments
-                    .iter()
-                    .map(|a| a.name.clone())
+            session.read_with(cx, |s, cx| {
+                (s.input.read(cx).tokens().iter())
+                    .map(|t| t.token().label().to_string())
                     .collect::<Vec<_>>()
             })
         };
@@ -1558,11 +1543,14 @@ mod tests {
             },
             cx,
         );
-        assert_eq!(names(cx), ["Pasted image.png"]);
-        assert_eq!(session.read_with(cx, |s, cx| s.draft(cx)), "");
+        assert_eq!(names(cx), ["Image #1"]);
+        assert_eq!(session.read_with(cx, |s, cx| s.draft(cx)), "[Image #1] ");
 
         paste(gpui_kit::ClipboardItem::new_string("some text".into()), cx);
-        assert_eq!(session.read_with(cx, |s, cx| s.draft(cx)), "some text");
+        assert_eq!(
+            session.read_with(cx, |s, cx| s.draft(cx)),
+            "[Image #1] some text"
+        );
         assert_eq!(names(cx).len(), 1);
 
         let dir = tempfile::tempdir().unwrap();
@@ -1581,8 +1569,11 @@ mod tests {
             },
             cx,
         );
-        assert_eq!(names(cx), ["Pasted image.png", "notes.pdf"]);
-        assert_eq!(session.read_with(cx, |s, cx| s.draft(cx)), "some text");
+        assert_eq!(names(cx), ["Image #1", "notes.pdf"]);
+        assert_eq!(
+            session.read_with(cx, |s, cx| s.draft(cx)),
+            "[Image #1] some text @notes.pdf "
+        );
 
         cx.simulate_keystrokes("enter");
         wait_until(cx, "the prompt", |cx| {
@@ -1592,7 +1583,7 @@ mod tests {
         assert_eq!(
             first,
             ChatItem::User {
-                text: "some text\nAttached: Pasted image.png, notes.pdf".into()
+                text: "[Image #1] some text @notes.pdf".into()
             }
         );
     }
@@ -2179,20 +2170,15 @@ mod tests {
     }
 
     /// ↑ from an empty prompt recalls the messages sent, newest first, caret at the end (a
-    /// multi-line one is walked up first), without the `Attached:` line; ↓ walks back to an empty
-    /// box; once the recalled text is edited, ↑ is the caret's again.
+    /// multi-line one is walked up first); ↓ walks back to an empty box; once the recalled text is
+    /// edited, ↑ is the caret's again.
     #[gpui_kit::test]
     fn arrow_up_recalls_the_messages_sent(cx: &mut TestAppContext) {
         cx.executor().allow_parking(); // the fake agent is a real process
         let (workspace, cx) = open(cx, fake_settings(""));
         let session = start_session(&workspace, cx);
         session.update(cx, |s, cx| {
-            for text in [
-                "one",
-                "two\nlines",
-                "Attached: a.png",
-                "three\nAttached: b.png",
-            ] {
+            for text in ["one", "two\nlines", "", "three"] {
                 s.model.items.push(ChatItem::User { text: text.into() });
             }
             s.sync_rows(None, cx);
@@ -3091,7 +3077,10 @@ mod tests {
         });
         cx.update(|window, cx| window.render_frame(cx));
         let queued = session.read_with(cx, |s, _| {
-            s.queued.iter().map(|m| m.text.clone()).collect::<Vec<_>>()
+            s.queued
+                .iter()
+                .map(|m| m.text().to_string())
+                .collect::<Vec<_>>()
         });
         assert_eq!(queued, ["second", "third"]);
         assert_eq!(typed(&session, cx), "first");
@@ -3485,6 +3474,40 @@ mod tests {
             state(&session, cx) == TurnState::Idle && last_agent_text(&session, cx).is_some()
         });
         assert_eq!(user_texts(&session, cx), ["/ini"]);
+    }
+
+    /// `@` and some letters list the session's matching files above the prompt box; Enter puts the
+    /// picked one in as a token, sending nothing. Esc closes the menu and keeps the text.
+    #[gpui_kit::test]
+    fn at_mentions_a_file(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "").unwrap();
+        std::fs::write(dir.path().join("README.md"), "").unwrap();
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        session.update(cx, |s, _| s.cwd = dir.path().to_path_buf());
+
+        cx.simulate_input("see @");
+        wait_until(cx, "the menu", |cx| shows("mentions", cx));
+        cx.simulate_input("ma");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(typed(&session, cx), "see @src/main.rs ");
+        assert!(!shows("mentions", cx));
+        assert!(
+            session.read_with(cx, |s, _| s.model.items.is_empty()),
+            "sent"
+        );
+        let tokens = session.read_with(cx, |s, cx| s.input.read(cx).tokens().to_vec());
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].range(), 4..16);
+
+        cx.simulate_input("@READ");
+        assert!(shows("mentions", cx));
+        cx.simulate_keystrokes("escape");
+        assert!(!shows("mentions", cx));
+        assert_eq!(typed(&session, cx), "see @src/main.rs @READ");
     }
 
     /// Before the agent sent its commands, the menu says so in a single row.

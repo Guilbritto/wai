@@ -292,7 +292,7 @@ impl ChatSession {
     }
 
     fn prompt_empty(&self, cx: &App) -> bool {
-        self.input.read(cx).value().is_empty() && self.attachments.is_empty()
+        self.input.read(cx).value().is_empty()
     }
 }
 
