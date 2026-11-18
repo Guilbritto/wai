@@ -32,11 +32,12 @@ pub struct ResolvedFonts {
 }
 
 /// The first installed family of a comma list (`'Fira Code', Menlo, monospace`); the generic
-/// names count as installed. `None` when the list names no installed family.
+/// names count as installed. A family matches ASCII case-insensitively and comes back spelled as
+/// installed. `None` when the list names no installed family.
 fn first_installed(
     value: &str,
     defaults: &FontDefaults,
-    installed: &dyn Fn(&str) -> bool,
+    installed: &dyn Fn(&str) -> Option<String>,
 ) -> Option<String> {
     value
         .split(',')
@@ -45,7 +46,7 @@ fn first_installed(
         .find_map(|name| match name {
             "monospace" => Some(defaults.mono_family.clone()),
             "sans-serif" | "system-ui" => Some(defaults.ui_family.clone()),
-            _ => installed(name).then(|| name.to_string()),
+            _ => installed(name),
         })
 }
 
@@ -57,7 +58,7 @@ fn clamp(size: f32) -> f32 {
 pub fn resolve(
     settings: &Settings,
     defaults: &FontDefaults,
-    installed: &dyn Fn(&str) -> bool,
+    installed: &dyn Fn(&str) -> Option<String>,
 ) -> (ResolvedFonts, Vec<String>) {
     let mut notices = Vec::new();
     let mut face = |family: &Option<String>, size: Option<f32>, fallback: Face| {
@@ -129,35 +130,47 @@ mod tests {
         }
     }
 
-    fn all(_: &str) -> bool {
-        true
+    fn all(family: &str) -> Option<String> {
+        Some(family.to_string())
+    }
+
+    fn has(names: &'static [&'static str]) -> impl Fn(&str) -> Option<String> {
+        move |family| {
+            (names.iter())
+                .find(|n| n.eq_ignore_ascii_case(family))
+                .map(|n| n.to_string())
+        }
     }
 
     #[test]
     fn first_installed_family_wins() {
         let mut s = Settings::default();
         s.editor.font_family = Some("'Fira Code', Menlo, monospace".into());
-        let only_menlo = |f: &str| f == "Menlo";
+        let only_menlo = has(&["Menlo"]);
         let (r, notices) = resolve(&s, &defaults(), &only_menlo);
         assert_eq!(r.editor.family, "Menlo");
         assert!(notices.is_empty(), "{notices:?}");
         s.editor.font_family = Some("\"Fira Code\" , Menlo".into());
-        let both = |f: &str| f == "Menlo" || f == "Fira Code";
+        let both = has(&["Menlo", "Fira Code"]);
         assert_eq!(resolve(&s, &defaults(), &both).0.editor.family, "Fira Code");
         s.editor.font_family = Some("Nope, monospace".into());
-        let none = |_: &str| false;
+        let none = has(&[]);
         let (r, notices) = resolve(&s, &defaults(), &none);
         assert_eq!(r.editor.family, "Menlo");
         assert!(notices.is_empty());
         s.interface.font_family = Some("Nope, system-ui".into());
         assert_eq!(resolve(&s, &defaults(), &none).0.ui.family, "Inter");
+        s.editor.font_family = Some("menlo".into());
+        let (r, notices) = resolve(&s, &defaults(), &only_menlo);
+        assert_eq!(r.editor.family, "Menlo");
+        assert!(notices.is_empty(), "{notices:?}");
     }
 
     #[test]
     fn no_installed_family_uses_default_with_notice() {
         let mut s = Settings::default();
         s.interface.font_family = Some("Nope, Missing".into());
-        let none = |_: &str| false;
+        let none = has(&[]);
         let (r, notices) = resolve(&s, &defaults(), &none);
         assert_eq!(r.ui.family, "Inter");
         assert_eq!(

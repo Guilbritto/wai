@@ -86,8 +86,16 @@ pub(crate) fn apply(
     } else {
         Vec::new()
     };
-    let installed = |family: &str| names.iter().any(|n| n == family);
-    apply_with(settings, user_dir, ext_files, window, cx, &installed)
+    let installed = |family: &str| {
+        names
+            .iter()
+            .find(|n| n.eq_ignore_ascii_case(family))
+            .cloned()
+    };
+    let appearance = cx.window_appearance();
+    apply_with(
+        settings, user_dir, ext_files, window, cx, appearance, &installed,
+    )
 }
 
 fn apply_with(
@@ -96,7 +104,8 @@ fn apply_with(
     ext_files: &[(String, PathBuf)],
     window: Option<&mut Window>,
     cx: &mut App,
-    installed: &dyn Fn(&str) -> bool,
+    appearance: WindowAppearance,
+    installed: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<String> {
     let (catalog, mut notices) = catalog::load(BUNDLED, user_dir, ext_files);
     let theme = &settings.theme;
@@ -110,7 +119,7 @@ fn apply_with(
     notices.extend(light_notices);
     notices.extend(dark_notices);
 
-    let mode = effective_mode(theme.mode, cx.window_appearance());
+    let mode = effective_mode(theme.mode, appearance);
     let global = Theme::global_mut(cx);
     global.light_theme = light;
     global.dark_theme = dark;
@@ -162,8 +171,13 @@ mod tests {
             if !cx.has_global::<Theme>() {
                 gpui_kit::init(cx);
             }
-            let installed = |f: &str| installed.contains(&f);
-            apply_with(settings, user_dir, &[], None, cx, &installed)
+            let installed = |f: &str| {
+                (installed.iter())
+                    .find(|n| n.eq_ignore_ascii_case(f))
+                    .map(|n| n.to_string())
+            };
+            let appearance = cx.window_appearance();
+            apply_with(settings, user_dir, &[], None, cx, appearance, &installed)
         })
     }
 
@@ -482,17 +496,21 @@ mod tests {
             },
             ..Default::default()
         };
-        run(cx, &settings, None, &[]);
-        cx.update(|cx| {
-            let os = cx.window_appearance();
-            assert_eq!(cx.theme().mode, effective_mode(ThemeChoice::System, os));
-            let name = if cx.theme().mode.is_dark() {
-                BUNDLED_DARK
-            } else {
-                BUNDLED_LIGHT
-            };
-            assert_eq!(cx.theme().theme_name(), name);
-        });
+        for (os, name, dark) in [
+            (WindowAppearance::Dark, "wai Aurora", true),
+            (WindowAppearance::Light, "wai Aurora Light", false),
+            (WindowAppearance::VibrantDark, "wai Aurora", true),
+            (WindowAppearance::Dark, "wai Aurora", true),
+        ] {
+            cx.update(|cx| {
+                if !cx.has_global::<Theme>() {
+                    gpui_kit::init(cx);
+                }
+                apply_with(&settings, None, &[], None, cx, os, &|_| None);
+                assert_eq!(cx.theme().theme_name(), name, "{os:?}");
+                assert_eq!(cx.theme().mode.is_dark(), dark, "{os:?}");
+            });
+        }
     }
 
     #[gpui_kit::test]
