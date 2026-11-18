@@ -14,7 +14,7 @@ This guide describes the latest wai release. On Windows, read **ctrl** where it 
 
 **Hiding and reordering.** Right-click the top bar, the bottom bar or the activity bar to hide or show what each holds (**Sessions** cannot be hidden). Drag an icon in the activity bar to move it; a line shows where it will land. Hiding the icon of the selected sidebar tab switches the sidebar to Sessions; a panel already open in a pane stays open. What you hid and the icons' order are kept across restarts.
 
-**The look:** the default dark theme is Aurora: an indigo night with a soft, still aurora behind floating glass cards. Set `theme = "light"` for the light one, which keeps plain panels and no aurora (see [Settings](#settings)).
+**The look:** the default dark theme is Aurora: an indigo night with a soft, still aurora behind floating glass cards. Set `[theme] mode = "light"` for the light one, which keeps plain panels and no aurora (see [Appearance](#appearance)).
 
 **On relaunch** wai restores the project, the open sessions with their history, which pane each was in, whether the terminal was open, where Agents was (and whether its panel was collapsed), and the sidebar width. Editor tabs come back too (only when the project is the same), and unsaved edits as before (see [Unsaved edits after a quit](#unsaved-edits-after-a-quit)). The terminal returns as one fresh shell.
 
@@ -365,7 +365,7 @@ Settings is a modal over the window, not a pane.
   - **Default model**, a picker once wai has seen the agent's models; before that it says `Start a session or press Test to see the models.`;
   - **Advanced**, folded, which shows the **Command**. Changing it asks `Run a new command?` (see [Agent commands](#agent-commands)).
   - Below them, an **Advanced** group: `settings.toml` with **Open**, which opens your file in the editor.
-- **Appearance:** **Theme**, Dark or Light, applies at once.
+- **Appearance:** **Mode** (System, Light or Dark), **Light theme** and **Dark theme** (the themes available for that mode), **Themes folder** (**Open** creates `~/.config/wai/themes` and shows it), **Colors** (**Open settings.toml**, where `[theme.overrides]` lives) and a **Fonts** group with a family and a size field for Interface, Editor, Terminal, Chat and Chat code. A family field empty means unset, and its placeholder shows the family in effect; a size field's placeholder shows the size in effect. Enter or leaving a field writes it; emptying it removes the key. Everything applies at once (see [Appearance](#appearance)).
 - **Conversation:** **Processing**, how a chat shows the agent's steps: Step by step, Grouped or Hidden (see [Chatting](#chatting)). It applies at once to every open session. Permission cards, questions and file edits always show.
 - **Terminal:** **Shell**, a path; empty is the system default. It applies to terminals opened afterwards, and changing it asks `Run a new command?`.
 - **Updates:** **Automatic updates** (switch), **Version** (the installed version, its status and one button: **Check now**, **Restart now** or **Open release page**) and **Repository** (see [Updates](#updates)).
@@ -390,7 +390,7 @@ The search filters the current page's rows by label (agents by name). A broken `
 
 | Change | Takes effect |
 |---|---|
-| Theme | at once |
+| Theme, colors, fonts | at once |
 | Processing | at once, in every open session |
 | Default agent | for the next sessions; open sessions keep their agent |
 | Default model | for the next sessions of that agent |
@@ -403,7 +403,11 @@ Every setting and its default:
 | Key | Default | Meaning |
 |---|---|---|
 | `default_agent` | unset | The agent ⌘N starts, whose history the sidebar lists, and that templates without `agent` use. Unset, wai starts no agent and opens Settings |
-| `theme` | `"dark"` | `"dark"` (Aurora) or `"light"` |
+| `theme.mode` | `"dark"` | `"dark"`, `"light"` or `"system"` (follows the OS live). The old `theme = "light"` still works and means the same |
+| `theme.light`, `theme.dark` | unset | The theme name used in that mode; unset means the bundled `wai Aurora Light` / `wai Aurora` |
+| `theme.overrides` | unset | Color overrides, see [Appearance](#appearance) |
+| `interface.font_family`, `interface.font_size` | unset | The interface font, see [Appearance](#appearance) |
+| `editor.*`, `terminal.*`, `conversation.*` font keys | unset | See [Appearance](#appearance) |
 | `agents.<name>.command` | the built-in's command (see below) | How to start the ACP agent `<name>` (see below) |
 | `models.<name>` | unset | The id of the model a new session of agent `<name>` starts with |
 | `terminal.shell` | unset | The terminal's program (no arguments); unset means `$SHELL`, then `/bin/sh` |
@@ -415,7 +419,8 @@ An example:
 
 ```toml
 default_agent = "claude"
-theme = "dark"
+[theme]
+mode = "dark"
 
 [agents.claude]
 command = "npx -y @agentclientprotocol/claude-agent-acp@0.103.0"
@@ -487,13 +492,54 @@ If an agent is still not found, for example because your shell gave no `PATH` in
   With Homebrew on Apple silicon, use `/opt/homebrew/bin` in both places.
 - MCP servers that extensions contribute with a bare `npx` (such as wai-navegador's) have no per-server override, so for those, start wai from a terminal.
 
+### Appearance
+
+```toml
+[theme]
+mode = "system"          # "dark" (default), "light" or "system"
+light = "My Light"       # theme used when the mode is light; unset = wai Aurora Light
+dark = "My Dark"         # theme used when the mode is dark; unset = wai Aurora
+```
+
+`system` follows the OS appearance live. A bare `theme = "light"` (or `"dark"`, `"system"`) from older versions still sets the mode. A theme name that is not installed falls back to the bundled one with a notice.
+
+**Themes folder.** Every `*.json` file in `~/.config/wai/themes/` (files over 1 MB are skipped) adds the themes it holds; wai reloads the folder as you save. A file is a gpui-kit theme set: `{"name": "...", "themes": [{"name": "...", "mode": "dark" or "light", "colors": {...}, "highlight": {...}, "wai": {...}}]}`. Copy `crates/wai/assets/theme/aurora.json` to start. Its `"wai"` object holds wai's own palette: `noite`, `noite_2`, `boreal`, `lilas`, `magenta`, `ceu`, `brasa`, `ambar`, `erro`, `tinta`, `tinta_2`, `nevoa`, `nevoa_2`, `ok`, `vidro`, `vidro_forte`, `borda`, `borda_forte`, `card_fill` and `backdrop.glow_1` to `backdrop.glow_3`; a key you leave out is derived from `colors`. Font keys inside a theme file are ignored: fonts come from settings. Themes from enabled [extensions](extensions.md) show in the same pickers. Names are unique: a duplicate is skipped with a notice.
+
+**Color overrides.** `[theme.overrides]` lays your colors over the chosen theme:
+
+```toml
+[theme.overrides]
+"primary.background" = "#ff8800"   # a gpui-kit color key
+"wai.boreal" = "#0f0"              # a key of the "wai" object
+"syntax.keyword" = "#ff8800"       # a syntax style name
+
+[theme.overrides."wai Aurora"]     # this theme only; applied after the global keys
+"primary.background" = "#222"
+```
+
+Values are `#rgb`, `#rrggbb` or `#rrggbbaa`. An unknown key or a bad value is skipped with `Ignored color override "<key>": <reason>.`
+
+**Fonts.** Each area has a family and a size, in `[interface]`, `[editor]`, `[terminal]` (`font_family`, `font_size`) and `[conversation]` (`font_family`, `font_size` for the chat text, `code_font_family`, `code_font_size` for code in it):
+
+| Area | Family default | Size default |
+|---|---|---|
+| Interface | the system UI font | 16 |
+| Editor | the monospace font | 13 |
+| Terminal | the editor's | the editor's |
+| Chat | the interface's | 13 |
+| Chat code | the editor's | the editor's |
+
+A family may be a comma list (`'Fira Code', Menlo, monospace`): the first installed one wins, and `monospace`, `sans-serif` and `system-ui` name the defaults. If none is installed wai uses the default and says `None of the fonts "<list>" is installed; using <family>.` A size is clamped to 6 to 100. Only your user file sets fonts; a project's are ignored with a notice.
+
+**Notices.** Problems above (skipped theme files, ignored overrides, missing themes or fonts, ignored `wai` colors) show once as a notice each time they appear and are not repeated until they change.
+
 ### What a project's `.wai/` may set
 
 A repository you open can carry a `.wai/` folder. Because opening a cloned repository must never choose what wai runs, it is limited:
 
 | File | Allowed | Not allowed |
 |---|---|---|
-| `.wai/settings.toml` | `theme`; `default_agent`, when you have already chosen a default and it names that default, an agent with an `[agents.<id>]` entry in your file, or an agent of an installed extension | `agents` and `terminal` (commands, shells, environment); `models`; `updates`; `conversation`; `extensions` (indexes). These are ignored with a notice |
+| `.wai/settings.toml` | `theme` (merged key by key with yours); `default_agent`, when you have already chosen a default and it names that default, an agent with an `[agents.<id>]` entry in your file, or an agent of an installed extension | `agents` and `terminal` (commands, shells, environment); `models`; `updates`; `conversation`; `extensions` (indexes); font keys (`interface`, `editor`, `terminal.font_*`). These are ignored with a notice |
 | `.wai/templates.toml` | Templates, as above | — |
 | `.wai/extensions.toml` | Suggesting extensions | Installing anything |
 

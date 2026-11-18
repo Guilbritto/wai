@@ -768,7 +768,7 @@ impl SettingsView {
         let text = self.font_inputs[ix].read(cx).value().trim().to_string();
         let key = FONT_AREAS[ix / 2].1;
         let (saved_family, saved_size) = self.saved_font(key);
-        let change = if ix % 2 == 0 {
+        let change = if ix.is_multiple_of(2) {
             let family = (!text.is_empty()).then_some(text);
             (family != saved_family).then_some(Change::FontFamily(key, family))
         } else {

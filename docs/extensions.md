@@ -57,7 +57,7 @@ title = "Pull requests"
 | `requires.claude_plugins` | array of tables | `name`, `marketplace` (`owner/repo` or an `https://` URL of letters, digits and `._~:/@%+=,-`). At most 5. API 1.5. Installed after consent, see [Installing and consent](#installing-and-consent) |
 | `contributes.panels` | array of tables | `id`, `title`, optional `icon`, optional `location`, optional `width` (prompt panels only), optional `wide` (sidebar panels, API 1.6), optional `frame` (`prompt-side` panels, API 1.7). At most one `prompt` and one `prompt-side` panel. See [Panels](#panels). Needs `panels` |
 | `contributes.items` | array of tables | `id`, `bar` (`"top"` or `"bottom"`), `title`. At most 3. See [Bar items](#bar-items). Needs `bar` |
-| `contributes.themes` | array of strings | Accepted, but not used in this version |
+| `contributes.themes` | array of strings | Paths, relative to the extension's folder, of theme-set `.json` files (same format as `~/.config/wai/themes/*.json`, see the [user guide](user-guide.md#appearance)). They show in Settings > Appearance while the extension is enabled. A path that is missing, outside the folder or not a theme set is skipped with a notice |
 
 **Extra rules:**
 - A command without `prompt` must have a `[process]` to serve it.
@@ -498,6 +498,18 @@ A card with one block:
   - `command` is one program, with no arguments. A wrapper script is the usual way to pass arguments.
   - The agent starts from the config folder, like any agent.
 - **MCP servers** are passed to every session wai starts, loads or forks, for every agent. The agent starts them over stdio in the project folder, with your `args` and `env`.
+- **Themes** (`contributes.themes`) are theme-set files that join the user's own themes in Settings > Appearance while the extension is enabled. A theme-only extension needs no `[process]` and no permission:
+
+  ```toml
+  id = "sunset"
+  name = "Sunset"
+  version = "0.1.0"
+
+  [contributes]
+  themes = ["themes/sunset.json"]
+  ```
+
+  `themes/sunset.json` has the format of `~/.config/wai/themes/*.json` (see the [user guide](user-guide.md#appearance)). Paths stay inside the extension's folder, files over 1 MB are skipped, and a name already taken is skipped with a notice.
 - **Claude plugins** are listed under the extension in the Extensions view with **Install in terminal**, required ones (`requires.claude_plugins`) first.
   - That types `claude plugin install <name>` (for a required one, with `--marketplace <marketplace>`) into wai's terminal **without pressing Enter**, so the user confirms.
   - A name outside `[A-Za-z0-9._@/-]`, longer than 214 characters, or starting with `-` shows `Invalid name`.
