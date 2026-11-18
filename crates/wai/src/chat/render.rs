@@ -304,7 +304,7 @@ impl ChatSession {
                     .truncate()
                     .cursor_grab()
                     .font_family(DISPLAY_FONT)
-                    .text_size(fonts::chat(cx, 14.))
+                    .text_size(fonts::ui(cx, 14.))
                     .font_weight(FontWeight::BOLD)
                     .aria_label(title.clone())
                     .child(title)

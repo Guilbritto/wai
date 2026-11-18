@@ -254,10 +254,32 @@ mod tests {
             assert_eq!(super::fonts::ui(cx, 42.), px(52.5));
         });
         let found = offenders(
-            |f| f.starts_with("appearance/") || f == "terminal_view.rs" || f.starts_with("chat/"),
+            |f| f.starts_with("appearance/") || f == "terminal_view.rs",
             |l| l.contains("text_size(px("),
         );
         assert!(found.is_empty(), "fixed text sizes:\n{}", found.join("\n"));
+        let mut wrong = Vec::new();
+        for (file, text) in sources()
+            .iter()
+            .filter(|(f, _)| f != "aurora.rs" && !f.starts_with("appearance/"))
+        {
+            let lines: Vec<_> = text.lines().collect();
+            for (n, _) in (lines.iter().enumerate())
+                .filter(|(_, l)| l.contains("DISPLAY_FONT") && !l.trim_start().starts_with("use "))
+            {
+                let end = (lines.iter().enumerate().skip(n + 1))
+                    .find(|(_, l)| l.contains(".child("))
+                    .map_or(lines.len(), |(i, _)| i + 1);
+                let chain = lines[n..end].join("\n");
+                if chain.contains("fonts::chat(")
+                    || chain.contains("text_size(px(")
+                    || !chain.contains("fonts::ui(")
+                {
+                    wrong.push(format!("{file}:{}: not sized by fonts::ui", n + 1));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     #[gpui_kit::test]

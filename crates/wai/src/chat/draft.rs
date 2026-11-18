@@ -925,7 +925,7 @@ impl Render for DraftView {
                     .min_w_0()
                     .truncate()
                     .font_family(DISPLAY_FONT)
-                    .text_size(fonts::chat(cx, 14.))
+                    .text_size(fonts::ui(cx, 14.))
                     .font_weight(FontWeight::BOLD)
                     .cursor_grab()
                     .child("New session")
@@ -1164,7 +1164,7 @@ impl Render for DraftView {
                     .child(
                         div()
                             .font_family(DISPLAY_FONT)
-                            .text_size(fonts::chat(cx, 42.))
+                            .text_size(fonts::ui(cx, 42.))
                             .font_weight(FontWeight::EXTRA_BOLD)
                             .mb(px(6.))
                             .child("What are we building?"),

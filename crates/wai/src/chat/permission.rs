@@ -148,7 +148,7 @@ pub(super) fn frame(
         .child(
             div()
                 .font_family(DISPLAY_FONT)
-                .text_size(fonts::chat(cx, 16.))
+                .text_size(fonts::ui(cx, 16.))
                 .font_weight(FontWeight::BOLD)
                 .child(title.into()),
         );
@@ -184,7 +184,7 @@ fn choice(n: Option<usize>, choice: &PermissionChoice, highlighted: bool, cx: &A
         (false, false) => theme.foreground,
     };
     let (badge, badge_text) = match dark {
-        true => (aurora::brasa(cx).alpha(0.18), aurora::brasa_text()),
+        true => (aurora::brasa(cx).alpha(0.18), aurora::brasa_text(cx)),
         false => (theme.background, theme.muted_foreground),
     };
     let number = n.map(|n| {
