@@ -228,7 +228,10 @@ mod tests {
         }
         let shown = |max| -> Vec<String> {
             let entries = list_all(root, false, max);
-            let rel = |e: &Entry| e.path.strip_prefix(root).unwrap().display().to_string();
+            let rel = |e: &Entry| {
+                let path = e.path.strip_prefix(root).unwrap();
+                path.to_string_lossy().replace('\\', "/")
+            };
             entries.iter().map(rel).collect()
         };
         assert_eq!(

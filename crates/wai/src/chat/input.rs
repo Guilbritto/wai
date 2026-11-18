@@ -199,9 +199,15 @@ pub(super) fn file_token(path: &Path, folder: &Path, tokens: &[InlineTokenSpan])
         return InlineToken::new(id, format!("[{image}]")).with_label(label);
     }
     let inside = (path.strip_prefix(folder).ok()).filter(|p| !p.as_os_str().is_empty());
-    let shown = inside.map_or_else(|| name.clone(), |p| p.to_string_lossy().into_owned());
+    let shown = inside.map_or_else(|| name.clone(), slashed);
     let slash = if path.is_dir() { "/" } else { "" };
     InlineToken::new(id, format!("@{shown}{slash}")).with_label(name)
+}
+
+/// `path` with `/` between its parts on every system, as mentions are typed.
+pub(super) fn slashed(path: &Path) -> String {
+    let parts = path.components().map(|c| c.as_os_str().to_string_lossy());
+    parts.collect::<Vec<_>>().join("/")
 }
 
 /// Puts a token for each of `paths` at the caret of `input`, each followed by a space.

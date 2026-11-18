@@ -15,7 +15,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_project::Entry;
 
-use super::input::file_token;
+use super::input::{file_token, slashed};
 
 /// A row's height: the list shows 8 rows and scrolls past them.
 const ROW: f32 = 28.;
@@ -59,10 +59,9 @@ fn matching(files: &[Entry], folder: &Path, query: &str) -> Vec<Entry> {
     tiers.into_iter().flatten().take(ROWS).cloned().collect()
 }
 
-/// `entry`'s path from `folder`.
+/// `entry`'s path from `folder`, `/` between its parts.
 fn relative(entry: &Entry, folder: &Path) -> String {
-    let path = entry.path.strip_prefix(folder).unwrap_or(&entry.path);
-    path.to_string_lossy().into_owned()
+    slashed(entry.path.strip_prefix(folder).unwrap_or(&entry.path))
 }
 
 pub(crate) struct Mentions {
