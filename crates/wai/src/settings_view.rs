@@ -431,6 +431,7 @@ impl SelectItem for Theme {
         match self.0 {
             ThemeChoice::Dark => "Dark",
             ThemeChoice::Light => "Light",
+            ThemeChoice::System => "System",
         }
         .into()
     }
@@ -547,7 +548,7 @@ impl SettingsView {
                 &theme,
                 |this, _, SelectEvent::Confirm(choice): &SelectEvent<Vec<Theme>>, cx| {
                     if let Some(choice) = choice
-                        && *choice != this.data.settings.theme
+                        && *choice != this.data.settings.theme.mode
                     {
                         this.change(Change::Theme(*choice), cx);
                     }
@@ -766,7 +767,7 @@ impl SettingsView {
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.stale = false;
         let settings = &self.data.settings;
-        let theme = settings.theme;
+        let theme = settings.theme.mode;
         self.theme
             .update(cx, |s, cx| s.set_selected_value(&theme, window, cx));
         let processing = settings.conversation.processing;

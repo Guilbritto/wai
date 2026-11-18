@@ -83,6 +83,7 @@ pub fn write_change(user_dir: &Path, change: &Change) -> Result<(), SettingsErro
             let name = match theme {
                 ThemeChoice::Dark => "dark",
                 ThemeChoice::Light => "light",
+                ThemeChoice::System => "system",
             };
             set(root, "theme", Some(value(name)));
         }
@@ -257,7 +258,7 @@ mod tests {
         write_change(d.path(), &Change::Processing(Processing::Steps)).unwrap();
         let (s, _) = Settings::load(d.path(), None).unwrap();
         assert_eq!(s.conversation.processing, Processing::Steps);
-        assert_eq!(s.theme, ThemeChoice::Light);
+        assert_eq!(s.theme.mode, ThemeChoice::Light);
         write_change(d.path(), &Change::Processing(Processing::Hidden)).unwrap();
         let (s, _) = Settings::load(d.path(), None).unwrap();
         assert_eq!(s.conversation.processing, Processing::Hidden);

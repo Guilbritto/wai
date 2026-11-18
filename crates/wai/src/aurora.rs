@@ -357,7 +357,7 @@ pub(crate) fn hex(c: Hsla) -> u32 {
 #[cfg(test)]
 mod tests {
     use gpui_kit::TestAppContext;
-    use wai_settings::{Settings, ThemeChoice};
+    use wai_settings::{Settings, ThemeChoice, ThemeSettings};
 
     use super::*;
     use crate::app;
@@ -381,7 +381,10 @@ mod tests {
     #[gpui_kit::test]
     fn light_theme_is_aurora_light(cx: &mut TestAppContext) {
         let settings = Settings {
-            theme: ThemeChoice::Light,
+            theme: ThemeSettings {
+                mode: ThemeChoice::Light,
+                ..Default::default()
+            },
             ..Default::default()
         };
         cx.update(|cx| {

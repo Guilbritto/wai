@@ -68,7 +68,7 @@ pub struct Settings {
     /// Agent id -> the id of the model (config value) it starts with; user settings only.
     pub models: BTreeMap<String, String>,
     pub terminal: TerminalSettings,
-    pub theme: ThemeChoice,
+    pub theme: ThemeSettings,
     pub updates: UpdateSettings,
     pub conversation: ConversationSettings,
     pub extensions: ExtensionSettings,
@@ -143,6 +143,17 @@ pub enum ThemeChoice {
     #[default]
     Dark,
     Light,
+    System,
+}
+
+/// The `[theme]` table: the mode, the theme picked for each mode, and color overrides.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ThemeSettings {
+    pub mode: ThemeChoice,
+    pub light: Option<String>,
+    pub dark: Option<String>,
+    pub overrides: toml::Table,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -169,7 +180,7 @@ impl Default for Settings {
                 .collect(),
             models: BTreeMap::new(),
             terminal: TerminalSettings::default(),
-            theme: ThemeChoice::default(),
+            theme: ThemeSettings::default(),
             updates: UpdateSettings::default(),
             conversation: ConversationSettings::default(),
             extensions: ExtensionSettings::default(),
@@ -231,7 +242,15 @@ fn read_layer(path: &Path) -> Result<Option<toml::Table>, SettingsError> {
         }
     };
     toml::from_str(&text)
-        .map(Some)
+        .map(|mut layer: toml::Table| {
+            // Today's `theme = "light"` is `[theme] mode = "light"`, so layers merge key by key.
+            if let Some(toml::Value::String(mode)) = layer.get("theme") {
+                let mut table = toml::Table::new();
+                table.insert("mode".into(), toml::Value::String(mode.clone()));
+                layer.insert("theme".into(), toml::Value::Table(table));
+            }
+            Some(layer)
+        })
         .map_err(|e: toml::de::Error| SettingsError::Parse {
             path: path.into(),
             message: e.to_string(),
@@ -703,7 +722,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "settings.toml", "theme = \"light\"\n");
         let (s, _) = Settings::load(d.path(), None).unwrap();
-        assert_eq!(s.theme, ThemeChoice::Light);
+        assert_eq!(s.theme.mode, ThemeChoice::Light);
         assert!(s.agents.contains_key("claude"));
     }
 
@@ -752,7 +771,7 @@ mod tests {
             "theme = \"light\"\n[updates]\ncheck = true\nrepo = \"evil/wai\"\n",
         );
         let (s, notices) = Settings::load(u.path(), Some(p.path())).unwrap();
-        assert_eq!(s.theme, ThemeChoice::Light);
+        assert_eq!(s.theme.mode, ThemeChoice::Light);
         assert_eq!(s.updates, UpdateSettings::default());
         let path = p.path().join(".wai").join("settings.toml");
         assert_eq!(
@@ -942,7 +961,7 @@ mod tests {
             let p = tempfile::tempdir().unwrap();
             write(p.path(), ".wai/settings.toml", body);
             let (s, notices) = Settings::load(u.path(), Some(p.path())).unwrap();
-            assert_eq!(s.theme, ThemeChoice::Light, "{body}");
+            assert_eq!(s.theme.mode, ThemeChoice::Light, "{body}");
             let path = p.path().join(".wai").join("settings.toml");
             let want = format!(
                 "Ignored project settings: invalid settings in {}: ",
@@ -951,6 +970,44 @@ mod tests {
             assert_eq!(notices.len(), 1, "{body}: {notices:?}");
             assert!(notices[0].starts_with(&want), "{body}: {notices:?}");
         }
+    }
+
+    #[test]
+    fn legacy_theme_string_is_the_mode() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "settings.toml", "theme = \"light\"\n");
+        let (s, _) = Settings::load(d.path(), None).unwrap();
+        assert_eq!(s.theme.mode, ThemeChoice::Light);
+        assert_eq!((s.theme.light, s.theme.dark), (None, None));
+        write(d.path(), "settings.toml", "[theme]\nmode = \"system\"\n");
+        let (s, _) = Settings::load(d.path(), None).unwrap();
+        assert_eq!(s.theme.mode, ThemeChoice::System);
+        write(d.path(), "settings.toml", "");
+        let (s, _) = Settings::load(d.path(), None).unwrap();
+        assert_eq!(s.theme.mode, ThemeChoice::Dark);
+    }
+
+    #[test]
+    fn project_theme_keys_merge_key_by_key() {
+        let u = tempfile::tempdir().unwrap();
+        let p = tempfile::tempdir().unwrap();
+        let load = |user: &str, project: &str| {
+            write(u.path(), "settings.toml", user);
+            write(p.path(), ".wai/settings.toml", project);
+            Settings::load(u.path(), Some(p.path())).unwrap().0.theme
+        };
+        let t = load("theme = \"light\"\n", "[theme]\ndark = \"X\"\n");
+        assert_eq!((t.mode, t.dark.as_deref()), (ThemeChoice::Light, Some("X")));
+        let t = load("[theme]\ndark = \"X\"\n", "theme = \"light\"\n");
+        assert_eq!((t.mode, t.dark.as_deref()), (ThemeChoice::Light, Some("X")));
+        let t = load(
+            "[theme]\nmode = \"light\"\nlight = \"L\"\n",
+            "[theme]\nlight = \"M\"\n",
+        );
+        assert_eq!(
+            (t.mode, t.light.as_deref()),
+            (ThemeChoice::Light, Some("M"))
+        );
     }
 
     #[test]
@@ -1162,7 +1219,7 @@ mod tests {
         );
 
         let (s, notices) = Settings::load(u.path(), Some(p.path())).unwrap();
-        assert_eq!(s.theme, ThemeChoice::Light);
+        assert_eq!(s.theme.mode, ThemeChoice::Light);
         let path = p.path().join(".wai").join("settings.toml");
         let want = format!(
             "Ignored project settings: cannot read {}: larger than 1 MB",

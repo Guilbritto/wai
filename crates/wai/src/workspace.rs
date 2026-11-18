@@ -634,8 +634,8 @@ impl Workspace {
             self.applied += 1;
         }
         self.settings_error = None;
-        if new.theme != self.settings.theme {
-            Theme::change(theme_mode(new.theme), Some(window), cx);
+        if new.theme.mode != self.settings.theme.mode {
+            Theme::change(theme_mode(new.theme.mode, cx), Some(window), cx);
             window.refresh();
         }
         let processing = new.conversation.processing;
@@ -3693,7 +3693,8 @@ pub(crate) mod tests {
     };
     use wai_agent::{AgentError, PromptBlock, SessionEvent, SessionSummary};
     use wai_settings::{
-        AgentConfig, AppState, Change, OpenSession, Settings, ThemeChoice, shown, unapproved,
+        AgentConfig, AppState, Change, OpenSession, Settings, ThemeChoice, ThemeSettings, shown,
+        unapproved,
     };
 
     use super::{Pane, Workspace};
@@ -4955,7 +4956,10 @@ pub(crate) mod tests {
     #[gpui_kit::test]
     fn light_mode_has_no_backdrop(light: &mut TestAppContext, dark: &mut TestAppContext) {
         let settings = Settings {
-            theme: ThemeChoice::Light,
+            theme: ThemeSettings {
+                mode: ThemeChoice::Light,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let (_, light) = open(light, settings);
@@ -5725,7 +5729,10 @@ pub(crate) mod tests {
     #[gpui_kit::test]
     fn broken_edit_keeps_the_last_good_settings(cx: &mut TestAppContext) {
         let light = Settings {
-            theme: ThemeChoice::Light,
+            theme: ThemeSettings {
+                mode: ThemeChoice::Light,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let (workspace, cx, dir) = live(cx, light, Some("theme = \"light\"\n"));
@@ -5734,7 +5741,9 @@ pub(crate) mod tests {
             workspace.read_with(cx, |w, _| w.settings_error.is_some())
         });
         cx.run_until_parked();
-        workspace.read_with(cx, |w, _| assert_eq!(w.settings.theme, ThemeChoice::Light));
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.settings.theme.mode, ThemeChoice::Light)
+        });
         assert!(cx.update(|_, cx| !cx.theme().is_dark()));
         assert!(cx.update(|window, cx| !window.notifications(cx).is_empty()));
     }
