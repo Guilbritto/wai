@@ -17,8 +17,8 @@ use self::catalog::{CatalogTheme, ThemeCatalog};
 use self::colors::Palette;
 
 const BUNDLED: &str = include_str!("../../assets/theme/aurora.json");
-const BUNDLED_DARK: &str = "wai Aurora";
-const BUNDLED_LIGHT: &str = "wai Aurora Light";
+pub(crate) const BUNDLED_DARK: &str = "wai Aurora";
+pub(crate) const BUNDLED_LIGHT: &str = "wai Aurora Light";
 
 /// The family and size each area draws in, as the settings resolved them.
 #[derive(Debug, Clone)]

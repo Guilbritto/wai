@@ -13,14 +13,17 @@ use gpui_kit::component::radio::Radio;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, IconName, Sizable as _, ThemeMode, h_flex, v_flex,
 };
 use gpui_kit::*;
 use wai_ext::panel::Pick;
 use wai_settings::claude::{ClaudeData, Stamp};
-use wai_settings::{Change, Processing, SeenModel, Settings, ThemeChoice, agent_label, builtin};
+use wai_settings::{
+    Change, FontKey, Processing, SeenModel, Settings, ThemeChoice, agent_label, builtin,
+};
 
-use crate::appearance::fonts;
+use crate::appearance::catalog::ThemeCatalog;
+use crate::appearance::{Fonts, fonts};
 use crate::aurora::{self, DISPLAY_FONT};
 use crate::campo;
 use crate::extensions_view::ExtensionsView;
@@ -212,14 +215,32 @@ pub(crate) fn open_modal(view: Entity<SettingsView>, window: &mut Window, cx: &m
 
 /// Every row with its section, the card it sits in (titled unless empty) and its label: the
 /// label is what the search matches.
-const ROWS: [(Section, &str, &str); 7] = [
-    (Section::Appearance, "", "Theme"),
+const ROWS: [(Section, &str, &str); 16] = [
+    (Section::Appearance, "", "Mode"),
+    (Section::Appearance, "", "Light theme"),
+    (Section::Appearance, "", "Dark theme"),
+    (Section::Appearance, "", "Themes folder"),
+    (Section::Appearance, "Colors", "Colors"),
+    (Section::Appearance, "Fonts", "Interface"),
+    (Section::Appearance, "Fonts", "Editor"),
+    (Section::Appearance, "Fonts", "Terminal"),
+    (Section::Appearance, "Fonts", "Chat"),
+    (Section::Appearance, "Fonts", "Chat code"),
     (Section::Conversation, "", "Processing"),
     (Section::Terminal, "", "Shell"),
     (Section::Updates, "", "Automatic updates"),
     (Section::Updates, "", "Version"),
     (Section::Updates, "Troubleshooting", "Diagnostics"),
     (Section::Updates, "Troubleshooting", "Repository"),
+];
+
+/// The font areas of Settings > Appearance: label, key and the id its row carries.
+const FONT_AREAS: [(&str, FontKey, &str); 5] = [
+    ("Interface", FontKey::Interface, "interface"),
+    ("Editor", FontKey::Editor, "editor"),
+    ("Terminal", FontKey::Terminal, "terminal"),
+    ("Chat", FontKey::Chat, "chat"),
+    ("Chat code", FontKey::ChatCode, "chat-code"),
 ];
 
 /// The page's column (padding included) and the width of a select or text field in it.
@@ -404,6 +425,8 @@ pub enum SettingsEvent {
     CheckUpdates,
     RestartToUpdate,
     CopyDiagnostics,
+    /// Creates the themes folder when missing and shows it in the file manager.
+    OpenThemes,
     Test(String),
     CheckMcp,
     Open {
@@ -438,6 +461,22 @@ impl SelectItem for Theme {
     }
 
     fn value(&self) -> &ThemeChoice {
+        &self.0
+    }
+}
+
+/// A theme of the Light theme or Dark theme select.
+#[derive(Clone)]
+struct ThemeName(String);
+
+impl SelectItem for ThemeName {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.0.clone().into()
+    }
+
+    fn value(&self) -> &String {
         &self.0
     }
 }
@@ -500,6 +539,14 @@ pub struct SettingsView {
     data: SettingsData,
     pub(crate) search: Entity<InputState>,
     theme: Entity<SelectState<Vec<Theme>>>,
+    /// The Light theme and Dark theme selects.
+    themes: [Entity<SelectState<Vec<ThemeName>>>; 2],
+    /// Family and size of each of `FONT_AREAS`, in that order.
+    font_inputs: Vec<Entity<InputState>>,
+    /// Per font input: it holds edits not committed yet.
+    font_editing: [bool; 10],
+    /// The placeholder each font input shows (the value in effect).
+    font_hints: Vec<String>,
     processing: Entity<SelectState<Vec<Steps>>>,
     /// Per agent id.
     models: BTreeMap<String, Entity<SelectState<Vec<ModelChoice>>>>,
@@ -535,8 +582,14 @@ impl SettingsView {
     ) -> Self {
         let placeholder = format!("Search {}…", section.title().to_lowercase());
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
-        let choices = vec![Theme(ThemeChoice::Dark), Theme(ThemeChoice::Light)];
+        let choices = [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark];
+        let choices: Vec<Theme> = choices.into_iter().map(Theme).collect();
         let theme = cx.new(|cx| SelectState::new(choices, None, window, cx));
+        let themes = [false, true]
+            .map(|_| cx.new(|cx| SelectState::new(Vec::<ThemeName>::new(), None, window, cx)));
+        let font_inputs: Vec<_> = (0..10)
+            .map(|_| cx.new(|cx| InputState::new(window, cx)))
+            .collect();
         let choices = [Processing::Steps, Processing::Grouped, Processing::Hidden];
         let choices: Vec<Steps> = choices.into_iter().map(Steps).collect();
         let processing = cx.new(|cx| SelectState::new(choices, None, window, cx));
@@ -566,6 +619,29 @@ impl SettingsView {
                 },
             ),
         ];
+        for (dark, select) in themes.iter().enumerate() {
+            subscriptions.push(cx.subscribe(
+                select,
+                move |this, _, SelectEvent::Confirm(choice): &SelectEvent<Vec<ThemeName>>, cx| {
+                    let dark = dark == 1;
+                    if let Some(name) = choice
+                        && *name != this.picked_theme(dark)
+                    {
+                        let name = Some(name.clone());
+                        this.change(Change::ThemeName { dark, name }, cx);
+                    }
+                },
+            ));
+        }
+        for (ix, input) in font_inputs.iter().enumerate() {
+            subscriptions.push(cx.subscribe(input, move |this, _, event: &InputEvent, cx| {
+                match event {
+                    InputEvent::Change => this.font_editing[ix] = true,
+                    InputEvent::PressEnter { .. } | InputEvent::Blur => this.commit_font(ix, cx),
+                    _ => {}
+                }
+            }));
+        }
         for (ix, input) in [&shell, &repo].into_iter().enumerate() {
             subscriptions.push(cx.subscribe(input, move |this, _, event: &InputEvent, cx| {
                 match event {
@@ -588,6 +664,10 @@ impl SettingsView {
             data,
             search,
             theme,
+            themes,
+            font_inputs,
+            font_editing: [false; 10],
+            font_hints: vec![String::new(); 10],
             processing,
             models: BTreeMap::new(),
             shell,
@@ -669,6 +749,62 @@ impl SettingsView {
         }
     }
 
+    /// The theme in effect for the mode: the one named in the settings, else the bundled one.
+    fn picked_theme(&self, dark: bool) -> String {
+        let theme = &self.data.settings.theme;
+        match (dark, &theme.dark, &theme.light) {
+            (true, Some(name), _) | (false, _, Some(name)) => name.clone(),
+            (true, ..) => crate::appearance::BUNDLED_DARK.into(),
+            _ => crate::appearance::BUNDLED_LIGHT.into(),
+        }
+    }
+
+    /// Writes font input `ix` (2 per area: family, size); empty removes the key, a size that is
+    /// not a number is dropped.
+    fn commit_font(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.font_editing[ix]) {
+            return;
+        }
+        let text = self.font_inputs[ix].read(cx).value().trim().to_string();
+        let key = FONT_AREAS[ix / 2].1;
+        let (saved_family, saved_size) = self.saved_font(key);
+        let change = if ix % 2 == 0 {
+            let family = (!text.is_empty()).then_some(text);
+            (family != saved_family).then_some(Change::FontFamily(key, family))
+        } else {
+            let size = match text.parse::<f32>() {
+                Ok(size) if size.is_finite() => Some(size),
+                _ if text.is_empty() => None,
+                _ => {
+                    // Not a number: show the saved size again.
+                    self.stale = true;
+                    cx.notify();
+                    return;
+                }
+            };
+            (size != saved_size).then_some(Change::FontSize(key, size))
+        };
+        if let Some(change) = change {
+            self.change(change, cx);
+        }
+    }
+
+    /// The family and size the settings set for `key`.
+    fn saved_font(&self, key: FontKey) -> (Option<String>, Option<f32>) {
+        let s = &self.data.settings;
+        let (family, size) = match key {
+            FontKey::Interface => (&s.interface.font_family, s.interface.font_size),
+            FontKey::Editor => (&s.editor.font_family, s.editor.font_size),
+            FontKey::Terminal => (&s.terminal.font_family, s.terminal.font_size),
+            FontKey::Chat => (&s.conversation.font_family, s.conversation.font_size),
+            FontKey::ChatCode => (
+                &s.conversation.code_font_family,
+                s.conversation.code_font_size,
+            ),
+        };
+        (family.clone(), size)
+    }
+
     fn commit(&mut self, ix: usize, cx: &mut Context<Self>) {
         if !std::mem::take(&mut self.editing[ix]) {
             return;
@@ -729,6 +865,56 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// The theme selects list what the catalog loaded now.
+    fn sync_themes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !cx.has_global::<ThemeCatalog>() {
+            return;
+        }
+        for (dark, select) in self.themes.clone().into_iter().enumerate() {
+            let mode = if dark == 1 {
+                ThemeMode::Dark
+            } else {
+                ThemeMode::Light
+            };
+            let names = ThemeCatalog::global(cx).names(mode);
+            let items = names.iter().map(|n| ThemeName(n.to_string())).collect();
+            let picked = self.picked_theme(dark == 1);
+            select.update(cx, |s, cx| {
+                s.set_items(items, window, cx);
+                s.set_selected_value(&picked, window, cx);
+            });
+        }
+    }
+
+    /// Each font field shows what the settings set, and the value in effect as its placeholder.
+    fn sync_fonts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let faces = cx.try_global::<Fonts>().map(|f| f.0.clone());
+        for (area, (_, key, _)) in FONT_AREAS.iter().enumerate() {
+            let (family, size) = self.saved_font(*key);
+            let effective = faces.as_ref().map(|f| {
+                let face = [&f.ui, &f.editor, &f.terminal, &f.chat, &f.chat_code][area];
+                (face.family.clone(), face.size.to_string())
+            });
+            let (family_hint, size_hint) = effective.unwrap_or_default();
+            let shown = [
+                family.unwrap_or_default(),
+                size.map(|s| s.to_string()).unwrap_or_default(),
+            ];
+            for (ix, (text, hint)) in [(0, (&shown[0], family_hint)), (1, (&shown[1], size_hint))] {
+                let ix = area * 2 + ix;
+                let (input, text) = (self.font_inputs[ix].clone(), text.clone());
+                let editing = self.font_editing[ix];
+                self.font_hints[ix] = hint.clone();
+                input.update(cx, |i, cx| {
+                    i.set_placeholder(hint, window, cx);
+                    if !editing {
+                        i.set_value(text, window, cx);
+                    }
+                });
+            }
+        }
+    }
+
     fn sync_models(&mut self, row: &AgentRow, window: &mut Window, cx: &mut Context<Self>) {
         let items = model_choices(row);
         let current = row.default_model.clone().unwrap_or_default();
@@ -774,6 +960,8 @@ impl SettingsView {
         let processing = settings.conversation.processing;
         self.processing
             .update(cx, |s, cx| s.set_selected_value(&processing, window, cx));
+        self.sync_themes(window, cx);
+        self.sync_fonts(window, cx);
         for row in self.data.agents.clone() {
             self.sync_models(&row, window, cx);
         }
@@ -1045,12 +1233,38 @@ impl SettingsView {
             .debug_selector(|| "settings-update".into())
     }
 
+    /// An area's family and size fields.
+    fn font_row(&self, label: &str, off: bool, cx: &App) -> Div {
+        let area = FONT_AREAS
+            .iter()
+            .position(|(l, ..)| *l == label)
+            .unwrap_or(0);
+        let id = FONT_AREAS[area].2;
+        let (family, size) = (&self.font_inputs[area * 2], &self.font_inputs[area * 2 + 1]);
+        let controls = h_flex()
+            .gap_2()
+            .child(field(campo::field(
+                Input::new(family).small().disabled(off),
+                false,
+                cx,
+            )))
+            .child(div().w(px(80.)).child(campo::field(
+                Input::new(size).small().disabled(off),
+                false,
+                cx,
+            )));
+        let hint = "Family, then size. Empty uses the default.";
+        let selector = format!("settings-font-{id}");
+        setting(named(label.to_string(), Some(hint.into()), cx), controls)
+            .debug_selector(move || selector.clone())
+    }
+
     fn rows(&self, label: &str, cx: &mut Context<Self>) -> Div {
         let off = self.data.error.is_some();
         match label {
-            "Theme" => self.row(
-                "Theme",
-                "Dark or light.",
+            "Mode" => self.row(
+                "Mode",
+                "System follows macOS, switching with it.",
                 "settings-theme",
                 field(campo::field(
                     Select::new(&self.theme).small().disabled(off),
@@ -1059,6 +1273,49 @@ impl SettingsView {
                 )),
                 cx,
             ),
+            "Light theme" => self.row(
+                "Light theme",
+                "Used in light mode.",
+                "settings-theme-light",
+                field(campo::field(
+                    Select::new(&self.themes[0]).small().disabled(off),
+                    false,
+                    cx,
+                )),
+                cx,
+            ),
+            "Dark theme" => self.row(
+                "Dark theme",
+                "Used in dark mode.",
+                "settings-theme-dark",
+                field(campo::field(
+                    Select::new(&self.themes[1]).small().disabled(off),
+                    false,
+                    cx,
+                )),
+                cx,
+            ),
+            "Themes folder" => self.row(
+                "Themes folder",
+                "Theme files saved there (*.json) join the lists above.",
+                "settings-themes-folder",
+                Button::new("settings-themes-open")
+                    .label("Open themes folder")
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::OpenThemes))),
+                cx,
+            ),
+            "Colors" => self.row(
+                "Colors",
+                "Override single colors in the [theme.overrides] table of settings.toml.",
+                "settings-colors",
+                Button::new("settings-colors-open")
+                    .label("Open settings.toml")
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::OpenFile))),
+                cx,
+            ),
+            "Interface" | "Editor" | "Terminal" | "Chat" | "Chat code" => {
+                self.font_row(label, off, cx)
+            }
             "Processing" => self.row(
                 "Processing",
                 "How the agent's steps show while it works.",
@@ -2055,5 +2312,190 @@ mod tests {
             Some("1.1.0 is out (wai runs 1.0.0)")
         );
         assert!(cx.debug_bounds("settings-adapter-note-npx").is_some());
+    }
+
+    /// A user theme file in the config folder, loaded by an apply with `dark = "Mine"` chosen.
+    fn with_user_theme(
+        workspace: &Entity<Workspace>,
+        dir: &tempfile::TempDir,
+        cx: &mut VisualTestContext,
+    ) {
+        std::fs::create_dir(dir.path().join("themes")).unwrap();
+        std::fs::write(
+            dir.path().join("themes/mine.json"),
+            r#"{"name":"set","themes":[{"name":"Mine","mode":"dark"},{"name":"Mine Light","mode":"light"}]}"#,
+        )
+        .unwrap();
+        let mut settings = Settings::default();
+        settings.theme.dark = Some("Mine".into());
+        workspace.update_in(cx, |w, window, cx| {
+            w.apply_settings(settings, vec![], window, cx)
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn appearance_lists_modes_and_themes(cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Appearance, None, window, cx)
+        });
+        cx.run_until_parked();
+        for id in [
+            "settings-theme",
+            "settings-theme-light",
+            "settings-theme-dark",
+            "settings-themes-folder",
+        ] {
+            assert!(cx.debug_bounds(id).is_some(), "{id}");
+        }
+        let titles = [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark]
+            .map(|mode| SelectItem::title(&super::Theme(mode)).to_string());
+        assert_eq!(titles, ["System", "Light", "Dark"]);
+        let view = view(&workspace, cx);
+        let picked = |view: &Entity<SettingsView>, cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, cx| {
+                (
+                    v.themes[0].read(cx).selected_value().cloned(),
+                    v.themes[1].read(cx).selected_value().cloned(),
+                )
+            })
+        };
+        // Only the bundled themes load: each select shows its bundled one.
+        assert_eq!(
+            picked(&view, cx),
+            (Some("wai Aurora Light".into()), Some("wai Aurora".into()))
+        );
+        // A theme from the folder joins the list: it can be the selected one.
+        with_user_theme(&workspace, &dir, cx);
+        assert_eq!(picked(&view, cx).1, Some("Mine".into()));
+    }
+
+    #[gpui_kit::test]
+    fn picking_a_theme_writes_settings(cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Appearance, None, window, cx)
+        });
+        let view = view(&workspace, cx);
+        with_user_theme(&workspace, &dir, cx);
+        view.update_in(cx, |v, window, cx| {
+            v.theme.update(cx, |s, cx| {
+                cx.emit(SelectEvent::Confirm(Some(ThemeChoice::Light)));
+                s.set_selected_value(&ThemeChoice::Light, window, cx);
+            });
+            v.themes[0].update(cx, |_, cx| {
+                cx.emit(SelectEvent::Confirm(Some("Mine Light".to_string())))
+            });
+        });
+        cx.run_until_parked();
+        let text = std::fs::read_to_string(dir.path().join("settings.toml")).unwrap();
+        assert_eq!(text, "[theme]\nmode = \"light\"\nlight = \"Mine Light\"\n");
+    }
+
+    #[gpui_kit::test]
+    fn open_themes_folder_creates_it(cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Appearance, None, window, cx)
+        });
+        assert!(!dir.path().join("themes").exists());
+        click("settings-themes-open", cx);
+        assert!(dir.path().join("themes").is_dir());
+    }
+
+    #[gpui_kit::test]
+    fn colors_row_opens_settings_toml(cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Appearance, None, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("settings-colors").is_some());
+        click("settings-colors-open", cx);
+        let path = crate::sidebar::canonical(&dir.path().join("settings.toml"));
+        wait_until(cx, "the editor tab", |cx| {
+            workspace.read_with(cx, |w, cx| {
+                w.panes.iter().any(|p| match p {
+                    Pane::Editor(pane) => {
+                        (pane.read(cx).tabs.iter()).any(|tab| tab.read(cx).path == path)
+                    }
+                    _ => false,
+                })
+            })
+        });
+        assert!(path.exists());
+    }
+
+    #[gpui_kit::test]
+    fn fonts_group_shows_areas_with_placeholders(cx: &mut TestAppContext) {
+        let (workspace, cx, _dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Appearance, None, window, cx)
+        });
+        cx.run_until_parked();
+        for id in [
+            "settings-font-interface",
+            "settings-font-editor",
+            "settings-font-terminal",
+            "settings-font-chat",
+            "settings-font-chat-code",
+        ] {
+            assert!(cx.debug_bounds(id).is_some(), "{id}");
+        }
+        let view = view(&workspace, cx);
+        let shown = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, cx| {
+                v.font_inputs
+                    .iter()
+                    .map(|i| i.read(cx).value().to_string())
+                    .zip(v.font_hints.clone())
+                    .collect::<Vec<_>>()
+            })
+        };
+        let faces = cx.update(|_, cx| cx.global::<crate::appearance::Fonts>().0.clone());
+        let shown_now = shown(cx);
+        for (area, face) in [
+            &faces.ui,
+            &faces.editor,
+            &faces.terminal,
+            &faces.chat,
+            &faces.chat_code,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Unset: empty, with the family and size in effect as placeholders.
+            assert_eq!(shown_now[area * 2], (String::new(), face.family.clone()));
+            assert_eq!(
+                shown_now[area * 2 + 1],
+                (String::new(), face.size.to_string())
+            );
+        }
+        // A set size shows as the value, and is the one in effect.
+        let mut settings = Settings::default();
+        settings.interface.font_size = Some(20.);
+        workspace.update_in(cx, |w, window, cx| {
+            w.apply_settings(settings, vec![], window, cx)
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        assert_eq!(shown(cx)[1], ("20".to_string(), "20".to_string()));
+    }
+
+    #[gpui_kit::test]
+    fn font_size_field_writes_settings(cx: &mut TestAppContext) {
+        let (workspace, cx, dir) = settings_ws(cx);
+        workspace.update_in(cx, |w, window, cx| {
+            w.open_settings(Section::Appearance, None, window, cx)
+        });
+        cx.run_until_parked();
+        let view = view(&workspace, cx);
+        let input = view.read_with(cx, |v, _| v.font_inputs[1].clone());
+        input.update_in(cx, |i, window, cx| i.focus(window, cx));
+        cx.simulate_input("18");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let text = std::fs::read_to_string(dir.path().join("settings.toml")).unwrap();
+        assert_eq!(text, "[interface]\nfont_size = 18.0\n");
     }
 }

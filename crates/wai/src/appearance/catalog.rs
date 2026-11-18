@@ -34,13 +34,11 @@ pub(crate) struct ThemeCatalog {
 impl Global for ThemeCatalog {}
 
 impl ThemeCatalog {
-    #[allow(dead_code)]
     pub fn global(cx: &App) -> &Self {
         cx.global::<Self>()
     }
 
     /// The names of the themes of `mode`, in load order (for the pickers).
-    #[allow(dead_code)]
     pub fn names(&self, mode: ThemeMode) -> Vec<SharedString> {
         self.themes
             .iter()

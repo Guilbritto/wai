@@ -724,6 +724,8 @@ impl Workspace {
                 self.load_notices.push(notice.clone());
             }
         }
+        // The theme lists in Settings follow what loaded.
+        self.sync_settings_view(cx);
         cx.notify();
     }
 
@@ -3088,6 +3090,13 @@ impl Workspace {
                         .ok();
                     this.close_settings(window, cx);
                     this.open_file(path, None, window, cx)
+                }
+                SettingsEvent::OpenThemes => {
+                    let folder = this.user_dir.join("themes");
+                    std::fs::create_dir_all(&folder).ok();
+                    // the test platform does not implement reveal_path
+                    #[cfg(not(test))]
+                    cx.reveal_path(&folder);
                 }
                 SettingsEvent::Test(id) => this.test_agent(id, window, cx),
                 SettingsEvent::CheckMcp => this.check_mcp(cx),
