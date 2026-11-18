@@ -272,6 +272,7 @@ pub struct Workspace {
     load_notices: Vec<String>,
     /// The enabled extensions' theme files, as the last `appearance::apply` got them.
     theme_files: Vec<(String, PathBuf)>,
+    window: AnyWindowHandle,
     /// The last run's sessions `restore` could not reopen (their agent is not in the settings, or
     /// its command waits for an answer): saved again, for a launch that can.
     unrestored: Vec<OpenSession>,
@@ -500,6 +501,7 @@ impl Workspace {
             settings_view: None,
             load_notices: Vec::new(),
             theme_files: Vec::new(),
+            window: window.window_handle(),
             unrestored: Vec::new(),
             #[cfg(test)]
             applied: 0,
@@ -3229,6 +3231,19 @@ impl Workspace {
         };
         self.ext_host.update(cx, |host, cx| host.sync(&list, cx));
         self.sync_contributions(cx);
+        let files = self.ext_host.read(cx).theme_files();
+        if files != self.theme_files {
+            self.theme_files = files;
+            // No window here: the apply runs once this update ends.
+            let (this, window) = (cx.entity(), self.window);
+            cx.defer(move |cx| {
+                window
+                    .update(cx, |_, window, cx| {
+                        this.update(cx, |w, cx| w.reapply_appearance(window, cx))
+                    })
+                    .ok();
+            });
+        }
     }
 
     /// Opens the settings modal on Extensions.

@@ -340,6 +340,15 @@ impl ExtHost {
         }
     }
 
+    /// The enabled extensions' theme files as (extension folder, file).
+    pub fn theme_files(&self) -> Vec<(String, PathBuf)> {
+        let files = self.enabled.iter().flat_map(|i| {
+            let dir = i.dir.to_string_lossy().into_owned();
+            (i.manifest.contributes.themes.iter()).map(move |t| (dir.clone(), i.dir.join(t)))
+        });
+        files.collect()
+    }
+
     pub fn templates(&self) -> impl Iterator<Item = &Template> {
         (self.enabled.iter()).flat_map(|i| &i.manifest.contributes.templates)
     }
@@ -2256,6 +2265,82 @@ pub(crate) mod tests {
             p.tabs[p.active].read(cx).editor.read(cx).text().to_string()
         });
         assert_eq!(text, "typed notes\n");
+    }
+
+    /// The workspace re-applies once the started extensions' theme files are known.
+    #[gpui_kit::test]
+    fn extension_theme_reaches_the_catalog(cx: &mut TestAppContext) {
+        use crate::appearance::catalog::ThemeCatalog;
+        use gpui_kit::component::ThemeMode;
+
+        const LOOKS: &str = "id = \"looks\"\nname = \"Looks\"\nversion = \"1.0.0\"\n\
+            [contributes]\nthemes = [\"t.json\"]\n";
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let dir = install(tmp.path(), &config, LOOKS, "", "");
+        std::fs::write(
+            dir.join("t.json"),
+            r#"{"name":"set","themes":[{"name":"From ext","mode":"dark"}]}"#,
+        )
+        .unwrap();
+        let (_workspace, cx) = start_after(&config, fake_settings(""), cx, |_, _| {});
+        cx.run_until_parked();
+        let found = cx.update(|_, cx| {
+            ThemeCatalog::global(cx)
+                .find("From ext", ThemeMode::Dark)
+                .is_some()
+        });
+        assert!(found);
+    }
+
+    fn themed(dir: &std::path::Path, enabled: bool) -> wai_ext::Installed {
+        let manifest = "id = \"looks\"\nname = \"Looks\"\nversion = \"1.0.0\"\n\
+            [contributes]\nthemes = [\"themes/one.json\", \"two.json\"]\n";
+        wai_ext::Installed {
+            manifest: wai_ext::parse_manifest(manifest, dir).unwrap(),
+            dir: dir.into(),
+            data: dir.join("data"),
+            enabled,
+            granted: Vec::new(),
+        }
+    }
+
+    #[gpui_kit::test]
+    fn enabled_extension_lists_its_theme_files(cx: &mut TestAppContext) {
+        let dir = std::path::Path::new("/ext/looks");
+        let host =
+            cx.update(|cx| gpui_kit::AppContext::new(cx, |_| super::ExtHost::new("/p".into())));
+        host.update(cx, |h, cx| h.sync(&[themed(dir, true)], cx));
+        let files = host.read_with(cx, |h, _| h.theme_files());
+        assert_eq!(
+            files,
+            vec![
+                ("/ext/looks".to_string(), dir.join("themes/one.json")),
+                ("/ext/looks".to_string(), dir.join("two.json")),
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn disabled_extension_drops_its_themes(cx: &mut TestAppContext) {
+        let dir = std::path::Path::new("/ext/looks");
+        let host =
+            cx.update(|cx| gpui_kit::AppContext::new(cx, |_| super::ExtHost::new("/p".into())));
+        host.update(cx, |h, cx| h.sync(&[themed(dir, true)], cx));
+        host.update(cx, |h, cx| h.sync(&[themed(dir, false)], cx));
+        assert!(host.read_with(cx, |h, _| h.theme_files().is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn theme_only_extension_starts_no_process(cx: &mut TestAppContext) {
+        let dir = std::path::Path::new("/ext/looks");
+        let host =
+            cx.update(|cx| gpui_kit::AppContext::new(cx, |_| super::ExtHost::new("/p".into())));
+        host.update(cx, |h, cx| h.sync(&[themed(dir, true)], cx));
+        host.read_with(cx, |h, _| {
+            assert!(h.running.is_empty());
+            assert_eq!(h.theme_files().len(), 2);
+        });
     }
 }
 
