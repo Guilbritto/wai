@@ -1,10 +1,8 @@
 //! The sizes and families views draw in, read from the `Fonts` global. wai's own text sizes are
 //! written for the default size of their area; these scale them with the user's.
 
-// Read by the views as they move off fixed sizes.
-#![allow(dead_code)]
-
-use gpui_kit::{App, Pixels, SharedString, px};
+use gpui_kit::component::text::TextViewStyle;
+use gpui_kit::{App, Pixels, SharedString, StyleRefinement, Styled as _, px};
 use wai_settings::fonts::{CHAT_SIZE, EDITOR_SIZE, Face, UI_SIZE};
 
 use super::Fonts;
@@ -54,6 +52,15 @@ pub(crate) fn chat_family(cx: &App) -> SharedString {
 
 pub(crate) fn chat_code_family(cx: &App) -> SharedString {
     face(cx, |f| &f.0.chat_code).family.into()
+}
+
+/// The style of a chat markdown view: its code blocks use the chat code family and size.
+pub(crate) fn chat_markdown(cx: &App) -> TextViewStyle {
+    TextViewStyle::default().code_block(
+        StyleRefinement::default()
+            .font_family(chat_code_family(cx))
+            .text_size(chat_code(cx, 13.)),
+    )
 }
 
 #[cfg(test)]

@@ -162,7 +162,7 @@ impl RenderOnce for PathField {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let (danger, ring, muted) = (theme.danger, theme.ring, theme.muted_foreground);
-        let mono = theme.mono_font_family.clone();
+        let mono = fonts::editor_family(cx);
         let (line, violet, dim) = (campo::line(cx), campo::violet(cx), campo::dim(cx));
         let text = self.input.read(cx).value();
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
@@ -185,7 +185,7 @@ impl RenderOnce for PathField {
                 .flex_1()
                 .min_w_0()
                 .font_family(mono)
-                .text_size(fonts::ui(cx, 11.5))
+                .text_size(fonts::editor(cx, 11.5))
                 .into_any_element(),
             false => div()
                 .id((self.id.clone(), "choose"))
@@ -198,7 +198,7 @@ impl RenderOnce for PathField {
                 .border_color(transparent_black())
                 .when(text.is_empty(), |el| el.text_color(dim))
                 .when(!text.is_empty(), |el| {
-                    el.font_family(mono).text_size(fonts::ui(cx, 11.5))
+                    el.font_family(mono).text_size(fonts::editor(cx, 11.5))
                 })
                 .child(if text.is_empty() {
                     self.placeholder.clone()

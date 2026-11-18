@@ -1489,7 +1489,6 @@ impl ExtPanel {
         }
         *seen = count;
         let scroll = scroll.clone();
-        let theme = cx.theme();
         let (lines, body) = (Rc::new(lines), text.clone());
         let list = uniform_list(("panel-log", k), count, move |range, _, _| {
             range
@@ -1525,8 +1524,8 @@ impl ExtPanel {
             .border_1()
             .border_color(campo::line(cx))
             .bg(campo::recessed(cx))
-            .font_family(theme.mono_font_family.clone())
-            .text_size(fonts::ui(cx, 11.))
+            .font_family(fonts::editor_family(cx))
+            .text_size(fonts::editor(cx, 11.))
             .map(|el| match fill {
                 true => el.flex_1().min_h_0(),
                 false => el
@@ -1731,9 +1730,7 @@ fn leaf(node: &Node, k: usize, cx: &App) -> AnyElement {
                 .child(SharedString::from(text)),
         }
         .when(*dim, |el| el.text_color(muted))
-        .when(*mono, |el| {
-            el.font_family(cx.theme().mono_font_family.clone())
-        })
+        .when(*mono, |el| el.font_family(fonts::editor_family(cx)))
         .into_any_element(),
         Node::Badge { text, tone } => h_flex()
             .child(campo::badge(text.to_string(), *tone, cx))

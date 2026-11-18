@@ -222,7 +222,7 @@ impl ChatSession {
             .pt(px(2.))
             .pb(px(8.))
             .mt(px(-4.))
-            .font_family(theme.mono_font_family.clone())
+            .font_family(fonts::chat_code_family(cx))
             .text_size(fonts::chat(cx, 12.))
             .child(list)
             .children(hint);
@@ -347,7 +347,7 @@ impl ChatSession {
                         body_rows.push(
                             div()
                                 .id(("subagent-text", k))
-                                .child(TextView::new(&md.state))
+                                .child(TextView::new(&md.state).style(fonts::chat_markdown(cx)))
                                 // Registers the id so tests can find it.
                                 .test_support()
                                 .into_any_element(),
@@ -360,7 +360,7 @@ impl ChatSession {
                             output_box(cx)
                                 .id(("subagent-thought", k))
                                 .text_color(muted)
-                                .child(TextView::new(&md.state))
+                                .child(TextView::new(&md.state).style(fonts::chat_markdown(cx)))
                                 .test_support()
                                 .into_any_element(),
                         );
@@ -381,7 +381,7 @@ impl ChatSession {
             .map(|md| {
                 div()
                     .id("subagent-answer")
-                    .child(TextView::new(&md.state))
+                    .child(TextView::new(&md.state).style(fonts::chat_markdown(cx)))
                     // Registers the id so tests can find it.
                     .test_support()
             });
@@ -480,7 +480,7 @@ impl ChatSession {
             .py(px(8.))
             .overflow_y_scroll()
             .track_scroll(&self.drawer_scroll)
-            .font_family(theme.mono_font_family.clone())
+            .font_family(fonts::chat_code_family(cx))
             .text_size(fonts::chat(cx, 11.5))
             .text_color(fg2)
             .children(body_rows)

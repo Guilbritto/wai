@@ -317,8 +317,8 @@ impl SearchView {
                     .id(("match", ix))
                     .aria_selected(active)
                     .pl(px(24.))
-                    .font_family(theme.mono_font_family.clone())
-                    .text_size(fonts::ui(cx, 12.))
+                    .font_family(fonts::editor_family(cx))
+                    .text_size(fonts::editor(cx, 12.))
                     .child(
                         div()
                             .flex_none()

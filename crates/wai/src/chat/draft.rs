@@ -1133,7 +1133,7 @@ impl Render for DraftView {
                         .rounded(px(5.))
                         .border_1()
                         .text_size(fonts::chat(cx, 11.))
-                        .font_family(theme.mono_font_family.clone())
+                        .font_family(fonts::chat_code_family(cx))
                         .bg(aurora::vidro(cx))
                         .border_color(aurora::borda(cx))
                         .text_color(aurora::nevoa(cx))

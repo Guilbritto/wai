@@ -207,7 +207,7 @@ fn step_title(title: &str, cx: &App) -> impl IntoElement + use<> {
             ..Default::default()
         },
     };
-    let mono = theme.mono_font_family.clone();
+    let mono = fonts::chat_code_family(cx);
     let overrides: Vec<_> = ranges.iter().map(|r| (r.clone(), mono.clone())).collect();
     div().flex_1().min_w_0().truncate().child(
         StyledText::new(text)
@@ -266,7 +266,7 @@ pub(super) fn output_box(cx: &App) -> Div {
         .py(px(6.))
         .rounded(px(6.))
         .border_1()
-        .font_family(theme.mono_font_family.clone())
+        .font_family(fonts::chat_code_family(cx))
         .text_size(fonts::chat(cx, 11.));
     match theme.is_dark() {
         true => out
@@ -492,22 +492,24 @@ impl ChatSession {
                         text.unwrap_or_default().into()
                     });
                 let text = self.texts.get(&ix).map(|md| {
-                    TextView::new(&md.state).code_block_actions(move |block, _, cx| {
-                        h_flex()
-                            .gap_1()
-                            .children(block.lang().map(|lang| {
-                                div()
-                                    .text_size(fonts::chat(cx, 12.))
-                                    .text_color(muted)
-                                    .child(lang.clone())
-                            }))
-                            .child(
-                                Clipboard::new("copy-code")
-                                    .value(block.code())
-                                    .tooltip("Copy code")
-                                    .accessibility_label("Copy code"),
-                            )
-                    })
+                    TextView::new(&md.state)
+                        .style(fonts::chat_markdown(cx))
+                        .code_block_actions(move |block, _, cx| {
+                            h_flex()
+                                .gap_1()
+                                .children(block.lang().map(|lang| {
+                                    div()
+                                        .text_size(fonts::chat(cx, 12.))
+                                        .text_color(muted)
+                                        .child(lang.clone())
+                                }))
+                                .child(
+                                    Clipboard::new("copy-code")
+                                        .value(block.code())
+                                        .tooltip("Copy code")
+                                        .accessibility_label("Copy code"),
+                                )
+                        })
                 });
                 let say = div().flex_1().min_w_0().py(px(4.)).children(text);
                 let say = match dark {
@@ -549,7 +551,7 @@ impl ChatSession {
                         el.children(self.texts.get(&ix).map(|md| {
                             output_box(cx)
                                 .id(("thought-output", ix))
-                                .child(TextView::new(&md.state))
+                                .child(TextView::new(&md.state).style(fonts::chat_markdown(cx)))
                                 // Registers the id so tests can find it.
                                 .test_support()
                         }))

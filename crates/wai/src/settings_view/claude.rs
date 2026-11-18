@@ -13,6 +13,7 @@ use wai_ext::panel::clamp;
 use wai_settings::claude::{ClaudeData, Entry, McpSource, McpStatus, short};
 
 use super::{Section, SettingsEvent, SettingsView};
+use crate::appearance::fonts;
 use crate::aurora;
 
 #[derive(Debug, PartialEq)]
@@ -575,7 +576,7 @@ impl SettingsView {
                 )
                 .children(row.path.clone().map(|p| {
                     div()
-                        .font_family(cx.theme().mono_font_family.clone())
+                        .font_family(fonts::editor_family(cx))
                         .text_xs()
                         .text_color(muted)
                         .child(p)

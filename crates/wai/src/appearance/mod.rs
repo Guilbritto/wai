@@ -267,6 +267,35 @@ mod tests {
         );
     }
 
+    #[gpui_kit::test]
+    fn mono_text_reads_the_area_fonts(cx: &mut TestAppContext) {
+        let mut settings = Settings::default();
+        settings.editor.font_family = Some("Menlo".into());
+        settings.editor.font_size = Some(26.);
+        settings.conversation.code_font_family = Some("Courier".into());
+        settings.conversation.code_font_size = Some(20.);
+        settings.terminal.font_family = Some("Monaco".into());
+        settings.terminal.font_size = Some(15.);
+        run(cx, &settings, None, &["Menlo", "Courier", "Monaco"]);
+        cx.update(|cx| {
+            assert_eq!(super::fonts::editor_family(cx).as_ref(), "Menlo");
+            assert_eq!(super::fonts::editor(cx, 11.), px(22.));
+            assert_eq!(super::fonts::chat_code_family(cx).as_ref(), "Courier");
+            assert_eq!(super::fonts::chat_code(cx, 13.), px(20.));
+            let (family, size) = super::fonts::terminal(cx);
+            assert_eq!((family.as_ref(), size), ("Monaco", px(15.)));
+        });
+        let found = offenders(
+            |f| f.starts_with("appearance/"),
+            |l| l.contains("mono_font_family") || l.contains("mono_font_size"),
+        );
+        assert!(
+            found.is_empty(),
+            "views reading the theme's mono font:\n{}",
+            found.join("\n")
+        );
+    }
+
     fn fonts(cx: &mut TestAppContext) -> ResolvedFonts {
         cx.update(|cx| cx.global::<Fonts>().0.clone())
     }

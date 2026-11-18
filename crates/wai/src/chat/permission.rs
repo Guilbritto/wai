@@ -91,8 +91,8 @@ impl DiffView {
                     .rounded(px(12.))
                     .bg(theme.muted)
                     .overflow_hidden()
-                    .font_family(theme.mono_font_family.clone())
-                    .text_size(theme.mono_font_size)
+                    .font_family(fonts::chat_code_family(cx))
+                    .text_size(fonts::chat_code(cx, 13.))
                     .children(lines),
             )
             .when(self.truncated, |el| {

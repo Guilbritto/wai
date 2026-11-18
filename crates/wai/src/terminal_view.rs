@@ -8,6 +8,7 @@ use wai_terminal::{
 };
 
 use crate::app::{CopySelection, Paste};
+use crate::appearance::fonts;
 
 /// Emitted when the shell's title changes.
 pub struct TerminalChanged;
@@ -280,8 +281,8 @@ impl EventEmitter<TerminalChanged> for TerminalView {}
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let font = font(theme.mono_font_family.clone());
-        let font_size = theme.mono_font_size;
+        let (family, font_size) = fonts::terminal(cx);
+        let font = font(family.clone());
         let line_height = (font_size * 1.4).round();
         let text_system = window.text_system();
         let cell_width = text_system
@@ -385,7 +386,7 @@ impl Render for TerminalView {
             .p_2()
             .bg(bg)
             .text_color(fg)
-            .font_family(theme.mono_font_family.clone())
+            .font_family(family)
             .text_size(font_size)
             .line_height(line_height)
             .whitespace_nowrap()
