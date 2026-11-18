@@ -1676,12 +1676,16 @@ mod tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestQueryExt as _;
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{Entity, TestAppContext, VisualTestContext};
+    use gpui_kit::{Entity, Hsla, TestAppContext, VisualTestContext};
     use wai_settings::{Change, Processing, Settings, ThemeChoice};
 
     use super::{RowStatus, Section, SelectEvent, SelectItem, SettingsData, SettingsView};
-    use crate::workspace::tests::{click, fake_settings, open, question, wait_until};
+    use crate::appearance::catalog::ThemeCatalog;
+    use crate::workspace::tests::{click, fake_settings, live, open, question, wait_until};
     use crate::workspace::{Pane, Workspace};
+    use gpui_kit::component::ActiveTheme as _;
+    use gpui_kit::component::select::{SelectDelegate, SelectState};
+    use gpui_kit::component::{IndexPath, ThemeMode};
     use gpui_kit::{Modifiers, point, px};
 
     fn settings_ws(
@@ -2349,9 +2353,6 @@ mod tests {
         ] {
             assert!(cx.debug_bounds(id).is_some(), "{id}");
         }
-        let titles = [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark]
-            .map(|mode| SelectItem::title(&super::Theme(mode)).to_string());
-        assert_eq!(titles, ["System", "Light", "Dark"]);
         let view = view(&workspace, cx);
         let picked = |view: &Entity<SettingsView>, cx: &mut VisualTestContext| {
             view.read_with(cx, |v, cx| {
@@ -2369,28 +2370,87 @@ mod tests {
         // A theme from the folder joins the list: it can be the selected one.
         with_user_theme(&workspace, &dir, cx);
         assert_eq!(picked(&view, cx).1, Some("Mine".into()));
+        // The Mode select lists the three choices; each picker only the themes of its mode.
+        let (mode, light, dark) = view.read_with(cx, |v, _| {
+            (v.theme.clone(), v.themes[0].clone(), v.themes[1].clone())
+        });
+        let modes = listed(&mode, cx);
+        let titles: Vec<_> = (modes.iter())
+            .map(|m| SelectItem::title(&super::Theme(*m)).to_string())
+            .collect();
+        assert_eq!(titles, ["System", "Light", "Dark"]);
+        let mut light = listed(&light, cx);
+        let mut dark = listed(&dark, cx);
+        light.sort();
+        dark.sort();
+        let (light_names, dark_names) = cx.update(|_, cx| {
+            let catalog = ThemeCatalog::global(cx);
+            let sorted = |mode| {
+                let mut names: Vec<_> = catalog.names(mode).iter().map(|n| n.to_string()).collect();
+                names.sort();
+                names
+            };
+            (sorted(ThemeMode::Light), sorted(ThemeMode::Dark))
+        });
+        assert_eq!(light, ["Mine Light", "wai Aurora Light"]);
+        assert_eq!(dark, ["Mine", "wai Aurora"]);
+        assert_eq!((light, dark), (light_names, dark_names));
+    }
+
+    /// What a select lists, read by walking its items.
+    fn listed<D>(
+        select: &Entity<SelectState<D>>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<<D::Item as SelectItem>::Value>
+    where
+        D: SelectDelegate + 'static,
+        <D::Item as SelectItem>::Value: Clone,
+    {
+        select.update_in(cx, |s, window, cx| {
+            let mut items = Vec::new();
+            for ix in 0.. {
+                s.set_selected_index(Some(IndexPath::new(ix)), window, cx);
+                match s.selected_value() {
+                    Some(value) => items.push(value.clone()),
+                    None => break,
+                }
+            }
+            items
+        })
     }
 
     #[gpui_kit::test]
     fn picking_a_theme_writes_settings(cx: &mut TestAppContext) {
-        let (workspace, cx, dir) = settings_ws(cx);
+        let (workspace, cx, dir) = live(cx, Settings::default(), None);
+        std::fs::create_dir(dir.path().join("themes")).unwrap();
+        std::fs::write(
+            dir.path().join("themes/mine.json"),
+            r##"{"name":"set","themes":[{"name":"Mine","mode":"dark","colors":{"background":"#101010"}}]}"##,
+        )
+        .unwrap();
         workspace.update_in(cx, |w, window, cx| {
             w.open_settings(Section::Appearance, None, window, cx)
         });
         let view = view(&workspace, cx);
-        with_user_theme(&workspace, &dir, cx);
-        view.update_in(cx, |v, window, cx| {
-            v.theme.update(cx, |s, cx| {
-                cx.emit(SelectEvent::Confirm(Some(ThemeChoice::Light)));
-                s.set_selected_value(&ThemeChoice::Light, window, cx);
-            });
-            v.themes[0].update(cx, |_, cx| {
-                cx.emit(SelectEvent::Confirm(Some("Mine Light".to_string())))
-            });
+        let dark = view.read_with(cx, |v, _| v.themes[1].clone());
+        wait_until(cx, "Mine in the dark picker", |cx| {
+            listed(&dark, cx).contains(&"Mine".to_string())
         });
-        cx.run_until_parked();
+        dark.update_in(cx, |s, window, cx| {
+            s.set_selected_value(&"wai Aurora".to_string(), window, cx);
+            s.focus(window, cx);
+        });
+        cx.simulate_keystrokes("enter down enter");
+        wait_until(cx, "the theme applied", |cx| {
+            cx.update(|_, cx| cx.theme().theme_name() == "Mine")
+        });
         let text = std::fs::read_to_string(dir.path().join("settings.toml")).unwrap();
-        assert_eq!(text, "[theme]\nmode = \"light\"\nlight = \"Mine Light\"\n");
+        assert_eq!(text, "[theme]\ndark = \"Mine\"\n");
+        cx.update(|_, cx| {
+            let background = Hsla::from(gpui_kit::Rgba::try_from("#101010").unwrap());
+            assert_eq!(cx.theme().colors.background, background);
+            assert_eq!(crate::aurora::noite(cx), background);
+        });
     }
 
     #[gpui_kit::test]
@@ -2482,20 +2542,93 @@ mod tests {
         assert_eq!(shown(cx)[1], ("20".to_string(), "20".to_string()));
     }
 
-    #[gpui_kit::test]
-    fn font_size_field_writes_settings(cx: &mut TestAppContext) {
-        let (workspace, cx, dir) = settings_ws(cx);
+    /// Opens Appearance over `file` and types `text` into font input `ix`, left uncommitted.
+    fn edit_font<'a>(
+        cx: &'a mut TestAppContext,
+        file: Option<&str>,
+        ix: usize,
+        text: &str,
+    ) -> (
+        (Entity<Workspace>, Entity<SettingsView>),
+        &'a mut VisualTestContext,
+        tempfile::TempDir,
+    ) {
+        let settings = file.map_or_else(Settings::default, |f| toml::from_str(f).unwrap());
+        let (workspace, cx, dir) = live(cx, settings, file);
         workspace.update_in(cx, |w, window, cx| {
             w.open_settings(Section::Appearance, None, window, cx)
         });
         cx.run_until_parked();
-        let view = view(&workspace, cx);
-        let input = view.read_with(cx, |v, _| v.font_inputs[1].clone());
+        // The modal holds the view weakly: the caller keeps it alive.
+        let settings = view(&workspace, cx);
+        let input = settings.read_with(cx, |v, _| v.font_inputs[ix].clone());
         input.update_in(cx, |i, window, cx| i.focus(window, cx));
-        cx.simulate_input("18");
+        cx.simulate_keystrokes("cmd-a backspace");
+        cx.simulate_input(text);
+        ((workspace, settings), cx, dir)
+    }
+
+    fn settings_file(dir: &tempfile::TempDir) -> String {
+        std::fs::read_to_string(dir.path().join("settings.toml")).unwrap_or_default()
+    }
+
+    fn ui_size(cx: &mut VisualTestContext) -> (f32, gpui_kit::Pixels) {
+        cx.update(|_, cx| {
+            (
+                cx.global::<crate::appearance::Fonts>().0.ui.size,
+                cx.theme().font_size,
+            )
+        })
+    }
+
+    #[gpui_kit::test]
+    fn font_size_field_writes_settings(cx: &mut TestAppContext) {
+        let (_ws, cx, dir) = edit_font(cx, None, 1, "18");
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
-        let text = std::fs::read_to_string(dir.path().join("settings.toml")).unwrap();
-        assert_eq!(text, "[interface]\nfont_size = 18.0\n");
+        wait_until(cx, "the size applied", |cx| ui_size(cx) == (18., px(18.)));
+        assert_eq!(settings_file(&dir), "[interface]\nfont_size = 18.0\n");
+    }
+
+    #[gpui_kit::test]
+    fn font_family_field_writes_settings(cx: &mut TestAppContext) {
+        let (_ws, cx, dir) = edit_font(cx, None, 0, "Menlo");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        wait_until(cx, "the family written", |_| {
+            settings_file(&dir).contains("Menlo")
+        });
+        assert_eq!(
+            settings_file(&dir),
+            "[interface]\nfont_family = \"Menlo\"\n"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn font_family_field_clearing_removes_the_key(cx: &mut TestAppContext) {
+        let seeded = "[interface]\nfont_family = \"Menlo\"\nfont_size = 18.0\n";
+        let (_ws, cx, dir) = edit_font(cx, Some(seeded), 0, "");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        wait_until(cx, "the family removed", |_| {
+            !settings_file(&dir).contains("font_family")
+        });
+        assert_eq!(settings_file(&dir), "[interface]\nfont_size = 18.0\n");
+        wait_until(cx, "the size still applied", |cx| ui_size(cx).0 == 18.);
+    }
+
+    #[gpui_kit::test]
+    fn font_size_field_rejects_a_non_number(cx: &mut TestAppContext) {
+        let seeded = "[interface]\nfont_size = 18.0\n";
+        let ((_, settings), cx, dir) = edit_font(cx, Some(seeded), 1, "abc");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(settings_file(&dir), seeded, "a non-number writes nothing");
+        // The modal is not repainted after Enter here: run the sync the next paint would.
+        assert!(settings.read_with(cx, |v, _| v.stale));
+        settings.update_in(cx, |v, window, cx| v.sync(window, cx));
+        let input = settings.read_with(cx, |v, _| v.font_inputs[1].clone());
+        assert_eq!(input.read_with(cx, |i, _| i.value().to_string()), "18");
+        assert_eq!(ui_size(cx).0, 18.);
     }
 }
