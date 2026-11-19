@@ -358,6 +358,9 @@ var forms map[string]func(d drawer, mood string, f int)
 func sprite(form, mood string, f int, shiny bool, bob int) grid {
 	var g grid
 	ox := 2
+	if forms[form] == nil {
+		form = "ovo"
+	}
 	if form == "ovo" {
 		ox += [4]int{0, 1, 0, -1}[f%4]
 	}

@@ -8,10 +8,10 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 )
 
 func seeded() *rand.Rand { return rand.New(rand.NewPCG(1, 2)) }
@@ -25,12 +25,12 @@ func TestEggsFollowTheRarityOdds(t *testing.T) {
 	for range n {
 		st.Eggs = 1
 		p := st.Hatch(rng, time.Now())
-		tiers[speciesByID(p.Species).Rarity]++
+		tiers[lineByID(p.Species).Rarity]++
 		if p.Shiny {
 			shiny++
 		}
 		for _, v := range p.Stats {
-			if v < rarities[speciesByID(p.Species).Rarity].floor || v > 10 {
+			if v < rarities[lineByID(p.Species).Rarity].floor || v > 10 {
 				t.Fatalf("stat %d out of range for %s", v, p.Species)
 			}
 		}
@@ -44,38 +44,11 @@ func TestEggsFollowTheRarityOdds(t *testing.T) {
 	if got := float64(shiny) / n; math.Abs(got-1.0/shinyOdds) > 0.003 {
 		t.Errorf("shiny: %.4f of eggs, want about %.4f", got, 1.0/shinyOdds)
 	}
-	if len(st.Seen) != len(species) {
-		t.Errorf("hatched %d of %d species", len(st.Seen), len(species))
+	if len(st.Seen) != len(dex) {
+		t.Errorf("hatched %d of %d lines", len(st.Seen), len(dex))
 	}
 	if len(st.Past) != maxPast {
 		t.Errorf("past pets: %d, want the last %d", len(st.Past), maxPast)
-	}
-}
-
-// 15 characters of text_sm monospace fit the 144 px inside a 160 px slot.
-func TestArtFitsTheSlot(t *testing.T) {
-	pets := []*Pet{nil}
-	for _, sp := range species {
-		pets = append(pets, &Pet{Species: sp.ID, Shiny: true})
-	}
-	for _, p := range pets {
-		for m := range moods {
-			for frame := range 16 {
-				art := draw(p, m, frame)
-				lines := strings.Split(art, "\n")
-				if len(lines) != 3 {
-					t.Fatalf("%v %s: %d lines", p, m, len(lines))
-				}
-				for _, l := range lines {
-					if n := utf8.RuneCountInString(l); n > 15 {
-						t.Errorf("%v %s frame %d: %q is %d wide", p, m, frame, l, n)
-					}
-				}
-				if p != nil && strings.ContainsAny(art, "EM") {
-					t.Errorf("%s %s: placeholder left in %q", p.Species, m, art)
-				}
-			}
-		}
 	}
 }
 
@@ -83,7 +56,7 @@ func TestArtFitsTheSlot(t *testing.T) {
 func TestMenuStaysPutWhileAnimating(t *testing.T) {
 	now := time.Now()
 	s := newServer(&bytes.Buffer{}, func() time.Time { return now }, seeded())
-	s.st.Pet = &Pet{Species: "boitata", Shiny: true, FedAt: now, Love: 100, LovedAt: now}
+	s.st.Pet = &Pet{Species: "jormungandr", Shiny: true, FedAt: now, Love: 100, LovedAt: now}
 	s.focused = "a\x00s"
 	s.states[s.focused] = "working"
 	var first string
@@ -194,7 +167,7 @@ func (h *harness) send(line string) []map[string]any {
 	return got
 }
 
-// promptOf is the prompt panel's badge (first row), art and word, from the last render.
+// promptOf is the prompt panel's badge (first row), pixel rows and word, from the last render.
 func promptOf(t *testing.T, msgs []map[string]any) (art, badge, word string) {
 	t.Helper()
 	for _, m := range msgs {
@@ -207,8 +180,10 @@ func promptOf(t *testing.T, msgs []map[string]any) (art, badge, word string) {
 			switch {
 			case n["type"] == "row":
 				badge = n["children"].([]any)[0].(map[string]any)["text"].(string)
-			case n["type"] == "text" && n["mono"] == true:
-				art = n["text"].(string)
+			case n["type"] == "pixels":
+				for _, r := range n["rows"].([]any) {
+					art += r.(string) + "\n"
+				}
 			case n["type"] == "text" && n["muted"] == true:
 				word = n["text"].(string)
 			}
@@ -479,15 +454,80 @@ func TestMouthTalks(t *testing.T) {
 	h.send(`{"jsonrpc":"2.0","method":"event/session_focused","params":{"agent":"claude","session":"s1"}}`)
 	h.action("hatch")
 	h.now = h.now.Add(5 * time.Second)
-	h.s.st.Pet.Species = "tatu"
+	h.s.st.Pet.Species = "gotinha"
 	h.s.talk.cur = nil
 	h.s.say("pet")
 	frame := func() string {
 		h.s.tick()
 		art, _, _ := promptOf(t, h.send(`{"jsonrpc":"2.0","method":"event/file_saved","params":{}}`))
-		return strings.NewReplacer("·", "*").Replace(art)
+		return art
 	}
 	if a, b := frame(), frame(); a == b {
 		t.Errorf("the mouth does not move:\n%s\n%s", a, b)
+	}
+}
+
+func TestDexMatchesTheMockup(t *testing.T) {
+	if len(dex) != 25 {
+		t.Fatalf("%d lines, want 25", len(dex))
+	}
+	forms40, perRarity := 0, map[Rarity]int{}
+	for _, l := range dex {
+		perRarity[l.Rarity]++
+		var lv []int
+		for _, f := range l.Forms {
+			forms40++
+			lv = append(lv, f.Level)
+			if forms[f.ID] == nil {
+				t.Errorf("form %s has no art", f.ID)
+			}
+		}
+		want := map[int][]int{1: {1}, 2: {1, 10}, 3: {1, 5, 15}}[len(l.Forms)]
+		if !reflect.DeepEqual(lv, want) {
+			t.Errorf("%s: levels %v, want %v", l.Forms[0].ID, lv, want)
+		}
+	}
+	if forms40 != 40 {
+		t.Errorf("%d forms, want 40", forms40)
+	}
+	for r, want := range []int{6, 6, 4, 4, 5} {
+		if perRarity[Rarity(r)] != want {
+			t.Errorf("%s: %d lines, want %d", rarities[r].name, perRarity[Rarity(r)], want)
+		}
+	}
+}
+
+func TestSpriteFallsBackToTheEgg(t *testing.T) {
+	if sprite("nope", "idle", 0, false, 0) != sprite("ovo", "idle", 0, false, 0) {
+		t.Error("an unknown form does not draw the egg")
+	}
+}
+
+func TestLoadMigratesOldPets(t *testing.T) {
+	dir := t.TempDir()
+	body := `{"pet":{"name":"A","species":"tatu","xp":300},"past":[{"name":"B","species":"boitata"},{"name":"C","species":"zzz-unknown"}],"eggs":1,"seen":{"tatu":false,"mico":true,"zzz":true}}`
+	if err := os.WriteFile(filepath.Join(dir, stateFile), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := start(t, dir)
+	st := h.s.st
+	if st.Pet.Species != "gotinha" || formOf(st.Pet).ID != "gotinha" {
+		t.Errorf("pet: %q, form %q", st.Pet.Species, formOf(st.Pet).ID)
+	}
+	if len(st.Past) != 1 || st.Past[0].Species != "jormungandr" {
+		t.Errorf("past: %+v", st.Past)
+	}
+	if want := map[string]bool{"gotinha": false, "fenix": true, "jormungandr": false}; !reflect.DeepEqual(st.Seen, want) {
+		t.Errorf("seen: %v, want %v", st.Seen, want)
+	}
+
+	dir = t.TempDir()
+	body = `{"pet":{"name":"A","species":"tatu","xp":5000,"shiny":true},"eggs":0,"seen":{}}`
+	if err := os.WriteFile(filepath.Join(dir, stateFile), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st = start(t, dir).s.st
+	if f := formOf(st.Pet); f.ID != "gosmao" || st.Seen["gosmao"] != true || len(st.Seen) != 1 {
+		t.Errorf("grown pet: form %q, seen %v", f.ID, st.Seen)
 	}
 }

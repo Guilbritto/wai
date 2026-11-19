@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
-	"strings"
 	"time"
 )
 
@@ -33,77 +32,99 @@ var rarities = [...]struct {
 // shinyOdds: one egg in shinyOdds hatches shiny, at any rarity.
 const shinyOdds = 40
 
-// Species art is three lines; E is an eye, M the mouth, and * twinkles.
-type Species struct {
+// Form is one stage of a line; Level is where it is reached (the first form is 1).
+type Form struct {
 	ID, Name string
-	Rarity   Rarity
-	Art      [3]string
+	Level    int
 }
 
-var species = []Species{
-	{"tatu", "Tatu", Common, [3]string{
-		`  .-===-.`,
-		` ( E M E )`,
-		"  `^^-^^'"}},
-	{"sapo", "Sapo-cururu", Common, [3]string{
-		`  (E)_(E)`,
-		` (   M   )`,
-		`  ^^   ^^`}},
-	{"jabuti", "Jabuti", Common, [3]string{
-		`  _/###\_`,
-		` ( E M E )`,
-		`  "-' '-"`}},
-	{"vagalume", "Vagalume", Common, [3]string{
-		`  \   /`,
-		` (E M E)`,
-		`  /)*(\`}},
-	{"quati", "Quati", Uncommon, [3]string{
-		`  /\_/\`,
-		` (E M E)`,
-		`  (___)=#=#`}},
-	{"tucano", "Tucano", Uncommon, [3]string{
-		`   .--.`,
-		`  ( E  )==>`,
-		`   )  (`}},
-	{"preguica", "Preguiça", Uncommon, [3]string{
-		` ~~~~~~~~~`,
-		`  \(EME)/`,
-		`   (   )`}},
-	{"lobo-guara", "Lobo-guará", Rare, [3]string{
-		`  /\   /\`,
-		` ( E M E )`,
-		`   || ||`}},
-	{"boto", "Boto-cor-de-rosa", Rare, [3]string{
-		`    __`,
-		`  <(E M)~~`,
-		` ~~~~~~~~~~`}},
-	{"mico", "Mico-leão-dourado", Epic, [3]string{
-		` \\|||//`,
-		` (E M E)`,
-		` //|||\\`}},
-	{"curupira", "Curupira", Epic, [3]string{
-		`  ^^^^^`,
-		` (E M E)`,
-		`  <| |<`}},
-	{"boitata", "Boitatá", Legendary, [3]string{
-		` *~(E E)~*`,
-		`  ~\_M_/~`,
-		` *~~~~~~~*`}},
+// Line is an evolution line; its id is Forms[0].ID.
+type Line struct {
+	Rarity Rarity
+	Forms  []Form
 }
 
-var eggArt = [3]string{
-	`   .-.`,
-	`  (   )`,
-	"   `-'",
+func ln(r Rarity, forms ...Form) Line    { return Line{r, forms} }
+func fm(id, name string, level int) Form { return Form{id, name, level} }
+
+// dex lists the lines in the mockup's order: the source of form numbers #001 to #040.
+var dex = []Line{
+	ln(Common, fm("gotinha", "Gotinha", 1), fm("gosma", "Gosma", 5), fm("gosmao", "Gosmão", 15)),
+	ln(Common, fm("larvinha", "Larvinha", 1), fm("bug", "Bug", 5), fm("megabug", "Megabug", 15)),
+	ln(Common, fm("fagulha", "Fagulha", 1), fm("fogo", "Fogo-fátuo", 10)),
+	ln(Common, fm("bit", "Bit", 1), fm("bot", "Bot", 10)),
+	ln(Common, fm("alevino", "Alevino", 1), fm("abissal", "Peixe-abissal", 10)),
+	ln(Common, fm("bauzinho", "Bauzinho", 1), fm("mimico", "Mímico", 10)),
+	ln(Uncommon, fm("grifinho", "Grifinho", 1), fm("grifo", "Grifo", 10)),
+	ln(Uncommon, fm("pedrinha", "Pedrinha", 1), fm("golem", "Golem", 10)),
+	ln(Uncommon, fm("corvinho", "Corvinho", 1), fm("corvo", "Corvo de Odin", 10)),
+	ln(Uncommon, fm("drone", "Drone", 1)),
+	ln(Uncommon, fm("ursinhocoruja", "Ursinho-coruja", 1), fm("ursocoruja", "Urso-coruja", 10)),
+	ln(Uncommon, fm("ferrugem", "Monstro da ferrugem", 1)),
+	ln(Rare, fm("dragaozinho", "Dragãozinho", 1), fm("dragao", "Dragão", 10)),
+	ln(Rare, fm("caozinho", "Cãozinho", 1), fm("cerbero", "Cérbero", 10)),
+	ln(Rare, fm("cavalinho", "Cavalo-marinho", 1), fm("hipocampo", "Hipocampo", 10)),
+	ln(Rare, fm("cubo", "Cubo gelatinoso", 1)),
+	ln(Epic, fm("fenix", "Fênix", 1)),
+	ln(Epic, fm("sleipnir", "Sleipnir", 1)),
+	ln(Epic, fm("mecha", "Mecha", 1)),
+	ln(Epic, fm("verme", "Verme púrpura", 1)),
+	ln(Legendary, fm("kraken", "Kraken", 1)),
+	ln(Legendary, fm("jormungandr", "Jörmungandr", 1)),
+	ln(Legendary, fm("hidra", "Hidra", 1)),
+	ln(Legendary, fm("singularidade", "Singularidade", 1)),
+	ln(Legendary, fm("tarrasque", "Tarrasque", 1)),
 }
 
-func speciesByID(id string) *Species {
-	for i := range species {
-		if species[i].ID == id {
-			return &species[i]
+// oldSpecies maps the species of 0.3.1 to the line that took their place.
+var oldSpecies = map[string]string{"tatu": "gotinha", "sapo": "larvinha", "jabuti": "alevino",
+	"vagalume": "fagulha", "quati": "grifinho", "tucano": "corvinho", "preguica": "pedrinha",
+	"lobo-guara": "caozinho", "boto": "cavalinho", "mico": "fenix", "curupira": "sleipnir",
+	"boitata": "jormungandr"}
+
+// lineByID is nil when id is not the first form of a line.
+func lineByID(id string) *Line {
+	for i := range dex {
+		if dex[i].Forms[0].ID == id {
+			return &dex[i]
 		}
 	}
 	return nil
+}
+
+func isForm(id string) bool {
+	for _, l := range dex {
+		for _, f := range l.Forms {
+			if f.ID == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// formOf is the last form of p's line whose Level the pet has reached.
+func formOf(p *Pet) Form {
+	l := lineByID(p.Species)
+	if l == nil {
+		return Form{ID: "ovo", Name: "Egg", Level: 1}
+	}
+	f := l.Forms[0]
+	for _, c := range l.Forms {
+		if c.Level <= level(p.XP) {
+			f = c
+		}
+	}
+	return f
+}
+
+// pixels is a pixels panel node; id is left out when empty.
+func pixels(g grid, scale int, id string) node {
+	n := node{"type": "pixels", "rows": g.rows(), "scale": scale}
+	if id != "" {
+		n["id"] = id
+	}
+	return n
 }
 
 var names = []string{
@@ -116,7 +137,7 @@ var statNames = [4]string{"Focus", "Calm", "Chaos", "Charm"}
 
 type Pet struct {
 	Name    string    `json:"name"`
-	Species string    `json:"species"`
+	Species string    `json:"species"` // the line id
 	Shiny   bool      `json:"shiny"`
 	Born    time.Time `json:"born"`
 	XP      int       `json:"xp"`
@@ -131,7 +152,7 @@ type State struct {
 	Pet   *Pet            `json:"pet,omitempty"` // nil: an egg waits
 	Eggs  int             `json:"eggs"`
 	Turns int             `json:"turns"`
-	Seen  map[string]bool `json:"seen"` // species hatched; true once one was shiny
+	Seen  map[string]bool `json:"seen"` // forms seen; true once one was shiny
 	Past  []Pet           `json:"past,omitempty"`
 
 	Lines      map[string][]string `json:"lines,omitempty"` // Claude's pools for the pet born at LinesBorn
@@ -196,13 +217,13 @@ func rollRarity(rng *rand.Rand) Rarity {
 // Hatch opens an egg; the current pet, if any, moves to Past.
 func (st *State) Hatch(rng *rand.Rand, now time.Time) *Pet {
 	tier := rollRarity(rng)
-	var pool []Species
-	for _, s := range species {
-		if s.Rarity == tier {
-			pool = append(pool, s)
+	var pool []*Line
+	for i := range dex {
+		if dex[i].Rarity == tier {
+			pool = append(pool, &dex[i])
 		}
 	}
-	sp := pool[rng.IntN(len(pool))]
+	sp := pool[rng.IntN(len(pool))].Forms[0]
 	p := &Pet{
 		Name: names[rng.IntN(len(names))], Species: sp.ID, Shiny: rng.IntN(shinyOdds) == 0,
 		Born: now, FedAt: now, Love: 60, LovedAt: now,
@@ -242,65 +263,6 @@ func (st *State) TurnEnded(reason string) (levelUp, egg bool) {
 	before := level(st.Pet.XP)
 	st.Pet.XP += gain
 	return level(st.Pet.XP) > before, egg
-}
-
-// A mood is the face and what floats beside it; fx cycles one step every `every` frames.
-type mood struct {
-	eye, mouth string
-	fx         []string
-	every      int
-}
-
-var moods = map[string]mood{
-	"idle":     {"o", "_", nil, 1},
-	"blink":    {"-", "_", nil, 1},
-	"happy":    {"^", "w", []string{"♥", " ♥"}, 1},
-	"surprise": {"O", "o", []string{"!"}, 1},
-	"working":  {"•", "~", []string{".", "..", "..."}, 1},
-	"alert":    {"O", "o", []string{"!", " !"}, 1},
-	"error":    {"x", "~", []string{"#"}, 1},
-	"hungry":   {"o", "O", nil, 1},
-	"sad":      {";", "n", nil, 1},
-	"talk":     {"o", "o", nil, 1},
-	"sleeping": {"-", "_", []string{"z", "zZ"}, 4},
-}
-
-// draw is the pet's three lines for a mood at an animation frame.
-func draw(p *Pet, moodName string, frame int) string {
-	m := moods[moodName]
-	if moodName == "idle" && frame%8 == 7 {
-		m = moods["blink"]
-	}
-	if moodName == "talk" && frame%2 == 1 {
-		m.mouth = "_"
-	}
-	lines := eggArt
-	if p != nil {
-		if sp := speciesByID(p.Species); sp != nil {
-			lines = sp.Art
-		}
-	}
-	twinkle := strings.NewReplacer("*", "·")
-	for i, l := range lines {
-		if p != nil {
-			l = strings.NewReplacer("E", m.eye, "M", m.mouth).Replace(l)
-		}
-		if frame%2 == 1 {
-			l = twinkle.Replace(l)
-		}
-		// Working bobs; an egg wobbles.
-		if (moodName == "working" && frame%2 == 1) || (p == nil && frame/2%2 == 1) {
-			l = " " + l
-		}
-		lines[i] = l
-	}
-	if len(m.fx) > 0 {
-		lines[0] += " " + m.fx[frame/m.every%len(m.fx)]
-	}
-	if p != nil && p.Shiny {
-		lines[2] += []string{" ✦", " ✧"}[frame/4%2]
-	}
-	return strings.Join(lines[:], "\n")
 }
 
 func (p *Pet) Title() string {

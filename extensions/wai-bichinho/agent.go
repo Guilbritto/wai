@@ -47,9 +47,9 @@ var traits = [4]struct{ high, low string }{
 }
 
 func persona(p *Pet) string {
-	sp := speciesByID(p.Species)
+	sp := lineByID(p.Species)
 	var b strings.Builder
-	fmt.Fprintf(&b, "You are %s, a %s, a %s creature from Brazilian fauna or folklore; let its nature show.", p.Name, sp.Name, strings.ToLower(rarities[sp.Rarity].name))
+	fmt.Fprintf(&b, "You are %s, a %s, a %s creature of myth, the sea, tech or fantasy; let its nature show.", p.Name, formOf(p).Name, strings.ToLower(rarities[sp.Rarity].name))
 	switch sp.Rarity {
 	case Epic:
 		b.WriteString(" You are proud.")
@@ -81,7 +81,7 @@ func persona(p *Pet) string {
 
 func request(p *Pet, mood string, diary []Note) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Pet: %s, a %s, level %d. ", p.Name, speciesByID(p.Species).Name, level(p.XP))
+	fmt.Fprintf(&b, "Pet: %s, a %s, level %d. ", p.Name, formOf(p).Name, level(p.XP))
 	fmt.Fprintf(&b, "Stats (1-10): %s %d, %s %d, %s %d, %s %d. Mood now: %s.\n", statNames[0], p.Stats[0], statNames[1], p.Stats[1], statNames[2], p.Stats[2], statNames[3], p.Stats[3], mood)
 	if len(diary) > 0 {
 		b.WriteString("\nYour diary, oldest first:\n")

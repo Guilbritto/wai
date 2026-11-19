@@ -12,7 +12,7 @@ import (
 )
 
 func petWith(stats [4]int, xp int) *Pet {
-	return &Pet{Name: "Bolota", Species: "tatu", Born: t0, XP: xp, Stats: stats}
+	return &Pet{Name: "Bolota", Species: "gotinha", Born: t0, XP: xp, Stats: stats}
 }
 
 func TestPersonaFollowsStats(t *testing.T) {
@@ -39,7 +39,7 @@ func TestPersonaFollowsStats(t *testing.T) {
 		t.Errorf("level 6:\n%s", p6)
 	}
 	leg := petWith([4]int{5, 5, 5, 5}, 0)
-	leg.Species = "boitata"
+	leg.Species = "jormungandr"
 	if !strings.Contains(persona(leg), "legend") || strings.Contains(persona(leg), "shine") {
 		t.Errorf("legendary:\n%s", persona(leg))
 	}
@@ -238,5 +238,12 @@ func TestEventsWriteDiary(t *testing.T) {
 	h.send(`{"jsonrpc":"2.0","method":"event/turn_ended","params":{"reason":"end_turn"}}`)
 	if d := h.s.st.Diary; d[len(d)-1].Text != "reached level 2" {
 		t.Errorf("diary %v", d)
+	}
+}
+
+func TestPersonaUsesTheForm(t *testing.T) {
+	p := persona(&Pet{Species: "gotinha", XP: 400})
+	if !strings.Contains(p, "Gosma") || !strings.Contains(p, "myth, the sea, tech or fantasy") || strings.Contains(p, "Brazilian fauna") {
+		t.Errorf("persona:\n%s", p)
 	}
 }

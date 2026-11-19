@@ -100,17 +100,42 @@ func (s *server) load() {
 	if st.Seen == nil {
 		st.Seen = map[string]bool{}
 	}
-	// A species this version does not know (a newer one wrote the file) is left out.
-	if st.Pet != nil && speciesByID(st.Pet.Species) == nil {
-		st.Pet = nil
+	// 0.3.1 kept species the dex replaced; ones nobody knows (a newer version wrote them) are left out.
+	line := func(id string) (string, bool) {
+		if lineByID(id) == nil {
+			id = oldSpecies[id]
+		}
+		return id, lineByID(id) != nil
+	}
+	seen := map[string]bool{}
+	for id, shiny := range st.Seen {
+		if isForm(id) {
+			seen[id] = seen[id] || shiny
+		} else if id, ok := line(id); ok {
+			seen[id] = seen[id] || shiny
+		}
+	}
+	mark := func(p *Pet) {
+		id := formOf(p).ID
+		seen[id] = seen[id] || p.Shiny
+	}
+	if st.Pet != nil {
+		if id, ok := line(st.Pet.Species); ok {
+			st.Pet.Species = id
+			mark(st.Pet)
+		} else {
+			st.Pet = nil
+		}
 	}
 	past := st.Past[:0]
 	for _, p := range st.Past {
-		if speciesByID(p.Species) != nil {
+		if id, ok := line(p.Species); ok {
+			p.Species = id
+			mark(&p)
 			past = append(past, p)
 		}
 	}
-	st.Past = past
+	st.Past, st.Seen = past, seen
 	s.st = st
 }
 
@@ -246,18 +271,22 @@ func (s *server) hatchItem(label string) node {
 
 func (s *server) promptTree(now time.Time) node {
 	mood, status := s.mood(now)
+	form, shiny := Form{ID: "ovo"}, false
 	badge := node{"type": "badge", "text": "egg"}
 	if p := s.st.Pet; p != nil {
-		badge = node{"type": "badge", "text": fmt.Sprintf("Lv %d", level(p.XP)), "tone": rarities[speciesByID(p.Species).Rarity].tone}
+		form, shiny = formOf(p), p.Shiny
+		badge = node{"type": "badge", "text": fmt.Sprintf("Lv %d", level(p.XP)), "tone": rarities[lineByID(p.Species).Rarity].tone}
 	}
+	// ponytail: Task 9 maps every mood to art; until then only talking differs.
+	artMood := "idle"
 	if mood == "idle" && s.talk.talking(now) {
-		mood = "talk"
+		artMood = "talk"
 	}
 	// The drawing gets a line of its own: its width changes between frames, so anything beside it
 	// would wrap under it and back. The menu sits by the badge, which does not animate.
 	kids := []node{
 		{"type": "row", "children": []node{badge, {"type": "spacer"}, s.menu()}},
-		{"type": "text", "text": draw(s.st.Pet, mood, s.frame), "mono": true},
+		pixels(sprite(form.ID, artMood, s.frame, shiny, s.frame%2), 2, "pet"),
 		{"type": "text", "text": status, "muted": true},
 	}
 	if c := s.talk.cur; c != nil {
@@ -289,13 +318,13 @@ func (s *server) cardTree(now time.Time) node {
 	p := s.st.Pet
 	if p == nil {
 		return node{"type": "column", "children": []node{
-			{"type": "text", "text": draw(nil, "egg", 0), "mono": true},
+			pixels(sprite("ovo", "idle", 0, false, 0), 3, ""),
 			text("An egg. Hatch it to meet your pet: it may be common, or very rare.", true),
 			hatch,
 		}}
 	}
-	sp := speciesByID(p.Species)
-	r := rarities[sp.Rarity]
+	form := formOf(p)
+	r := rarities[lineByID(p.Species).Rarity]
 	head := []node{{"type": "text", "text": p.Name}, {"type": "badge", "text": r.name, "tone": r.tone}}
 	if p.Shiny {
 		head = append(head, node{"type": "badge", "text": "✦ Shiny", "tone": "warning"})
@@ -311,27 +340,31 @@ func (s *server) cardTree(now time.Time) node {
 	for i, n := range statNames {
 		stats = append(stats, n, fmt.Sprintf("%s %d", strings.Repeat("●", p.Stats[i])+strings.Repeat("○", 10-p.Stats[i]), p.Stats[i]))
 	}
-	var dex []node
-	seen := 0
-	for _, sp := range species {
-		name := "???"
-		if shiny, ok := s.st.Seen[sp.ID]; ok {
-			seen++
-			name = sp.Name
-			if shiny {
-				name += " ✦"
+	var dexRows []node
+	seen, no := 0, 0
+	for _, l := range dex {
+		r := rarities[l.Rarity]
+		for _, f := range l.Forms {
+			no++
+			name := fmt.Sprintf("#%03d ???", no)
+			if shiny, ok := s.st.Seen[f.ID]; ok {
+				seen++
+				name = fmt.Sprintf("#%03d %s", no, f.Name)
+				if shiny {
+					name += " ✦"
+				}
 			}
+			dexRows = append(dexRows, node{"cells": []any{name, node{"type": "badge", "text": r.name, "tone": r.tone}}})
 		}
-		dex = append(dex, node{"cells": []any{name, node{"type": "badge", "text": rarities[sp.Rarity].name, "tone": rarities[sp.Rarity].tone}}})
 	}
 	var past []string
 	for _, q := range s.st.Past {
-		past = append(past, q.Title(), fmt.Sprintf("%s · Lv %d", speciesByID(q.Species).Name, level(q.XP)))
+		past = append(past, q.Title(), fmt.Sprintf("%s · Lv %d", formOf(&q).Name, level(q.XP)))
 	}
 	kids := []node{
-		{"type": "text", "text": draw(p, "idle", 0), "mono": true},
+		pixels(sprite(form.ID, "idle", 0, p.Shiny, 0), 3, ""),
 		{"type": "row", "children": head},
-		text(fmt.Sprintf("%s · born %s", sp.Name, p.Born.Local().Format("Jan 2")), true),
+		text(fmt.Sprintf("%s · born %s", form.Name, p.Born.Local().Format("Jan 2")), true),
 		kv("Level", fmt.Sprintf("%d (%d/%d xp)", lv, p.XP, next),
 			"Hunger", percent(p.Hunger(now)),
 			"Love", percent(p.Affection(now)),
@@ -349,8 +382,8 @@ func (s *server) cardTree(now time.Time) node {
 				{"type": "button", "id": "rename", "label": "Rename"},
 			}},
 		}},
-		{"type": "section", "id": "s-dex", "title": "Collection", "badge": fmt.Sprintf("%d/%d", seen, len(species)), "children": []node{
-			{"type": "table", "columns": []node{{"title": "Species"}, {"title": "Rarity", "width": 110}}, "rows": dex},
+		{"type": "section", "id": "s-dex", "title": "Collection", "badge": fmt.Sprintf("%d/%d", seen, no), "children": []node{
+			{"type": "table", "columns": []node{{"title": "Form"}, {"title": "Rarity", "width": 110}}, "rows": dexRows},
 		}},
 	}
 	if len(past) > 0 {
@@ -446,8 +479,7 @@ func (s *server) act(action string, values map[string]any) {
 	case "hatch":
 		if s.st.Eggs > 0 {
 			p := s.st.Hatch(s.rng, now)
-			sp := speciesByID(p.Species)
-			s.note(fmt.Sprintf("hatched %s, a %s %s", p.Name, strings.ToLower(rarities[sp.Rarity].name), sp.Name))
+			s.note(fmt.Sprintf("hatched %s, a %s %s", p.Name, strings.ToLower(rarities[lineByID(p.Species).Rarity].name), formOf(p).Name))
 			s.react("surprise", "hi!")
 			s.say("hatch")
 		}
