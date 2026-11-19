@@ -93,7 +93,7 @@ pub struct McpServerSpec {
 
 /// The extension API this wai speaks: `initialize` sends it, and a manifest's `api` may not be
 /// newer.
-pub const API: &str = "1.8";
+pub const API: &str = "1.9";
 
 pub const MAX_ITEMS: usize = 3;
 
@@ -189,12 +189,20 @@ pub enum PanelLocation {
     /// Beside the focused session's prompt box, at its right (API 1.6).
     #[serde(rename = "prompt-side")]
     PromptSide,
+    /// At the foot of the sidebar, on every tab (API 1.9).
+    #[serde(rename = "sidebar-foot")]
+    SidebarFoot,
 }
 
 impl PanelLocation {
     /// Drawn by the prompt box, not the activity bar.
     pub fn in_prompt(self) -> bool {
         matches!(self, Self::Prompt | Self::PromptSide)
+    }
+
+    /// Drawn in a fixed spot, not from the activity bar: one per location.
+    pub fn docked(self) -> bool {
+        matches!(self, Self::Prompt | Self::PromptSide | Self::SidebarFoot)
     }
 }
 
@@ -466,9 +474,14 @@ pub fn parse_manifest(text: &str, _ext_dir: &Path) -> Result<Manifest, ManifestE
                 p.id
             )));
         }
-        if p.location.in_prompt() && c.panels[..i].iter().any(|o| o.location == p.location) {
+        if p.location.docked() && c.panels[..i].iter().any(|o| o.location == p.location) {
+            let location = match p.location {
+                PanelLocation::Prompt => "prompt",
+                PanelLocation::PromptSide => "prompt-side",
+                _ => "sidebar-foot",
+            };
             return Err(ManifestError::Unknown(format!(
-                "panel {:?}: one panel per prompt location",
+                "panel {:?}: one panel per {location} location",
                 p.id
             )));
         }

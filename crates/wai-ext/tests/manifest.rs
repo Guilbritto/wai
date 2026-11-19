@@ -275,6 +275,20 @@ fn panel_icon_and_location() {
     assert!(panel("wide=true\n").unwrap().contributes.panels[0].wide);
     let wide_main = panel("wide=true\nlocation=\"main\"\n").unwrap_err();
     assert!(wide_main.to_string().contains("wide"), "{wide_main}");
+
+    // The sidebar's foot (API 1.9): docked, one per manifest, no width, frame or wide.
+    let p = panel("location=\"sidebar-foot\"\n").unwrap();
+    assert_eq!(p.contributes.panels[0].location, PanelLocation::SidebarFoot);
+    assert!(p.contributes.panels[0].location.docked());
+    assert!(!p.contributes.panels[0].location.in_prompt());
+    for bad in ["width=150\n", "frame=false\n", "wide=true\n"] {
+        assert!(
+            panel(&format!("location=\"sidebar-foot\"\n{bad}")).is_err(),
+            "{bad}"
+        );
+    }
+    assert!(two("sidebar-foot", "sidebar-foot").is_err());
+    assert!(two("sidebar-foot", "prompt").is_ok());
 }
 
 #[test]
@@ -291,17 +305,18 @@ fn api_version_is_checked_first() {
     assert!(with_api("\"1.6\"", "").is_ok());
     assert!(with_api("\"1.7\"", "").is_ok());
     assert!(with_api("\"1.8\"", "").is_ok());
-    let newer = with_api("\"1.9\"", "").unwrap_err();
+    assert!(with_api("\"1.9\"", "").is_ok());
+    let newer = with_api("\"1.10\"", "").unwrap_err();
     assert_eq!(
         newer.to_string(),
-        "Go Tools needs a newer wai (extension API 1.9; this wai has 1.8)"
+        "Go Tools needs a newer wai (extension API 1.10; this wai has 1.9)"
     );
     // Even when the newer API's fields would fail the strict parse.
     assert_eq!(
         with_api("\"2.0\"", "\nfuture = true\n")
             .unwrap_err()
             .to_string(),
-        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.8)"
+        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.9)"
     );
     // Numeric, not lexical: 1.10 is newer than 1.2.
     assert!(matches!(
