@@ -311,12 +311,20 @@ impl Workspace {
             .size_full()
             .py_2()
             .text_color(cx.theme().sidebar_foreground)
-            .child(v_flex().flex_1().min_h_0().child(content))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .debug_selector(|| "sidebar-body".into())
+                    .child(content),
+            )
             .children(foot.map(|p| {
                 div()
                     .id("sidebar-foot")
                     .debug_selector(|| "sidebar-foot".into())
                     .flex_none()
+                    .max_h(relative(0.5))
+                    .overflow_hidden()
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .child(p.view.clone())

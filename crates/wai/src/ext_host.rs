@@ -1865,6 +1865,44 @@ pub(crate) mod tests {
         assert!(foot(cx).is_none());
     }
 
+    /// A foot taller than half the sidebar is clipped, so the tabs keep their room.
+    #[gpui_kit::test]
+    fn tall_sidebar_foot_is_clipped(cx: &mut TestAppContext) {
+        use gpui_kit::{px, size};
+        use wai_ext::PanelLocation;
+        use wai_ext::panel::parse;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = "id = \"pet\"\nname = \"Pet\"\nversion = \"1.0.0\"\napi = \"1.9\"\n\
+            permissions = [\"process\", \"panels\"]\n\
+            [process]\ncommand = \"bin/run\"\n\
+            [[contributes.panels]]\nid = \"foot\"\ntitle = \"Foot\"\nlocation = \"sidebar-foot\"\n";
+        install(tmp.path(), &config, manifest, "", "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        cx.simulate_resize(size(px(1400.), px(800.)));
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        wait_until(cx, "the panel", |cx| {
+            host.read_with(cx, |h, _| h.panel_at(PanelLocation::SidebarFoot).is_some())
+        });
+        let slot = host.read_with(cx, |h, _| {
+            h.panel_at(PanelLocation::SidebarFoot)
+                .map(|p| p.view.clone())
+                .unwrap()
+        });
+        let row = "#".repeat(64);
+        let tree = json!({"type": "pixels", "rows": vec![row; 64], "scale": 8});
+        slot.update(cx, |p, cx| p.set_tree(parse(&tree), cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.render_frame(cx));
+        let sidebar = cx.debug_bounds("sidebar").unwrap();
+        let foot = cx.debug_bounds("sidebar-foot").unwrap();
+        let body = cx.debug_bounds("sidebar-body").unwrap();
+        assert!(foot.size.height <= sidebar.size.height / 2. + px(0.5));
+        assert!(foot.size.height > px(100.), "{foot:?}");
+        assert!(body.size.height > px(0.), "{body:?}");
+    }
+
     /// The real wai-bichinho, built with `go`, walks its pixel pet in the sidebar's foot.
     #[cfg(unix)]
     #[gpui_kit::test]

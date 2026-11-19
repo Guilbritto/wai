@@ -55,7 +55,7 @@ title = "Pull requests"
 | `contributes.mcp_servers` | array of tables | `name`, `command`, optional `args` (array), optional `env` (table of strings). Needs `process` |
 | `contributes.claude_plugins` | array of strings | Claude Code plugin names to suggest |
 | `requires.claude_plugins` | array of tables | `name`, `marketplace` (`owner/repo` or an `https://` URL of letters, digits and `._~:/@%+=,-`). At most 5. API 1.5. Installed after consent, see [Installing and consent](#installing-and-consent) |
-| `contributes.panels` | array of tables | `id`, `title`, optional `icon`, optional `location`, optional `width` (prompt panels only), optional `wide` (sidebar panels, API 1.6), optional `frame` (`prompt-side` panels, API 1.7). At most one `prompt` and one `prompt-side` panel. See [Panels](#panels). Needs `panels` |
+| `contributes.panels` | array of tables | `id`, `title`, optional `icon`, optional `location`, optional `width` (prompt panels only), optional `wide` (sidebar panels, API 1.6), optional `frame` (`prompt-side` panels, API 1.7). At most one each of `prompt`, `prompt-side` and `sidebar-foot` panel; `width`, `wide` and `frame` are rejected on `sidebar-foot`. See [Panels](#panels). Needs `panels` |
 | `contributes.items` | array of tables | `id`, `bar` (`"top"` or `"bottom"`), `title`. At most 3. See [Bar items](#bar-items). Needs `bar` |
 | `contributes.themes` | array of strings | Paths, relative to the extension's folder, of theme-set `.json` files (same format as `~/.config/wai/themes/*.json`, see the [user guide](user-guide.md#appearance)). They show in Settings > Appearance while the extension is enabled. A path that is missing, outside the folder or not a theme set is skipped with a notice |
 
@@ -245,7 +245,7 @@ A panel exists while your process runs, and its content is the last tree you ren
 - **`sidebar-foot`** (API 1.9): a dock at the bottom of the sidebar, under every tab, with a 1 px top border and its tree's natural height.
   - It has no activity-bar button, and `panel/open` on it does nothing. `width`, `frame` and `wide` are invalid on it.
   - At most one per manifest; across extensions the first one wins, as for the prompt slots.
-  - It does not scroll: the tree takes its own height. A `bubble` floats above the dock instead of growing it, and a `menu` shows only while the mouse is over the dock (it keeps its space).
+  - It does not scroll: the tree takes its own height, and a foot taller than half the sidebar is clipped. A `bubble` floats above the dock instead of growing it, and a `menu` shows only while the mouse is over the dock (it keeps its space).
 
 **`icon`:** a [Lucide](https://lucide.dev/icons) icon name in kebab-case, such as `git-pull-request`, `database` or `rocket`. wai ships the whole Lucide set it bundles; an unknown name falls back to the initials and does not fail the install. The `icon` node and the `icon` fields of nodes take the same names. A panel's `icon` may instead be the path of an `.svg` file in your extension's folder (`icons/panel.svg`): a relative path without `..`, at most 32 KB, a regular file (not a symlink). wai draws it as a mask in the activity bar's colours, so its fill colour does not matter, and shows the initials when the file is missing or too big. The shared release workflow packs it.
 
