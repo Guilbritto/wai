@@ -251,7 +251,7 @@ The dex has 25 lines and 40 forms. Ids, names and evolution levels follow `TIERS
 
 ## Calls made without asking
 
-- The tick goes to 250 ms, about 16 KB/s of JSON while walking, which is negligible on stdio. Sending only on change keeps it at zero while the pet sleeps.
+- The tick goes to 250 ms, about 16 KB/s of JSON while walking, which is negligible on stdio. Sending only on change keeps it low when the pet stands still: only the effect glyphs (z's, hearts) change then.
 - The stage is 128 cells, not the mockup's 132, so it fits the 280 px sidebar.
 - The egg migration map in the table above.
 - "Switch pet" in the menu just opens the card.
