@@ -247,10 +247,10 @@ impl ExtHost {
         &self.panels
     }
 
-    /// The panels with an activity bar button: not the prompt box's.
+    /// The panels with an activity bar button: not the docked ones.
     pub fn rail_panels(&self) -> Vec<&Panel> {
         (self.panels.iter())
-            .filter(|p| !p.location.in_prompt())
+            .filter(|p| !p.location.docked())
             .collect()
     }
 
@@ -328,8 +328,8 @@ impl ExtHost {
         Some(HostEvent::SessionFocused { agent, session })
     }
 
-    /// The first prompt panel at `location` of the running extensions, in list order.
-    pub fn prompt_panel(&self, location: PanelLocation) -> Option<&Panel> {
+    /// The first panel at `location` of the running extensions, in list order.
+    pub fn panel_at(&self, location: PanelLocation) -> Option<&Panel> {
         self.panels.iter().find(|p| p.location == location)
     }
 
@@ -427,7 +427,12 @@ impl ExtHost {
             installed.manifest.name.clone(),
         );
         let ext_name = SharedString::from(ext_name);
-        let view = cx.new(|_| ExtPanel::new(ext_name.clone()));
+        let foot = spec.location == PanelLocation::SidebarFoot;
+        let view = cx.new(|_| {
+            let mut panel = ExtPanel::new(ext_name.clone());
+            panel.foot = foot;
+            panel
+        });
         let (to, panel) = (ext.clone(), spec.id.clone());
         let actions = cx.subscribe(&view, move |this, _, action: &PanelAction, _| {
             if let Some(handle) = this.handle(&to) {
@@ -1734,13 +1739,11 @@ pub(crate) mod tests {
         cx.simulate_resize(size(px(1400.), px(800.)));
         let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
         wait_until(cx, "the panel", |cx| {
-            host.read_with(cx, |h, _| {
-                h.prompt_panel(PanelLocation::PromptSide).is_some()
-            })
+            host.read_with(cx, |h, _| h.panel_at(PanelLocation::PromptSide).is_some())
         });
         cx.simulate_keystrokes("secondary-n");
         let slot = host.read_with(cx, |h, _| {
-            h.prompt_panel(PanelLocation::PromptSide)
+            h.panel_at(PanelLocation::PromptSide)
                 .map(|p| p.view.clone())
                 .unwrap()
         });
@@ -1762,6 +1765,84 @@ pub(crate) mod tests {
             (side.bottom() - field.bottom()).abs() < px(0.5),
             "{side:?} {field:?}"
         );
+    }
+
+    /// API 1.9: a `sidebar-foot` panel sits under every sidebar tab, with no rail button. Its
+    /// height is its content's; a bubble floats above it.
+    #[gpui_kit::test]
+    fn sidebar_foot_shows_on_every_tab(cx: &mut TestAppContext) {
+        use gpui_kit::{ElementId, px, size};
+        use wai_ext::PanelLocation;
+        use wai_ext::panel::parse;
+
+        use crate::sidebar::SidebarTab;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = "id = \"pet\"\nname = \"Pet\"\nversion = \"1.0.0\"\napi = \"1.9\"\n\
+            permissions = [\"process\", \"panels\"]\n\
+            [process]\ncommand = \"bin/run\"\n\
+            [[contributes.panels]]\nid = \"foot\"\ntitle = \"Foot\"\nlocation = \"sidebar-foot\"\n";
+        install(tmp.path(), &config, manifest, "", "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        cx.simulate_resize(size(px(1400.), px(800.)));
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        wait_until(cx, "the panel", |cx| {
+            host.read_with(cx, |h, _| h.panel_at(PanelLocation::SidebarFoot).is_some())
+        });
+        let slot = host.read_with(cx, |h, _| {
+            h.panel_at(PanelLocation::SidebarFoot)
+                .map(|p| p.view.clone())
+                .unwrap()
+        });
+        let draw = |tree: serde_json::Value, cx: &mut VisualTestContext| {
+            slot.update(cx, |p, cx| p.set_tree(parse(&tree), cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.render_frame(cx));
+        };
+        let foot = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| window.render_frame(cx));
+            cx.debug_bounds("sidebar-foot")
+        };
+
+        draw(json!({"type": "text", "text": "Pipoca"}), cx);
+        workspace.update(cx, |w, cx| {
+            w.sidebar_tab = SidebarTab::Sessions;
+            cx.notify();
+        });
+        assert!(foot(cx).is_some());
+        workspace.update(cx, |w, cx| {
+            w.sidebar_tab = SidebarTab::History;
+            cx.notify();
+        });
+        draw(json!({"type": "text", "text": "Pipoca"}), cx);
+        assert!(foot(cx).is_some());
+        assert!(crate::sidebar::tests::label(("tab-panel", 0usize), cx).is_none());
+
+        let text = json!({"type": "text", "text": "Pipoca"});
+        draw(json!({"type": "column", "children": [text.clone()]}), cx);
+        let plain = foot(cx).unwrap();
+        draw(
+            json!({"type": "column", "children": [
+                {"type": "bubble", "id": "say", "text": "Oi"},
+                text,
+            ]}),
+            cx,
+        );
+        let with = foot(cx).unwrap();
+        assert_eq!(with.size.height, plain.size.height);
+        let bubble = cx.update(|window, _| {
+            window
+                .find(ElementId::Name("panel-bubble:say".into()))
+                .bounds()
+        });
+        assert!(bubble.top() < with.top(), "{bubble:?} {with:?}");
+
+        workspace.update(cx, |w, cx| {
+            w.sidebar_hidden = true;
+            cx.notify();
+        });
+        assert!(foot(cx).is_none());
     }
 
     /// The real wai-bichinho, built with `go`, draws its egg beside the focused prompt box.
@@ -1805,7 +1886,7 @@ pub(crate) mod tests {
         });
         start_now(&workspace, cx);
         let slot = host.read_with(cx, |h, _| {
-            h.prompt_panel(PanelLocation::PromptSide)
+            h.panel_at(PanelLocation::PromptSide)
                 .map(|p| p.view.clone())
         });
         let slot = slot.expect("the pet's slot");

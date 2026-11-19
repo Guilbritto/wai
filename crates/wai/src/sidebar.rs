@@ -16,6 +16,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_agent::SessionSummary;
+use wai_ext::PanelLocation;
 pub use wai_settings::canonical;
 use wai_settings::{SessionGroup, WorkArea};
 
@@ -305,11 +306,21 @@ impl Workspace {
             SidebarTab::Search => self.search.clone().into_any_element(),
             SidebarTab::Agents => self.render_agents(cx).into_any_element(),
         };
+        let foot = self.ext_host.read(cx).panel_at(PanelLocation::SidebarFoot);
         v_flex()
             .size_full()
             .py_2()
             .text_color(cx.theme().sidebar_foreground)
             .child(v_flex().flex_1().min_h_0().child(content))
+            .children(foot.map(|p| {
+                div()
+                    .id("sidebar-foot")
+                    .debug_selector(|| "sidebar-foot".into())
+                    .flex_none()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(p.view.clone())
+            }))
     }
 
     /// The activity bar: one icon per panel, the sessions' badge counting those that need the

@@ -138,6 +138,8 @@ pub struct ExtPanel {
     ticker: Option<Task<()>>,
     /// Redraws the bubbles when the prompt box starts or stops having text.
     typing: Option<Subscription>,
+    /// Drawn under the sidebar tabs: sized by its content, the menus shown on hover.
+    pub(crate) foot: bool,
 }
 
 impl EventEmitter<PanelAction> for ExtPanel {}
@@ -155,6 +157,7 @@ impl ExtPanel {
             bubbles: HashMap::new(),
             ticker: None,
             typing: None,
+            foot: false,
         }
     }
 
@@ -729,7 +732,19 @@ impl ExtPanel {
             | Node::Kv(_) => leaf(node, k, cx),
             Node::Bubble {
                 id, tone, sticky, ..
-            } => self.bubble(id, *tone, *sticky, cx),
+            } => {
+                let bubble = self.bubble(id, *tone, *sticky, cx);
+                match self.foot {
+                    // Above the foot, out of its height.
+                    true => div()
+                        .absolute()
+                        .bottom_full()
+                        .left_0()
+                        .child(bubble)
+                        .into_any_element(),
+                    false => bubble,
+                }
+            }
             Node::Markdown(text) => TextView::markdown(("panel-md", k), SharedString::from(text))
                 .text_sm()
                 .on_link_click(|url, _, _, cx| {
@@ -1323,8 +1338,19 @@ impl ExtPanel {
                             }))
                         })
                     });
-                own(menu, at)
+                let menu = own(menu, at);
+                match self.foot {
+                    true => div()
+                        .id(("ext-foot-menu", k))
+                        .opacity(0.)
+                        .group_hover("ext-foot", |s| s.opacity(1.))
+                        .child(menu)
+                        .into_any_element(),
+                    false => menu,
+                }
             }
+            // Painted by the next task.
+            Node::Pixels { .. } => div().into_any_element(),
             Node::Unsupported => unsupported(cx),
         };
         (element, false)
@@ -1894,12 +1920,23 @@ impl Render for ExtPanel {
             Some(Ok(tree)) => self.node(&tree, at, &mut 0, window, cx),
         };
         // A filling list scrolls itself; anything else scrolls with the panel.
-        v_flex()
-            .id("ext-panel")
-            .size_full()
-            .p_2()
-            .when(!fills, |el| el.overflow_y_scroll())
-            .child(body)
+        match self.foot {
+            true => v_flex()
+                .id("ext-panel")
+                .group("ext-foot")
+                .w_full()
+                .px_2()
+                .pt_1()
+                .child(body)
+                .into_any_element(),
+            false => v_flex()
+                .id("ext-panel")
+                .size_full()
+                .p_2()
+                .when(!fills, |el| el.overflow_y_scroll())
+                .child(body)
+                .into_any_element(),
+        }
     }
 }
 
@@ -2436,6 +2473,36 @@ mod tests {
 
     fn sent(actions: &Rc<RefCell<Vec<(String, Value)>>>) -> Vec<String> {
         actions.borrow().iter().map(|(a, _)| a.clone()).collect()
+    }
+
+    #[gpui_kit::test]
+    fn menu_shows_without_foot(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        show(
+            &panel,
+            json!({"type": "column", "children": [
+                {"type": "menu", "items": [{"id": "a", "label": "A"}]},
+            ]}),
+            cx,
+        );
+        assert!(shown(("panel-menu", 2usize), cx));
+    }
+
+    /// A foot hides its menus until the pointer is over it. The test harness does not carry a
+    /// simulated pointer into `group_hover` (the hit test never lists the group), so only the
+    /// hidden half is asserted.
+    #[gpui_kit::test]
+    fn foot_menu_is_hidden_until_hover(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        panel.update(cx, |p, _| p.foot = true);
+        show(
+            &panel,
+            json!({"type": "column", "children": [
+                {"type": "menu", "items": [{"id": "a", "label": "A"}]},
+            ]}),
+            cx,
+        );
+        assert!(!shown(("ext-foot-menu", 2usize), cx));
     }
 
     fn frame(cx: &mut VisualTestContext) {

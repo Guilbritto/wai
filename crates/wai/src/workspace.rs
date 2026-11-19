@@ -1959,14 +1959,16 @@ impl Workspace {
                 let Some(p) = self.ext_host.read(cx).panel_of(&ext, &panel) else {
                     return reply.send(Err(format!("No panel named {panel}")));
                 };
-                // A prompt panel is always on screen with the focused prompt box.
+                // A docked panel is always on screen.
                 let (view, location) = (p.view.clone(), p.location);
                 match location {
                     PanelLocation::Main => self.open_panel(view, false, window, cx),
                     PanelLocation::Sidebar => {
                         self.show_tab(SidebarTab::Panel(view.entity_id()), cx)
                     }
-                    PanelLocation::Prompt | PanelLocation::PromptSide => {}
+                    PanelLocation::Prompt
+                    | PanelLocation::PromptSide
+                    | PanelLocation::SidebarFoot => {}
                 }
                 reply.send(Ok(serde_json::Value::Null));
             }
@@ -2327,7 +2329,7 @@ impl Workspace {
         });
         let host = self.ext_host.read(cx);
         let slot = |location, width: u16| {
-            host.prompt_panel(location).map(|p| PromptSlot {
+            host.panel_at(location).map(|p| PromptSlot {
                 view: p.view.clone(),
                 frame: p.frame,
                 width: px(f32::from(
