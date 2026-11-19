@@ -1342,6 +1342,7 @@ impl ExtPanel {
                 match self.foot {
                     true => div()
                         .id(("ext-foot-menu", k))
+                        .test_support()
                         .opacity(0.)
                         .group_hover("ext-foot", |s| s.opacity(1.))
                         .child(menu)
@@ -2488,11 +2489,11 @@ mod tests {
         assert!(shown(("panel-menu", 2usize), cx));
     }
 
-    /// A foot hides its menus until the pointer is over it. The test harness does not carry a
-    /// simulated pointer into `group_hover` (the hit test never lists the group), so only the
-    /// hidden half is asserted.
+    /// A foot hides its menus until the pointer is over it.
     #[gpui_kit::test]
-    fn foot_menu_is_hidden_until_hover(cx: &mut TestAppContext) {
+    fn foot_menu_shows_on_hover(cx: &mut TestAppContext) {
+        use gpui_kit::{Modifiers, point, px};
+
         let (panel, cx) = panel_window(cx);
         panel.update(cx, |p, _| p.foot = true);
         show(
@@ -2502,7 +2503,20 @@ mod tests {
             ]}),
             cx,
         );
-        assert!(!shown(("ext-foot-menu", 2usize), cx));
+        let menu = ("ext-foot-menu", 2usize);
+        let drawn = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.find(menu).visible()
+            })
+        };
+        // The pointer starts at the window's corner, over the foot.
+        cx.simulate_mouse_move(point(px(0.), px(200.)), None, Modifiers::none());
+        assert!(!drawn(cx), "hidden until hovered");
+        cx.simulate_mouse_move(point(px(400.), px(2.)), None, Modifiers::none());
+        assert!(drawn(cx), "shown on hover");
+        cx.simulate_mouse_move(point(px(0.), px(200.)), None, Modifiers::none());
+        assert!(!drawn(cx), "hidden again");
     }
 
     fn frame(cx: &mut VisualTestContext) {

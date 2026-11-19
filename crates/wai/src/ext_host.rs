@@ -1838,6 +1838,26 @@ pub(crate) mod tests {
         });
         assert!(bubble.top() < with.top(), "{bubble:?} {with:?}");
 
+        draw(
+            json!({"type": "column", "children": [
+                {"type": "menu", "items": [{"id": "a", "label": "A"}]},
+            ]}),
+            cx,
+        );
+        let menu = ("ext-foot-menu", 2usize);
+        let shown = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.render_frame(cx);
+                window.try_find(menu).is_some_and(|m| m.visible())
+            })
+        };
+        assert!(!shown(cx), "hidden until hovered");
+        let over = foot(cx).unwrap().origin + gpui_kit::point(px(200.), px(2.));
+        cx.simulate_mouse_move(over, None, Default::default());
+        assert!(shown(cx), "shown on hover");
+        cx.simulate_mouse_move(gpui_kit::point(px(0.), px(0.)), None, Default::default());
+        assert!(!shown(cx), "hidden again");
+
         workspace.update(cx, |w, cx| {
             w.sidebar_hidden = true;
             cx.notify();
