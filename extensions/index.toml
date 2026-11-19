@@ -78,33 +78,33 @@ sha256 = "aecd5ab4762464d4d8dc2aaab524fbc803e4ff02ac4fd7f9766614b53005ba7e"
 [[extensions]]
 id = "wai-bichinho"
 name = "Bichinho"
-version = "0.3.1"
-description = "A small pet beside your prompt box that grows with your agents' finished turns and talks, in a personality Claude writes from its stats"
+version = "0.4.0"
+description = "A small pet that walks in a dock at the foot of the sidebar, grows with your agents' finished turns, evolves, and talks in a personality Claude writes from its stats"
 repository = "https://github.com/Guilbritto/wai"
 
 [extensions.packages.darwin-arm64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.3.1/wai-bichinho-0.3.1-darwin-arm64.tar.gz"
-sha256 = "2fd6474f0ecffafa3aa09ba5d9d3266ef176bb13e4a40b8a38d50083674b3ea2"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.4.0/wai-bichinho-0.4.0-darwin-arm64.tar.gz"
+sha256 = "daeb7921906b0748c3df984e6e2efb3f73e518d834c229266d9a18afb40be020"
 
 [extensions.packages.darwin-x64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.3.1/wai-bichinho-0.3.1-darwin-x64.tar.gz"
-sha256 = "963b470a7e735b7443c7ebe36dec8ac43eb55d33b1d85973aa4b2502078d7c6f"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.4.0/wai-bichinho-0.4.0-darwin-x64.tar.gz"
+sha256 = "3a59f2e905d16f00145e4f5b2468505f9eb641d852d12de8ab62f8a3919c9614"
 
 [extensions.packages.linux-arm64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.3.1/wai-bichinho-0.3.1-linux-arm64.tar.gz"
-sha256 = "8627ce94ccc6e5ce2dd286afbd05b8ed63d6359f220fed761361c63c2e9d8867"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.4.0/wai-bichinho-0.4.0-linux-arm64.tar.gz"
+sha256 = "d1ad1d3c665a04eb1bfb3e204687e1de15b19a6772156ab3442ccb7ca1816613"
 
 [extensions.packages.linux-x64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.3.1/wai-bichinho-0.3.1-linux-x64.tar.gz"
-sha256 = "d559dd8edd91cf9dd63fa9ecd2a32ff20843887f4e7ffdeaf9d129e9c56741f4"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.4.0/wai-bichinho-0.4.0-linux-x64.tar.gz"
+sha256 = "969a1b280114a6544b1c467e1665ec88f052fd486394eb3fc2436f36acca5c91"
 
 [extensions.packages.windows-arm64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.3.1/wai-bichinho-0.3.1-windows-arm64.tar.gz"
-sha256 = "08706f63a399c376bc1f8b3343a9366cae2fd5c57b73b2f68ac74fdae0f7fed8"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.4.0/wai-bichinho-0.4.0-windows-arm64.tar.gz"
+sha256 = "d15e7710b4d3915a70fc25465e1c09f17f03b9353ee8afd1b51b02f9a003d28c"
 
 [extensions.packages.windows-x64]
-url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.3.1/wai-bichinho-0.3.1-windows-x64.tar.gz"
-sha256 = "8d05b5eed3700e33b49dfb260fa2df493055e9bace47af4930b5b74460cadaba"
+url = "https://github.com/Guilbritto/wai/releases/download/wai-bichinho-v0.4.0/wai-bichinho-0.4.0-windows-x64.tar.gz"
+sha256 = "f3a50970d7c2b837c2858c9ee55abe44d758fd4890c01977db80558525c95c1a"
 
 [[extensions]]
 id = "wai-navegador"
