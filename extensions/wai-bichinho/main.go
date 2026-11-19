@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -248,6 +249,9 @@ func (s *server) menu() node {
 	if p := s.st.Pet; p != nil {
 		items = append(items, node{"id": "pet", "label": "Pet " + p.Name}, node{"id": "feed", "label": "Feed"})
 	}
+	if len(s.st.Past) > 0 {
+		items = append(items, node{"id": "switch", "label": "Switch pet"})
+	}
 	items = append(items, node{"id": "card", "label": "Open card"})
 	if s.st.Eggs > 0 {
 		items = append(items, s.hatchItem(fmt.Sprintf("Hatch an egg (%d)", s.st.Eggs)))
@@ -259,7 +263,7 @@ func (s *server) menu() node {
 func (s *server) hatchItem(label string) node {
 	item := node{"id": "hatch", "label": label}
 	if p := s.st.Pet; p != nil {
-		item["confirm"] = node{"title": "Hatch a new egg?", "text": p.Name + " moves to your past pets.", "confirm_label": "Hatch"}
+		item["confirm"] = node{"title": "Hatch a new egg?", "text": p.Name + " goes to your pets. You can switch back any time.", "confirm_label": "Hatch"}
 	}
 	return item
 }
@@ -379,9 +383,10 @@ func (s *server) cardTree(now time.Time) node {
 			dexRows = append(dexRows, node{"cells": []any{name, node{"type": "badge", "text": r.name, "tone": r.tone}}})
 		}
 	}
-	var past []string
+	var pastRows []node
 	for _, q := range s.st.Past {
-		past = append(past, q.Title(), fmt.Sprintf("%s · Lv %d", formOf(&q).Name, level(q.XP)))
+		pastRows = append(pastRows, node{"cells": []any{q.Title(), formOf(&q).Name, strconv.Itoa(level(q.XP)),
+			node{"type": "button", "id": "use-" + strconv.FormatInt(q.Born.UnixNano(), 10), "label": "Use"}}})
 	}
 	born := fmt.Sprintf("%s · born %s", form.Name, p.Born.Local().Format("Jan 2"))
 	if nf, ok := nextForm(p); ok {
@@ -412,8 +417,10 @@ func (s *server) cardTree(now time.Time) node {
 			{"type": "table", "columns": []node{{"title": "Form"}, {"title": "Rarity", "width": 110}}, "rows": dexRows},
 		}},
 	}
-	if len(past) > 0 {
-		kids = append(kids, node{"type": "section", "id": "s-past", "title": "Past pets", "open": false, "children": []node{kv(past...)}})
+	if len(pastRows) > 0 {
+		kids = append(kids, node{"type": "section", "id": "s-past", "title": "Your pets", "badge": strconv.Itoa(len(pastRows)), "children": []node{
+			{"type": "table", "columns": []node{{"title": "Pet"}, {"title": "Form"}, {"title": "Lv", "width": 40}, {"title": "", "width": 64}}, "rows": pastRows},
+		}})
 	}
 	return node{"type": "column", "children": kids}
 }
@@ -499,7 +506,7 @@ func (s *server) act(action string, values map[string]any) {
 				s.say("full")
 			}
 		}
-	case "card":
+	case "card", "switch":
 		s.call("panel/open", node{"panel": cardPanel})
 	case "hatch":
 		if s.st.Eggs > 0 {
@@ -515,6 +522,14 @@ func (s *server) act(action string, values map[string]any) {
 				name = string(r[:10])
 			}
 			p.Name = name
+		}
+	default:
+		if id, ok := strings.CutPrefix(action, "use-"); ok {
+			if born, err := strconv.ParseInt(id, 10, 64); err == nil && s.st.Use(born, now) {
+				s.note("switched to " + s.st.Pet.Name)
+				s.react("surprise")
+				s.say("hatch")
+			}
 		}
 	}
 	s.save()

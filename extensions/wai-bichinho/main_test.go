@@ -24,7 +24,7 @@ func TestEggsFollowTheRarityOdds(t *testing.T) {
 	tiers := map[Rarity]int{}
 	shiny := 0
 	for range n {
-		st.Eggs = 1
+		st.Eggs, st.Past = 1, nil
 		p := st.Hatch(rng, time.Now())
 		tiers[lineByID(p.Species).Rarity]++
 		if p.Shiny {
@@ -47,9 +47,6 @@ func TestEggsFollowTheRarityOdds(t *testing.T) {
 	}
 	if len(st.Seen) != len(dex) {
 		t.Errorf("hatched %d of %d lines", len(st.Seen), len(dex))
-	}
-	if len(st.Past) != maxPast {
-		t.Errorf("past pets: %d, want the last %d", len(st.Past), maxPast)
 	}
 }
 
@@ -698,4 +695,119 @@ func TestWorkingAndAlertGlyphs(t *testing.T) {
 func (s *server) stageRows(now time.Time) []string {
 	kids := s.dockTree(now)["children"].([]node)
 	return kids[len(kids)-1]["rows"].([]string)
+}
+
+func hatched(t *testing.T, st *State, at time.Time) *Pet {
+	st.Eggs = 1
+	return st.Hatch(seeded(), at)
+}
+
+func TestUseSwapsAndFreezes(t *testing.T) {
+	t0 := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	st := newState()
+	a := *hatched(t, &st, t0)
+	hatched(t, &st, t0.Add(time.Hour))
+	b := st.Pet.Born
+	if st.Past[0].StoredAt != t0.Add(time.Hour) {
+		t.Fatalf("stored at %v", st.Past[0].StoredAt)
+	}
+	hunger, love := a.Hunger(t0.Add(time.Hour)), a.Affection(t0.Add(time.Hour))
+	st.Lines = map[string][]string{"x": {"y"}}
+	now := t0.Add(5 * 24 * time.Hour)
+	if !st.Use(a.Born.UnixNano(), now) {
+		t.Fatal("Use said false")
+	}
+	if st.Pet.Born != a.Born || !st.Pet.StoredAt.IsZero() {
+		t.Errorf("pet: %+v", st.Pet)
+	}
+	if math.Abs(st.Pet.Hunger(now)-hunger) > 0.01 || math.Abs(st.Pet.Affection(now)-love) > 0.01 {
+		t.Errorf("hunger %.2f love %.2f, want %.2f %.2f", st.Pet.Hunger(now), st.Pet.Affection(now), hunger, love)
+	}
+	if len(st.Past) != 1 || st.Past[0].Born != b || st.Past[0].StoredAt != now {
+		t.Errorf("past: %+v", st.Past)
+	}
+	if st.Lines != nil {
+		t.Error("lines kept")
+	}
+}
+
+func TestUseWithoutStoredAt(t *testing.T) {
+	t0 := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	old := Pet{Name: "A", Species: "gotinha", Born: t0, FedAt: t0, Love: 50, LovedAt: t0.Add(time.Hour)}
+	st := State{Pet: &Pet{Name: "B", Species: "bit", Born: t0.Add(time.Minute)}, Past: []Pet{old}}
+	now := t0.Add(72 * time.Hour)
+	if !st.Use(old.Born.UnixNano(), now) {
+		t.Fatal("Use said false")
+	}
+	at := t0.Add(time.Hour)
+	if got, want := st.Pet.Hunger(now), old.Hunger(at); math.Abs(got-want) > 0.01 {
+		t.Errorf("hunger %.2f, want %.2f", got, want)
+	}
+	if got, want := st.Pet.Affection(now), old.Affection(at); math.Abs(got-want) > 0.01 {
+		t.Errorf("love %.2f, want %.2f", got, want)
+	}
+}
+
+func TestUseIgnoresBadIDs(t *testing.T) {
+	h := start(t, t.TempDir())
+	h.action("hatch")
+	h.s.st.Eggs = 1
+	h.now = h.now.Add(time.Hour)
+	h.action("hatch")
+	snap := func() string { b, _ := json.Marshal(h.s.st); return string(b) }
+	before := snap()
+	for _, id := range []string{"use-abc", "use-", "use-123", "use-" + fmt.Sprint(h.s.st.Pet.Born.UnixNano())} {
+		if msgs := h.action(id); len(msgs) == 0 {
+			t.Errorf("%s: no answer", id)
+		}
+		var a, b State
+		json.Unmarshal([]byte(before), &a)
+		json.Unmarshal([]byte(snap()), &b)
+		if !reflect.DeepEqual(a, b) {
+			t.Errorf("%s changed the state", id)
+		}
+	}
+}
+
+func TestHatchKeepsEveryPet(t *testing.T) {
+	st := newState()
+	for i := range 30 {
+		hatched(t, &st, time.Unix(int64(1000+i), 0))
+	}
+	if len(st.Past) != 29 {
+		t.Fatalf("past: %d", len(st.Past))
+	}
+	for _, q := range st.Past {
+		if q.StoredAt.IsZero() {
+			t.Error("stored pet without StoredAt")
+		}
+	}
+}
+
+func TestPetsTable(t *testing.T) {
+	h := start(t, t.TempDir())
+	if strings.Contains(quote(fmt.Sprint(h.s.menu())), "switch") {
+		t.Error("switch without past pets")
+	}
+	h.action("hatch")
+	h.s.st.Eggs = 1
+	h.now = h.now.Add(time.Hour)
+	h.action("hatch")
+	old := h.s.st.Past[0]
+	b, _ := json.Marshal(h.s.cardTree(h.now))
+	for _, want := range []string{`"id":"s-past"`, `"title":"Your pets"`, `{"title":"Pet"},{"title":"Form"},{"title":"Lv","width":40},{"title":"","width":64}`,
+		fmt.Sprintf(`{"id":"use-%d","label":"Use","type":"button"}`, old.Born.UnixNano())} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("card lacks %s\n%s", want, b)
+		}
+	}
+	mb, _ := json.Marshal(h.s.menu())
+	if !strings.Contains(string(mb), `{"id":"switch","label":"Switch pet"}`) {
+		t.Errorf("menu: %s", mb)
+	}
+	h.s.st.Eggs = 1
+	want := h.s.st.Pet.Name + " goes to your pets. You can switch back any time."
+	if hb, _ := json.Marshal(h.s.hatchItem("x")); !strings.Contains(string(hb), want) {
+		t.Errorf("confirm: %s", hb)
+	}
 }

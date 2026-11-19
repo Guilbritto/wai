@@ -147,6 +147,8 @@ type Pet struct {
 	Love    float64   `json:"love"`     // at LovedAt
 	LovedAt time.Time `json:"loved_at"` // it fades from there
 	Stats   [4]int    `json:"stats"`
+
+	StoredAt time.Time `json:"stored_at,omitempty"` // when it moved to Past; hunger and love freeze from then
 }
 
 // State is what pet.json keeps.
@@ -170,7 +172,6 @@ const (
 	petLove     = 20
 	turnsPerEgg = 25
 	maxEggs     = 3
-	maxPast     = 20
 	xpPerTurn   = 10
 )
 
@@ -216,6 +217,39 @@ func rollRarity(rng *rand.Rand) Rarity {
 	return Common
 }
 
+// store moves the current pet to the front of Past.
+func (st *State) store(now time.Time) {
+	stored := *st.Pet
+	stored.StoredAt = now
+	st.Past = append([]Pet{stored}, st.Past...)
+}
+
+// Use swaps the past pet born at born (UnixNano) with the current one. Hunger and love froze while
+// it was stored, so its clocks move forward by the time it spent away. False: no such pet.
+func (st *State) Use(born int64, now time.Time) bool {
+	i := slices.IndexFunc(st.Past, func(q Pet) bool { return q.Born.UnixNano() == born })
+	if i < 0 {
+		return false
+	}
+	q := st.Past[i]
+	base := q.StoredAt
+	if base.IsZero() {
+		base = q.FedAt
+		if q.LovedAt.After(base) {
+			base = q.LovedAt
+		}
+	}
+	shift := now.Sub(base)
+	q.FedAt, q.LovedAt, q.StoredAt = q.FedAt.Add(shift), q.LovedAt.Add(shift), time.Time{}
+	st.Past = slices.Delete(st.Past, i, i+1)
+	if st.Pet != nil {
+		st.store(now)
+	}
+	st.Pet = &q
+	st.Lines = nil
+	return true
+}
+
 // Hatch opens an egg; the current pet, if any, moves to Past.
 func (st *State) Hatch(rng *rand.Rand, now time.Time) *Pet {
 	tier := rollRarity(rng)
@@ -235,8 +269,7 @@ func (st *State) Hatch(rng *rand.Rand, now time.Time) *Pet {
 		p.Stats[i] = floor + rng.IntN(11-floor)
 	}
 	if st.Pet != nil {
-		st.Past = append([]Pet{*st.Pet}, st.Past...)
-		st.Past = st.Past[:min(len(st.Past), maxPast)]
+		st.store(now)
 	}
 	if st.Seen == nil {
 		st.Seen = map[string]bool{}
