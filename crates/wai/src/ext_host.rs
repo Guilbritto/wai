@@ -1865,10 +1865,10 @@ pub(crate) mod tests {
         assert!(foot(cx).is_none());
     }
 
-    /// The real wai-bichinho, built with `go`, draws its egg beside the focused prompt box.
+    /// The real wai-bichinho, built with `go`, walks its pixel pet in the sidebar's foot.
     #[cfg(unix)]
     #[gpui_kit::test]
-    fn bichinho_draws_beside_the_prompt_box(cx: &mut TestAppContext) {
+    fn bichinho_walks_in_the_sidebar_foot(cx: &mut TestAppContext) {
         use gpui_kit::{px, size};
         use wai_ext::PanelLocation;
         use wai_ext::panel::Node;
@@ -1906,31 +1906,26 @@ pub(crate) mod tests {
         });
         start_now(&workspace, cx);
         let slot = host.read_with(cx, |h, _| {
-            h.panel_at(PanelLocation::PromptSide)
+            h.panel_at(PanelLocation::SidebarFoot)
                 .map(|p| p.view.clone())
         });
         let slot = slot.expect("the pet's slot");
-        let art = |cx: &mut VisualTestContext| {
-            let mut art = None;
+        let pixels = |cx: &mut VisualTestContext| {
+            let mut rows = 0;
             if let Some(Ok(tree)) = slot.read_with(cx, |p, _| p.tree.clone()) {
                 tree.walk(&mut |node| {
-                    if let Node::Text {
-                        text, mono: true, ..
-                    } = node
-                    {
-                        art = Some(text.to_string());
+                    if let Node::Pixels { rows: r, .. } = node {
+                        rows = r.len();
                     }
                 });
             }
-            art
+            rows
         };
-        wait_until(cx, "the egg", |cx| {
-            art(cx).is_some_and(|art| art.contains("(   )"))
-        });
+        wait_until(cx, "the pet's pixels", |cx| pixels(cx) > 0);
         cx.update(|window, cx| {
             window.render_frame(cx);
-            assert!(window.try_find("prompt-side").is_some());
         });
+        assert!(cx.debug_bounds("sidebar-foot").is_some());
         // The sidebar shows the card's button only.
         assert!(crate::sidebar::tests::label(("tab-panel", 0usize), cx).is_some());
         assert!(crate::sidebar::tests::label(("tab-panel", 1usize), cx).is_none());
