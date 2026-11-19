@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -289,3 +291,39 @@ func (p *Pet) Title() string {
 }
 
 func percent(v float64) string { return fmt.Sprintf("%d%%", int(math.Round(v))) }
+
+const stageW, stageH = 128, 31
+
+// walk is the pet's place on the stage and where it is going.
+type walk struct{ x, dir, pause int }
+
+// step moves one pixel, or waits; it returns true when it moved. At an edge it turns and rests, and
+// now and then it stops for a while on its own.
+func (w *walk) step(rng *rand.Rand) bool {
+	if w.pause > 0 {
+		w.pause--
+		return false
+	}
+	w.x += w.dir
+	if w.x <= 0 || w.x >= stageW-W {
+		w.dir = -w.dir
+		w.pause = 12
+	} else if rng.Float64() < .025 {
+		w.pause = 10 + rng.IntN(16)
+	}
+	return true
+}
+
+// stage puts the sprite at column x of a stageH-row, stageW-column scene, mirrored when flip.
+func stage(g grid, x int, flip bool) []string {
+	rows := g.rows()
+	out := make([]string, stageH)
+	for j := range out {
+		row := []byte(rows[j])
+		if flip {
+			slices.Reverse(row)
+		}
+		out[j] = strings.Repeat(".", x) + string(row) + strings.Repeat(".", stageW-W-x)
+	}
+	return out
+}

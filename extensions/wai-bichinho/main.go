@@ -1,5 +1,5 @@
-// wai-bichinho: a wai extension (line-delimited JSON-RPC 2.0 on stdio) that keeps a small pet beside
-// the prompt box. It hatches from an egg at a rarity, grows on your agents' finished turns, gets
+// wai-bichinho: a wai extension (line-delimited JSON-RPC 2.0 on stdio) that keeps a small pet in a
+// dock at the foot of the sidebar. It hatches from an egg at a rarity, grows on your agents' finished turns, gets
 // hungry and lonely with time, and reacts to the focused session.
 package main
 
@@ -16,12 +16,12 @@ import (
 )
 
 const (
-	promptPanel = "pet"
-	cardPanel   = "card"
-	stateFile   = "pet.json"
-	frameEvery  = 500 * time.Millisecond
+	petPanel   = "pet"
+	cardPanel  = "card"
+	stateFile  = "pet.json"
+	frameEvery = 250 * time.Millisecond
 	// A session list every listEvery frames drops the states of closed sessions.
-	listEvery = 60
+	listEvery = 120
 	sleepGap  = 20 * time.Minute
 	flashFor  = 4 * time.Second
 )
@@ -48,10 +48,12 @@ type server struct {
 	states    map[string]string // agent\x00session → idle, working, needs_you, error
 	lastEvent time.Time         // sleeps after sleepGap without one
 	flash     struct {          // a short reaction
-		mood, text string
-		until      time.Time
+		mood  string
+		until time.Time
 	}
-	frame  int // advances only while a session is focused
+	frame  int
+	walk   walk
+	moved  bool // the pet walked on the last frame
 	ticks  int
 	listID int
 	sent   map[string]string // the last tree sent per panel
@@ -68,7 +70,7 @@ type server struct {
 }
 
 func newServer(out io.Writer, now func() time.Time, rng *rand.Rand) *server {
-	return &server{out: out, now: now, rng: rng, gen: make(chan pools, 1), st: newState(), states: map[string]string{}, sent: map[string]string{}}
+	return &server{out: out, now: now, rng: rng, gen: make(chan pools, 1), st: newState(), walk: walk{x: (stageW - W) / 2, dir: 1, pause: 6}, states: map[string]string{}, sent: map[string]string{}}
 }
 
 func (s *server) write(v any) {
@@ -155,45 +157,45 @@ func (s *server) save() {
 	}
 }
 
-func (s *server) react(mood, text string) {
-	s.flash.mood, s.flash.text, s.flash.until = mood, text, s.now().Add(flashFor)
+func (s *server) react(mood string) {
+	s.flash.mood, s.flash.until = mood, s.now().Add(flashFor)
 }
 
-// mood picks the face and the word beside the level, most urgent first.
-func (s *server) mood(now time.Time) (string, string) {
+// mood picks the pet's mood, most urgent first.
+func (s *server) mood(now time.Time) string {
 	p := s.st.Pet
 	if p == nil {
-		return "egg", "hatch me"
+		return "egg"
 	}
 	if now.Before(s.flash.until) {
-		return s.flash.mood, s.flash.text
+		return s.flash.mood
 	}
 	for _, state := range s.states {
 		if state == "needs_you" {
-			return "alert", "needs you"
+			return "alert"
 		}
 	}
 	switch s.states[s.focused] {
 	case "error":
-		return "error", "oops"
+		return "error"
 	case "working":
-		return "working", "working"
+		return "working"
 	}
-	if n := s.countPRs(attention); n > 0 {
-		return "alert", plural(n, "fix PR", "fix %d PRs")
+	if s.countPRs(attention) > 0 {
+		return "alert"
 	}
-	if n := s.countPRs(func(r string) bool { return r == "approved" }); n > 0 {
-		return "happy", plural(n, "merge PR", "%d to merge")
+	if s.countPRs(func(r string) bool { return r == "approved" }) > 0 {
+		return "happy"
 	}
 	switch {
 	case p.Hunger(now) >= 60:
-		return "hungry", "hungry"
+		return "hungry"
 	case p.Affection(now) < 25:
-		return "sad", "lonely"
+		return "sad"
 	case now.Sub(s.lastEvent) > sleepGap:
-		return "sleeping", "zzz"
+		return "sleeping"
 	}
-	return "idle", p.Name
+	return "idle"
 }
 
 // attention is a PR reason that asks the user to fix something.
@@ -209,13 +211,6 @@ func (s *server) countPRs(match func(string) bool) int {
 		}
 	}
 	return n
-}
-
-func plural(n int, one, many string) string {
-	if n == 1 {
-		return one
-	}
-	return fmt.Sprintf(many, n)
 }
 
 // gotPRs takes wai-waycarbon's prs.mine, the whole state each time, and flashes what changed since
@@ -238,11 +233,11 @@ func (s *server) gotPRs(list []struct{ URL, Reason string }) {
 	case first && waiting:
 		s.say("pr_fix")
 	case fix:
-		s.react("alert", "check PR")
+		s.react("alert")
 		s.say("pr_fix")
 		s.note("a PR needs a fix")
 	case approved:
-		s.react("happy", "approved!")
+		s.react("happy")
 		s.say("pr_approved")
 		s.note("a PR got approved")
 	}
@@ -269,25 +264,52 @@ func (s *server) hatchItem(label string) node {
 	return item
 }
 
-func (s *server) promptTree(now time.Time) node {
-	mood, status := s.mood(now)
-	form, shiny := Form{ID: "ovo"}, false
-	badge := node{"type": "badge", "text": "egg"}
+// artMood maps a mood to the art the sprites know.
+func artMood(mood string) string {
+	switch mood {
+	case "working":
+		return "idle"
+	case "surprise":
+		return "happy"
+	case "alert", "error":
+		return "talk"
+	case "sad":
+		return "hungry"
+	case "sleeping":
+		return "sleep"
+	}
+	return mood
+}
+
+func (s *server) dockTree(now time.Time) node {
+	mood := s.mood(now)
+	form, shiny, title := Form{ID: "ovo"}, false, "Egg"
 	if p := s.st.Pet; p != nil {
-		form, shiny = formOf(p), p.Shiny
-		badge = node{"type": "badge", "text": fmt.Sprintf("Lv %d", level(p.XP)), "tone": rarities[lineByID(p.Species).Rarity].tone}
+		form, shiny, title = formOf(p), p.Shiny, p.Title()
 	}
-	// ponytail: Task 9 maps every mood to art; until then only talking differs.
-	artMood := "idle"
+	art := artMood(mood)
 	if mood == "idle" && s.talk.talking(now) {
-		artMood = "talk"
+		art = "talk"
 	}
-	// The drawing gets a line of its own: its width changes between frames, so anything beside it
-	// would wrap under it and back. The menu sits by the badge, which does not animate.
+	f := s.frame / 2
+	bob := f % 2
+	switch {
+	case s.moved || mood == "working":
+		bob = s.frame % 2
+	case art == "sleep" || art == "egg":
+		bob = 0
+	}
+	g := sprite(form.ID, art, f, shiny, bob)
+	q := pen{&g, 2, 0}
+	if mood == "working" {
+		q.glyph(27, 6, []string{[]string{"#....", "#.#..", "#.#.#"}[f%3]})
+	}
+	if mood == "alert" || mood == "error" {
+		q.glyph(30, 1, []string{"##", "##", "##", "..", "##"})
+	}
 	kids := []node{
-		{"type": "row", "children": []node{badge, {"type": "spacer"}, s.menu()}},
-		pixels(sprite(form.ID, artMood, s.frame, shiny, s.frame%2), 2, "pet"),
-		{"type": "text", "text": status, "muted": true},
+		{"type": "row", "children": []node{{"type": "text", "text": title}, {"type": "spacer"}, s.menu()}},
+		{"type": "pixels", "id": "pet", "scale": 2, "rows": stage(g, s.walk.x, s.walk.dir < 0 && mood == "idle")},
 	}
 	if c := s.talk.cur; c != nil {
 		bubble := node{"type": "bubble", "id": c.ID, "text": c.Text, "sticky": c.Sticky}
@@ -430,7 +452,7 @@ func (s *server) render() {
 	for _, p := range []struct {
 		id   string
 		tree node
-	}{{promptPanel, s.promptTree(now)}, {cardPanel, s.cardTree(now)}} {
+	}{{petPanel, s.dockTree(now)}, {cardPanel, s.cardTree(now)}} {
 		b, _ := json.Marshal(p.tree)
 		if s.sent[p.id] == string(b) {
 			continue
@@ -440,11 +462,10 @@ func (s *server) render() {
 	}
 }
 
-// tick animates while a session is focused: elsewhere the slot is hidden, or on a draft.
+// tick advances the animation, and the walk while the pet is idle.
 func (s *server) tick() {
-	if s.focused != "" {
-		s.frame++
-	}
+	s.frame++
+	s.moved = s.st.Pet != nil && s.mood(s.now()) == "idle" && s.walk.step(s.rng)
 	s.ticks++
 	s.maybeGenerate(s.now())
 	if s.ticks%listEvery == 0 && len(s.states) > 0 {
@@ -461,7 +482,7 @@ func (s *server) act(action string, values map[string]any) {
 	case "pet":
 		if p != nil {
 			p.Pet(now)
-			s.react("happy", "♥")
+			s.react("happy")
 			s.say("pet")
 		}
 	case "feed":
@@ -471,10 +492,10 @@ func (s *server) act(action string, values map[string]any) {
 				if starving {
 					s.note("was fed while starving")
 				}
-				s.react("happy", "yum")
+				s.react("happy")
 				s.say("feed")
 			} else {
-				s.react("idle", "full")
+				s.react("idle")
 				s.say("full")
 			}
 		}
@@ -484,7 +505,7 @@ func (s *server) act(action string, values map[string]any) {
 		if s.st.Eggs > 0 {
 			p := s.st.Hatch(s.rng, now)
 			s.note(fmt.Sprintf("hatched %s, a %s %s", p.Name, strings.ToLower(rarities[lineByID(p.Species).Rarity].name), formOf(p).Name))
-			s.react("surprise", "hi!")
+			s.react("surprise")
 			s.say("hatch")
 		}
 	case "rename":
@@ -576,16 +597,16 @@ func (s *server) handle(m message) {
 		}
 		switch {
 		case evolved:
-			s.react("happy", "evolved!")
+			s.react("happy")
 			s.say("evolve")
 		case levelUp:
-			s.react("happy", "level up!")
+			s.react("happy")
 			s.say("level_up")
 		case egg:
-			s.react("surprise", "an egg!")
+			s.react("surprise")
 			s.say("egg")
 		case s.st.Pet != nil && p.Reason == "end_turn":
-			s.react("happy", fmt.Sprintf("+%d xp", xpPerTurn))
+			s.react("happy")
 			s.say("turn_done")
 		}
 		s.save()

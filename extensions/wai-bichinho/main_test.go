@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -62,7 +63,7 @@ func TestMenuStaysPutWhileAnimating(t *testing.T) {
 	var first string
 	for s.frame = range 16 {
 		var row string
-		for _, kid := range s.promptTree(now)["children"].([]node) {
+		for _, kid := range s.dockTree(now)["children"].([]node) {
 			b, _ := json.Marshal(kid)
 			if strings.Contains(string(b), `"type":"menu"`) {
 				row = string(b)
@@ -167,30 +168,29 @@ func (h *harness) send(line string) []map[string]any {
 	return got
 }
 
-// promptOf is the prompt panel's badge (first row), pixel rows and word, from the last render.
-func promptOf(t *testing.T, msgs []map[string]any) (art, badge, word string) {
+// dockOf is the dock's name (first row) and stage rows, from the last render.
+func dockOf(t *testing.T, msgs []map[string]any) (name string, rows []string) {
 	t.Helper()
 	for _, m := range msgs {
 		p, _ := m["params"].(map[string]any)
-		if m["method"] != "panel/render" || p["panel"] != promptPanel {
+		if m["method"] != "panel/render" || p["panel"] != petPanel {
 			continue
 		}
 		for _, k := range p["tree"].(map[string]any)["children"].([]any) {
 			n := k.(map[string]any)
-			switch {
-			case n["type"] == "row":
-				badge = n["children"].([]any)[0].(map[string]any)["text"].(string)
-			case n["type"] == "pixels":
+			switch n["type"] {
+			case "row":
+				name = n["children"].([]any)[0].(map[string]any)["text"].(string)
+			case "pixels":
+				rows = nil
 				for _, r := range n["rows"].([]any) {
-					art += r.(string) + "\n"
+					rows = append(rows, r.(string))
 				}
-			case n["type"] == "text" && n["muted"] == true:
-				word = n["text"].(string)
 			}
 		}
 	}
-	if art == "" {
-		t.Fatalf("no prompt render in %v", msgs)
+	if rows == nil {
+		t.Fatalf("no dock render in %v", msgs)
 	}
 	return
 }
@@ -198,8 +198,8 @@ func promptOf(t *testing.T, msgs []map[string]any) (art, badge, word string) {
 func TestProtocol(t *testing.T) {
 	dir := t.TempDir()
 	h := start(t, dir)
-	if _, badge, word := promptOf(t, h.init); badge != "egg" || word != "hatch me" {
-		t.Errorf("first run: %q %q", badge, word)
+	if name, _ := dockOf(t, h.init); name != "Egg" || h.s.mood(h.now) != "egg" {
+		t.Errorf("first run: %q %q", name, h.s.mood(h.now))
 	}
 	msgs := h.send(`{"jsonrpc":"2.0","method":"event/file_saved","params":{"path":"/x"}}`)
 	if len(msgs) != 0 {
@@ -210,50 +210,53 @@ func TestProtocol(t *testing.T) {
 	if msgs[0]["id"] != 7.0 {
 		t.Fatalf("panel/action answered first: %v", msgs[0])
 	}
-	_, badge, word := promptOf(t, msgs)
-	if badge != "Lv 1" || word != "hi!" {
-		t.Errorf("after hatching: %q %q", badge, word)
+	name, _ := dockOf(t, msgs)
+	if name != h.s.st.Pet.Title() || h.s.mood(h.now) != "surprise" {
+		t.Errorf("after hatching: %q %q", name, h.s.mood(h.now))
 	}
 	var saved State
 	b, _ := os.ReadFile(filepath.Join(dir, stateFile))
 	if json.Unmarshal(b, &saved); saved.Pet == nil || saved.Eggs != 0 {
 		t.Fatalf("hatch not saved: %s", b)
 	}
-	name := saved.Pet.Name
 
-	_, _, word = promptOf(t, h.send(`{"jsonrpc":"2.0","method":"event/turn_ended","params":{"agent":"claude","session":"s1","reason":"end_turn"}}`))
-	if word != "+10 xp" {
-		t.Errorf("after a turn: %q", word)
+	h.send(`{"jsonrpc":"2.0","method":"event/turn_ended","params":{"agent":"claude","session":"s1","reason":"end_turn"}}`)
+	if m := h.s.mood(h.now); m != "happy" {
+		t.Errorf("after a turn: %q", m)
 	}
 
 	h.now = h.now.Add(10 * time.Second)
 	h.send(`{"jsonrpc":"2.0","method":"event/session_focused","params":{"agent":"claude","session":"s1"}}`)
-	art, _, word := promptOf(t, h.send(`{"jsonrpc":"2.0","method":"event/session_state","params":{"agent":"claude","session":"s1","state":"working"}}`))
-	if word != "working" {
-		t.Errorf("while the focused session works: %q", word)
+	_, art := dockOf(t, h.send(`{"jsonrpc":"2.0","method":"event/session_state","params":{"agent":"claude","session":"s1","state":"working"}}`))
+	if m := h.s.mood(h.now); m != "working" {
+		t.Errorf("while the focused session works: %q", m)
 	}
 	h.s.tick()
-	if moved, _, _ := promptOf(t, h.send(`{"jsonrpc":"2.0","method":"event/file_saved","params":{"path":"/x"}}`)); moved == art {
+	if _, moved := dockOf(t, h.send(`{"jsonrpc":"2.0","method":"event/file_saved","params":{"path":"/x"}}`)); reflect.DeepEqual(moved, art) {
 		t.Error("a frame does not bob the working pet")
 	}
-	_, _, word = promptOf(t, h.send(`{"jsonrpc":"2.0","method":"event/session_state","params":{"agent":"claude","session":"s2","state":"needs_you"}}`))
-	if word != "needs you" {
-		t.Errorf("another session needs you: %q", word)
+	h.send(`{"jsonrpc":"2.0","method":"event/session_state","params":{"agent":"claude","session":"s2","state":"needs_you"}}`)
+	if m := h.s.mood(h.now); m != "alert" {
+		t.Errorf("another session needs you: %q", m)
 	}
 	// The session list drops closed sessions.
-	_, _, word = promptOf(t, h.send(`{"jsonrpc":"2.0","id":1,"result":[{"agent":"claude","session":"s1","title":null,"state":"idle"}]}`))
-	if word != name {
-		t.Errorf("idle pet shows its name %q: %q", name, word)
+	h.send(`{"jsonrpc":"2.0","id":1,"result":[{"agent":"claude","session":"s1","title":null,"state":"idle"}]}`)
+	if m := h.s.mood(h.now); m != "idle" {
+		t.Errorf("a closed session no longer calls: %q", m)
 	}
 
 	h.now = h.now.Add(7 * time.Hour)
-	_, _, word = promptOf(t, h.send(`{"jsonrpc":"2.0","id":8,"method":"panel/action","params":{"panel":"pet","action_id":"rename","values":{"name":"  Zezinho  "}}}`))
-	if word != "hungry" {
-		t.Errorf("after 7 hours: %q", word)
+	name, _ = dockOf(t, h.send(`{"jsonrpc":"2.0","id":8,"method":"panel/action","params":{"panel":"pet","action_id":"rename","values":{"name":"  Zezinho  "}}}`))
+	if m := h.s.mood(h.now); m != "hungry" || name != "Zezinho" {
+		t.Errorf("after 7 hours: %q %q", m, name)
 	}
-	_, _, word = promptOf(t, h.send(`{"jsonrpc":"2.0","id":9,"method":"panel/action","params":{"panel":"pet","action_id":"feed","values":{}}}`))
-	if word != "yum" {
-		t.Errorf("feeding: %q", word)
+	h.send(`{"jsonrpc":"2.0","id":9,"method":"panel/action","params":{"panel":"pet","action_id":"feed","values":{}}}`)
+	if m := h.s.mood(h.now); m != "happy" {
+		t.Errorf("feeding: %q", m)
+	}
+	h.send(`{"jsonrpc":"2.0","id":12,"method":"panel/action","params":{"panel":"pet","action_id":"pet","values":{}}}`)
+	if !h.s.st.Pet.LovedAt.Equal(h.now) {
+		t.Error("clicking the stage does not pet the pet")
 	}
 
 	msgs = h.send(`{"jsonrpc":"2.0","id":10,"method":"panel/action","params":{"panel":"pet","action_id":"card","values":{}}}`)
@@ -283,32 +286,35 @@ func TestPREvents(t *testing.T) {
 		}
 		return `{"jsonrpc":"2.0","method":"event/ext","params":{"source":"wai-waycarbon","name":"prs.mine","data":{"prs":[` + strings.Join(list, ",") + `]}}}`
 	}
+	// a render that would repeat the last tree sends nothing, so read the mood; "!" marks a flash
 	word := func(line string) string {
 		t.Helper()
-		h.send(line) // a render that would repeat the last tree sends nothing, so read the mood
-		_, w := h.s.mood(h.now)
-		return w
+		h.send(line)
+		if h.now.Before(h.s.flash.until) {
+			return h.s.mood(h.now) + "!"
+		}
+		return h.s.mood(h.now)
 	}
 
-	if w := word(prs("approved", "waiting")); w != "merge PR" {
+	if w := word(prs("approved", "waiting")); w != "happy" {
 		t.Errorf("first event, no flash, an approved PR: %q", w)
 	}
-	if w := word(prs("approved", "ci_failed")); w != "check PR" {
+	if w := word(prs("approved", "ci_failed")); w != "alert!" {
 		t.Errorf("a PR that turns red flashes: %q", w)
 	}
 	h.now = h.now.Add(time.Minute)
-	if w := word(prs("approved", "ci_failed", "conflict")); w != "check PR" {
+	if w := word(prs("approved", "ci_failed", "conflict")); w != "alert!" {
 		t.Errorf("a new PR with a conflict flashes: %q", w)
 	}
 	h.now = h.now.Add(time.Minute)
-	if w := word(prs("approved", "ci_failed", "conflict")); w != "fix 2 PRs" {
+	if w := word(prs("approved", "ci_failed", "conflict")); w != "alert" {
 		t.Errorf("no change, PRs to fix win over approved: %q", w)
 	}
-	if w := word(prs("approved", "approved")); w != "approved!" {
+	if w := word(prs("approved", "approved")); w != "happy!" {
 		t.Errorf("a PR approved: %q", w)
 	}
 	h.now = h.now.Add(time.Minute)
-	if w := word(prs("approved", "approved")); w != "2 to merge" {
+	if w := word(prs("approved", "approved")); w != "happy" {
 		t.Errorf("two approved: %q", w)
 	}
 	for _, other := range []string{
@@ -320,7 +326,7 @@ func TestPREvents(t *testing.T) {
 			t.Errorf("ignored %s: %v", other, msgs)
 		}
 	}
-	if w := word(prs()); w == "2 to merge" || w == "approved!" {
+	if w := word(prs()); w == "happy" || w == "happy!" {
 		t.Errorf("all merged: %q", w)
 	}
 }
@@ -335,8 +341,8 @@ func TestFirstPRsToFixSpeak(t *testing.T) {
 	if text != fallback["pr_fix"][0] {
 		t.Fatalf("a PR to fix at launch is said: %q", text)
 	}
-	if _, w := h.s.mood(h.now); w != "fix PR" {
-		t.Errorf("no flash for an old PR: %q", w)
+	if m := h.s.mood(h.now); m != "alert" || h.now.Before(h.s.flash.until) {
+		t.Errorf("no flash for an old PR: %q", m)
 	}
 	h.bubbleDone(id)
 	h.now = h.now.Add(time.Minute)
@@ -359,7 +365,7 @@ func TestServeEndsAtEOF(t *testing.T) {
 func bubbleOf(msgs []map[string]any) (id, text string, ok bool) {
 	for _, m := range msgs {
 		p, _ := m["params"].(map[string]any)
-		if m["method"] != "panel/render" || p["panel"] != promptPanel {
+		if m["method"] != "panel/render" || p["panel"] != petPanel {
 			continue
 		}
 		id, text, ok = "", "", false
@@ -377,7 +383,7 @@ func bubbleOf(msgs []map[string]any) (id, text string, ok bool) {
 func sticky(msgs []map[string]any) bool {
 	for _, m := range msgs {
 		p, _ := m["params"].(map[string]any)
-		if m["method"] == "panel/render" && p["panel"] == promptPanel {
+		if m["method"] == "panel/render" && p["panel"] == petPanel {
 			for _, k := range p["tree"].(map[string]any)["children"].([]any) {
 				if n := k.(map[string]any); n["type"] == "bubble" {
 					return n["sticky"] == true
@@ -450,20 +456,26 @@ func TestFocusDropsNormalLine(t *testing.T) {
 }
 
 func TestMouthTalks(t *testing.T) {
+	// two frames of one pose and one bob: only the mouth can differ.
+	if sprite("gosma", "talk", 0, false, 0) == sprite("gosma", "talk", 1, false, 0) {
+		t.Error("the mouth does not move")
+	}
 	h := start(t, t.TempDir())
-	h.send(`{"jsonrpc":"2.0","method":"event/session_focused","params":{"agent":"claude","session":"s1"}}`)
 	h.action("hatch")
 	h.now = h.now.Add(5 * time.Second)
-	h.s.st.Pet.Species = "gotinha"
+	h.s.lastEvent = h.now
+	h.s.st.Pet.Species, h.s.st.Pet.XP = "gotinha", xpFor(5) // gosma, a form whose mouth shows
 	h.s.talk.cur = nil
 	h.s.say("pet")
-	frame := func() string {
-		h.s.tick()
-		art, _, _ := promptOf(t, h.send(`{"jsonrpc":"2.0","method":"event/file_saved","params":{}}`))
-		return art
+	h.s.render()
+	if !h.s.talk.talking(h.now) {
+		t.Fatal("the pet is not talking")
 	}
-	if a, b := frame(), frame(); a == b {
-		t.Errorf("the mouth does not move:\n%s\n%s", a, b)
+	h.s.frame = 2 // an odd pose, where the talking mouth is open
+	talk := h.s.stageRows(h.now)
+	h.s.talk.cur = nil
+	if reflect.DeepEqual(talk, h.s.stageRows(h.now)) {
+		t.Error("the stage does not change while it talks")
 	}
 }
 
@@ -590,4 +602,100 @@ func TestCardShowsTheNextEvolution(t *testing.T) {
 			t.Errorf("%s card evolves text: %v", id, got)
 		}
 	}
+}
+
+func TestWalkStaysOnStage(t *testing.T) {
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	s := newServer(&bytes.Buffer{}, func() time.Time { return now }, seeded())
+	s.ready = true
+	s.lastEvent = now
+	s.st.Pet = &Pet{Species: "gotinha", FedAt: now, Love: 100, LovedAt: now}
+	left, right := false, false
+	for i := range 20000 {
+		if i%500 == 0 {
+			// hungry on odd turns of 500 steps: a day without food, then fed again
+			if (i/500)%2 == 1 {
+				s.st.Pet.FedAt = now.Add(-24 * time.Hour)
+			} else {
+				s.st.Pet.Feed(now)
+			}
+		}
+		before, idle := s.walk.x, s.mood(now) == "idle"
+		s.tick()
+		if x := s.walk.x; x < 0 || x > stageW-W {
+			t.Fatalf("step %d: x = %d", i, x)
+		} else if x != before && !idle {
+			t.Fatalf("step %d: moved while %q", i, s.mood(now))
+		} else {
+			left, right = left || x == 0, right || x == stageW-W
+		}
+	}
+	if !left || !right {
+		t.Errorf("edges reached: left %v right %v", left, right)
+	}
+}
+
+func TestDockTree(t *testing.T) {
+	h := start(t, t.TempDir())
+	kids := h.s.dockTree(h.now)["children"].([]node)
+	if len(kids) != 2 || kids[0]["children"].([]node)[0]["text"] != "Egg" {
+		t.Fatalf("no pet: %v", kids)
+	}
+	egg := stage(sprite("ovo", "egg", 0, false, 0), h.s.walk.x, false)
+	if !reflect.DeepEqual(kids[1]["rows"], egg) {
+		t.Error("the stage shows the egg")
+	}
+	h.action("hatch")
+	kids = h.s.dockTree(h.now)["children"].([]node)
+	if kids[0]["type"] != "bubble" {
+		t.Fatalf("the hatch bubble comes first: %v", kids[0])
+	}
+	row, px := kids[1], kids[2]
+	if c := row["children"].([]node); row["type"] != "row" || c[0]["text"] != h.s.st.Pet.Title() || c[1]["type"] != "spacer" || c[2]["type"] != "menu" {
+		t.Errorf("name row: %v", row)
+	}
+	rows := px["rows"].([]string)
+	if px["type"] != "pixels" || px["id"] != "pet" || px["scale"] != 2 || len(rows) != stageH || len(rows[0]) != stageW {
+		t.Errorf("stage: %v", px)
+	}
+}
+
+func TestStageFlipsWhenFacingLeft(t *testing.T) {
+	g := sprite("gotinha", "idle", 0, false, 0)
+	sp, flipped := g.rows(), stage(g, 10, true)
+	for j := range stageH {
+		row := []byte(sp[j])
+		slices.Reverse(row)
+		if got := flipped[j][10 : 10+W]; got != string(row) {
+			t.Fatalf("row %d: %q, want %q", j, got, row)
+		}
+	}
+}
+
+func TestWorkingAndAlertGlyphs(t *testing.T) {
+	h := start(t, t.TempDir())
+	h.action("hatch")
+	h.now = h.now.Add(time.Minute)
+	h.s.lastEvent = h.now
+	rows := func() any { return h.s.stageRows(h.now) }
+	idle := rows()
+	h.s.focused = "a\x00s"
+	h.s.states[h.s.focused] = "working"
+	if reflect.DeepEqual(rows(), idle) {
+		t.Error("working looks idle")
+	}
+	h.s.states[h.s.focused] = "idle"
+	h.s.states["b\x00s"] = "needs_you"
+	alert := rows()
+	h.s.states["b\x00s"] = "idle"
+	h.s.flash.mood, h.s.flash.until = "talk", h.now.Add(time.Hour)
+	if reflect.DeepEqual(alert, rows()) {
+		t.Error("alert looks like plain talk")
+	}
+}
+
+// stageRows is the pixels node's rows: the dock's last child.
+func (s *server) stageRows(now time.Time) []string {
+	kids := s.dockTree(now)["children"].([]node)
+	return kids[len(kids)-1]["rows"].([]string)
 }

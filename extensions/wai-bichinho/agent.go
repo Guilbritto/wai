@@ -183,7 +183,7 @@ func (s *server) maybeGenerate(now time.Time) {
 		return
 	}
 	pet := *p
-	mood, _ := s.mood(now)
+	mood := s.mood(now)
 	diary := s.st.Diary[max(0, len(s.st.Diary)-diaryInPrompt):]
 	diary = append([]Note(nil), diary...)
 	run, gen := s.run, s.gen

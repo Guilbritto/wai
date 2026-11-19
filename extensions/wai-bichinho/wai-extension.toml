@@ -1,8 +1,8 @@
 id = "wai-bichinho"
 name = "Bichinho"
-version = "0.3.1"
-description = "A small pet beside your prompt box that grows with your agents' finished turns and talks, in a personality Claude writes from its stats"
-api = "1.8"
+version = "0.4.0"
+description = "A small pet that walks in a dock at the foot of the sidebar, grows with your agents' finished turns, evolves, and talks in a personality Claude writes from its stats"
+api = "1.9"
 permissions = ["process", "panels", "sessions:read", "events:wai-waycarbon"]
 
 [process]
@@ -11,9 +11,7 @@ command = "bin/wai-bichinho"
 [[contributes.panels]]
 id = "pet"
 title = "Pet"
-location = "prompt-side"
-width = 160
-frame = false
+location = "sidebar-foot"
 
 [[contributes.panels]]
 id = "card"
