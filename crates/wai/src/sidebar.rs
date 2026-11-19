@@ -324,7 +324,6 @@ impl Workspace {
                     .debug_selector(|| "sidebar-foot".into())
                     .flex_none()
                     .max_h(relative(0.5))
-                    .overflow_hidden()
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .child(p.view.clone())

@@ -245,7 +245,7 @@ A panel exists while your process runs, and its content is the last tree you ren
 - **`sidebar-foot`** (API 1.9): a dock at the bottom of the sidebar, under every tab, with a 1 px top border and its tree's natural height.
   - It has no activity-bar button, and `panel/open` on it does nothing. `width`, `frame` and `wide` are invalid on it.
   - At most one per manifest; across extensions the first one wins, as for the prompt slots.
-  - It does not scroll: the tree takes its own height, and a foot taller than half the sidebar is clipped. A `bubble` floats above the dock instead of growing it, and a `menu` shows only while the mouse is over the dock (it keeps its space).
+  - It does not scroll: the tree takes its own height, and a foot's height is capped at half the sidebar: a taller tree overflows its box rather than squeezing the tabs. A `bubble` floats above the dock instead of growing it, and a `menu` shows only while the mouse is over the dock (it keeps its space).
 
 **`icon`:** a [Lucide](https://lucide.dev/icons) icon name in kebab-case, such as `git-pull-request`, `database` or `rocket`. wai ships the whole Lucide set it bundles; an unknown name falls back to the initials and does not fail the install. The `icon` node and the `icon` fields of nodes take the same names. A panel's `icon` may instead be the path of an `.svg` file in your extension's folder (`icons/panel.svg`): a relative path without `..`, at most 32 KB, a regular file (not a symlink). wai draws it as a mask in the activity bar's colours, so its fill colour does not matter, and shows the initials when the file is missing or too big. The shared release workflow packs it.
 

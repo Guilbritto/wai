@@ -1865,9 +1865,9 @@ pub(crate) mod tests {
         assert!(foot(cx).is_none());
     }
 
-    /// A foot taller than half the sidebar is clipped, so the tabs keep their room.
+    /// A foot taller than half the sidebar is capped at half, so the tabs keep their room.
     #[gpui_kit::test]
-    fn tall_sidebar_foot_is_clipped(cx: &mut TestAppContext) {
+    fn tall_sidebar_foot_is_capped(cx: &mut TestAppContext) {
         use gpui_kit::{px, size};
         use wai_ext::PanelLocation;
         use wai_ext::panel::parse;
