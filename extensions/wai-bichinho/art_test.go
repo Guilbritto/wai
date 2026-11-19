@@ -64,6 +64,7 @@ func TestFormsMatchTheMockup(t *testing.T) {
 	checked := 0
 	for _, b := range blocks {
 		if _, ok := forms[b.form]; !ok {
+			t.Errorf("form %q is in the golden file but not ported", b.form)
 			continue
 		}
 		checked++
@@ -85,5 +86,25 @@ func TestFormsMatchTheMockup(t *testing.T) {
 func TestEggWobbles(t *testing.T) {
 	if sprite("ovo", "idle", 0, false, 0) == sprite("ovo", "idle", 1, false, 0) {
 		t.Error("the egg frames are identical")
+	}
+}
+
+func TestEveryFormDraws(t *testing.T) {
+	for name := range forms {
+		for _, mood := range []string{"idle", "talk", "happy", "sleep", "hungry"} {
+			for f := 0; f < 8; f++ {
+				n := 0
+				for _, row := range sprite(name, mood, f, true, 1) {
+					for _, v := range row {
+						if v != 0 {
+							n++
+						}
+					}
+				}
+				if n < 20 {
+					t.Errorf("%s %s %d draws only %d cells", name, mood, f, n)
+				}
+			}
+		}
 	}
 }
