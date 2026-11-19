@@ -10,7 +10,7 @@
 //! - `text` (and `markdown`, `alert`, a multiline input's `value`) keep at most `TEXT_CHARS`
 //!   characters; a `log` keeps its last `LOG_CHARS`. Every other string is one line of at most
 //!   `LINE_CHARS` characters.
-//! - Ids are 1 to `MAX_ID` bytes. Buttons, form fields, sections, tabs and bubbles share one set of ids: a
+//! - Ids are 1 to `MAX_ID` bytes. Buttons, form fields, sections, tabs, bubbles and pixels share one set of ids: a
 //!   repeated id makes that node `Unsupported`. List item, card, table row and menu item ids may
 //!   repeat.
 //! - Nodes are the tree's root, each element of a `children` array and each table cell that is
@@ -52,6 +52,9 @@ pub const MAX_ICON: usize = 64;
 /// A column's `width`, in px.
 pub const MIN_WIDTH: f64 = 24.;
 pub const MAX_WIDTH: f64 = 2_000.;
+/// The most a `pixels` node keeps, in cells.
+pub const PIXEL_ROWS: usize = 64;
+pub const PIXEL_COLS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
@@ -201,6 +204,13 @@ pub enum Node {
         label: Option<Arc<str>>,
         icon: Option<Arc<str>>,
         items: Vec<MenuItem>,
+    },
+    /// A grid of cells (API 1.9): 0 empty, 1 dim (`+`), 2 full (`#`); every row is `width` long.
+    Pixels {
+        id: Option<String>,
+        rows: Arc<[Box<[u8]>]>,
+        width: usize,
+        scale: u8,
     },
     /// An unknown type, or a known one that is broken.
     Unsupported,
@@ -867,6 +877,47 @@ impl Parser {
                     items: items.collect::<Option<_>>()?,
                 }
             }
+            "pixels" => {
+                let rows = o.get("rows")?.as_array()?;
+                let rows = rows
+                    .iter()
+                    .take(PIXEL_ROWS)
+                    .map(|r| {
+                        let cells = r.as_str()?.chars().take(PIXEL_COLS);
+                        Some(
+                            cells
+                                .map(|c| match c {
+                                    '#' => 2,
+                                    '+' => 1,
+                                    _ => 0,
+                                })
+                                .collect::<Vec<u8>>(),
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                let width = rows.iter().map(Vec::len).max()?;
+                if width == 0 {
+                    return None;
+                }
+                Node::Pixels {
+                    id: match o.contains_key("id") {
+                        true => Some(id(o)?),
+                        false => None,
+                    },
+                    rows: rows
+                        .into_iter()
+                        .map(|mut r| {
+                            r.resize(width, 0);
+                            r.into_boxed_slice()
+                        })
+                        .collect(),
+                    width,
+                    scale: o
+                        .get("scale")
+                        .and_then(Value::as_f64)
+                        .map_or(2, |s| s.clamp(1., 8.) as u8),
+                }
+            }
             _ => return None,
         };
         // Only a node that is otherwise whole takes its id.
@@ -877,6 +928,7 @@ impl Parser {
             | Node::Select { id, .. }
             | Node::Path { id, .. }
             | Node::Checkbox { id, .. } => self.ids.insert(id.clone()).then_some(node),
+            Node::Pixels { id: Some(id), .. } => self.ids.insert(id.clone()).then_some(node),
             _ => Some(node),
         }
     }
@@ -960,6 +1012,57 @@ fn confirm(o: &Map<String, Value>) -> Option<Option<Confirm>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pixels_parse() {
+        let Ok(Node::Pixels {
+            id,
+            rows,
+            width,
+            scale,
+        }) = parse(&json!({"type": "pixels", "rows": ["#+", "..#", "é#"]}))
+        else {
+            panic!()
+        };
+        assert_eq!((id, width, scale), (None, 3, 2));
+        assert_eq!(
+            &*rows,
+            &[
+                vec![2, 1, 0].into(),
+                vec![0, 0, 2].into(),
+                vec![0, 2, 0].into()
+            ]
+        );
+        let scale = |s: Value| match parse(&json!({"type": "pixels", "rows": ["#"], "scale": s})) {
+            Ok(Node::Pixels { scale, .. }) => scale,
+            n => panic!("{n:?}"),
+        };
+        assert_eq!(
+            (scale(json!(0)), scale(json!(3)), scale(json!(99))),
+            (1, 3, 8)
+        );
+        let long = parse(&json!({"type": "pixels", "rows": vec!["é".repeat(300); 70]}));
+        let Ok(Node::Pixels { rows, width, .. }) = long else {
+            panic!()
+        };
+        assert_eq!((rows.len(), width), (PIXEL_ROWS, PIXEL_COLS));
+        for bad in [
+            json!({"type": "pixels"}),
+            json!({"type": "pixels", "rows": []}),
+            json!({"type": "pixels", "rows": [""]}),
+            json!({"type": "pixels", "rows": [3]}),
+        ] {
+            assert_eq!(parse(&bad), Ok(Node::Unsupported), "{bad}");
+        }
+        // The id shares the set of buttons, fields, sections and bubbles.
+        let Ok(Node::Column { children, .. }) = parse(&json!({"type": "column", "children": [
+            {"type": "button", "id": "pet", "label": "Pet"},
+            {"type": "pixels", "id": "pet", "rows": ["#"]},
+        ]})) else {
+            panic!()
+        };
+        assert_eq!(children[1], Node::Unsupported);
+    }
+
     fn col(children: Vec<Node>) -> Node {
         Node::Column {
             children,
