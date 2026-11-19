@@ -172,6 +172,7 @@ func (s *server) note(text string) {
 }
 
 // maybeGenerate starts one background run when the pools are missing, stale or for another pet.
+// A switched-in pet waits out linesEvery after the last run (Hatch zeroes LinesAt, so a hatch does not).
 // The goroutine touches nothing of the server but s.gen.
 func (s *server) maybeGenerate(now time.Time) {
 	p := s.st.Pet
@@ -179,7 +180,7 @@ func (s *server) maybeGenerate(now time.Time) {
 		return
 	}
 	lv := level(p.XP)
-	if s.st.LinesBorn.Equal(p.Born) && s.st.LinesLevel == lv && now.Sub(s.st.LinesAt) < linesEvery {
+	if now.Sub(s.st.LinesAt) < linesEvery && (!s.st.LinesBorn.Equal(p.Born) || s.st.LinesLevel == lv) {
 		return
 	}
 	pet := *p

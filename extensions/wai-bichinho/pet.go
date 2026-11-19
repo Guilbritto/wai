@@ -276,7 +276,7 @@ func (st *State) Hatch(rng *rand.Rand, now time.Time) *Pet {
 	}
 	st.Seen[sp.ID] = st.Seen[sp.ID] || p.Shiny
 	st.Pet = p
-	st.Lines = nil
+	st.Lines, st.LinesAt = nil, time.Time{}
 	st.Eggs = max(0, st.Eggs-1)
 	return p
 }

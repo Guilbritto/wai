@@ -247,3 +247,43 @@ func TestPersonaUsesTheForm(t *testing.T) {
 		t.Errorf("persona:\n%s", p)
 	}
 }
+
+func TestSwitchWaitsBeforeAskingClaude(t *testing.T) {
+	b, _ := json.Marshal(map[string]any{"structured_output": allKinds()})
+	h, calls := withPet(t, string(b))
+	s := h.s
+	s.maybeGenerate(h.now)
+	s.gotPools(<-s.gen, h.now)
+	s.st.Eggs = 1
+	s.st.Hatch(seeded(), h.now)
+	s.maybeGenerate(h.now)
+	s.gotPools(<-s.gen, h.now)
+	*calls = 0
+	if !s.st.Use(s.st.Past[0].Born.UnixNano(), h.now) {
+		t.Fatal("no past pet")
+	}
+	s.maybeGenerate(h.now.Add(time.Minute))
+	if s.genBusy || *calls != 0 {
+		t.Fatal("a switch started a run")
+	}
+	s.maybeGenerate(h.now.Add(linesEvery))
+	if !s.genBusy {
+		t.Fatal("no run after linesEvery")
+	}
+	<-s.gen
+}
+
+func TestHatchRightAfterARunStartsOne(t *testing.T) {
+	b, _ := json.Marshal(map[string]any{"structured_output": allKinds()})
+	h, _ := withPet(t, string(b))
+	s := h.s
+	s.maybeGenerate(h.now)
+	s.gotPools(<-s.gen, h.now)
+	s.st.Eggs = 1
+	s.st.Hatch(seeded(), h.now.Add(time.Minute))
+	s.maybeGenerate(h.now.Add(time.Minute))
+	if !s.genBusy {
+		t.Fatal("a hatch started no run")
+	}
+	<-s.gen
+}
