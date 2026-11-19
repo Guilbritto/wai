@@ -247,22 +247,38 @@ func (st *State) Hatch(rng *rand.Rand, now time.Time) *Pet {
 }
 
 // TurnEnded counts a finished turn: XP for the pet, and an egg every turnsPerEgg turns.
-func (st *State) TurnEnded(reason string) (levelUp, egg bool) {
+func (st *State) TurnEnded(reason string) (levelUp, evolved, egg bool) {
 	st.Turns++
 	if st.Turns%turnsPerEgg == 0 && st.Eggs < maxEggs {
 		st.Eggs++
 		egg = true
 	}
 	if st.Pet == nil {
-		return false, egg
+		return false, false, egg
 	}
 	gain := xpPerTurn
 	if reason != "end_turn" {
 		gain = 2
 	}
-	before := level(st.Pet.XP)
+	before, form := level(st.Pet.XP), formOf(st.Pet)
 	st.Pet.XP += gain
-	return level(st.Pet.XP) > before, egg
+	if now := formOf(st.Pet); now.ID != form.ID {
+		evolved = true
+		st.Seen[now.ID] = st.Seen[now.ID] || st.Pet.Shiny
+	}
+	return level(st.Pet.XP) > before, evolved, egg
+}
+
+// nextForm is the form the pet evolves into, and false when it is on its line's last.
+func nextForm(p *Pet) (Form, bool) {
+	if l := lineByID(p.Species); l != nil {
+		for _, f := range l.Forms {
+			if f.Level > level(p.XP) {
+				return f, true
+			}
+		}
+	}
+	return Form{}, false
 }
 
 func (p *Pet) Title() string {

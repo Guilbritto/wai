@@ -108,7 +108,7 @@ func TestHungerLoveAndLevels(t *testing.T) {
 	st.Eggs = 0
 	eggs := 0
 	for range turnsPerEgg * 5 {
-		if _, egg := st.TurnEnded("end_turn"); egg {
+		if _, _, egg := st.TurnEnded("end_turn"); egg {
 			eggs++
 		}
 	}
@@ -116,9 +116,9 @@ func TestHungerLoveAndLevels(t *testing.T) {
 		t.Errorf("eggs: %d given, %d held; want %d", eggs, st.Eggs, maxEggs)
 	}
 	st.Hatch(seeded(), t0)
-	up, _ := st.TurnEnded("end_turn")
-	up2, _ := st.TurnEnded("end_turn")
-	up3, _ := st.TurnEnded("end_turn")
+	up, _, _ := st.TurnEnded("end_turn")
+	up2, _, _ := st.TurnEnded("end_turn")
+	up3, _, _ := st.TurnEnded("end_turn")
 	if st.Pet.XP != 3*xpPerTurn || up || up2 || !up3 {
 		t.Errorf("xp %d, level ups %v %v %v", st.Pet.XP, up, up2, up3)
 	}
@@ -529,5 +529,65 @@ func TestLoadMigratesOldPets(t *testing.T) {
 	st = start(t, dir).s.st
 	if f := formOf(st.Pet); f.ID != "gosmao" || st.Seen["gosmao"] != true || len(st.Seen) != 1 {
 		t.Errorf("grown pet: form %q, seen %v", f.ID, st.Seen)
+	}
+}
+
+func TestEvolvesAtTheLineLevels(t *testing.T) {
+	for _, c := range []struct {
+		id      string
+		lv      int
+		to      string
+		evolves bool
+	}{
+		{"gotinha", 5, "gosma", true},
+		{"gotinha", 15, "gosmao", true},
+		{"grifinho", 5, "grifinho", false},
+		{"grifinho", 10, "grifo", true},
+		{"drone", 15, "drone", false},
+	} {
+		st := newState()
+		st.Pet = &Pet{Species: c.id, XP: xpFor(c.lv) - 10}
+		_, evolved, _ := st.TurnEnded("end_turn")
+		_, seen := st.Seen[c.to]
+		if evolved != c.evolves || formOf(st.Pet).ID != c.to || seen != c.evolves {
+			t.Errorf("%s at Lv %d: evolved %v, form %s, seen %v", c.id, c.lv, evolved, formOf(st.Pet).ID, st.Seen)
+		}
+	}
+	st := newState()
+	st.Pet = &Pet{Species: "gotinha", Shiny: true, XP: xpFor(5) - 10}
+	st.TurnEnded("end_turn")
+	if !st.Seen["gosma"] {
+		t.Errorf("a shiny evolving keeps its flag: %v", st.Seen)
+	}
+}
+
+func TestEvolveSpeaks(t *testing.T) {
+	h := start(t, t.TempDir())
+	id, _, _ := bubbleOf(h.action("hatch"))
+	h.bubbleDone(id)
+	h.now = h.now.Add(300 * time.Millisecond)
+	h.s.st.Pet.Species, h.s.st.Pet.XP = "gotinha", xpFor(5)-10
+	_, text, ok := bubbleOf(h.send(`{"jsonrpc":"2.0","method":"event/turn_ended","params":{"agent":"claude","session":"s1","reason":"end_turn"}}`))
+	if !ok || text != fallback["evolve"][0] {
+		t.Errorf("bubble %q %v", text, ok)
+	}
+	found := false
+	for _, n := range h.s.st.Diary {
+		found = found || n.Text == "evolved into Gosma"
+	}
+	if !found || h.s.flash.mood != "happy" {
+		t.Errorf("diary %v, mood %q", h.s.st.Diary, h.s.flash.mood)
+	}
+}
+
+func TestCardShowsTheNextEvolution(t *testing.T) {
+	h := start(t, t.TempDir())
+	h.action("hatch")
+	for id, want := range map[string]bool{"gosma": true, "gosmao": false} {
+		h.s.st.Pet.Species, h.s.st.Pet.XP = "gotinha", xpFor(map[string]int{"gosma": 5, "gosmao": 15}[id])
+		b, _ := json.Marshal(h.s.cardTree(h.now))
+		if got := strings.Contains(string(b), "evolves at Lv"); got != want {
+			t.Errorf("%s card evolves text: %v", id, got)
+		}
 	}
 }

@@ -361,10 +361,14 @@ func (s *server) cardTree(now time.Time) node {
 	for _, q := range s.st.Past {
 		past = append(past, q.Title(), fmt.Sprintf("%s · Lv %d", formOf(&q).Name, level(q.XP)))
 	}
+	born := fmt.Sprintf("%s · born %s", form.Name, p.Born.Local().Format("Jan 2"))
+	if nf, ok := nextForm(p); ok {
+		born += fmt.Sprintf(" · evolves at Lv %d", nf.Level)
+	}
 	kids := []node{
 		pixels(sprite(form.ID, "idle", 0, p.Shiny, 0), 3, ""),
 		{"type": "row", "children": head},
-		text(fmt.Sprintf("%s · born %s", form.Name, p.Born.Local().Format("Jan 2")), true),
+		text(born, true),
 		kv("Level", fmt.Sprintf("%d (%d/%d xp)", lv, p.XP, next),
 			"Hunger", percent(p.Hunger(now)),
 			"Love", percent(p.Affection(now)),
@@ -560,7 +564,10 @@ func (s *server) handle(m message) {
 	case "event/turn_ended":
 		var p struct{ Reason string }
 		json.Unmarshal(m.Params, &p)
-		levelUp, egg := s.st.TurnEnded(p.Reason)
+		levelUp, evolved, egg := s.st.TurnEnded(p.Reason)
+		if evolved {
+			s.note("evolved into " + formOf(s.st.Pet).Name)
+		}
 		if levelUp {
 			s.note(fmt.Sprintf("reached level %d", level(s.st.Pet.XP)))
 		}
@@ -568,6 +575,9 @@ func (s *server) handle(m message) {
 			s.note("found an egg")
 		}
 		switch {
+		case evolved:
+			s.react("happy", "evolved!")
+			s.say("evolve")
 		case levelUp:
 			s.react("happy", "level up!")
 			s.say("level_up")
