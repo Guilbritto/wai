@@ -275,6 +275,66 @@ impl ExtPanel {
         }));
     }
 
+    /// A grid of cells at `scale` px each: one quad per horizontal run of equal cells. With an
+    /// `id` a click sends it.
+    fn pixels(
+        &self,
+        id: Option<&str>,
+        rows: Arc<[Box<[u8]>]>,
+        width: usize,
+        scale: u8,
+        k: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (w, h) = (
+            px((width * scale as usize) as f32),
+            px((rows.len() * scale as usize) as f32),
+        );
+        let full = cx.theme().foreground;
+        let cell = px(scale as f32);
+        let grid = canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                for (y, row) in rows.iter().enumerate() {
+                    let mut x = 0;
+                    while x < row.len() {
+                        let v = row[x];
+                        let run = row[x..].iter().take_while(|&&c| c == v).count();
+                        if v != 0 {
+                            let color = if v == 2 { full } else { full.opacity(0.4) };
+                            let at = bounds.origin + point(cell * x as f32, cell * y as f32);
+                            window.paint_quad(fill(
+                                Bounds::new(at, gpui_kit::size(cell * run as f32, cell)),
+                                color,
+                            ));
+                        }
+                        x += run;
+                    }
+                }
+            },
+        )
+        .w(w)
+        .h(h);
+        let el = div()
+            .w(w)
+            .h(h)
+            .max_w_full()
+            .flex_none()
+            .overflow_hidden()
+            .child(grid);
+        match id {
+            Some(id) => {
+                let action = id.to_string();
+                el.id(name("panel-pixels", id))
+                    .test_support()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.act(action.clone(), cx)))
+                    .into_any_element()
+            }
+            None => el.id(("panel-pixels", k)).test_support().into_any_element(),
+        }
+    }
+
     fn bubble(&self, id: &str, tone: Tone, sticky: bool, cx: &mut Context<Self>) -> AnyElement {
         let Some(bubble) = self.bubbles.get(id).filter(|b| !b.ended()) else {
             return div().into_any_element();
@@ -1350,8 +1410,15 @@ impl ExtPanel {
                     false => menu,
                 }
             }
-            // Painted by the next task.
-            Node::Pixels { .. } => div().into_any_element(),
+            Node::Pixels {
+                id,
+                rows,
+                width,
+                scale,
+            } => own(
+                self.pixels(id.as_deref(), rows.clone(), *width, *scale, k, cx),
+                at,
+            ),
             Node::Unsupported => unsupported(cx),
         };
         (element, false)
@@ -2938,6 +3005,30 @@ mod tests {
             *actions.borrow(),
             [("go".to_string(), json!({"done": true}))]
         );
+    }
+
+    #[gpui_kit::test]
+    fn pixels_draw_and_click(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        show(
+            &panel,
+            json!({"type": "column", "children": [
+                {"type": "pixels", "id": "pet", "rows": ["#+.#"], "scale": 3},
+                {"type": "pixels", "rows": ["#"], "scale": 2},
+            ]}),
+            cx,
+        );
+        let size = cx.update(|w, _| w.find(name("panel-pixels:pet")).bounds().size);
+        assert_eq!((size.width, size.height), (px(12.), px(3.)));
+        click(name("panel-pixels:pet"), cx);
+        assert_eq!(*actions.borrow(), [("pet".to_string(), json!({}))]);
+        actions.borrow_mut().clear();
+        assert!(shown(("panel-pixels", 3usize), cx));
+        click(("panel-pixels", 3usize), cx);
+        assert!(sent(&actions).is_empty());
     }
 
     /// An icon link in a clickable card takes its own click: the card's action is not sent.

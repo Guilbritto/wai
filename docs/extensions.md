@@ -4,9 +4,9 @@ An extension is a folder with a `wai-extension.toml` manifest. It can be manifes
 
 Users install an extension from a folder, from a git URL, or from the Extensions page's **Available** list, which downloads a prebuilt package from an index. Anyone can publish one: see [Publishing](#publishing).
 
-This guide describes API version 1.8 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
+This guide describes API version 1.9 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
 - `wai-navegador` is manifest-only;
-- `wai-rotinas` and `wai-bichinho` are written in Go; `wai-bichinho` draws beside the prompt box, without a frame (API 1.7), and speaks in a `bubble` (API 1.8).
+- `wai-rotinas` and `wai-bichinho` are written in Go; `wai-bichinho` shows a pet in a dock at the sidebar's foot (API 1.9) and speaks in a `bubble` (API 1.8).
 
 ## The manifest
 
@@ -45,7 +45,7 @@ title = "Pull requests"
 | `name` | string | Shown in the extension list and the consent dialog |
 | `version` | string | Free form. wai shows it; it does not compare versions |
 | `description` | string, optional | Shown last in the consent dialog, cut to fit |
-| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.8)`. Set it to `"1.8"` when you use a `plain` list, list item `icon`, `tone`, `selected`, `lead`, `note` or `indent`, a `text` `style`, a `column` `framed`, `title`, `badge`, `tone` or `collapsed`, `tabs` `style` or a tab `tone`, `select` `segmented`, `input` `icon`, `submit` or `clear`, `button` `icon_only`, `link` `icon` or `icon_only`, or the `bubble` node, to `"1.7"` when you use `events/emit`, an `events:<id>` permission or a panel's `frame`, to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
+| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.9)`. Set it to `"1.9"` when you use a `sidebar-foot` panel or the `pixels` node, to `"1.8"` when you use a `plain` list, list item `icon`, `tone`, `selected`, `lead`, `note` or `indent`, a `text` `style`, a `column` `framed`, `title`, `badge`, `tone` or `collapsed`, `tabs` `style` or a tab `tone`, `select` `segmented`, `input` `icon`, `submit` or `clear`, `button` `icon_only`, `link` `icon` or `icon_only`, or the `bubble` node, to `"1.7"` when you use `events/emit`, an `events:<id>` permission or a panel's `frame`, to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
 | `permissions` | array of strings | See [Permissions](#permissions). An unknown permission is refused |
 | `process.command` | string | See [Commands and paths](#commands-and-paths). Needs `process` |
 | `process.args` | array of strings, optional | Arguments, passed as given (no shell) |
@@ -155,7 +155,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 
 | Method | Kind | Params | Notes |
 |---|---|---|---|
-| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.8", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
+| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.9", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
 | `command/run` | request | `{"id": "<command id>"}` | The user ran one of your commands without `prompt` from the palette. wai ignores the answer |
 | `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item, card, table row, button or menu item was clicked (after its confirmation, if it has one). `action_id` is its `id`. `values` has every form field in the panel by id: inputs and paths as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels`. A `bubble` sends one when it is gone: `action_id` is its `id`, and `values` is `{"bubble": "click"}` or `{"bubble": "timeout"}` |
 | `item/action` | request | `{"item": "<item id>"}` | The user clicked one of your bar items. wai ignores the answer. The usual reply is a `panel/open` or a `sessions/open`. Needs `bar` |
@@ -166,7 +166,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `event/ext` | notification | `{"source", "name", "data"}` | An event another extension emitted. API 1.7. Needs `events:<source>` |
 
 - Paths are absolute, and on Windows they never carry the `\\?\` prefix.
-- Answer `initialize` before anything else. API 1.1 to 1.8 only add fields and methods; ignore the ones you do not know.
+- Answer `initialize` before anything else. API 1.1 to 1.9 only add fields and methods; ignore the ones you do not know.
 
 ### Extension → host
 
@@ -242,6 +242,10 @@ A panel exists while your process runs, and its content is the last tree you ren
   - They hide while the prompt box would be left narrower than 360 px: in a narrow pane, or a split. `prompt` gives way last.
   - Each location shows one panel: the first one in the extensions list. Another extension's panel there waits until that one stops.
   - Keep the tree small: a few lines of `text` (`mono` for ASCII art), a `progress`, a `badge`, a `menu`. A click in the slot does not move the caret into the prompt box.
+- **`sidebar-foot`** (API 1.9): a dock at the bottom of the sidebar, under every tab, with a 1 px top border and its tree's natural height.
+  - It has no activity-bar button, and `panel/open` on it does nothing. `width`, `frame` and `wide` are invalid on it.
+  - At most one per manifest; across extensions the first one wins, as for the prompt slots.
+  - It does not scroll: the tree takes its own height. A `bubble` floats above the dock instead of growing it, and a `menu` shows only while the mouse is over the dock (it keeps its space).
 
 **`icon`:** a [Lucide](https://lucide.dev/icons) icon name in kebab-case, such as `git-pull-request`, `database` or `rocket`. wai ships the whole Lucide set it bundles; an unknown name falls back to the initials and does not fail the install. The `icon` node and the `icon` fields of nodes take the same names. A panel's `icon` may instead be the path of an `.svg` file in your extension's folder (`icons/panel.svg`): a relative path without `..`, at most 32 KB, a regular file (not a symlink). wai draws it as a mask in the activity bar's colours, so its fill colour does not matter, and shows the initials when the file is missing or too big. The shared release workflow packs it.
 
@@ -280,6 +284,7 @@ A tree is JSON nodes. Every field without `?` is required.
 | `alert` | `tone`, `title`?, `text` | A coloured notice. `tone` is `info`, `success`, `warning` or `danger`. `text` wraps, up to 10,000 characters |
 | `kv` | `items` (array of `{"key", "value"}`) | Keys and values side by side, one line each. At most 200 items |
 | `bubble` | `id`, `text`, `tone`?, `sticky`? (bool) | API 1.8. A speech bubble with a tail at its bottom left. wai animates it: it pops in, types its text (one character per 30 ms), holds 2.5 s + 50 ms per character (at most 7 s) with a shrinking timer line, and fades out. The hold waits while the mouse is on it and while the prompt box has text (it dims then). A click closes it. When it is gone, wai sends `panel/action` with its `id` and `values: {"bubble": "click"}` or `{"bubble": "timeout"}`. `sticky`: it never times out; after 6 s it shrinks to a bouncing "!" (hover shows the text). A different `text` for the same `id` starts a new bubble; removing the node removes it at once. `text` is one line, at most 140 characters |
+| `pixels` | `rows` (array of strings), `scale`? (1 to 8), `id`? | API 1.9. A grid of cells: `#` is a full cell (the theme's foreground), `+` a dim one (40% of it), any other character is empty and not painted. At most 64 rows, each cut to 256 characters; shorter rows are padded to the longest; an empty `rows` is unsupported. `scale` is px per cell (default 2, clamped to 1 to 8). The node is exactly `longest row × scale` by `rows × scale` px; a narrower container clips it. With `id`, a click sends `panel/action` with it and the cursor is a pointer; the `id` is shared with buttons and fields, and a repeat makes the node unsupported |
 | `progress` | `value` (number) | From 0 to 1, clamped |
 | `spinner` | `label`? | A loading indicator |
 
