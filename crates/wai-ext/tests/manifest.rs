@@ -527,7 +527,10 @@ fn listen_and_sessions_content_parse() {
     );
     assert_eq!(Permission::Listen.to_string(), "listen");
     assert_eq!(Permission::SessionsContent.to_string(), "sessions:content");
-    for bad in ["\"process\", \"listen:8080\"", "\"process\", \"sessions:contents\""] {
+    for bad in [
+        "\"process\", \"listen:8080\"",
+        "\"process\", \"sessions:contents\"",
+    ] {
         assert!(matches!(m(bad), Err(ManifestError::Unknown(_))), "{bad}");
     }
 }

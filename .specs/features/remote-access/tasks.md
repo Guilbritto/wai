@@ -161,8 +161,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `tests/host.rs`: `content_and_control_methods_need_permissions` and `content_and_control_methods_reach_wai` pass
-- [ ] Gate check passes: `cargo test -p wai-ext --test host`
+- [x] `tests/host.rs`: `content_and_control_methods_need_permissions` and `content_and_control_methods_reach_wai` pass
+- [x] Gate check passes: `cargo test -p wai-ext --test host`
 
 **Tests**: integration
 **Gate**: full

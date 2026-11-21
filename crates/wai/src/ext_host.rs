@@ -558,6 +558,10 @@ impl ExtHost {
             event @ (ExtEvent::OpenSession { .. }
             | ExtEvent::Prompt { .. }
             | ExtEvent::ListSessions { .. }
+            | ExtEvent::ReadSession { .. }
+            | ExtEvent::CancelSession { .. }
+            | ExtEvent::AnswerPermission { .. }
+            | ExtEvent::AnswerQuestion { .. }
             | ExtEvent::OpenPanel { .. }) => {
                 return cx.emit(SessionCall(Cell::new(Some((id.clone(), event)))));
             }

@@ -78,6 +78,38 @@ pub enum ExtEvent {
     ListSessions {
         reply: Reply,
     },
+    /// `sessions/read`: a page of the transcript, `{items, total}`.
+    ReadSession {
+        agent: String,
+        session: String,
+        from: Option<usize>,
+        limit: Option<usize>,
+        reply: Reply,
+    },
+    /// `sessions/cancel`: stop the running turn.
+    CancelSession {
+        agent: String,
+        session: String,
+        reply: Reply,
+    },
+    /// `permission/answer`: answer a pending permission request with one of its options.
+    AnswerPermission {
+        agent: String,
+        session: String,
+        request: u64,
+        option: String,
+        reply: Reply,
+    },
+    /// `question/answer`: `answer` is `accept` (with `values` by field key), `decline` or
+    /// `cancel`.
+    AnswerQuestion {
+        agent: String,
+        session: String,
+        request: u64,
+        answer: String,
+        values: Option<serde_json::Map<String, Value>>,
+        reply: Reply,
+    },
     /// `panel/open`: show the panel, a contributed one.
     OpenPanel {
         panel: String,
@@ -658,6 +690,49 @@ impl Ext {
                     text: p.text,
                 })
             }
+            "sessions/read" => {
+                need(Permission::SessionsContent)?;
+                let p: ReadParams = params_of(params)?;
+                Call::Deferred(ExtEvent::ReadSession {
+                    agent: p.agent,
+                    session: p.session,
+                    from: p.from,
+                    limit: p.limit,
+                    reply: reply(),
+                })
+            }
+            "sessions/cancel" => {
+                need(Permission::SessionsControl)?;
+                let p: SessionParams = params_of(params)?;
+                Call::Deferred(ExtEvent::CancelSession {
+                    agent: p.agent,
+                    session: p.session,
+                    reply: reply(),
+                })
+            }
+            "permission/answer" => {
+                need(Permission::SessionsControl)?;
+                let p: PermissionAnswerParams = params_of(params)?;
+                Call::Deferred(ExtEvent::AnswerPermission {
+                    agent: p.agent,
+                    session: p.session,
+                    request: p.request,
+                    option: p.option,
+                    reply: reply(),
+                })
+            }
+            "question/answer" => {
+                need(Permission::SessionsControl)?;
+                let p: QuestionAnswerParams = params_of(params)?;
+                Call::Deferred(ExtEvent::AnswerQuestion {
+                    agent: p.agent,
+                    session: p.session,
+                    request: p.request,
+                    answer: p.answer,
+                    values: p.values,
+                    reply: reply(),
+                })
+            }
             "notify" => {
                 need(Permission::Notify)?;
                 let p: NotifyParams = params_of(params)?;
@@ -750,6 +825,37 @@ struct PromptParams {
     agent: String,
     session: String,
     text: String,
+}
+
+#[derive(Deserialize)]
+struct ReadParams {
+    agent: String,
+    session: String,
+    from: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct SessionParams {
+    agent: String,
+    session: String,
+}
+
+#[derive(Deserialize)]
+struct PermissionAnswerParams {
+    agent: String,
+    session: String,
+    request: u64,
+    option: String,
+}
+
+#[derive(Deserialize)]
+struct QuestionAnswerParams {
+    agent: String,
+    session: String,
+    request: u64,
+    answer: String,
+    values: Option<serde_json::Map<String, Value>>,
 }
 
 #[derive(Deserialize)]
