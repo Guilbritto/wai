@@ -7,10 +7,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 use wai_agent::{
-    Choice, ChoiceKind, FieldKind, PermissionChoice, QuestionField, QuestionRequest, ToolStatus,
+    Choice, ChoiceKind, FieldKind, PermissionChoice, PermissionRequest, QuestionField,
+    QuestionRequest, ToolStatus,
 };
+use wai_ext::HostEvent;
 
-use crate::chat::{ChatItem, NoticeKind};
+use crate::chat::{ChatEvent, ChatItem, ChatModel, ChatSession, NoticeKind};
 
 /// `sessions/read` without `limit`: the last 200 items.
 pub const PAGE_DEFAULT: usize = 200;
@@ -19,6 +21,74 @@ pub const PAGE_MAX: usize = 500;
 
 /// The shortest gap between two `event/session_update`s of one session: 10 a second (HOST-02).
 pub const FLUSH_GAP: Duration = Duration::from_millis(100);
+
+/// A session's transcript as extensions see it: the closed rows, then the cards waiting for an
+/// answer, as wai shows them.
+pub fn transcript(model: &ChatModel) -> Vec<&ChatItem> {
+    model.items.iter().chain(&model.waiting).collect()
+}
+
+/// The waiting permission request `id`.
+pub fn waiting_permission(model: &ChatModel, id: u64) -> Option<&PermissionRequest> {
+    model.waiting.iter().find_map(|item| match item {
+        ChatItem::Permission { request, .. } if request.id == id => Some(request),
+        _ => None,
+    })
+}
+
+/// The host event a session's card event becomes (HOST-04, HOST-06, QST-01, QST-03).
+pub fn card_event(event: &ChatEvent, s: &ChatSession) -> Option<HostEvent> {
+    let (agent, session) = (s.agent.clone(), s.id.clone());
+    Some(match event {
+        ChatEvent::PermissionAsked(id) => {
+            let request = waiting_permission(&s.model, *id)?;
+            HostEvent::PermissionRequested {
+                agent,
+                session,
+                request: *id,
+                title: request.title.clone(),
+                options: options_json(&request.options),
+            }
+        }
+        ChatEvent::PermissionAnswered { id, option } => HostEvent::PermissionResolved {
+            agent,
+            session,
+            request: *id,
+            option: option.clone(),
+        },
+        ChatEvent::QuestionAsked(id) => {
+            let request = s.model.waiting_question(*id)?;
+            HostEvent::QuestionRequested {
+                agent,
+                session,
+                request: *id,
+                message: request.message.clone(),
+                fields: fields_json(&request.fields),
+            }
+        }
+        ChatEvent::QuestionAnswered { id, answer } => HostEvent::QuestionResolved {
+            agent,
+            session,
+            request: *id,
+            answer: answer.to_string(),
+        },
+        _ => return None,
+    })
+}
+
+/// `event/session_update` for the items `changed` of the session's transcript.
+pub fn session_update(s: &ChatSession, changed: Vec<usize>) -> HostEvent {
+    let items = transcript(&s.model);
+    let changed = (changed.into_iter())
+        .filter_map(|ix| Some((ix, item_json(items.get(ix)?))))
+        .collect();
+    HostEvent::SessionUpdate {
+        agent: s.agent.clone(),
+        session: s.id.clone(),
+        total: items.len(),
+        items: changed,
+    }
+}
 
 /// One transcript item. A tool call carries its title, kind and status, never its output.
 pub fn item_json(item: &ChatItem) -> Value {

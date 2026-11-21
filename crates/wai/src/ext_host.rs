@@ -166,6 +166,9 @@ pub struct ExtHost {
     /// The last `event/session_focused`, sent again to an extension that starts. Set while the
     /// workspace renders, so not through an update.
     focused: RefCell<Option<(Option<String>, Option<String>)>>,
+    /// Every broadcast, for tests that run no extension.
+    #[cfg(test)]
+    pub(crate) sent: RefCell<Vec<HostEvent>>,
 }
 
 impl ExtHost {
@@ -176,6 +179,8 @@ impl ExtHost {
             panels: Vec::new(),
             enabled: Vec::new(),
             focused: RefCell::new(None),
+            #[cfg(test)]
+            sent: RefCell::default(),
         }
     }
 
@@ -308,6 +313,8 @@ impl ExtHost {
 
     /// Tells every running extension, as far as each was granted what `event` needs.
     pub fn broadcast(&self, event: HostEvent) {
+        #[cfg(test)]
+        self.sent.borrow_mut().push(event.clone());
         for running in self.running.values() {
             running.handle.notify_event(event.clone());
         }

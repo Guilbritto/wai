@@ -256,8 +256,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `workspace::tests::remote_turn_streams_session_update`, `remote_permission_requested_event`, `remote_permission_resolved_event`, `remote_question_requested_event`, `remote_question_resolved_event` pass
-- [ ] Gate check passes: `cargo test -p wai --bin wai -- remote_`
+- [x] `workspace::tests::remote_turn_streams_session_update`, `remote_permission_requested_event`, `remote_permission_resolved_event`, `remote_question_requested_event`, `remote_question_resolved_event` pass
+- [x] Gate check passes: `cargo test -p wai --bin wai -- remote_`
 
 **Tests**: integration
 **Gate**: full
