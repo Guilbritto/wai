@@ -223,9 +223,9 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | PAIR-10 | P1: Pair a phone | Design | Implementing |
 | PAIR-11 | P1: Pair a phone | Design | Implementing |
 | PAIR-12 | P1: Pair a phone | Design | Implementing |
-| PAIR-13 | P1: Pair a phone | Design | Pending |
-| PAIR-14 | P1: Pair a phone | Design | Pending |
-| PAIR-15 | P1: Pair a phone | Design | Pending |
+| PAIR-13 | P1: Pair a phone | Design | Implementing |
+| PAIR-14 | P1: Pair a phone | Design | Implementing |
+| PAIR-15 | P1: Pair a phone | Design | Implementing |
 | HOST-01 | P1: Follow sessions | Design | Implementing |
 | HOST-02 | P1: Follow sessions | Design | Implementing |
 | HOST-03 | P1: Follow sessions | Design | Implementing |
