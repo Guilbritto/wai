@@ -215,11 +215,28 @@ fn first_party_manifests_validate() {
     );
     assert_eq!((card.location, card.width), (PanelLocation::Sidebar, None));
 
-    // wai-remoto: a skeleton; no process, nothing contributed.
+    // wai-remoto: its own process, a sidebar panel, session content and control, and `listen`.
     let remoto = read("wai-remoto");
-    assert!(remoto.process.is_none());
-    assert_eq!(remoto.permissions, [Permission::SessionsControl]);
-    assert_eq!(remoto.contributes, Contributes::default());
+    assert_eq!(
+        remoto.permissions,
+        [
+            Permission::Process,
+            Permission::Panels,
+            Permission::SessionsRead,
+            Permission::SessionsContent,
+            Permission::SessionsControl,
+            Permission::Notify,
+            Permission::Listen
+        ]
+    );
+    assert_eq!(remoto.process.unwrap().command, "bin/wai-remoto");
+    let [panel] = remoto.contributes.panels.as_slice() else {
+        panic!("one panel: {:?}", remoto.contributes.panels)
+    };
+    assert_eq!(
+        (panel.id.as_str(), panel.title.as_str(), panel.location),
+        ("remoto", "Remoto", PanelLocation::Sidebar)
+    );
 }
 
 #[test]

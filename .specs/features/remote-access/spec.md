@@ -211,7 +211,7 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 
 | Requirement ID | Story | Phase | Status |
 | -------------- | ----- | ----- | ------ |
-| PAIR-01 | P1: Pair a phone | Design | Pending |
+| PAIR-01 | P1: Pair a phone | Design | Implementing |
 | PAIR-02 | P1: Pair a phone | Design | Pending |
 | PAIR-03 | P1: Pair a phone | Design | Pending |
 | PAIR-04 | P1: Pair a phone | Design | Pending |

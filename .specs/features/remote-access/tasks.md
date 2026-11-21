@@ -332,8 +332,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `TestInitializeAndRender` passes; `crates/wai-ext/tests/manifest.rs` asserts the new wai-remoto manifest
-- [ ] Gate check passes: `cd extensions/wai-remoto && go test ./...`
+- [x] `TestInitializeAndRender` passes; `crates/wai-ext/tests/manifest.rs` asserts the new wai-remoto manifest
+- [x] Gate check passes: `cd extensions/wai-remoto && go test ./...`
 
 **Tests**: unit
 **Gate**: quick
@@ -973,8 +973,8 @@ Proof: run remoto | --- PASS: TestResponsesAreNoStore
 
 The feature's live state, written as it happens - a compaction gives no warning.
 
-**Settled mid-build:** The `**Build**` line keeps only the Rust build: wai-remoto and wai-mobile do not exist before T13 and T24, so the `--execute` run of the Build line would be red before any change. `go vet` and `flutter analyze` run in those phases' build gates. Execution: one sub-agent per phase, in order (user: "Subagente por lote"). Branch `feat/remote-access` from `origin/development`; the wai-github WIP is in `stash@{0}` "wip wai-github (antes do remote-access)" (user: "Nova branch, WIP em stash"). Phase 1: `wai` is a bin-only crate, so every `cargo test -p wai --lib` became `cargo test -p wai --bin wai`; the API bump changed two existing tests' expected version (`api_version_is_checked_first` now tests 1.11 as newer, `initialize_roundtrip` expects 1.10), as the 1.9 bump did; T1 alone does not build `wai` (T2 completes it). Go 1.27.4 from winget (`C:\Program Files\Go\bin`); Flutter stable cloned to `C:\Users\guilh\dev\flutter` (not in winget).
-**Dispatched:** batch worker Phase 1 (T1-T4) at `7588aa9` - returned: T1 77e821b, T2 3d51db8, T3 d33c39b, T4 ac91b14; batch worker Phase 2 (T5-T12) at `1c228fd`
+**Settled mid-build:** The `**Build**` line keeps only the Rust build: wai-remoto and wai-mobile do not exist before T13 and T24, so the `--execute` run of the Build line would be red before any change. `go vet` and `flutter analyze` run in those phases' build gates. Execution: one sub-agent per phase, in order (user: "Subagente por lote"). Branch `feat/remote-access` from `origin/development`; the wai-github WIP is in `stash@{0}` "wip wai-github (antes do remote-access)" (user: "Nova branch, WIP em stash"). Phase 1: `wai` is a bin-only crate, so every `cargo test -p wai --lib` became `cargo test -p wai --bin wai`; the API bump changed two existing tests' expected version (`api_version_is_checked_first` now tests 1.11 as newer, `initialize_roundtrip` expects 1.10), as the 1.9 bump did; T1 alone does not build `wai` (T2 completes it). Phase 2: the transcript is `items` followed by pending cards (`model.waiting`); host error strings for wai-remoto: `Request <id> is already answered or unknown`, `Field <key>: <why>`, `No option <option> in request <id>`, `Unknown answer <x>: use accept, decline or cancel`, `No open session <agent> <session>`; an agent-resolved question sends `answer: "cancel"`. Go 1.27.4 from winget (`C:\Program Files\Go\bin`); Flutter stable cloned to `C:\Users\guilh\dev\flutter` (not in winget).
+**Dispatched:** batch worker Phase 1 (T1-T4) at `7588aa9` - returned: T1 77e821b, T2 3d51db8, T3 d33c39b, T4 ac91b14; batch worker Phase 2 (T5-T12) at `1c228fd` - returned: T5 9d2dc14, T6 bb70454, T7 2841534, T8 0feb7d7, T9 d418238, T10 22cb1f4, T11 0930772, T12 889012b; batch worker Phase 3 (T13-T17) at `889012b`
 **Walked:** none
 
 ---
