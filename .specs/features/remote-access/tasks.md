@@ -123,8 +123,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `extensions_view::tests::consent_lists_listen` and `consent_lists_sessions_content` pass
-- [ ] Gate check passes: `cargo test -p wai --lib -- consent_`
+- [x] `extensions_view::tests::consent_lists_listen` and `consent_lists_sessions_content` pass
+- [x] Gate check passes: `cargo test -p wai --lib -- consent_`
 
 **Tests**: unit
 **Gate**: quick
