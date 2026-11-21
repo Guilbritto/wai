@@ -1,6 +1,10 @@
 //! Session content for extensions (API 1.10): the transcript as JSON, pages of it for
 //! `sessions/read`. Pure functions; `workspace.rs` routes the calls and events to them.
 
+use std::collections::{BTreeSet, HashMap};
+use std::hash::Hash;
+use std::time::{Duration, Instant};
+
 use serde_json::{Map, Value, json};
 use wai_agent::{
     Choice, ChoiceKind, FieldKind, PermissionChoice, QuestionField, QuestionRequest, ToolStatus,
@@ -12,6 +16,9 @@ use crate::chat::{ChatItem, NoticeKind};
 pub const PAGE_DEFAULT: usize = 200;
 /// The most items one `sessions/read` returns: a page stays under the 4 MB message cap.
 pub const PAGE_MAX: usize = 500;
+
+/// The shortest gap between two `event/session_update`s of one session: 10 a second (HOST-02).
+pub const FLUSH_GAP: Duration = Duration::from_millis(100);
 
 /// One transcript item. A tool call carries its title, kind and status, never its output.
 pub fn item_json(item: &ChatItem) -> Value {
@@ -164,9 +171,62 @@ pub fn check_answer(request: &QuestionRequest, values: &Map<String, Value>) -> R
     Ok(())
 }
 
+/// The transcript items that changed per session, sent as one `event/session_update` at most
+/// every `FLUSH_GAP`. The caller runs the timer: `mark` says when to `flush`.
+pub struct Feed<K> {
+    sessions: HashMap<K, Pending>,
+}
+
+#[derive(Default)]
+struct Pending {
+    dirty: BTreeSet<usize>,
+    /// A flush is scheduled.
+    scheduled: bool,
+    last: Option<Instant>,
+}
+
+impl<K> Default for Feed<K> {
+    fn default() -> Self {
+        Self {
+            sessions: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Hash + Eq> Feed<K> {
+    /// Item `ix` of `key` changed at `now`. `Some(wait)`: schedule a `flush` after `wait`, at
+    /// least `FLUSH_GAP` after the last one; `None`: one is already scheduled.
+    pub fn mark(&mut self, key: K, ix: usize, now: Instant) -> Option<Duration> {
+        let pending = self.sessions.entry(key).or_default();
+        pending.dirty.insert(ix);
+        if pending.scheduled {
+            return None;
+        }
+        pending.scheduled = true;
+        let next = pending.last.map_or(now, |last| last + FLUSH_GAP);
+        Some(next.saturating_duration_since(now))
+    }
+
+    /// The changed items of `key`, in order, each once; the next flush waits `FLUSH_GAP`.
+    pub fn flush(&mut self, key: &K, now: Instant) -> Vec<usize> {
+        let Some(pending) = self.sessions.get_mut(key) else {
+            return Vec::new();
+        };
+        pending.scheduled = false;
+        pending.last = Some(now);
+        std::mem::take(&mut pending.dirty).into_iter().collect()
+    }
+
+    /// The session closed.
+    pub fn forget(&mut self, key: &K) {
+        self.sessions.remove(key);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     use serde_json::json;
     use wai_agent::{
@@ -174,7 +234,7 @@ mod tests {
         QuestionRequest, ToolStatus,
     };
 
-    use super::{check_answer, item_json, page};
+    use super::{FLUSH_GAP, Feed, check_answer, item_json, page};
     use crate::chat::{ChatItem, EditedFile, NoticeKind, ToolItem};
 
     fn tool() -> ToolItem {
@@ -457,5 +517,36 @@ mod tests {
         for (v, error) in cases {
             assert_eq!(check(v.clone()), Err(error.to_string()), "{v}");
         }
+    }
+
+    #[test]
+    fn feed_flushes_at_most_every_100ms() {
+        let (mut feed, t0) = (Feed::default(), Instant::now());
+        let ms = Duration::from_millis;
+        assert_eq!(FLUSH_GAP, ms(100));
+        // The first change flushes at once.
+        assert_eq!(feed.mark("a", 0, t0), Some(ms(0)));
+        assert_eq!(feed.flush(&"a", t0), [0]);
+        // The next waits out the 100 ms since that flush; changes meanwhile join it.
+        assert_eq!(feed.mark("a", 1, t0 + ms(30)), Some(ms(70)));
+        assert_eq!(feed.mark("a", 2, t0 + ms(60)), None);
+        assert_eq!(feed.flush(&"a", t0 + ms(100)), [1, 2]);
+        // Another session has its own pace.
+        assert_eq!(feed.mark("b", 0, t0 + ms(110)), Some(ms(0)));
+        // A change long after the last flush goes at once again.
+        assert_eq!(feed.mark("a", 3, t0 + ms(350)), Some(ms(0)));
+        assert_eq!(feed.flush(&"a", t0 + ms(350)), [3]);
+        assert!(feed.flush(&"a", t0 + ms(450)).is_empty(), "nothing changed");
+        feed.forget(&"b");
+        assert!(feed.flush(&"b", t0 + ms(500)).is_empty());
+    }
+
+    #[test]
+    fn feed_merges_repeated_indexes() {
+        let (mut feed, t0) = (Feed::default(), Instant::now());
+        for ix in [5, 5, 6, 2, 5] {
+            feed.mark("a", ix, t0);
+        }
+        assert_eq!(feed.flush(&"a", t0), [2, 5, 6]);
     }
 }

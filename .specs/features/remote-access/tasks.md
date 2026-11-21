@@ -218,8 +218,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `ext_sessions::tests::feed_flushes_at_most_every_100ms` and `feed_merges_repeated_indexes` pass
-- [ ] Gate check passes: `cargo test -p wai --bin wai -- ext_sessions`
+- [x] `ext_sessions::tests::feed_flushes_at_most_every_100ms` and `feed_merges_repeated_indexes` pass
+- [x] Gate check passes: `cargo test -p wai --bin wai -- ext_sessions`
 
 **Tests**: unit
 **Gate**: quick
