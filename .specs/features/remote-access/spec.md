@@ -234,8 +234,8 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | REMO-03 | P1: Follow sessions | Design | Implementing |
 | REMO-04 | P1: Follow sessions | Design | Implementing |
 | REMO-05 | P1: Follow sessions | Design | Pending |
-| REMO-06 | P1: Follow sessions | Design | Pending |
-| REMO-07 | P1: Follow sessions | Design | Pending |
+| REMO-06 | P1: Follow sessions | Design | Implementing |
+| REMO-07 | P1: Follow sessions | Design | Implementing |
 | HOST-04 | P1: Drive a session | Design | Implementing |
 | HOST-05 | P1: Drive a session | Design | Implementing |
 | HOST-06 | P1: Drive a session | Design | Implementing |

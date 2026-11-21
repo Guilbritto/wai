@@ -561,8 +561,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] "client maps statuses to errors" and "client parses an SSE stream" pass
-- [ ] Gate check passes: `cd ../wai-mobile && flutter test`
+- [x] "client maps statuses to errors" and "client parses an SSE stream" pass
+- [x] Gate check passes: `cd ../wai-mobile && flutter test`
 
 **Tests**: unit
 **Gate**: quick
