@@ -618,8 +618,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] "QuestionState disables Submit while a required field is empty", "QuestionState builds accept values", "QuestionState builds decline and cancel", "QuestionState marks the field from 422" pass
-- [ ] Gate check passes: `cd ../wai-mobile && flutter test`
+- [x] "QuestionState disables Submit while a required field is empty", "QuestionState builds accept values", "QuestionState builds decline and cancel", "QuestionState marks the field from 422" pass
+- [x] Gate check passes: `cd ../wai-mobile && flutter test`
 
 **Tests**: unit
 **Gate**: quick
