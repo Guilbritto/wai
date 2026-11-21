@@ -599,8 +599,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] "TranscriptStore applies session_update", "TranscriptStore allows sending only when idle", "TranscriptStore marks a permission answered in wai", "TranscriptStore marks a question answered in wai", "TranscriptStore reports busy and rate limit" pass
-- [ ] Gate check passes: `cd ../wai-mobile && flutter test`
+- [x] "TranscriptStore applies session_update", "TranscriptStore allows sending only when idle", "TranscriptStore marks a permission answered in wai", "TranscriptStore marks a question answered in wai", "TranscriptStore reports busy and rate limit" pass
+- [x] Gate check passes: `cd ../wai-mobile && flutter test`
 
 **Tests**: unit
 **Gate**: quick

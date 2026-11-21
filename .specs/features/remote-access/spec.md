@@ -245,11 +245,11 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | HOST-10 | P1: Drive a session | Design | Pending |
 | HOST-11 | P1: Drive a session | Design | Implementing |
 | REMO-08 | P1: Drive a session | Design | Implementing |
-| REMO-09 | P1: Drive a session | Design | Pending |
+| REMO-09 | P1: Drive a session | Design | Implementing |
 | REMO-10 | P1: Drive a session | Design | Implementing |
 | REMO-11 | P1: Drive a session | Design | Pending |
 | REMO-12 | P1: Drive a session | Design | Implementing |
-| REMO-13 | P1: Drive a session | Design | Pending |
+| REMO-13 | P1: Drive a session | Design | Implementing |
 | REMO-14 | P1: Drive a session | Design | Implementing |
 | QST-01 | P2: Answer an agent's question | Design | Implementing |
 | QST-02 | P2: Answer an agent's question | Design | Implementing |
@@ -260,7 +260,7 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | QST-07 | P2: Answer an agent's question | Design | Pending |
 | QST-08 | P2: Answer an agent's question | Design | Implementing |
 | QST-09 | P2: Answer an agent's question | Design | Pending |
-| QST-10 | P2: Answer an agent's question | Design | Pending |
+| QST-10 | P2: Answer an agent's question | Design | Implementing |
 | DEV-01 | P2: Manage devices | Design | Implementing |
 | DEV-02 | P2: Manage devices | Design | Implementing |
 | DEV-03 | P2: Manage devices | Design | Implementing |
