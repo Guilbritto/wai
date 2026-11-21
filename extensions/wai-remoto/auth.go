@@ -56,7 +56,17 @@ func (g *guard) hostOK(host string) bool {
 		return true
 	}
 	u, err := url.Parse(tunnel)
-	return err == nil && u.Host != "" && strings.EqualFold(host, u.Host)
+	return err == nil && u.Host != "" && strings.EqualFold(dropDefaultPort(host, u.Scheme), dropDefaultPort(u.Host, u.Scheme))
+}
+
+// dropDefaultPort strips the scheme's default port: a client sends `Host: name` for
+// `https://name:443`.
+func dropDefaultPort(host, scheme string) string {
+	def := map[string]string{"https": ":443", "http": ":80"}[strings.ToLower(scheme)]
+	if def != "" && strings.HasSuffix(host, def) {
+		return strings.TrimSuffix(host, def)
+	}
+	return host
 }
 
 // wrap guards next; with needToken false (the pair route) it skips the token only.

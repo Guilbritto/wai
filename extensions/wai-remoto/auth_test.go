@@ -102,6 +102,14 @@ func TestUnknownHostIs421(t *testing.T) {
 		gd.expect(t, "Host "+bad, gd.route, gd.request("", host(bad)), http.StatusMisdirectedRequest)
 		gd.expect(t, "Host "+bad+" on the pair route", gd.public, gd.request("", host(bad)), http.StatusMisdirectedRequest)
 	}
+	// A tunnel URL written with the default port matches the Host a client sends without it.
+	gd.g.store.st.TunnelURL = "https://" + tunnelHost + ":443"
+	for _, ok := range []string{tunnelHost, tunnelHost + ":443"} {
+		gd.expect(t, "Host "+ok+" with the tunnel at :443", gd.route, gd.request("", host(ok)), http.StatusOK)
+	}
+	gd.expect(t, "Host "+tunnelHost+":7717 with the tunnel at :443", gd.route, gd.request("", host(tunnelHost+":7717")), http.StatusMisdirectedRequest)
+	gd.g.store.st.TunnelURL = "https://" + tunnelHost
+	gd.expect(t, "Host "+tunnelHost+":443 with the tunnel at no port", gd.route, gd.request("", host(tunnelHost+":443")), http.StatusOK)
 	// The port is the configured one.
 	gd.g.store.st.Port = 8000
 	gd.expect(t, "Host 127.0.0.1:8000", gd.route, gd.request("", host("127.0.0.1:8000")), http.StatusOK)
