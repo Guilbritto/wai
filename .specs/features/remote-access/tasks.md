@@ -313,8 +313,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] Every method, event and permission from T1-T4 is documented
-- [ ] Gate check passes: Build line
+- [x] Every method, event and permission from T1-T4 is documented
+- [x] Gate check passes: Build line
 
 **Tests**: none
 **Gate**: build

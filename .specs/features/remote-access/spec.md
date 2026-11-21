@@ -241,9 +241,9 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | HOST-06 | P1: Drive a session | Design | Implementing |
 | HOST-07 | P1: Drive a session | Design | Implementing |
 | HOST-08 | P1: Drive a session | Design | Implementing |
-| HOST-09 | P1: Drive a session | Design | Pending |
+| HOST-09 | P1: Drive a session | Design | Implementing |
 | HOST-10 | P1: Drive a session | Design | Pending |
-| HOST-11 | P1: Drive a session | Design | Pending |
+| HOST-11 | P1: Drive a session | Design | Implementing |
 | REMO-08 | P1: Drive a session | Design | Pending |
 | REMO-09 | P1: Drive a session | Design | Pending |
 | REMO-10 | P1: Drive a session | Design | Pending |
