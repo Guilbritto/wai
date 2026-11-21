@@ -104,8 +104,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `tests/manifest.rs`: `listen_and_sessions_content_parse` and `api_is_1_10` pass; existing manifest tests still pass
-- [ ] Gate check passes: `cargo test -p wai-ext --test manifest`
+- [x] `tests/manifest.rs`: `listen_and_sessions_content_parse` and `api_is_1_10` pass; existing manifest tests still pass
+- [x] Gate check passes: `cargo test -p wai-ext --test manifest`
 
 **Tests**: unit
 **Gate**: quick
@@ -974,7 +974,7 @@ Proof: run remoto | --- PASS: TestResponsesAreNoStore
 The feature's live state, written as it happens - a compaction gives no warning.
 
 **Settled mid-build:** The `**Build**` line keeps only the Rust build: wai-remoto and wai-mobile do not exist before T13 and T24, so the `--execute` run of the Build line would be red before any change. `go vet` and `flutter analyze` run in those phases' build gates. Execution: one sub-agent per phase, in order (user: "Subagente por lote"). Branch `feat/remote-access` from `origin/development`; the wai-github WIP is in `stash@{0}` "wip wai-github (antes do remote-access)" (user: "Nova branch, WIP em stash"). Go 1.27.4 from winget (`C:\Program Files\Go\bin`); Flutter stable cloned to `C:\Users\guilh\dev\flutter` (not in winget).
-**Dispatched:** none
+**Dispatched:** batch worker Phase 1 (T1-T4) at `7588aa9`
 **Walked:** none
 
 ---

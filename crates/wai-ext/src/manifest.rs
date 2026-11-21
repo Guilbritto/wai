@@ -93,7 +93,7 @@ pub struct McpServerSpec {
 
 /// The extension API this wai speaks: `initialize` sends it, and a manifest's `api` may not be
 /// newer.
-pub const API: &str = "1.9";
+pub const API: &str = "1.10";
 
 pub const MAX_ITEMS: usize = 3;
 
@@ -222,10 +222,12 @@ pub enum Permission {
     Process,
     SessionsRead,
     SessionsControl,
+    SessionsContent,
     Notify,
     Panels,
     Bar,
     Network,
+    Listen,
     Fs(PathBuf),
     Events(ExtId),
 }
@@ -236,10 +238,12 @@ impl std::fmt::Display for Permission {
             Self::Process => f.write_str("process"),
             Self::SessionsRead => f.write_str("sessions:read"),
             Self::SessionsControl => f.write_str("sessions:control"),
+            Self::SessionsContent => f.write_str("sessions:content"),
             Self::Notify => f.write_str("notify"),
             Self::Panels => f.write_str("panels"),
             Self::Bar => f.write_str("bar"),
             Self::Network => f.write_str("network"),
+            Self::Listen => f.write_str("listen"),
             Self::Fs(p) => write!(f, "fs:{}", p.display()),
             Self::Events(id) => write!(f, "events:{}", id.as_str()),
         }
@@ -338,10 +342,12 @@ pub(crate) fn parse_permission(s: &str) -> Result<Permission, ManifestError> {
         "process" => Permission::Process,
         "sessions:read" => Permission::SessionsRead,
         "sessions:control" => Permission::SessionsControl,
+        "sessions:content" => Permission::SessionsContent,
         "notify" => Permission::Notify,
         "panels" => Permission::Panels,
         "bar" => Permission::Bar,
         "network" => Permission::Network,
+        "listen" => Permission::Listen,
         _ => match s.strip_prefix("events:") {
             Some(id) => Permission::Events(ExtId::new(id).map_err(|_| {
                 ManifestError::Unknown(format!("events permission {s:?} must name an extension id"))
