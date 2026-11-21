@@ -656,8 +656,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] "SessionsScreen lists sessions", "SessionsScreen shows No open sessions in wai", "SessionsScreen shows can't reach wai with Retry" pass
-- [ ] Gate check passes: `cd ../wai-mobile && flutter test`
+- [x] "SessionsScreen lists sessions", "SessionsScreen shows No open sessions in wai", "SessionsScreen shows can't reach wai with Retry" pass
+- [x] Gate check passes: `cd ../wai-mobile && flutter test`
 
 **Tests**: widget
 **Gate**: quick
