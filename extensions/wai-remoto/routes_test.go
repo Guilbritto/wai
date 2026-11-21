@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -20,10 +21,35 @@ type api struct {
 	device Device
 }
 
+// dataDir is a temporary data folder. Unlike t.TempDir, its removal retries for a while: on
+// Windows a state.json just replaced can stay delete-pending for a moment, and the folder then
+// refuses to go.
+func dataDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "wai-remoto-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for i := 0; ; i++ {
+			err := os.RemoveAll(dir)
+			if err == nil {
+				return
+			}
+			if i == 50 {
+				t.Errorf("cannot remove %s: %v", dir, err)
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+	return dir
+}
+
 func startAPI(t *testing.T) *api {
 	t.Helper()
 	h := startHost(t)
-	h.initialize(t.TempDir())
+	h.initialize(dataDir(t))
 	h.next() // initialize's answer
 	h.next() // the first render
 	token, d, err := h.s.store.add("Pixel")

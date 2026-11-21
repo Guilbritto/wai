@@ -230,9 +230,9 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | HOST-02 | P1: Follow sessions | Design | Implementing |
 | HOST-03 | P1: Follow sessions | Design | Implementing |
 | REMO-01 | P1: Follow sessions | Design | Implementing |
-| REMO-02 | P1: Follow sessions | Design | Pending |
+| REMO-02 | P1: Follow sessions | Design | Implementing |
 | REMO-03 | P1: Follow sessions | Design | Pending |
-| REMO-04 | P1: Follow sessions | Design | Pending |
+| REMO-04 | P1: Follow sessions | Design | Implementing |
 | REMO-05 | P1: Follow sessions | Design | Pending |
 | REMO-06 | P1: Follow sessions | Design | Pending |
 | REMO-07 | P1: Follow sessions | Design | Pending |
@@ -271,7 +271,7 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | EDGE-02 | Edge cases | Design | Implementing |
 | EDGE-03 | Edge cases | Design | Implementing |
 | EDGE-04 | Edge cases | Design | Implementing |
-| EDGE-05 | Edge cases | Design | Pending |
+| EDGE-05 | Edge cases | Design | Implementing |
 | EDGE-06 | Edge cases | Design | Implementing |
 | EDGE-07 | Edge cases | Design | Pending |
 | EDGE-08 | Edge cases | Design | Implementing |

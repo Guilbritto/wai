@@ -465,8 +465,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `TestEventsForwardHostEvents`, `TestFifthStreamIs429`, `TestRevokeClosesStreams` pass
-- [ ] Gate check passes: `cd extensions/wai-remoto && go test ./...`
+- [x] `TestEventsForwardHostEvents`, `TestFifthStreamIs429`, `TestRevokeClosesStreams` pass
+- [x] Gate check passes: `cd extensions/wai-remoto && go test ./...`
 
 **Tests**: unit
 **Gate**: quick

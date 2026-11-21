@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -59,6 +60,8 @@ type server struct {
 	pairing *pairing
 	guard   *guard
 
+	hub *hub // the open event streams
+
 	smu     sync.Mutex
 	states  map[sessionKey]string  // each session's last state, from wai
 	prompts map[string][]time.Time // each device's prompts in the last promptWindow
@@ -66,7 +69,7 @@ type server struct {
 
 func newServer(out io.Writer, now func() time.Time) *server {
 	return &server{
-		out: out, now: now, timeout: hostTimeout,
+		out: out, now: now, timeout: hostTimeout, hub: newHub(),
 		pending: map[int64]chan message{},
 		states:  map[sessionKey]string{},
 		prompts: map[string][]time.Time{},
@@ -157,13 +160,16 @@ func (s *server) handle(m message) {
 		s.guard = &guard{store: st, notify: s.notify}
 		s.write(node{"jsonrpc": "2.0", "id": m.ID, "result": node{}})
 		s.render()
-	case "event/session_state":
-		var p struct{ Agent, Session, State string }
-		if json.Unmarshal(m.Params, &p) == nil {
-			s.setState(sessionKey{p.Agent, p.Session}, p.State)
-		}
 	default:
-		if m.ID != nil {
+		if streamed[m.Method] {
+			if m.Method == "event/session_state" {
+				var p struct{ Agent, Session, State string }
+				if json.Unmarshal(m.Params, &p) == nil {
+					s.setState(sessionKey{p.Agent, p.Session}, p.State)
+				}
+			}
+			s.hub.publish(strings.TrimPrefix(m.Method, "event/"), compact(m.Params))
+		} else if m.ID != nil {
 			s.write(node{"jsonrpc": "2.0", "id": m.ID, "error": node{"code": -32601, "message": "Method not found"}})
 		}
 	}

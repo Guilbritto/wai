@@ -24,7 +24,7 @@ type guarded struct {
 
 func newGuarded(t *testing.T, now func() time.Time, notify func(string)) *guarded {
 	t.Helper()
-	s, err := openStore(t.TempDir(), now)
+	s, err := openStore(dataDir(t), now)
 	if err != nil {
 		t.Fatal(err)
 	}

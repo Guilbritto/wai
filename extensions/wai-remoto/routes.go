@@ -25,6 +25,7 @@ func (s *server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/pair", s.guard.wrap(http.HandlerFunc(s.pair), false))
 	mux.Handle("POST /v1/unpair", auth(s.unpair))
+	mux.Handle("GET /v1/events", auth(s.events))
 	mux.Handle("GET /v1/sessions", auth(s.listSessions))
 	mux.Handle("GET /v1/sessions/{agent}/{session}", auth(s.readSession))
 	mux.Handle("POST /v1/sessions/{agent}/{session}/prompt", auth(s.prompt))
@@ -142,6 +143,18 @@ func pathSession(r *http.Request) sessionKey {
 	return sessionKey{r.PathValue("agent"), r.PathValue("session")}
 }
 
+// revoke deletes a device's token and ends its event streams (DEV-02).
+func (s *server) revoke(id string) {
+	s.store.revoke(id)
+	s.hub.kick(id)
+}
+
+// signOutAll deletes every token and ends every event stream (DEV-03).
+func (s *server) signOutAll() {
+	s.store.revokeAll()
+	s.hub.closeAll()
+}
+
 // POST /v1/pair {code, device}: a new device token, or 401 (PAIR-09, PAIR-10).
 func (s *server) pair(w http.ResponseWriter, r *http.Request) {
 	var body struct{ Code, Device string }
@@ -167,7 +180,7 @@ func (s *server) pair(w http.ResponseWriter, r *http.Request) {
 
 // POST /v1/unpair: the calling device's token stops working (DEV-06).
 func (s *server) unpair(w http.ResponseWriter, r *http.Request) {
-	s.store.revoke(deviceOf(r).ID)
+	s.revoke(deviceOf(r).ID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
