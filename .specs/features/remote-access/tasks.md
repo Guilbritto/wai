@@ -275,8 +275,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `workspace::tests::remote_read_returns_transcript`, `remote_read_unknown_session_errors`, `remote_cancel_ends_turn_cancelled` pass
-- [ ] Gate check passes: `cargo test -p wai --bin wai -- remote_`
+- [x] `workspace::tests::remote_read_returns_transcript`, `remote_read_unknown_session_errors`, `remote_cancel_ends_turn_cancelled` pass
+- [x] Gate check passes: `cargo test -p wai --bin wai -- remote_`
 
 **Tests**: integration
 **Gate**: full

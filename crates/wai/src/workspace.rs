@@ -1994,6 +1994,18 @@ impl Workspace {
                     eprintln!("wai: an extension's prompt for {agent} {session} was dropped");
                 }
             }
+            ExtEvent::ReadSession {
+                agent,
+                session,
+                from,
+                limit,
+                reply,
+            } => reply.send(self.read_session(&agent, &session, from, limit, cx)),
+            ExtEvent::CancelSession {
+                agent,
+                session,
+                reply,
+            } => reply.send(self.cancel_session(&agent, &session, cx)),
             ExtEvent::OpenPanel { panel, reply } => {
                 let Some(p) = self.ext_host.read(cx).panel_of(&ext, &panel) else {
                     return reply.send(Err(format!("No panel named {panel}")));
@@ -2013,6 +2025,42 @@ impl Workspace {
             }
             _ => {}
         }
+    }
+
+    /// The open session `agent` `session`, else the error an extension gets (HOST-03).
+    fn open_session(
+        &self,
+        agent: &str,
+        session: &str,
+        cx: &App,
+    ) -> Result<Entity<ChatSession>, String> {
+        (self.session(agent, session, cx))
+            .ok_or_else(|| format!("No open session {agent} {session}"))
+    }
+
+    /// `sessions/read`: a page of the session's transcript (HOST-01).
+    fn read_session(
+        &self,
+        agent: &str,
+        session: &str,
+        from: Option<usize>,
+        limit: Option<usize>,
+        cx: &App,
+    ) -> Result<serde_json::Value, String> {
+        let session = self.open_session(agent, session, cx)?;
+        let items = ext_sessions::transcript(&session.read(cx).model);
+        Ok(ext_sessions::page(&items, from, limit))
+    }
+
+    /// `sessions/cancel`: as wai's Stop (HOST-08).
+    fn cancel_session(
+        &self,
+        agent: &str,
+        session: &str,
+        cx: &App,
+    ) -> Result<serde_json::Value, String> {
+        self.open_session(agent, session, cx)?.read(cx).stop();
+        Ok(serde_json::Value::Null)
     }
 
     /// Shows `view`, a main panel, in the pane that shows it, else in the session pane
@@ -7182,6 +7230,97 @@ pub(crate) mod tests {
         assert_eq!(
             questions_resolved(&workspace, cx),
             [("fake".into(), id, 1, "decline".into())]
+        );
+    }
+
+    /// HOST-01: `sessions/read` returns the user's message, the agent's and its tool call (title
+    /// and status, no output), in order.
+    #[gpui_kit::test]
+    fn remote_read_returns_transcript(cx: &mut TestAppContext) {
+        let (workspace, session, id, cx) = prompted("--steps 1", "hi", cx);
+        wait_until(cx, "the answer", |cx| {
+            turn_state(&session, cx) == TurnState::Idle
+                && session.read_with(cx, |s, _| {
+                    matches!(s.model.items.last(), Some(ChatItem::Agent { .. }))
+                })
+        });
+        let read = |from, limit, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, cx| w.read_session("fake", &id, from, limit, cx))
+        };
+        let (user, thought, tool, agent) = (
+            json!({"kind": "user", "text": "hi"}),
+            json!({"kind": "thought", "text": "Looking around"}),
+            json!({"kind": "tool", "title": "Read README.md", "tool_kind": "read",
+                "status": "completed"}),
+            json!({"kind": "agent", "text": "Hello from fake agent"}),
+        );
+        assert_eq!(
+            read(None, None, cx),
+            Ok(json!({"items": [user, thought, tool, agent], "total": 4}))
+        );
+        assert_eq!(
+            read(Some(1), Some(2), cx),
+            Ok(json!({"items": [thought, tool], "total": 4}))
+        );
+        assert!(
+            !read(None, None, cx)
+                .unwrap()
+                .to_string()
+                .contains("step 0 output")
+        );
+    }
+
+    /// HOST-03: a session that is not open is an error naming it.
+    #[gpui_kit::test]
+    fn remote_read_unknown_session_errors(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_now(&workspace, cx);
+        let id = session.read_with(cx, |s, _| s.id.clone());
+        let read = |agent: &str, session: &str, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, cx| w.read_session(agent, session, None, None, cx))
+        };
+        assert!(read("fake", &id, cx).is_ok());
+        assert_eq!(
+            read("fake", "nope", cx),
+            Err("No open session fake nope".into())
+        );
+        assert_eq!(
+            read("other", &id, cx),
+            Err(format!("No open session other {id}"))
+        );
+    }
+
+    /// HOST-08: `sessions/cancel` stops a running turn as wai's Stop does: it ends `cancelled`.
+    #[gpui_kit::test]
+    fn remote_cancel_ends_turn_cancelled(cx: &mut TestAppContext) {
+        let words: Vec<String> = (0..40).map(|i| format!("w{i}")).collect();
+        let flags = format!("--reply '{}' --chunk-delay-ms 50", words.join(" "));
+        let (workspace, session, id, cx) = prompted(&flags, "go", cx);
+        assert_eq!(turn_state(&session, cx), TurnState::Working);
+        let cancel = |session: &str, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, cx| w.cancel_session("fake", session, cx))
+        };
+        assert_eq!(cancel("nope", cx), Err("No open session fake nope".into()));
+        assert_eq!(cancel(&id, cx), Ok(Value::Null));
+        wait_until(cx, "the cancelled turn", |cx| {
+            turn_state(&session, cx) == TurnState::Idle
+        });
+        let ended: Vec<_> = (sent(&workspace, cx).into_iter())
+            .filter_map(|e| match e {
+                HostEvent::TurnEnded {
+                    agent,
+                    session,
+                    reason,
+                } => Some((agent, session, reason)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ended, [("fake".into(), id, "cancelled".into())]);
+        let last = session.read_with(cx, |s, _| s.model.items.last().cloned());
+        assert!(
+            matches!(&last, Some(ChatItem::Notice { text, .. }) if text == "Cancelled"),
+            "{last:?}"
         );
     }
 }

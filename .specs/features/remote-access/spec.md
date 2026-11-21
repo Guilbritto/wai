@@ -228,7 +228,7 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | PAIR-15 | P1: Pair a phone | Design | Pending |
 | HOST-01 | P1: Follow sessions | Design | Implementing |
 | HOST-02 | P1: Follow sessions | Design | Implementing |
-| HOST-03 | P1: Follow sessions | Design | Pending |
+| HOST-03 | P1: Follow sessions | Design | Implementing |
 | REMO-01 | P1: Follow sessions | Design | Pending |
 | REMO-02 | P1: Follow sessions | Design | Pending |
 | REMO-03 | P1: Follow sessions | Design | Pending |
@@ -240,7 +240,7 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | HOST-05 | P1: Drive a session | Design | Pending |
 | HOST-06 | P1: Drive a session | Design | Implementing |
 | HOST-07 | P1: Drive a session | Design | Pending |
-| HOST-08 | P1: Drive a session | Design | Pending |
+| HOST-08 | P1: Drive a session | Design | Implementing |
 | HOST-09 | P1: Drive a session | Design | Pending |
 | HOST-10 | P1: Drive a session | Design | Pending |
 | HOST-11 | P1: Drive a session | Design | Pending |
