@@ -142,8 +142,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `tests/host.rs`: `content_events_reach_content_extension` and `content_events_skip_read_only_extension` pass
-- [ ] Gate check passes: `cargo test -p wai-ext --test host`
+- [x] `tests/host.rs`: `content_events_reach_content_extension` and `content_events_skip_read_only_extension` pass
+- [x] Gate check passes: `cargo test -p wai-ext --test host`
 
 **Tests**: integration
 **Gate**: full

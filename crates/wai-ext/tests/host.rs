@@ -817,3 +817,130 @@ fn ext_event_needs_its_permission() {
         assert_eq!(body, json!({"source": "a", "name": "x", "data": 1}));
     });
 }
+
+/// One of each content event (HOST-02, HOST-04, HOST-06, QST-01, QST-03), and the
+/// notification and params each one is sent as.
+fn content_events() -> Vec<(HostEvent, &'static str, Value)> {
+    let (agent, session) = (String::from("claude"), String::from("s1"));
+    let options = json!([{"id": "allow", "name": "Allow", "kind": "allow_once"}]);
+    let fields = json!([{"key": "b", "title": "Branch", "description": null, "required": true,
+        "kind": "single", "choices": [{"value": "main", "label": "main", "description": null}]}]);
+    let item = json!({"kind": "agent", "text": "hi"});
+    vec![
+        (
+            HostEvent::SessionUpdate {
+                agent: agent.clone(),
+                session: session.clone(),
+                total: 4,
+                items: vec![(3, item.clone())],
+            },
+            "event/session_update",
+            json!({"agent": "claude", "session": "s1", "total": 4,
+                "items": [{"index": 3, "item": item}]}),
+        ),
+        (
+            HostEvent::PermissionRequested {
+                agent: agent.clone(),
+                session: session.clone(),
+                request: 7,
+                title: "Run cargo test".into(),
+                options: options.clone(),
+            },
+            "event/permission_requested",
+            json!({"agent": "claude", "session": "s1", "request": 7,
+                "title": "Run cargo test", "options": options}),
+        ),
+        (
+            HostEvent::PermissionResolved {
+                agent: agent.clone(),
+                session: session.clone(),
+                request: 7,
+                option: Some("allow".into()),
+            },
+            "event/permission_resolved",
+            json!({"agent": "claude", "session": "s1", "request": 7, "option": "allow"}),
+        ),
+        (
+            HostEvent::QuestionRequested {
+                agent: agent.clone(),
+                session: session.clone(),
+                request: 3,
+                message: "Which branch?".into(),
+                fields: fields.clone(),
+            },
+            "event/question_requested",
+            json!({"agent": "claude", "session": "s1", "request": 3,
+                "message": "Which branch?", "fields": fields}),
+        ),
+        (
+            HostEvent::QuestionResolved {
+                agent,
+                session,
+                request: 3,
+                answer: "decline".into(),
+            },
+            "event/question_resolved",
+            json!({"agent": "claude", "session": "s1", "request": 3, "answer": "decline"}),
+        ),
+    ]
+}
+
+/// HOST-02/04/06, QST-01/03: an extension granted `sessions:content` gets each content event,
+/// with every field.
+#[test]
+fn content_events_reach_content_extension() {
+    let tmp = tempfile::tempdir().unwrap();
+    let granted = vec![
+        Permission::Process,
+        Permission::Notify,
+        Permission::SessionsContent,
+    ];
+    let ext = installed(tmp.path(), &[], granted);
+    run(Duration::from_secs(10), async {
+        let (handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        reported(&rx, "initialize").await;
+        for (event, method, params) in content_events() {
+            handle.notify_event(event);
+            assert_eq!(reported(&rx, method).await, params, "{method}");
+        }
+        // A permission request resolved by the agent (a cancelled turn) has no option.
+        handle.notify_event(HostEvent::PermissionResolved {
+            agent: "claude".into(),
+            session: "s1".into(),
+            request: 8,
+            option: None,
+        });
+        assert_eq!(
+            reported(&rx, "event/permission_resolved").await,
+            json!({"agent": "claude", "session": "s1", "request": 8, "option": null})
+        );
+    });
+}
+
+/// HOST-10: `sessions:read` without `sessions:content` gets none of the five content events.
+#[test]
+fn content_events_skip_read_only_extension() {
+    let tmp = tempfile::tempdir().unwrap();
+    let granted = vec![
+        Permission::Process,
+        Permission::Notify,
+        Permission::SessionsRead,
+    ];
+    let ext = installed(tmp.path(), &[], granted);
+    run(Duration::from_secs(10), async {
+        let (handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        reported(&rx, "initialize").await;
+        for (event, ..) in content_events() {
+            handle.notify_event(event);
+        }
+        // Sent after them, so it arrives after any of them that were sent.
+        handle.notify_event(HostEvent::SessionState {
+            agent: "claude".into(),
+            session: "s1".into(),
+            state: "Working".into(),
+        });
+        let events = until(&rx, |e| title(e) == Some("event/session_state")).await;
+        let titles: Vec<_> = events.iter().filter_map(title).collect();
+        assert_eq!(titles, ["event/session_state"], "content sent without permission");
+    });
+}

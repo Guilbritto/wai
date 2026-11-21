@@ -122,12 +122,50 @@ pub enum HostEvent {
         name: String,
         data: Value,
     },
+    /// Transcript items that changed, by index; `total` is the transcript's length.
+    SessionUpdate {
+        agent: String,
+        session: String,
+        total: usize,
+        items: Vec<(usize, Value)>,
+    },
+    /// `options`: `[{id, name, kind}]`.
+    PermissionRequested {
+        agent: String,
+        session: String,
+        request: u64,
+        title: String,
+        options: Value,
+    },
+    /// `option` is `None` when the agent resolved it (a cancelled turn).
+    PermissionResolved {
+        agent: String,
+        session: String,
+        request: u64,
+        option: Option<String>,
+    },
+    /// `fields`: `[{key, title, description, required, kind, choices}]`.
+    QuestionRequested {
+        agent: String,
+        session: String,
+        request: u64,
+        message: String,
+        fields: Value,
+    },
+    /// `answer`: `accept`, `decline` or `cancel`.
+    QuestionResolved {
+        agent: String,
+        session: String,
+        request: u64,
+        answer: String,
+    },
 }
 
 impl HostEvent {
     /// The notification and the permission it needs.
     fn message(self) -> (&'static str, Value, Option<Permission>) {
         let read = Some(Permission::SessionsRead);
+        let content = Some(Permission::SessionsContent);
         match self {
             Self::SessionState {
                 agent,
@@ -161,6 +199,65 @@ impl HostEvent {
                 "event/ext",
                 json!({"source": source.as_str(), "name": name, "data": data}),
                 Some(Permission::Events(source)),
+            ),
+            Self::SessionUpdate {
+                agent,
+                session,
+                total,
+                items,
+            } => {
+                let items: Vec<Value> = (items.into_iter())
+                    .map(|(index, item)| json!({"index": index, "item": item}))
+                    .collect();
+                (
+                    "event/session_update",
+                    json!({"agent": agent, "session": session, "total": total, "items": items}),
+                    content,
+                )
+            }
+            Self::PermissionRequested {
+                agent,
+                session,
+                request,
+                title,
+                options,
+            } => (
+                "event/permission_requested",
+                json!({"agent": agent, "session": session, "request": request, "title": title,
+                    "options": options}),
+                content,
+            ),
+            Self::PermissionResolved {
+                agent,
+                session,
+                request,
+                option,
+            } => (
+                "event/permission_resolved",
+                json!({"agent": agent, "session": session, "request": request, "option": option}),
+                content,
+            ),
+            Self::QuestionRequested {
+                agent,
+                session,
+                request,
+                message,
+                fields,
+            } => (
+                "event/question_requested",
+                json!({"agent": agent, "session": session, "request": request,
+                    "message": message, "fields": fields}),
+                content,
+            ),
+            Self::QuestionResolved {
+                agent,
+                session,
+                request,
+                answer,
+            } => (
+                "event/question_resolved",
+                json!({"agent": agent, "session": session, "request": request, "answer": answer}),
+                content,
             ),
         }
     }
