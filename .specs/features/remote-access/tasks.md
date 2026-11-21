@@ -199,8 +199,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `ext_sessions::tests::check_answer_needs_required_fields` and `check_answer_rejects_values_outside_kind` pass
-- [ ] Gate check passes: `cargo test -p wai --bin wai -- ext_sessions`
+- [x] `ext_sessions::tests::check_answer_needs_required_fields` and `check_answer_rejects_values_outside_kind` pass
+- [x] Gate check passes: `cargo test -p wai --bin wai -- ext_sessions`
 
 **Tests**: unit
 **Gate**: quick

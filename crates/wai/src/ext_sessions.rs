@@ -1,8 +1,10 @@
 //! Session content for extensions (API 1.10): the transcript as JSON, pages of it for
 //! `sessions/read`. Pure functions; `workspace.rs` routes the calls and events to them.
 
-use serde_json::{Value, json};
-use wai_agent::{ChoiceKind, FieldKind, PermissionChoice, QuestionField, ToolStatus};
+use serde_json::{Map, Value, json};
+use wai_agent::{
+    Choice, ChoiceKind, FieldKind, PermissionChoice, QuestionField, QuestionRequest, ToolStatus,
+};
 
 use crate::chat::{ChatItem, NoticeKind};
 
@@ -113,6 +115,55 @@ pub fn page(items: &[&ChatItem], from: Option<usize>, limit: Option<usize>) -> V
     json!({"items": items, "total": total})
 }
 
+/// Whether `values`, an `accept` from an extension, answers `request` (QST-05): every required
+/// field has a value, and each value fits its field's kind and choices. The error names the
+/// field: `Field <key>: <why>`.
+pub fn check_answer(request: &QuestionRequest, values: &Map<String, Value>) -> Result<(), String> {
+    let error = |key: &str, why: &str| Err(format!("Field {key}: {why}"));
+    if let Some(key) = (values.keys()).find(|k| !request.fields.iter().any(|f| f.key == **k)) {
+        return error(key, "not in the question");
+    }
+    for field in &request.fields {
+        let key = &field.key;
+        let value = match values.get(key) {
+            // As wai's form: blank text and no choices are no value.
+            Some(Value::String(s)) if s.trim().is_empty() => None,
+            Some(Value::Array(a)) if a.is_empty() => None,
+            value => value,
+        };
+        let Some(value) = value else {
+            match field.required {
+                true => return error(key, "a value is required"),
+                false => continue,
+            }
+        };
+        let one_of = |choices: &[Choice], v: &Value| {
+            v.as_str()
+                .is_some_and(|v| choices.iter().any(|c| c.value == v))
+        };
+        let fits = match &field.kind {
+            FieldKind::SingleChoice(choices) => one_of(choices, value),
+            FieldKind::MultiChoice(choices) => {
+                (value.as_array()).is_some_and(|a| a.iter().all(|v| one_of(choices, v)))
+            }
+            FieldKind::Text => value.is_string(),
+            FieldKind::Boolean => value.is_boolean(),
+            FieldKind::Number => value.is_number(),
+        };
+        if !fits {
+            let why = match &field.kind {
+                FieldKind::SingleChoice(_) => "not one of its choices",
+                FieldKind::MultiChoice(_) => "not a list of its choices",
+                FieldKind::Text => "not text",
+                FieldKind::Boolean => "not true or false",
+                FieldKind::Number => "not a number",
+            };
+            return error(key, why);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -123,7 +174,7 @@ mod tests {
         QuestionRequest, ToolStatus,
     };
 
-    use super::{item_json, page};
+    use super::{check_answer, item_json, page};
     use crate::chat::{ChatItem, EditedFile, NoticeKind, ToolItem};
 
     fn tool() -> ToolItem {
@@ -340,5 +391,71 @@ mod tests {
 
         let few = &items[..3];
         assert_eq!(texts(&page(few, None, None)), range(0..3));
+    }
+
+    fn values(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn check_answer_needs_required_fields() {
+        let q = question();
+        let missing = "Field b: a value is required";
+        assert_eq!(check_answer(&q, &values(json!({}))), Err(missing.into()));
+        assert_eq!(
+            check_answer(&q, &values(json!({"note": "hi"}))),
+            Err(missing.into())
+        );
+        assert_eq!(
+            check_answer(&q, &values(json!({"b": "  "}))),
+            Err(missing.into()),
+            "blank is no value"
+        );
+        assert_eq!(check_answer(&q, &values(json!({"b": "main"}))), Ok(()));
+        let all =
+            json!({"b": "main", "tags": ["x", "y"], "note": "n", "draft": true, "count": 2.5});
+        assert_eq!(check_answer(&q, &values(all)), Ok(()));
+        // Optional fields may stay empty, as in wai's form.
+        let empty = json!({"b": "main", "tags": [], "note": ""});
+        assert_eq!(check_answer(&q, &values(empty)), Ok(()));
+    }
+
+    #[test]
+    fn check_answer_rejects_values_outside_kind() {
+        let q = question();
+        let check = |v: serde_json::Value| check_answer(&q, &values(v));
+        let cases = [
+            (json!({"b": "dev"}), "Field b: not one of its choices"),
+            (json!({"b": 1}), "Field b: not one of its choices"),
+            (json!({"b": ["main"]}), "Field b: not one of its choices"),
+            (
+                json!({"b": "main", "tags": ["x", "z"]}),
+                "Field tags: not a list of its choices",
+            ),
+            (
+                json!({"b": "main", "tags": "x"}),
+                "Field tags: not a list of its choices",
+            ),
+            (json!({"b": "main", "note": 3}), "Field note: not text"),
+            (
+                json!({"b": "main", "draft": "yes"}),
+                "Field draft: not true or false",
+            ),
+            (
+                json!({"b": "main", "count": "3"}),
+                "Field count: not a number",
+            ),
+            (
+                json!({"b": "main", "count": null}),
+                "Field count: not a number",
+            ),
+            (
+                json!({"b": "main", "color": "red"}),
+                "Field color: not in the question",
+            ),
+        ];
+        for (v, error) in cases {
+            assert_eq!(check(v.clone()), Err(error.to_string()), "{v}");
+        }
     }
 }

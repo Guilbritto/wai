@@ -255,7 +255,7 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | QST-02 | P2: Answer an agent's question | Design | Pending |
 | QST-03 | P2: Answer an agent's question | Design | Pending |
 | QST-04 | P2: Answer an agent's question | Design | Pending |
-| QST-05 | P2: Answer an agent's question | Design | Pending |
+| QST-05 | P2: Answer an agent's question | Design | Implementing |
 | QST-06 | P2: Answer an agent's question | Design | Pending |
 | QST-07 | P2: Answer an agent's question | Design | Pending |
 | QST-08 | P2: Answer an agent's question | Design | Pending |
