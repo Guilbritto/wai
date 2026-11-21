@@ -523,8 +523,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] README, DESIGN.md and `ci.yml` updated
-- [ ] Gate check passes: Build line
+- [x] README, DESIGN.md and `ci.yml` updated
+- [x] Gate check passes: Build line
 
 **Tests**: none
 **Gate**: build
