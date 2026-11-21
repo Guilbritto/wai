@@ -580,8 +580,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] "SessionsStore labels title agent and state", "SessionsStore applies session_state", "SessionsStore is empty with no sessions", "SessionsStore goes offline when unreachable", "SessionsStore unpairs on 401" pass
-- [ ] Gate check passes: `cd ../wai-mobile && flutter test`
+- [x] "SessionsStore labels title agent and state", "SessionsStore applies session_state", "SessionsStore is empty with no sessions", "SessionsStore goes offline when unreachable", "SessionsStore unpairs on 401" pass
+- [x] Gate check passes: `cd ../wai-mobile && flutter test`
 
 **Tests**: unit
 **Gate**: quick
