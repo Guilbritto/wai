@@ -503,9 +503,9 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `TestPanelShowsSettingsAndServeCommand`, `TestPairShowsQRWithURLAndCode`, `TestPanelListsPairedDevice`, `TestPanelCountsConnectedDevices`, `TestPanelRevokeAndSignOutAll` pass
-- [ ] The `tailscale serve` command is checked against Tailscale's docs and recorded in the README
-- [ ] Gate check passes: `cd extensions/wai-remoto && go test ./...`
+- [x] `TestPanelShowsSettingsAndServeCommand`, `TestPairShowsQRWithURLAndCode`, `TestPanelListsPairedDevice`, `TestPanelCountsConnectedDevices`, `TestPanelRevokeAndSignOutAll` pass
+- [x] The `tailscale serve` command is checked against Tailscale's docs and recorded in the README
+- [x] Gate check passes: `cd extensions/wai-remoto && go test ./...`
 
 **Tests**: unit
 **Gate**: quick

@@ -212,7 +212,7 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | Requirement ID | Story | Phase | Status |
 | -------------- | ----- | ----- | ------ |
 | PAIR-01 | P1: Pair a phone | Design | Implementing |
-| PAIR-02 | P1: Pair a phone | Design | Pending |
+| PAIR-02 | P1: Pair a phone | Design | Implementing |
 | PAIR-03 | P1: Pair a phone | Design | Implementing |
 | PAIR-04 | P1: Pair a phone | Design | Implementing |
 | PAIR-05 | P1: Pair a phone | Design | Implementing |
@@ -221,7 +221,7 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | PAIR-08 | P1: Pair a phone | Design | Implementing |
 | PAIR-09 | P1: Pair a phone | Design | Implementing |
 | PAIR-10 | P1: Pair a phone | Design | Implementing |
-| PAIR-11 | P1: Pair a phone | Design | Pending |
+| PAIR-11 | P1: Pair a phone | Design | Implementing |
 | PAIR-12 | P1: Pair a phone | Design | Implementing |
 | PAIR-13 | P1: Pair a phone | Design | Pending |
 | PAIR-14 | P1: Pair a phone | Design | Pending |
@@ -261,7 +261,7 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | QST-08 | P2: Answer an agent's question | Design | Implementing |
 | QST-09 | P2: Answer an agent's question | Design | Pending |
 | QST-10 | P2: Answer an agent's question | Design | Pending |
-| DEV-01 | P2: Manage devices | Design | Pending |
+| DEV-01 | P2: Manage devices | Design | Implementing |
 | DEV-02 | P2: Manage devices | Design | Implementing |
 | DEV-03 | P2: Manage devices | Design | Implementing |
 | DEV-04 | P2: Manage devices | Design | Implementing |

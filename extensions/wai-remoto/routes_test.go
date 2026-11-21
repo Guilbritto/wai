@@ -103,11 +103,22 @@ func status(t *testing.T, what string, w *httptest.ResponseRecorder, code int, w
 	}
 }
 
-// expectCall is the server's next message to wai, a request for method; it returns the id to
+// nextCall is the server's next message to wai that is not a panel/render: the API's calls and
+// notifications. The panel's renders are checked by the panel's tests.
+func (h *host) nextCall() map[string]any {
+	h.t.Helper()
+	for {
+		if m := h.next(); m["method"] != "panel/render" {
+			return m
+		}
+	}
+}
+
+// expectCall is the server's next call to wai, a request for method; it returns the id to
 // answer and the params.
 func (h *host) expectCall(method string) (any, map[string]any) {
 	h.t.Helper()
-	m := h.next()
+	m := h.nextCall()
 	if m["method"] != method || m["id"] == nil {
 		h.t.Fatalf("want a %s request, got %v", method, m)
 	}
@@ -127,13 +138,13 @@ func (h *host) replyError(id any, code int, msg string) {
 	h.send(`{"jsonrpc":"2.0","id":` + string(b) + `,"error":{"code":` + strconv.Itoa(code) + `,"message":` + quote(msg) + `}}`)
 }
 
-// quiet checks the server sent wai nothing since the last message read, and that it handled
+// quiet checks the server called wai for nothing since the last message read, and that it handled
 // everything sent to it before: it answers a marker request after them.
 func (h *host) quiet(when string) {
 	h.t.Helper()
 	h.send(`{"jsonrpc":"2.0","id":"marker","method":"marker"}`)
-	if m := h.next(); m["id"] != "marker" {
-		h.t.Errorf("%s: want no message to wai, got %v", when, m)
+	if m := h.nextCall(); m["id"] != "marker" {
+		h.t.Errorf("%s: want no call to wai, got %v", when, m)
 	}
 }
 
@@ -372,7 +383,7 @@ func TestPairRoute(t *testing.T) {
 	}
 	a.h.quiet("19 failed sign-ins")
 	refused("the 20th", "nope")
-	m := a.h.next()
+	m := a.h.nextCall()
 	if p, _ := m["params"].(map[string]any); m["method"] != "notify" || p["title"] != "wai-remoto: 20 failed sign-ins in the last hour" {
 		t.Errorf("want the failed sign-ins notify, got %v", m)
 	}

@@ -32,6 +32,16 @@ func (p *pairing) issue() (string, time.Time) {
 	return p.code, p.expires
 }
 
+// live is the code the panel shows, while it is unused and unexpired.
+func (p *pairing) live() (string, time.Time, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.code == "" || !p.store.now().Before(p.expires) {
+		return "", time.Time{}, false
+	}
+	return p.code, p.expires, true
+}
+
 // redeem pairs a device with the live code and returns its token; the code is then used.
 func (p *pairing) redeem(code, name string) (string, error) {
 	p.mu.Lock()

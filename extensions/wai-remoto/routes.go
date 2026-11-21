@@ -176,12 +176,14 @@ func (s *server) pair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, node{"token": token})
+	s.render() // the new device, and no more QR code
 }
 
 // POST /v1/unpair: the calling device's token stops working (DEV-06).
 func (s *server) unpair(w http.ResponseWriter, r *http.Request) {
 	s.revoke(deviceOf(r).ID)
 	w.WriteHeader(http.StatusNoContent)
+	s.render()
 }
 
 // GET /v1/sessions: wai's open sessions (REMO-01).

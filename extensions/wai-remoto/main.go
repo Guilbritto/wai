@@ -67,18 +67,29 @@ type server struct {
 	srv  *http.Server // nil while not listening
 	addr string
 
+	// The panel's state.
+	pmu      sync.Mutex
+	msg      string        // the last action's error, shown until the next action
+	ticket   int           // the pairing code being counted down
+	codeTick time.Duration // how often the time left is redrawn
+	done     chan struct{} // closed when wai closes stdin
+
 	smu     sync.Mutex
 	states  map[sessionKey]string  // each session's last state, from wai
 	prompts map[string][]time.Time // each device's prompts in the last promptWindow
 }
 
 func newServer(out io.Writer, now func() time.Time) *server {
-	return &server{
+	s := &server{
 		out: out, now: now, timeout: hostTimeout, hub: newHub(),
-		pending: map[int64]chan message{},
-		states:  map[sessionKey]string{},
-		prompts: map[string][]time.Time{},
+		pending:  map[int64]chan message{},
+		states:   map[sessionKey]string{},
+		prompts:  map[string][]time.Time{},
+		codeTick: codeTick,
+		done:     make(chan struct{}),
 	}
+	s.hub.changed = s.render // the connected-device count
+	return s
 }
 
 func (s *server) write(v any) {
@@ -140,10 +151,6 @@ func (s *server) render() {
 	s.call("panel/render", node{"panel": panelID, "tree": s.tree()})
 }
 
-func (s *server) tree() node {
-	return node{"type": "column", "children": []node{{"type": "text", "text": "Not listening", "muted": true}}}
-}
-
 func (s *server) handle(m message) {
 	switch m.Method {
 	case "initialize":
@@ -165,6 +172,8 @@ func (s *server) handle(m message) {
 		s.guard = &guard{store: st, notify: s.notify}
 		s.write(node{"jsonrpc": "2.0", "id": m.ID, "result": node{}})
 		s.render()
+	case "panel/action":
+		s.handleAction(m)
 	default:
 		if streamed[m.Method] {
 			if m.Method == "event/session_state" {
@@ -182,6 +191,7 @@ func (s *server) handle(m message) {
 
 // serve handles wai's messages until stdin closes; its answers go to the calls waiting for them.
 func serve(s *server, in io.Reader) {
+	defer close(s.done)
 	r := bufio.NewReaderSize(in, 1<<20)
 	for {
 		line, err := r.ReadBytes('\n')
