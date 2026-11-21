@@ -262,10 +262,10 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | QST-09 | P2: Answer an agent's question | Design | Pending |
 | QST-10 | P2: Answer an agent's question | Design | Pending |
 | DEV-01 | P2: Manage devices | Design | Pending |
-| DEV-02 | P2: Manage devices | Design | Pending |
-| DEV-03 | P2: Manage devices | Design | Pending |
-| DEV-04 | P2: Manage devices | Design | Pending |
-| DEV-05 | P2: Manage devices | Design | Pending |
+| DEV-02 | P2: Manage devices | Design | Implementing |
+| DEV-03 | P2: Manage devices | Design | Implementing |
+| DEV-04 | P2: Manage devices | Design | Implementing |
+| DEV-05 | P2: Manage devices | Design | Implementing |
 | DEV-06 | P2: Manage devices | Design | Pending |
 | EDGE-01 | Edge cases | Design | Pending |
 | EDGE-02 | Edge cases | Design | Pending |
