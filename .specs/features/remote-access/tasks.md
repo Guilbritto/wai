@@ -675,8 +675,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] "SessionScreen shows agent output as text", "SessionScreen sends a prompt", "SessionScreen disables send and shows Cancel while working", "SessionScreen Cancel calls cancel", "SessionScreen shows one button per permission option", "SessionScreen sends the tapped option" pass
-- [ ] Gate check passes: `cd ../wai-mobile && flutter test`
+- [x] "SessionScreen shows agent output as text", "SessionScreen sends a prompt", "SessionScreen disables send and shows Cancel while working", "SessionScreen Cancel calls cancel", "SessionScreen shows one button per permission option", "SessionScreen sends the tapped option" pass
+- [x] Gate check passes: `cd ../wai-mobile && flutter test`
 
 **Tests**: widget
 **Gate**: quick

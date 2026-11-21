@@ -247,7 +247,7 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | REMO-08 | P1: Drive a session | Design | Implementing |
 | REMO-09 | P1: Drive a session | Design | Implementing |
 | REMO-10 | P1: Drive a session | Design | Implementing |
-| REMO-11 | P1: Drive a session | Design | Pending |
+| REMO-11 | P1: Drive a session | Design | Implementing |
 | REMO-12 | P1: Drive a session | Design | Implementing |
 | REMO-13 | P1: Drive a session | Design | Implementing |
 | REMO-14 | P1: Drive a session | Design | Implementing |
