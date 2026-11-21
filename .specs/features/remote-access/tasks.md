@@ -13,7 +13,7 @@ Implement these tasks with the `tlc-spec-driven` skill: **activate it by name an
 **Approved**: 2026-11-20 - user: "PODE SEGUIR"
 **Build**: `cargo fmt --all --check; cargo clippy --workspace --all-targets -- -D warnings`
 **Run ext**: `cargo test -p wai-ext --test host --test manifest`
-**Run wai**: `cargo test -p wai --lib -- ext_sessions remote_ consent_`
+**Run wai**: `cargo test -p wai --bin wai -- ext_sessions remote_ consent_`
 **Run remoto**: `cd extensions/wai-remoto && go test -v ./...`
 **Run mobile**: `cd ../wai-mobile && flutter test --reporter github`
 
@@ -33,8 +33,8 @@ Implement these tasks with the `tlc-spec-driven` skill: **activate it by name an
 | ---------- | ------------------ | -------------------- | ---------------- | ----------- |
 | wai-ext manifest and permissions | unit | Every new permission parsed, displayed and refused when invalid | `crates/wai-ext/tests/manifest.rs` | `cargo test -p wai-ext --test manifest` |
 | wai-ext host protocol (methods, events) | integration (fake extension process) | Every new method and event: granted, denied, forwarded | `crates/wai-ext/tests/host.rs`, `crates/wai-ext/src/bin/wai-fake-ext.rs` | `cargo test -p wai-ext --test host` |
-| wai pure logic (`ext_sessions.rs`) | unit | All branches; 1:1 to HOST-01/02, QST-05 | `#[cfg(test)] mod tests` in the file | `cargo test -p wai --lib -- ext_sessions` |
-| wai UI wiring (ChatSession, Workspace) | integration (GPUI `TestAppContext` + `wai-fake-agent`) | Each HOST/QST criterion: happy + error path | `mod tests` in `workspace.rs`, `chat/view.rs`, `extensions_view.rs` | `cargo test -p wai --lib -- remote_ consent_` |
+| wai pure logic (`ext_sessions.rs`) | unit | All branches; 1:1 to HOST-01/02, QST-05 | `#[cfg(test)] mod tests` in the file | `cargo test -p wai --bin wai -- ext_sessions` |
+| wai UI wiring (ChatSession, Workspace) | integration (GPUI `TestAppContext` + `wai-fake-agent`) | Each HOST/QST criterion: happy + error path | `mod tests` in `workspace.rs`, `chat/view.rs`, `extensions_view.rs` | `cargo test -p wai --bin wai -- remote_ consent_` |
 | wai-remoto (Go) | unit + HTTP (`httptest`) | Every route: happy + every listed edge + error; panel trees | `extensions/wai-remoto/*_test.go` | `go test -v ./...` |
 | wai-mobile stores, client, models (Dart) | unit | All branches; 1:1 to REMO/QST/DEV ACs | `test/state/`, `test/api/` | `flutter test` |
 | wai-mobile screens | widget | Every control's gesture and every state the spec names | `test/screens/` | `flutter test` |
@@ -46,8 +46,8 @@ Implement these tasks with the `tlc-spec-driven` skill: **activate it by name an
 
 | Gate Level | When to Use | Command |
 | ---------- | ----------- | ------- |
-| Quick | Rust unit, Go or Dart tasks | the task's own run line: `cargo test -p wai --lib -- ext_sessions` / `cd extensions/wai-remoto && go test ./...` / `cd ../wai-mobile && flutter test` |
-| Full | Host protocol and UI wiring tasks | `cargo test -p wai-ext --test host --test manifest && cargo test -p wai --lib -- ext_sessions remote_ consent_` |
+| Quick | Rust unit, Go or Dart tasks | the task's own run line: `cargo test -p wai --bin wai -- ext_sessions` / `cd extensions/wai-remoto && go test ./...` / `cd ../wai-mobile && flutter test` |
+| Full | Host protocol and UI wiring tasks | `cargo test -p wai-ext --test host --test manifest && cargo test -p wai --bin wai -- ext_sessions remote_ consent_` |
 | Build | End of each phase, docs and config tasks | `**Build**` line above, plus the quick gate of every layer the phase touched |
 
 ---
@@ -124,7 +124,7 @@ T29 → T30 → T31 → T32 → T33
 **Done when**:
 
 - [x] `extensions_view::tests::consent_lists_listen` and `consent_lists_sessions_content` pass
-- [x] Gate check passes: `cargo test -p wai --lib -- consent_`
+- [x] Gate check passes: `cargo test -p wai --bin wai -- consent_`
 
 **Tests**: unit
 **Gate**: quick
@@ -181,7 +181,7 @@ T29 → T30 → T31 → T32 → T33
 **Done when**:
 
 - [ ] `ext_sessions::tests::item_json_covers_every_kind`, `tool_item_has_no_output`, `page_defaults_to_last_200` pass
-- [ ] Gate check passes: `cargo test -p wai --lib -- ext_sessions`
+- [ ] Gate check passes: `cargo test -p wai --bin wai -- ext_sessions`
 
 **Tests**: unit
 **Gate**: quick
@@ -200,7 +200,7 @@ T29 → T30 → T31 → T32 → T33
 **Done when**:
 
 - [ ] `ext_sessions::tests::check_answer_needs_required_fields` and `check_answer_rejects_values_outside_kind` pass
-- [ ] Gate check passes: `cargo test -p wai --lib -- ext_sessions`
+- [ ] Gate check passes: `cargo test -p wai --bin wai -- ext_sessions`
 
 **Tests**: unit
 **Gate**: quick
@@ -219,7 +219,7 @@ T29 → T30 → T31 → T32 → T33
 **Done when**:
 
 - [ ] `ext_sessions::tests::feed_flushes_at_most_every_100ms` and `feed_merges_repeated_indexes` pass
-- [ ] Gate check passes: `cargo test -p wai --lib -- ext_sessions`
+- [ ] Gate check passes: `cargo test -p wai --bin wai -- ext_sessions`
 
 **Tests**: unit
 **Gate**: quick
@@ -238,7 +238,7 @@ T29 → T30 → T31 → T32 → T33
 **Done when**:
 
 - [ ] `chat::view::tests::remote_card_events_follow_clicks` and `remote_agent_resolution_has_no_option` pass
-- [ ] Gate check passes: `cargo test -p wai --lib -- remote_`
+- [ ] Gate check passes: `cargo test -p wai --bin wai -- remote_`
 
 **Tests**: integration
 **Gate**: full
@@ -257,7 +257,7 @@ T29 → T30 → T31 → T32 → T33
 **Done when**:
 
 - [ ] `workspace::tests::remote_turn_streams_session_update`, `remote_permission_requested_event`, `remote_permission_resolved_event`, `remote_question_requested_event`, `remote_question_resolved_event` pass
-- [ ] Gate check passes: `cargo test -p wai --lib -- remote_`
+- [ ] Gate check passes: `cargo test -p wai --bin wai -- remote_`
 
 **Tests**: integration
 **Gate**: full
@@ -276,7 +276,7 @@ T29 → T30 → T31 → T32 → T33
 **Done when**:
 
 - [ ] `workspace::tests::remote_read_returns_transcript`, `remote_read_unknown_session_errors`, `remote_cancel_ends_turn_cancelled` pass
-- [ ] Gate check passes: `cargo test -p wai --lib -- remote_`
+- [ ] Gate check passes: `cargo test -p wai --bin wai -- remote_`
 
 **Tests**: integration
 **Gate**: full
@@ -295,7 +295,7 @@ T29 → T30 → T31 → T32 → T33
 **Done when**:
 
 - [ ] `workspace::tests::remote_permission_answer_reaches_agent`, `remote_permission_answer_twice_errors`, `remote_question_answer_reaches_agent`, `remote_question_answer_twice_errors`, `remote_question_answer_invalid_stays_pending` pass
-- [ ] Gate check passes: `cargo test -p wai --lib -- remote_`
+- [ ] Gate check passes: `cargo test -p wai --bin wai -- remote_`
 
 **Tests**: integration
 **Gate**: full
@@ -973,8 +973,8 @@ Proof: run remoto | --- PASS: TestResponsesAreNoStore
 
 The feature's live state, written as it happens - a compaction gives no warning.
 
-**Settled mid-build:** The `**Build**` line keeps only the Rust build: wai-remoto and wai-mobile do not exist before T13 and T24, so the `--execute` run of the Build line would be red before any change. `go vet` and `flutter analyze` run in those phases' build gates. Execution: one sub-agent per phase, in order (user: "Subagente por lote"). Branch `feat/remote-access` from `origin/development`; the wai-github WIP is in `stash@{0}` "wip wai-github (antes do remote-access)" (user: "Nova branch, WIP em stash"). Go 1.27.4 from winget (`C:\Program Files\Go\bin`); Flutter stable cloned to `C:\Users\guilh\dev\flutter` (not in winget).
-**Dispatched:** batch worker Phase 1 (T1-T4) at `7588aa9`
+**Settled mid-build:** The `**Build**` line keeps only the Rust build: wai-remoto and wai-mobile do not exist before T13 and T24, so the `--execute` run of the Build line would be red before any change. `go vet` and `flutter analyze` run in those phases' build gates. Execution: one sub-agent per phase, in order (user: "Subagente por lote"). Branch `feat/remote-access` from `origin/development`; the wai-github WIP is in `stash@{0}` "wip wai-github (antes do remote-access)" (user: "Nova branch, WIP em stash"). Phase 1: `wai` is a bin-only crate, so every `cargo test -p wai --lib` became `cargo test -p wai --bin wai`; the API bump changed two existing tests' expected version (`api_version_is_checked_first` now tests 1.11 as newer, `initialize_roundtrip` expects 1.10), as the 1.9 bump did; T1 alone does not build `wai` (T2 completes it). Go 1.27.4 from winget (`C:\Program Files\Go\bin`); Flutter stable cloned to `C:\Users\guilh\dev\flutter` (not in winget).
+**Dispatched:** batch worker Phase 1 (T1-T4) at `7588aa9` - returned: T1 77e821b, T2 3d51db8, T3 d33c39b, T4 ac91b14
 **Walked:** none
 
 ---
