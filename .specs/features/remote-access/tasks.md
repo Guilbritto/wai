@@ -180,8 +180,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `ext_sessions::tests::item_json_covers_every_kind`, `tool_item_has_no_output`, `page_defaults_to_last_200` pass
-- [ ] Gate check passes: `cargo test -p wai --bin wai -- ext_sessions`
+- [x] `ext_sessions::tests::item_json_covers_every_kind`, `tool_item_has_no_output`, `page_defaults_to_last_200` pass
+- [x] Gate check passes: `cargo test -p wai --bin wai -- ext_sessions`
 
 **Tests**: unit
 **Gate**: quick
@@ -974,7 +974,7 @@ Proof: run remoto | --- PASS: TestResponsesAreNoStore
 The feature's live state, written as it happens - a compaction gives no warning.
 
 **Settled mid-build:** The `**Build**` line keeps only the Rust build: wai-remoto and wai-mobile do not exist before T13 and T24, so the `--execute` run of the Build line would be red before any change. `go vet` and `flutter analyze` run in those phases' build gates. Execution: one sub-agent per phase, in order (user: "Subagente por lote"). Branch `feat/remote-access` from `origin/development`; the wai-github WIP is in `stash@{0}` "wip wai-github (antes do remote-access)" (user: "Nova branch, WIP em stash"). Phase 1: `wai` is a bin-only crate, so every `cargo test -p wai --lib` became `cargo test -p wai --bin wai`; the API bump changed two existing tests' expected version (`api_version_is_checked_first` now tests 1.11 as newer, `initialize_roundtrip` expects 1.10), as the 1.9 bump did; T1 alone does not build `wai` (T2 completes it). Go 1.27.4 from winget (`C:\Program Files\Go\bin`); Flutter stable cloned to `C:\Users\guilh\dev\flutter` (not in winget).
-**Dispatched:** batch worker Phase 1 (T1-T4) at `7588aa9` - returned: T1 77e821b, T2 3d51db8, T3 d33c39b, T4 ac91b14
+**Dispatched:** batch worker Phase 1 (T1-T4) at `7588aa9` - returned: T1 77e821b, T2 3d51db8, T3 d33c39b, T4 ac91b14; batch worker Phase 2 (T5-T12) at `1c228fd`
 **Walked:** none
 
 ---
