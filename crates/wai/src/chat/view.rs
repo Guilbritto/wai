@@ -1077,12 +1077,13 @@ impl ChatSession {
         diff_views(diffs, locations, &self.cwd)
     }
 
+    /// Whether the agent took the answer: else it had already resolved the request.
     pub(crate) fn answer(
         &mut self,
         request: u64,
         choice: &PermissionChoice,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let sent = self
             .handle
             .answer_permission(request, Some(choice.id.clone()));
@@ -1092,6 +1093,7 @@ impl ChatSession {
             // Already resolved on the agent's side (cancelled, say).
             Err(_) => m.on_permission_resolved(request),
         });
+        let taken = option.is_some();
         cx.emit(ChatEvent::PermissionAnswered {
             id: request,
             option,
@@ -1099,6 +1101,7 @@ impl ChatSession {
         self.card_diffs.remove(&request);
         self.sync_rows(None, cx);
         cx.notify();
+        taken
     }
 
     pub(crate) fn set_mode(&mut self, mode: String, cx: &mut Context<Self>) {

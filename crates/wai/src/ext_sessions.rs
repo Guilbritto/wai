@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 use wai_agent::{
-    Choice, ChoiceKind, FieldKind, PermissionChoice, PermissionRequest, QuestionField,
-    QuestionRequest, ToolStatus,
+    Choice, ChoiceKind, FieldKind, PermissionChoice, PermissionRequest, QuestionAnswer,
+    QuestionField, QuestionRequest, ToolStatus,
 };
 use wai_ext::HostEvent;
 
@@ -239,6 +239,58 @@ pub fn check_answer(request: &QuestionRequest, values: &Map<String, Value>) -> R
         }
     }
     Ok(())
+}
+
+/// An extension's `question/answer` as wai's own: the answer for the agent and the line its card
+/// closes with. An `accept` must pass `check_answer`.
+pub fn question_answer(
+    request: &QuestionRequest,
+    answer: &str,
+    values: Option<Map<String, Value>>,
+) -> Result<(QuestionAnswer, String), String> {
+    match answer {
+        "accept" => {
+            let values = values.unwrap_or_default();
+            check_answer(request, &values)?;
+            let summary = summary(request, &values);
+            Ok((QuestionAnswer::Accept(values), summary))
+        }
+        "decline" => Ok((QuestionAnswer::Decline, "Declined".into())),
+        "cancel" => Ok((QuestionAnswer::Cancel, "Cancelled".into())),
+        other => Err(format!(
+            "Unknown answer {other}: use accept, decline or cancel"
+        )),
+    }
+}
+
+/// What wai's card shows for an accepted answer: `Answered: …`, each value in field order,
+/// choices by their label, a switch as Yes or No.
+fn summary(request: &QuestionRequest, values: &Map<String, Value>) -> String {
+    let shown = request.fields.iter().filter_map(|field| {
+        let label = |v: &Value| match &field.kind {
+            FieldKind::SingleChoice(choices) | FieldKind::MultiChoice(choices) => (choices.iter())
+                .find(|c| v.as_str() == Some(c.value.as_str()))
+                .map(|c| c.label.clone()),
+            _ => None,
+        };
+        let shown = match values.get(&field.key)? {
+            Value::Array(values) => values
+                .iter()
+                .filter_map(label)
+                .collect::<Vec<_>>()
+                .join(", "),
+            Value::Bool(on) => if *on { "Yes" } else { "No" }.into(),
+            Value::String(text) => {
+                label(&Value::from(text.as_str())).unwrap_or_else(|| text.trim().to_string())
+            }
+            value => value.to_string(),
+        };
+        (!shown.is_empty()).then_some(shown)
+    });
+    match shown.collect::<Vec<_>>().join(", ") {
+        shown if shown.is_empty() => "Answered".into(),
+        shown => format!("Answered: {shown}"),
+    }
 }
 
 /// The transcript items that changed per session, sent as one `event/session_update` at most

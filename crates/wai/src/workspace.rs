@@ -2006,6 +2006,21 @@ impl Workspace {
                 session,
                 reply,
             } => reply.send(self.cancel_session(&agent, &session, cx)),
+            ExtEvent::AnswerPermission {
+                agent,
+                session,
+                request,
+                option,
+                reply,
+            } => reply.send(self.answer_permission(&agent, &session, request, &option, cx)),
+            ExtEvent::AnswerQuestion {
+                agent,
+                session,
+                request,
+                answer,
+                values,
+                reply,
+            } => reply.send(self.answer_question(&agent, &session, request, &answer, values, cx)),
             ExtEvent::OpenPanel { panel, reply } => {
                 let Some(p) = self.ext_host.read(cx).panel_of(&ext, &panel) else {
                     return reply.send(Err(format!("No panel named {panel}")));
@@ -2061,6 +2076,46 @@ impl Workspace {
     ) -> Result<serde_json::Value, String> {
         self.open_session(agent, session, cx)?.read(cx).stop();
         Ok(serde_json::Value::Null)
+    }
+
+    /// `permission/answer`, as a click on the option: the first answer wins (HOST-05, HOST-07).
+    fn answer_permission(
+        &mut self,
+        agent: &str,
+        session: &str,
+        request: u64,
+        option: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, String> {
+        let session = self.open_session(agent, session, cx)?;
+        let pending = ext_sessions::waiting_permission(&session.read(cx).model, request);
+        let pending = pending.ok_or_else(|| not_pending(request))?;
+        let choice = (pending.options.iter()).find(|o| o.id == option).cloned();
+        let choice = choice.ok_or_else(|| format!("No option {option} in request {request}"))?;
+        match session.update(cx, |s, cx| s.answer(request, &choice, cx)) {
+            true => Ok(serde_json::Value::Null),
+            false => Err(not_pending(request)),
+        }
+    }
+
+    /// `question/answer`, as the card's Submit, Decline or Cancel (QST-02, QST-04, QST-05).
+    fn answer_question(
+        &mut self,
+        agent: &str,
+        session: &str,
+        request: u64,
+        answer: &str,
+        values: Option<serde_json::Map<String, serde_json::Value>>,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, String> {
+        let session = self.open_session(agent, session, cx)?;
+        let pending = session.read(cx).model.waiting_question(request);
+        let pending = pending.ok_or_else(|| not_pending(request))?;
+        let (answer, summary) = ext_sessions::question_answer(pending, answer, values)?;
+        match session.update(cx, |s, cx| s.answer_question(request, answer, summary, cx)) {
+            true => Ok(serde_json::Value::Null),
+            false => Err(not_pending(request)),
+        }
     }
 
     /// Shows `view`, a main panel, in the pane that shows it, else in the session pane
@@ -3830,6 +3885,11 @@ fn state_name(state: &TurnState) -> &'static str {
         TurnState::NeedsYou => "needs_you",
         TurnState::Error(_) => "error",
     }
+}
+
+/// An extension's answer to a request that no longer waits, or never did (HOST-07, QST-04).
+fn not_pending(request: u64) -> String {
+    format!("Request {request} is already answered or unknown")
 }
 
 /// ACP's names: `end_turn`, `cancelled`, `max_tokens`, `refusal`, or the agent's own.
@@ -7321,6 +7381,268 @@ pub(crate) mod tests {
         assert!(
             matches!(&last, Some(ChatItem::Notice { text, .. }) if text == "Cancelled"),
             "{last:?}"
+        );
+    }
+
+    /// The closed permission or question card's `answered`, once there is one.
+    fn answered(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> Option<String> {
+        session.read_with(cx, |s, _| {
+            s.model.items.iter().rev().find_map(|item| match item {
+                ChatItem::Permission { answered, .. } | ChatItem::Question { answered, .. } => {
+                    answered.clone()
+                }
+                _ => None,
+            })
+        })
+    }
+
+    fn last_agent(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> Option<String> {
+        session.read_with(cx, |s, _| {
+            s.model.items.iter().rev().find_map(|item| match item {
+                ChatItem::Agent { text } => Some(text.clone()),
+                _ => None,
+            })
+        })
+    }
+
+    /// `permission/answer` on `request` of the fake agent's session `id`.
+    fn answer_permission(
+        workspace: &Entity<Workspace>,
+        id: &str,
+        request: u64,
+        option: &str,
+        cx: &mut VisualTestContext,
+    ) -> Result<Value, String> {
+        workspace.update(cx, |w, cx| {
+            w.answer_permission("fake", id, request, option, cx)
+        })
+    }
+
+    /// `question/answer` on `request` of the fake agent's session `id`.
+    fn answer_question(
+        workspace: &Entity<Workspace>,
+        id: &str,
+        request: u64,
+        answer: &str,
+        values: Option<Value>,
+        cx: &mut VisualTestContext,
+    ) -> Result<Value, String> {
+        let values = values.map(|v| v.as_object().unwrap().clone());
+        workspace.update(cx, |w, cx| {
+            w.answer_question("fake", id, request, answer, values, cx)
+        })
+    }
+
+    /// HOST-05/06: `permission/answer` answers the agent with the option, closes wai's card as
+    /// answered and sends `event/permission_resolved` with it.
+    #[gpui_kit::test]
+    fn remote_permission_answer_reaches_agent(cx: &mut TestAppContext) {
+        let (workspace, session, id, cx) = prompted("--ask-permission", "edit", cx);
+        wait_until(cx, "the permission card", |cx| {
+            turn_state(&session, cx) == TurnState::NeedsYou
+        });
+        assert_eq!(
+            answer_permission(&workspace, &id, 1, "allow", cx),
+            Err("No option allow in request 1".into())
+        );
+        assert_eq!(
+            answer_permission(&workspace, "nope", 1, "allow-always", cx),
+            Err("No open session fake nope".into())
+        );
+        assert_eq!(turn_state(&session, cx), TurnState::NeedsYou, "still waits");
+
+        assert_eq!(
+            answer_permission(&workspace, &id, 1, "allow-always", cx),
+            Ok(Value::Null)
+        );
+        wait_until(cx, "the answer", |cx| {
+            turn_state(&session, cx) == TurnState::Idle
+        });
+        assert_eq!(
+            last_agent(&session, cx).as_deref(),
+            Some("chose:allow-always")
+        );
+        assert_eq!(answered(&session, cx).as_deref(), Some("Yes, always"));
+        assert!(session.read_with(cx, |s, _| s.model.waiting.is_empty()));
+        assert_eq!(
+            permissions_resolved(&workspace, cx),
+            [("fake".into(), id, 1, Some("allow-always".into()))]
+        );
+    }
+
+    /// HOST-07: a request already answered, or never asked, is an error; the agent keeps the
+    /// first answer.
+    #[gpui_kit::test]
+    fn remote_permission_answer_twice_errors(cx: &mut TestAppContext) {
+        let (workspace, session, id, cx) = prompted("--ask-permission", "edit", cx);
+        wait_until(cx, "the permission card", |cx| {
+            turn_state(&session, cx) == TurnState::NeedsYou
+        });
+        let stale = Err("Request 1 is already answered or unknown".to_string());
+        assert_eq!(
+            answer_permission(&workspace, &id, 9, "allow-once", cx),
+            Err("Request 9 is already answered or unknown".into())
+        );
+        click_now("perm-reject_once", cx);
+        assert_eq!(
+            answer_permission(&workspace, &id, 1, "allow-once", cx),
+            stale
+        );
+        wait_until(cx, "the answer", |cx| {
+            turn_state(&session, cx) == TurnState::Idle
+        });
+        assert_eq!(
+            answer_permission(&workspace, &id, 1, "allow-once", cx),
+            stale
+        );
+        assert_eq!(
+            last_agent(&session, cx).as_deref(),
+            Some("chose:reject-once")
+        );
+        assert_eq!(answered(&session, cx).as_deref(), Some("No"));
+        assert_eq!(
+            permissions_resolved(&workspace, cx),
+            [("fake".into(), id, 1, Some("reject-once".into()))]
+        );
+    }
+
+    /// QST-02/03: `question/answer` with `accept` and values, `decline` or `cancel` reaches the
+    /// agent, closes wai's card as answered and sends `event/question_resolved`.
+    #[gpui_kit::test]
+    fn remote_question_answer_reaches_agent(cx: &mut TestAppContext) {
+        let (workspace, session, id, cx) = prompted("--ask-question", "ask", cx);
+        let cases = [
+            ("accept", Some(json!({"color": "blue", "note": "hi"}))),
+            ("decline", None),
+            ("cancel", None),
+        ];
+        let replies = [
+            r#"answered:{"color":"blue","note":"hi"}"#,
+            "answered:declined",
+            "answered:cancelled",
+        ];
+        let closed = ["Answered: Blue, hi", "Declined", "Cancelled"];
+        for (k, (answer, values)) in cases.into_iter().enumerate() {
+            let request = k as u64 + 1;
+            if k > 0 {
+                assert!(session.update(cx, |s, cx| s.send_text("again", cx)));
+            }
+            wait_until(cx, "the question card", |cx| {
+                turn_state(&session, cx) == TurnState::NeedsYou
+            });
+            assert_eq!(
+                answer_question(&workspace, &id, request, answer, values, cx),
+                Ok(Value::Null)
+            );
+            wait_until(cx, "the answer", |cx| {
+                turn_state(&session, cx) == TurnState::Idle
+            });
+            assert_eq!(last_agent(&session, cx).as_deref(), Some(replies[k]));
+            assert_eq!(answered(&session, cx).as_deref(), Some(closed[k]));
+        }
+        assert_eq!(
+            questions_resolved(&workspace, cx),
+            [
+                ("fake".into(), id.clone(), 1, "accept".into()),
+                ("fake".into(), id.clone(), 2, "decline".into()),
+                ("fake".into(), id, 3, "cancel".into()),
+            ]
+        );
+    }
+
+    /// QST-04: a question already answered, or never asked, is an error and changes nothing.
+    #[gpui_kit::test]
+    fn remote_question_answer_twice_errors(cx: &mut TestAppContext) {
+        let (workspace, session, id, cx) = prompted("--ask-question", "ask", cx);
+        wait_until(cx, "the question card", |cx| {
+            turn_state(&session, cx) == TurnState::NeedsYou
+        });
+        let red = Some(json!({"color": "red"}));
+        assert_eq!(
+            answer_question(&workspace, &id, 9, "accept", red.clone(), cx),
+            Err("Request 9 is already answered or unknown".into())
+        );
+        assert_eq!(
+            answer_question(&workspace, &id, 1, "accept", red, cx),
+            Ok(Value::Null)
+        );
+        let stale = Err("Request 1 is already answered or unknown".to_string());
+        let blue = Some(json!({"color": "blue"}));
+        assert_eq!(
+            answer_question(&workspace, &id, 1, "accept", blue, cx),
+            stale
+        );
+        wait_until(cx, "the answer", |cx| {
+            turn_state(&session, cx) == TurnState::Idle
+        });
+        assert_eq!(
+            answer_question(&workspace, &id, 1, "decline", None, cx),
+            stale
+        );
+        assert_eq!(
+            last_agent(&session, cx).as_deref(),
+            Some(r#"answered:{"color":"red"}"#)
+        );
+        assert_eq!(answered(&session, cx).as_deref(), Some("Answered: Red"));
+        assert_eq!(
+            questions_resolved(&workspace, cx),
+            [("fake".into(), id, 1, "accept".into())]
+        );
+    }
+
+    /// QST-05: an `accept` missing a required field, or with a value outside its kind or choices,
+    /// is an error naming the field, and the question still waits.
+    #[gpui_kit::test]
+    fn remote_question_answer_invalid_stays_pending(cx: &mut TestAppContext) {
+        let (workspace, session, id, cx) = prompted("--ask-question", "ask", cx);
+        wait_until(cx, "the question card", |cx| {
+            turn_state(&session, cx) == TurnState::NeedsYou
+        });
+        let cases = [
+            ("accept", None, "Field color: a value is required"),
+            (
+                "accept",
+                Some(json!({"note": "hi"})),
+                "Field color: a value is required",
+            ),
+            (
+                "accept",
+                Some(json!({"color": "green"})),
+                "Field color: not one of its choices",
+            ),
+            (
+                "accept",
+                Some(json!({"color": "red", "note": 5})),
+                "Field note: not text",
+            ),
+            (
+                "maybe",
+                None,
+                "Unknown answer maybe: use accept, decline or cancel",
+            ),
+        ];
+        for (answer, values, error) in cases {
+            assert_eq!(
+                answer_question(&workspace, &id, 1, answer, values, cx),
+                Err(error.into())
+            );
+        }
+        cx.run_until_parked();
+        assert_eq!(turn_state(&session, cx), TurnState::NeedsYou);
+        assert!(session.read_with(cx, |s, _| s.model.waiting_question(1).is_some()));
+        assert!(questions_resolved(&workspace, cx).is_empty());
+        // Still answerable.
+        let blue = Some(json!({"color": "blue"}));
+        assert_eq!(
+            answer_question(&workspace, &id, 1, "accept", blue, cx),
+            Ok(Value::Null)
+        );
+        wait_until(cx, "the answer", |cx| {
+            turn_state(&session, cx) == TurnState::Idle
+        });
+        assert_eq!(
+            last_agent(&session, cx).as_deref(),
+            Some(r#"answered:{"color":"blue"}"#)
         );
     }
 }

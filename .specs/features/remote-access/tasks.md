@@ -294,8 +294,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `workspace::tests::remote_permission_answer_reaches_agent`, `remote_permission_answer_twice_errors`, `remote_question_answer_reaches_agent`, `remote_question_answer_twice_errors`, `remote_question_answer_invalid_stays_pending` pass
-- [ ] Gate check passes: `cargo test -p wai --bin wai -- remote_`
+- [x] `workspace::tests::remote_permission_answer_reaches_agent`, `remote_permission_answer_twice_errors`, `remote_question_answer_reaches_agent`, `remote_question_answer_twice_errors`, `remote_question_answer_invalid_stays_pending` pass
+- [x] Gate check passes: `cargo test -p wai --bin wai -- remote_`
 
 **Tests**: integration
 **Gate**: full

@@ -237,9 +237,9 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | REMO-06 | P1: Follow sessions | Design | Pending |
 | REMO-07 | P1: Follow sessions | Design | Pending |
 | HOST-04 | P1: Drive a session | Design | Implementing |
-| HOST-05 | P1: Drive a session | Design | Pending |
+| HOST-05 | P1: Drive a session | Design | Implementing |
 | HOST-06 | P1: Drive a session | Design | Implementing |
-| HOST-07 | P1: Drive a session | Design | Pending |
+| HOST-07 | P1: Drive a session | Design | Implementing |
 | HOST-08 | P1: Drive a session | Design | Implementing |
 | HOST-09 | P1: Drive a session | Design | Pending |
 | HOST-10 | P1: Drive a session | Design | Pending |
@@ -252,9 +252,9 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | REMO-13 | P1: Drive a session | Design | Pending |
 | REMO-14 | P1: Drive a session | Design | Pending |
 | QST-01 | P2: Answer an agent's question | Design | Implementing |
-| QST-02 | P2: Answer an agent's question | Design | Pending |
+| QST-02 | P2: Answer an agent's question | Design | Implementing |
 | QST-03 | P2: Answer an agent's question | Design | Implementing |
-| QST-04 | P2: Answer an agent's question | Design | Pending |
+| QST-04 | P2: Answer an agent's question | Design | Implementing |
 | QST-05 | P2: Answer an agent's question | Design | Implementing |
 | QST-06 | P2: Answer an agent's question | Design | Pending |
 | QST-07 | P2: Answer an agent's question | Design | Pending |

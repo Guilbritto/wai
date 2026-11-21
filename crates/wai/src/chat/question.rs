@@ -186,7 +186,7 @@ pub fn card(
     });
     let close = |answer: QuestionAnswer, summary: &'static str| {
         cx.listener(move |this: &mut ChatSession, _, _, cx| {
-            this.answer_question(id, answer.clone(), summary.into(), cx)
+            this.answer_question(id, answer.clone(), summary.into(), cx);
         })
     };
     let buttons = h_flex()
@@ -307,21 +307,23 @@ fn render_field(
 }
 
 impl ChatSession {
-    /// Sends the answer to question `id` and closes its card with `summary`.
+    /// Sends the answer to question `id` and closes its card with `summary`. Whether the agent
+    /// took it: else it had already resolved the question.
     pub(crate) fn answer_question(
         &mut self,
         id: u64,
         answer: QuestionAnswer,
         summary: String,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let kind = match answer {
             QuestionAnswer::Accept(_) => "accept",
             QuestionAnswer::Decline => "decline",
             QuestionAnswer::Cancel => "cancel",
         };
         let sent = self.handle.answer_question(id, answer);
-        let answer = if sent.is_ok() { kind } else { "cancel" };
+        let taken = sent.is_ok();
+        let answer = if taken { kind } else { "cancel" };
         self.update_model(cx, |m| match sent {
             Ok(()) => m.on_question_answered(id, &summary),
             // Already resolved on the agent's side (cancelled or withdrawn).
@@ -331,6 +333,7 @@ impl ChatSession {
         self.questions.remove(&id);
         self.sync_rows(None, cx);
         cx.notify();
+        taken
     }
 }
 
