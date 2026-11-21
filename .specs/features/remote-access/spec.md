@@ -267,15 +267,15 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | DEV-04 | P2: Manage devices | Design | Implementing |
 | DEV-05 | P2: Manage devices | Design | Implementing |
 | DEV-06 | P2: Manage devices | Design | Pending |
-| EDGE-01 | Edge cases | Design | Pending |
-| EDGE-02 | Edge cases | Design | Pending |
-| EDGE-03 | Edge cases | Design | Pending |
-| EDGE-04 | Edge cases | Design | Pending |
+| EDGE-01 | Edge cases | Design | Implementing |
+| EDGE-02 | Edge cases | Design | Implementing |
+| EDGE-03 | Edge cases | Design | Implementing |
+| EDGE-04 | Edge cases | Design | Implementing |
 | EDGE-05 | Edge cases | Design | Pending |
-| EDGE-06 | Edge cases | Design | Pending |
+| EDGE-06 | Edge cases | Design | Implementing |
 | EDGE-07 | Edge cases | Design | Pending |
 | EDGE-08 | Edge cases | Design | Pending |
-| EDGE-09 | Edge cases | Design | Pending |
+| EDGE-09 | Edge cases | Design | Implementing |
 
 **Coverage:** 65 total, 0 mapped to tasks, 65 unmapped ⚠️
 

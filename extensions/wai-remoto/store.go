@@ -113,6 +113,13 @@ func (s *store) prune() bool {
 	return gone
 }
 
+// settings are the port and the tunnel URL.
+func (s *store) settings() (int, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.st.Port, s.st.TunnelURL
+}
+
 // add pairs a device: a new 32-byte token, returned once and stored as its hash.
 func (s *store) add(name string) (string, Device, error) {
 	token := base64.RawURLEncoding.EncodeToString(random(32))

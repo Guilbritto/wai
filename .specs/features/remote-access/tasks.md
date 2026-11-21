@@ -408,8 +408,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `TestOriginHeaderIs403`, `TestUnknownHostIs421`, `TestMissingOrUnknownTokenIs401`, `TestBodyOver64KBIs413`, `TestTwentyFailuresNotifyOnce`, `TestResponsesAreNoStore` pass
-- [ ] Gate check passes: `cd extensions/wai-remoto && go test ./...`
+- [x] `TestOriginHeaderIs403`, `TestUnknownHostIs421`, `TestMissingOrUnknownTokenIs401`, `TestBodyOver64KBIs413`, `TestTwentyFailuresNotifyOnce`, `TestResponsesAreNoStore` pass
+- [x] Gate check passes: `cd extensions/wai-remoto && go test ./...`
 
 **Tests**: unit
 **Gate**: quick

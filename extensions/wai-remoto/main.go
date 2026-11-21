@@ -47,6 +47,11 @@ func (s *server) call(method string, params any) {
 	s.write(node{"jsonrpc": "2.0", "method": method, "params": params})
 }
 
+// notify shows the user a system notification.
+func (s *server) notify(title string) {
+	s.call("notify", node{"title": title})
+}
+
 func (s *server) render() {
 	s.call("panel/render", node{"panel": panelID, "tree": s.tree()})
 }
