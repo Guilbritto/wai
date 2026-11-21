@@ -237,8 +237,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `chat::view::tests::remote_card_events_follow_clicks` and `remote_agent_resolution_has_no_option` pass
-- [ ] Gate check passes: `cargo test -p wai --bin wai -- remote_`
+- [x] `chat::view::tests::remote_card_events_follow_clicks` and `remote_agent_resolution_has_no_option` pass
+- [x] Gate check passes: `cargo test -p wai --bin wai -- remote_`
 
 **Tests**: integration
 **Gate**: full

@@ -308,19 +308,26 @@ fn render_field(
 
 impl ChatSession {
     /// Sends the answer to question `id` and closes its card with `summary`.
-    fn answer_question(
+    pub(crate) fn answer_question(
         &mut self,
         id: u64,
         answer: QuestionAnswer,
         summary: String,
         cx: &mut Context<Self>,
     ) {
+        let kind = match answer {
+            QuestionAnswer::Accept(_) => "accept",
+            QuestionAnswer::Decline => "decline",
+            QuestionAnswer::Cancel => "cancel",
+        };
         let sent = self.handle.answer_question(id, answer);
+        let answer = if sent.is_ok() { kind } else { "cancel" };
         self.update_model(cx, |m| match sent {
             Ok(()) => m.on_question_answered(id, &summary),
             // Already resolved on the agent's side (cancelled or withdrawn).
             Err(_) => m.on_question_resolved(id),
         });
+        cx.emit(super::ChatEvent::QuestionAnswered { id, answer });
         self.questions.remove(&id);
         self.sync_rows(None, cx);
         cx.notify();
