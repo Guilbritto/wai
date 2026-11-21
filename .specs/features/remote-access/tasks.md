@@ -389,8 +389,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `TestQRRowsFitPixelsNode` and `TestQRRowsHaveFinderPatterns` pass
-- [ ] Gate check passes: `cd extensions/wai-remoto && go test ./...`
+- [x] `TestQRRowsFitPixelsNode` and `TestQRRowsHaveFinderPatterns` pass
+- [x] Gate check passes: `cd extensions/wai-remoto && go test ./...`
 
 **Tests**: unit
 **Gate**: quick
