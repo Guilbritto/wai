@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "promote_threshold": 2,
+  "window_days": 45,
+  "quarantine_threshold": 2,
+  "next_id": 5,
+  "lessons": [
+    {
+      "id": "L-001",
+      "key": "spec_precision_gap::when matching a host header against a configured url drop the scheme s default port on both sides",
+      "text": "When matching a Host header against a configured URL, drop the scheme's default port on both sides.",
+      "signal": "spec_precision_gap",
+      "scope": "extensions/wai-remoto",
+      "status": "candidate",
+      "features": [
+        "remote-access"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "EDGE-02 (extensions/wai-remoto)"
+      ],
+      "created": "2026-11-21T15:17:58Z",
+      "last_seen": "2026-11-21T15:17:58Z"
+    },
+    {
+      "id": "L-002",
+      "key": "ac_gap::a client side has a value rule must use the same definition as the server s validator blank text non finite numbers",
+      "text": "A client-side 'has a value' rule must use the same definition as the server's validator (blank text, non-finite numbers).",
+      "signal": "ac_gap",
+      "scope": "wai-mobile",
+      "status": "candidate",
+      "features": [
+        "remote-access"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "QST-07 (wai-mobile)"
+      ],
+      "created": "2026-11-21T15:17:58Z",
+      "last_seen": "2026-11-21T15:17:58Z"
+    },
+    {
+      "id": "L-003",
+      "key": "ac_gap::on a stream reconnect re read every piece of state the stream keeps in step not only the content",
+      "text": "On a stream reconnect, re-read every piece of state the stream keeps in step, not only the content.",
+      "signal": "ac_gap",
+      "scope": "wai-mobile",
+      "status": "candidate",
+      "features": [
+        "remote-access"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "REMO-09 (wai-mobile)"
+      ],
+      "created": "2026-11-21T15:17:58Z",
+      "last_seen": "2026-11-21T15:17:58Z"
+    },
+    {
+      "id": "L-004",
+      "key": "weak_test::a criterion that names a screen needs a widget app test that checks the screen not the store behind it",
+      "text": "A criterion that names a screen needs a widget/app test that checks the screen, not the store behind it.",
+      "signal": "weak_test",
+      "scope": "wai-mobile",
+      "status": "candidate",
+      "features": [
+        "remote-access"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "C30 (wai-mobile)"
+      ],
+      "created": "2026-11-21T15:17:58Z",
+      "last_seen": "2026-11-21T15:17:58Z"
+    }
+  ]
+}
