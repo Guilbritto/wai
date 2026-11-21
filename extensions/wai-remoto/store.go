@@ -120,6 +120,14 @@ func (s *store) settings() (int, string) {
 	return s.st.Port, s.st.TunnelURL
 }
 
+// setSettings saves the port and the tunnel URL.
+func (s *store) setSettings(port int, tunnel string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.st.Port, s.st.TunnelURL = port, tunnel
+	s.persist()
+}
+
 // add pairs a device: a new 32-byte token, returned once and stored as its hash.
 func (s *store) add(name string) (string, Device, error) {
 	token := base64.RawURLEncoding.EncodeToString(random(32))

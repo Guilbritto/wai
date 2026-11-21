@@ -28,10 +28,16 @@ func (a *api) listen() *httptest.Server {
 // when it is 200.
 func openSSE(t *testing.T, srv *httptest.Server, token string) *sse {
 	t.Helper()
-	r, _ := http.NewRequest("GET", srv.URL+"/v1/events", nil)
-	r.Host = "127.0.0.1:7717"
+	return openSSEAt(t, srv.URL, "127.0.0.1:7717", token)
+}
+
+// openSSEAt is openSSE against base, with Host host.
+func openSSEAt(t *testing.T, base, host, token string) *sse {
+	t.Helper()
+	r, _ := http.NewRequest("GET", base+"/v1/events", nil)
+	r.Host = host
 	r.Header.Set("Authorization", "Bearer "+token)
-	resp, err := srv.Client().Do(r)
+	resp, err := http.DefaultClient.Do(r)
 	if err != nil {
 		t.Fatal(err)
 	}

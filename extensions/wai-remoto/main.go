@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -61,6 +62,10 @@ type server struct {
 	guard   *guard
 
 	hub *hub // the open event streams
+
+	lmu  sync.Mutex
+	srv  *http.Server // nil while not listening
+	addr string
 
 	smu     sync.Mutex
 	states  map[sessionKey]string  // each session's last state, from wai

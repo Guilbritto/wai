@@ -213,16 +213,16 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | -------------- | ----- | ----- | ------ |
 | PAIR-01 | P1: Pair a phone | Design | Implementing |
 | PAIR-02 | P1: Pair a phone | Design | Pending |
-| PAIR-03 | P1: Pair a phone | Design | Pending |
-| PAIR-04 | P1: Pair a phone | Design | Pending |
-| PAIR-05 | P1: Pair a phone | Design | Pending |
-| PAIR-06 | P1: Pair a phone | Design | Pending |
-| PAIR-07 | P1: Pair a phone | Design | Pending |
+| PAIR-03 | P1: Pair a phone | Design | Implementing |
+| PAIR-04 | P1: Pair a phone | Design | Implementing |
+| PAIR-05 | P1: Pair a phone | Design | Implementing |
+| PAIR-06 | P1: Pair a phone | Design | Implementing |
+| PAIR-07 | P1: Pair a phone | Design | Implementing |
 | PAIR-08 | P1: Pair a phone | Design | Implementing |
 | PAIR-09 | P1: Pair a phone | Design | Implementing |
 | PAIR-10 | P1: Pair a phone | Design | Implementing |
 | PAIR-11 | P1: Pair a phone | Design | Pending |
-| PAIR-12 | P1: Pair a phone | Design | Pending |
+| PAIR-12 | P1: Pair a phone | Design | Implementing |
 | PAIR-13 | P1: Pair a phone | Design | Pending |
 | PAIR-14 | P1: Pair a phone | Design | Pending |
 | PAIR-15 | P1: Pair a phone | Design | Pending |
