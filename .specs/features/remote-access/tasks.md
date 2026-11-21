@@ -713,8 +713,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] "Unpair revokes and returns to pairing" passes
-- [ ] Gate check passes: `cd ../wai-mobile && flutter test`
+- [x] "Unpair revokes and returns to pairing" passes
+- [x] Gate check passes: `cd ../wai-mobile && flutter test`
 
 **Tests**: widget
 **Gate**: quick
