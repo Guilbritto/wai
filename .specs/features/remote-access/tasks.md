@@ -694,8 +694,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] "QuestionForm shows one control per field kind", "QuestionForm Submit sends values", "QuestionForm Decline and Cancel send decline and cancel" pass
-- [ ] Gate check passes: `cd ../wai-mobile && flutter test`
+- [x] "QuestionForm shows one control per field kind", "QuestionForm Submit sends values", "QuestionForm Decline and Cancel send decline and cancel" pass
+- [x] Gate check passes: `cd ../wai-mobile && flutter test`
 
 **Tests**: widget
 **Gate**: quick
