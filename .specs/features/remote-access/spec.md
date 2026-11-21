@@ -229,7 +229,7 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | HOST-01 | P1: Follow sessions | Design | Implementing |
 | HOST-02 | P1: Follow sessions | Design | Implementing |
 | HOST-03 | P1: Follow sessions | Design | Implementing |
-| REMO-01 | P1: Follow sessions | Design | Pending |
+| REMO-01 | P1: Follow sessions | Design | Implementing |
 | REMO-02 | P1: Follow sessions | Design | Pending |
 | REMO-03 | P1: Follow sessions | Design | Pending |
 | REMO-04 | P1: Follow sessions | Design | Pending |
@@ -244,13 +244,13 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | HOST-09 | P1: Drive a session | Design | Implementing |
 | HOST-10 | P1: Drive a session | Design | Pending |
 | HOST-11 | P1: Drive a session | Design | Implementing |
-| REMO-08 | P1: Drive a session | Design | Pending |
+| REMO-08 | P1: Drive a session | Design | Implementing |
 | REMO-09 | P1: Drive a session | Design | Pending |
-| REMO-10 | P1: Drive a session | Design | Pending |
+| REMO-10 | P1: Drive a session | Design | Implementing |
 | REMO-11 | P1: Drive a session | Design | Pending |
 | REMO-12 | P1: Drive a session | Design | Pending |
 | REMO-13 | P1: Drive a session | Design | Pending |
-| REMO-14 | P1: Drive a session | Design | Pending |
+| REMO-14 | P1: Drive a session | Design | Implementing |
 | QST-01 | P2: Answer an agent's question | Design | Implementing |
 | QST-02 | P2: Answer an agent's question | Design | Implementing |
 | QST-03 | P2: Answer an agent's question | Design | Implementing |
@@ -266,7 +266,7 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | DEV-03 | P2: Manage devices | Design | Implementing |
 | DEV-04 | P2: Manage devices | Design | Implementing |
 | DEV-05 | P2: Manage devices | Design | Implementing |
-| DEV-06 | P2: Manage devices | Design | Pending |
+| DEV-06 | P2: Manage devices | Design | Implementing |
 | EDGE-01 | Edge cases | Design | Implementing |
 | EDGE-02 | Edge cases | Design | Implementing |
 | EDGE-03 | Edge cases | Design | Implementing |
@@ -274,7 +274,7 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | EDGE-05 | Edge cases | Design | Pending |
 | EDGE-06 | Edge cases | Design | Implementing |
 | EDGE-07 | Edge cases | Design | Pending |
-| EDGE-08 | Edge cases | Design | Pending |
+| EDGE-08 | Edge cases | Design | Implementing |
 | EDGE-09 | Edge cases | Design | Implementing |
 
 **Coverage:** 65 total, 0 mapped to tasks, 65 unmapped ⚠️
