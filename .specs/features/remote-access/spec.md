@@ -248,7 +248,7 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | REMO-09 | P1: Drive a session | Design | Pending |
 | REMO-10 | P1: Drive a session | Design | Implementing |
 | REMO-11 | P1: Drive a session | Design | Pending |
-| REMO-12 | P1: Drive a session | Design | Pending |
+| REMO-12 | P1: Drive a session | Design | Implementing |
 | REMO-13 | P1: Drive a session | Design | Pending |
 | REMO-14 | P1: Drive a session | Design | Implementing |
 | QST-01 | P2: Answer an agent's question | Design | Implementing |
@@ -258,7 +258,7 @@ wai's sessions only run and answer from the computer where wai is open. Once the
 | QST-05 | P2: Answer an agent's question | Design | Implementing |
 | QST-06 | P2: Answer an agent's question | Design | Pending |
 | QST-07 | P2: Answer an agent's question | Design | Pending |
-| QST-08 | P2: Answer an agent's question | Design | Pending |
+| QST-08 | P2: Answer an agent's question | Design | Implementing |
 | QST-09 | P2: Answer an agent's question | Design | Pending |
 | QST-10 | P2: Answer an agent's question | Design | Pending |
 | DEV-01 | P2: Manage devices | Design | Pending |

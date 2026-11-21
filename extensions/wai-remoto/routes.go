@@ -29,6 +29,8 @@ func (s *server) handler() http.Handler {
 	mux.Handle("GET /v1/sessions/{agent}/{session}", auth(s.readSession))
 	mux.Handle("POST /v1/sessions/{agent}/{session}/prompt", auth(s.prompt))
 	mux.Handle("POST /v1/sessions/{agent}/{session}/cancel", auth(s.cancel))
+	mux.Handle("POST /v1/sessions/{agent}/{session}/permissions/{request}", auth(s.answerPermission))
+	mux.Handle("POST /v1/sessions/{agent}/{session}/questions/{request}", auth(s.answerQuestion))
 	mux.Handle("/", auth(func(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusNotFound, "No such route")
 	}))

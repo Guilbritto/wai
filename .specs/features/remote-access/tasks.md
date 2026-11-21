@@ -446,8 +446,8 @@ T29 → T30 → T31 → T32 → T33
 
 **Done when**:
 
-- [ ] `TestPermissionAnswerForwards`, `TestAnsweredPermissionIs409`, `TestQuestionAnswerForwards`, `TestInvalidQuestionAnswerIs422` pass
-- [ ] Gate check passes: `cd extensions/wai-remoto && go test ./...`
+- [x] `TestPermissionAnswerForwards`, `TestAnsweredPermissionIs409`, `TestQuestionAnswerForwards`, `TestInvalidQuestionAnswerIs422` pass
+- [x] Gate check passes: `cd extensions/wai-remoto && go test ./...`
 
 **Tests**: unit
 **Gate**: quick
