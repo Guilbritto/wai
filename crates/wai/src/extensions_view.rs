@@ -38,10 +38,12 @@ pub fn permission_text(permission: &Permission) -> String {
         Permission::Process => "Run its own programs".into(),
         Permission::SessionsRead => "See your sessions and their progress".into(),
         Permission::SessionsControl => "Start sessions and send prompts".into(),
+        Permission::SessionsContent => "Read your sessions' conversations".into(),
         Permission::Notify => "Show notifications".into(),
         Permission::Panels => "Show panels in the sidebar".into(),
         Permission::Bar => "Show items in the top and bottom bars".into(),
         Permission::Network => "Use the network (not enforced)".into(),
+        Permission::Listen => "Listen for connections on a network port".into(),
         Permission::Fs(path) => format!("Access {} (not enforced)", path.display()),
         Permission::Events(id) => format!("Receive events from the {} extension", id.as_str()),
     }
@@ -1030,6 +1032,37 @@ pub(crate) mod tests {
             );
             assert!(bounds.bottom() <= viewport.height, "{line:?} out of view");
         }
+    }
+
+    /// The consent dialog for an extension asking for `permission` says `text`.
+    fn consent_says(permission: &str, text: &'static str, cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = MANIFEST.replace("\"network\"", &format!("\"{permission}\""));
+        let src = sample_with(&tmp.path().join("src"), &manifest);
+        let (workspace, cx) = workspace(&tmp.path().join("config"), cx);
+        let view =
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.show_extensions(window, cx)));
+
+        review(&view, &src, cx);
+        assert!(consent(cx), "no consent dialog");
+        cx.update(|window, cx| window.render_frame(cx));
+        let says = format!("consent: {text}").leak();
+        assert!(
+            cx.debug_bounds(says).is_some(),
+            "the dialog does not say {text:?}"
+        );
+    }
+
+    /// PAIR-01: `listen` is "Listen for connections on a network port".
+    #[gpui_kit::test]
+    fn consent_lists_listen(cx: &mut TestAppContext) {
+        consent_says("listen", "Listen for connections on a network port", cx);
+    }
+
+    /// HOST-11: `sessions:content` is "Read your sessions' conversations".
+    #[gpui_kit::test]
+    fn consent_lists_sessions_content(cx: &mut TestAppContext) {
+        consent_says("sessions:content", "Read your sessions' conversations", cx);
     }
 
     /// `wai-fake-ext`, next to the test binary's `deps/` (`cargo test --workspace` builds it).

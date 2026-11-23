@@ -50,6 +50,8 @@ jobs:
         if: runner.os != 'Windows'
         working-directory: extensions/wai-rotinas
       - run: go vet ./... && go test ./...
+        working-directory: extensions/wai-remoto
+      - run: go vet ./... && go test ./...
         working-directory: docs/storybook
 
   licenses:

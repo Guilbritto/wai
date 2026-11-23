@@ -4,7 +4,7 @@ An extension is a folder with a `wai-extension.toml` manifest. It can be manifes
 
 Users install an extension from a folder, from a git URL, or from the Extensions page's **Available** list, which downloads a prebuilt package from an index. Anyone can publish one: see [Publishing](#publishing).
 
-This guide describes API version 1.9 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
+This guide describes API version 1.10 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
 - `wai-navegador` is manifest-only;
 - `wai-rotinas` and `wai-bichinho` are written in Go; `wai-bichinho` shows a pet in a dock at the sidebar's foot (API 1.9) and speaks in a `bubble` (API 1.8).
 
@@ -45,7 +45,7 @@ title = "Pull requests"
 | `name` | string | Shown in the extension list and the consent dialog |
 | `version` | string | Free form. wai shows it; it does not compare versions |
 | `description` | string, optional | Shown last in the consent dialog, cut to fit |
-| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.9)`. Set it to `"1.9"` when you use a `sidebar-foot` panel or the `pixels` node, to `"1.8"` when you use a `plain` list, list item `icon`, `tone`, `selected`, `lead`, `note` or `indent`, a `text` `style`, a `column` `framed`, `title`, `badge`, `tone` or `collapsed`, `tabs` `style` or a tab `tone`, `select` `segmented`, `input` `icon`, `submit` or `clear`, `button` `icon_only`, `link` `icon` or `icon_only`, or the `bubble` node, to `"1.7"` when you use `events/emit`, an `events:<id>` permission or a panel's `frame`, to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
+| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.10)`. Set it to `"1.10"` when you use the `listen` or `sessions:content` permission, `sessions/read`, `sessions/cancel`, `permission/answer` or `question/answer`, to `"1.9"` when you use a `sidebar-foot` panel or the `pixels` node, to `"1.8"` when you use a `plain` list, list item `icon`, `tone`, `selected`, `lead`, `note` or `indent`, a `text` `style`, a `column` `framed`, `title`, `badge`, `tone` or `collapsed`, `tabs` `style` or a tab `tone`, `select` `segmented`, `input` `icon`, `submit` or `clear`, `button` `icon_only`, `link` `icon` or `icon_only`, or the `bubble` node, to `"1.7"` when you use `events/emit`, an `events:<id>` permission or a panel's `frame`, to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
 | `permissions` | array of strings | See [Permissions](#permissions). An unknown permission is refused |
 | `process.command` | string | See [Commands and paths](#commands-and-paths). Needs `process` |
 | `process.args` | array of strings, optional | Arguments, passed as given (no shell) |
@@ -82,11 +82,13 @@ Calls in both directions are checked against what the user **granted** at instal
 |---|---|
 | `process` | Run `[process]`. Also required to contribute `agents` and `mcp_servers`, which run code |
 | `sessions:read` | `sessions/list`. Receive `event/session_state`, `event/turn_ended` and `event/session_focused` |
-| `sessions:control` | `sessions/open` and `sessions/prompt`. It does not include `sessions:read` |
+| `sessions:content` | `sessions/read`. Receive `event/session_update`, `event/permission_requested`, `event/permission_resolved`, `event/question_requested` and `event/question_resolved`: what the user and the agents write. Shown as *Read your sessions' conversations*. It does not include `sessions:read`. API 1.10 |
+| `sessions:control` | `sessions/open`, `sessions/prompt`, and (API 1.10) `sessions/cancel`, `permission/answer` and `question/answer`. It does not include `sessions:read` |
 | `notify` | `notify`: system notifications |
 | `panels` | Contribute panels, `panel/render`, `panel/open`, and receive `panel/action` |
 | `bar` | Contribute bar items, `item/update`, and receive `item/action`. Shown as *Show items in the top and bottom bars* |
 | `network` | Nothing is enforced. It tells the user the extension uses the network |
+| `listen` | Nothing is enforced. It tells the user the extension listens for connections on a network port. Shown as *Listen for connections on a network port*. API 1.10 |
 | `fs:<path>` | Nothing is enforced. It tells the user the extension uses `<path>`, which must be a relative path inside the extension's folder |
 | `events:<id>` | Receive `event/ext` from extension `<id>` (see [Events between extensions](#events-between-extensions)). `<id>` need not be installed. API 1.7 |
 
@@ -155,7 +157,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 
 | Method | Kind | Params | Notes |
 |---|---|---|---|
-| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.9", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
+| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.10", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
 | `command/run` | request | `{"id": "<command id>"}` | The user ran one of your commands without `prompt` from the palette. wai ignores the answer |
 | `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item, card, table row, button or menu item was clicked (after its confirmation, if it has one). `action_id` is its `id`. `values` has every form field in the panel by id: inputs and paths as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels`. A `bubble` sends one when it is gone: `action_id` is its `id`, and `values` is `{"bubble": "click"}` or `{"bubble": "timeout"}` |
 | `item/action` | request | `{"item": "<item id>"}` | The user clicked one of your bar items. wai ignores the answer. The usual reply is a `panel/open` or a `sessions/open`. Needs `bar` |
@@ -164,9 +166,14 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `event/file_saved` | notification | `{"path": "<absolute path>"}` | The user saved a file in wai |
 | `event/session_focused` | notification | `{"agent", "session"}` | The focused pane's session, the one whose prompt box shows your prompt panels; both `null` when the focused pane is not a session (a draft, a file, a panel) or the main area is closed. Sent when it changes, and once after `initialize` when wai knows it. API 1.6. Needs `sessions:read` |
 | `event/ext` | notification | `{"source", "name", "data"}` | An event another extension emitted. API 1.7. Needs `events:<source>` |
+| `event/session_update` | notification | `{"agent", "session", "total", "items": [{"index", "item"}]}` | Transcript items that are new or changed, each with its index (see [Transcript items](#transcript-items)); `total` is the transcript's length now. At most **10 per second** per session: changes meanwhile join the next one. API 1.10. Needs `sessions:content` |
+| `event/permission_requested` | notification | `{"agent", "session", "request", "title", "options": [{"id", "name", "kind"}]}` | An agent asks to run a tool call. `request` is a number, unique per agent (not per session); `title` is the tool call's. `kind` is `allow_once`, `allow_always`, `reject_once` or `reject_always`. API 1.10. Needs `sessions:content` |
+| `event/permission_resolved` | notification | `{"agent", "session", "request", "option"}` | The request closed: `option` is the chosen option's `id`, whether the user chose it in wai or an extension did, or `null` when the agent withdrew it (a cancelled turn, say). API 1.10. Needs `sessions:content` |
+| `event/question_requested` | notification | `{"agent", "session", "request", "message", "fields": [{"key", "title", "description", "required", "kind", "choices": [{"value", "label", "description"}]}]}` | An agent asks the user to fill a form. `kind` is `single`, `multi`, `text`, `boolean` or `number`; `choices` is empty but for `single` and `multi`; `description` may be `null`. API 1.10. Needs `sessions:content` |
+| `event/question_resolved` | notification | `{"agent", "session", "request", "answer"}` | The question closed: `answer` is `accept`, `decline` or `cancel` (also when the agent withdrew it). API 1.10. Needs `sessions:content` |
 
 - Paths are absolute, and on Windows they never carry the `\\?\` prefix.
-- Answer `initialize` before anything else. API 1.1 to 1.9 only add fields and methods; ignore the ones you do not know.
+- Answer `initialize` before anything else. API 1.1 to 1.10 only add fields and methods; ignore the ones you do not know.
 
 ### Extension → host
 
@@ -175,6 +182,10 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `sessions/list` | `sessions:read` | none | `[{"agent", "session", "title" (string or null), "state"}]`, one per open session |
 | `sessions/open` | `sessions:control` | `{"agent"?: string, "prompt"?: string, "send"?: bool}` | `{"agent", "session"}` once the session has started |
 | `sessions/prompt` | `sessions:control` | `{"agent", "session", "text"}` | `null` at once |
+| `sessions/read` | `sessions:content` | `{"agent", "session", "from"?: int, "limit"?: int}` | `{"items": [item], "total": int}`. API 1.10 |
+| `sessions/cancel` | `sessions:control` | `{"agent", "session"}` | `null`. API 1.10 |
+| `permission/answer` | `sessions:control` | `{"agent", "session", "request": int, "option": "<option id>"}` | `null` once the agent has the answer. API 1.10 |
+| `question/answer` | `sessions:control` | `{"agent", "session", "request": int, "answer": "accept"\|"decline"\|"cancel", "values"?: {…}}` | `null` once the agent has the answer. API 1.10 |
 | `notify` | `notify` | `{"title", "body"?}` | `null` |
 | `events/emit` | none | `{"name", "data"?}` | `null` |
 | `panel/render` | `panels` | `{"panel": "<panel id>", "tree": {…}}` | `null` |
@@ -191,6 +202,37 @@ When an enabled extension with `[process]` and the `process` permission starts (
   - `The session was closed` if the user closed it while it started.
 
 **`sessions/prompt`** sends `text` to the session if it is idle. Otherwise the prompt is dropped (logged), and the result is still `null`.
+
+**`sessions/read`** returns a page of the session's transcript (see [Transcript items](#transcript-items)): `limit` items from index `from`. Without `from`, the last `limit` items. `limit` defaults to 200 and is at most 500. `total` is the transcript's length, so the page starts at `total` minus the number of items when you left out `from`. A session that is not open is an error, `No open session <agent> <session>`; so is it for `sessions/cancel`, `permission/answer` and `question/answer`.
+
+**`sessions/cancel`** stops the session's running turn, as wai's Stop does: the turn ends with `event/turn_ended` reason `cancelled`. A session with no turn running is left alone, and the result is still `null`.
+
+**`permission/answer`** answers a pending permission request with one of its options' `id`, as a click on that option in wai: the agent gets it, and wai closes the card as answered.
+- The first answer wins. A request already answered, in wai or by an extension, withdrawn, or never asked is an error, `Request <request> is already answered or unknown`, and the agent keeps the first answer.
+- An option the request does not offer is an error, `No option <option> in request <request>`.
+
+**`question/answer`** answers a pending question, as the card's Submit, Decline or Cancel in wai.
+- `accept` sends `values`: one per field, by `key`. A `single` field takes a choice's `value`, a `multi` field an array of them, a `text` field a string, a `boolean` field `true` or `false`, a `number` field a number.
+- Before it reaches the agent, an `accept` is checked: a required field needs a value (an empty string or array is none), each value must fit its field's kind and choices, and every key must be a field. Otherwise it is an error naming the field, `Field <key>: <why>`, and the question still waits.
+- Any other `answer` than `accept`, `decline` or `cancel` is an error.
+- As for permissions, the first answer wins: `Request <request> is already answered or unknown`.
+
+#### Transcript items
+
+`sessions/read` and `event/session_update` carry the transcript as wai shows it: the conversation in order, then the permission requests and questions still waiting for an answer. Each item is an object with a `kind`:
+
+| `kind` | Fields |
+|---|---|
+| `user` | `text`: a message the user sent |
+| `agent` | `text`: the agent's answer, as Markdown |
+| `thought` | `text`: the agent's thinking |
+| `tool` | `title`, `tool_kind` (`read`, `edit`, `execute`, …) and `status` (`pending`, `in_progress`, `completed` or `failed`). Never the tool call's output |
+| `permission` | `request`, `title`, `options` (as in `event/permission_requested`) and `answered`: `null` while it waits, then what wai's card shows, the chosen option's name or `Cancelled` |
+| `question` | `request`, `message`, `fields` (as in `event/question_requested`) and `answered`: `null` while it waits, then what wai's card shows (`Answered: …`, `Declined` or `Cancelled`) |
+| `notice` | `text` and `level` (`info` or `error`): wai's own line, as `Cancelled` |
+| `edits` | `files`: the paths a finished turn edited |
+
+An item's index can change only for waiting cards: when one is answered it joins the conversation, and the cards still waiting move after it. `event/session_update` sends every index that changed, so applying its items by index keeps a copy of the transcript in step.
 
 **`notify`:**
 - It shows a system notification. The title is cut to 100 characters and the body to 300, each on one line.
@@ -540,7 +582,7 @@ Agents and MCP servers come only from enabled extensions that were granted `proc
 
 **What v1 does not isolate:**
 - **Your rights:** the extension's process runs as you. It can read and write any file you can, use the network, read the environment it inherits, and start any program.
-- **`network` and `fs:`** are declarations only.
+- **`network`, `listen` and `fs:`** are declarations only.
 - **Contributed agents and MCP servers** run with the same rights, inside every agent session.
 - **MCP servers run in the project folder:** the agent starts them there, so a launcher that reads its current folder picks up what the repository put in it. npx, for one, reads the project's `.npmrc` and runs a matching package from its `node_modules`. An npx-based server should pass `--prefix=/` before the package, as wai-navegador does: `args = ["--prefix=/", "-y", "<package>@<version>"]`.
 - **The project's Claude settings:** claude-agent-acp itself already loads the project's own Claude settings (`.claude/`), as Claude Code does in a terminal. wai neither adds to nor limits what they can do.

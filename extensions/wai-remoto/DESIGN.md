@@ -1,122 +1,106 @@
 # wai-remoto: design
 
-Status: **design only.** Nothing here is built, and nothing listens. The skeleton manifest has no process. Building it needs the owner's security review of this document first.
-
 ## Goal
 
-From a phone, see wai's sessions, follow a turn as it streams, send a prompt, and answer an agent's permission request, while the computer running wai stays where it is. The phone uses a small web app (a PWA) served by the extension.
+From a phone, see wai's sessions, follow a turn as it streams, send a prompt, cancel a turn, and answer an agent's permission request or question, while the computer running wai stays where it is. The client is the native wai-mobile app (Flutter, iOS and Android), not a web page.
 
-Out of scope for the first version: editing files, the terminal, starting agents that are not configured, and anything that reaches wai from the public internet without a tunnel the user set up.
+Out of scope for the first version: starting a session, viewing files or diffs, the terminal, push notifications, listening on the LAN or through an internet relay.
 
 ## Why this is dangerous
 
-Controlling a session is controlling an agent, and agents run tools on the computer: shell commands, file writes. Anyone who can drive wai-remoto can run code as the user. The design treats every request as hostile until it proves otherwise.
+Controlling a session is controlling an agent, and agents run tools on the computer: shell commands, file writes. Anyone who can drive wai-remoto can run code as the user. The design treats every request as hostile until a paired device's token proves otherwise.
 
 ## Security model
 
-This reuses the security model of the old Central: its ideas and behaviour, never its code.
-
 ### Where it listens
 
-- **Localhost only by default:** `127.0.0.1` (and `::1`) on a port the user picks in the panel. A phone reaches it through a tunnel the user runs (Tailscale, an SSH forward).
-- **LAN only on explicit opt-in:** binding a non-loopback address takes a setting the panel names plainly ("Anyone on this network can reach the login page"). The extension then serves only HTTPS, with a certificate the user provides; it never falls back to plain HTTP off loopback.
-- **Nothing listens until the user clicks Start** in the panel, and only after a password exists. Disabling the extension stops it, since wai kills the process and its group.
+- **Loopback only:** `127.0.0.1:<port>`, port 1024 to 65535 (default 7717). There is no LAN mode. The phone arrives through `tailscale serve`, which terminates HTTPS inside the user's tailnet and forwards to the loopback port.
+- **Nothing listens until the user clicks Start** in the panel, with a valid port and a tunnel URL starting with `https://`. Stop closes the listener and every connection at once. Disabling or uninstalling the extension kills its process, so nothing listens.
+- **wai itself never listens.** The HTTP server lives in the extension's process; wai only talks to it over stdio.
 
-### Password
+### Pairing
 
-- **No default password.** The user sets one in the panel on first use, at least 12 characters.
-- **Stored as PBKDF2-HMAC-SHA256:** a random 16-byte salt per install and at least 600,000 iterations (OWASP's 2023 figure), with the parameters stored next to the hash so they can be raised later.
-- **The password itself is never stored or logged.** Comparison is constant-time.
-- **The file is private:** the extension's data file (hash, salt, cookie key) is created `0600`, in a `0700` folder.
+- **QR code + one-time code.** "Pair a device" makes a code of 16 random bytes (base64url), valid 5 minutes, used once; a new code replaces the previous one. The QR code carries `wai-remoto:pair?url=<tunnel URL>&code=<code>`.
+- **Codes live in memory only.** A restart forgets the live code.
+- **Guessing is not a threat:** 128 bits in a 5-minute window. Behind `tailscale serve` every request comes from `127.0.0.1`, so a per-address limit would mean nothing; failures are counted globally instead (see Rate limits).
 
-### Session cookie
+### Device tokens
 
-- After a correct password, the server sets one cookie holding a random session id, the time it was issued and its expiry (12 h), signed with HMAC-SHA256 under a random 32-byte key made at setup.
-- **Flags:** `HttpOnly`, `SameSite=Strict`, `Path=/`, plus `Secure` whenever it serves HTTPS.
-- **Checked on every request:** a bad signature, an expired cookie or a revoked id answers 401.
-- **Logout** revokes the id server-side.
-- **"Sign out all devices"** in the panel, and any password change, rotate the signing key, so every cookie stops working at once.
+- **One token per device:** 32 random bytes (base64url), returned once by `POST /v1/pair`, sent as `Authorization: Bearer <token>` on every other request.
+- **Stored as SHA-256 only**, in `state.json` in the extension's data folder, written `0600` through a temporary file. A copy of the file pairs nothing. Tokens and prompts are never logged. Lookups compare hashes in constant time.
+- **The app keeps the token** in the Keychain (iOS) or the Keystore (Android).
+- **Expiry:** 30 days without use. Each authenticated request restarts the 30 days; an expired device is removed.
+- **Revocation:** Revoke in the panel deletes one device's token and closes its event streams at once. "Sign out all devices" deletes every token and closes every stream. Unpair in the app revokes its own token.
 
-### Origin and Host
+### Every request
 
-- **Exact Origin on every state-changing request:** every `POST` and every WebSocket upgrade must carry an `Origin` equal to the configured origin, scheme, host and port compared exactly. No prefix, suffix or wildcard match. A missing `Origin` is rejected.
-- **Host check:** the `Host` header must be one of the configured names. This defeats DNS rebinding, where a web page in the user's own browser resolves its name to `127.0.0.1`.
-- **No `GET` request changes anything.** Together with `SameSite=Strict` and the Origin check, this is the CSRF defence.
+In this order, before any route:
+
+1. **No `Origin` header**, whatever its value: `403`. The client is a native app, which sends none; a browser always does on the requests that matter, so a web page cannot reach the API.
+2. **Host check:** the `Host` must be the tunnel URL's host or `127.0.0.1:<port>`, else `421`. This defeats DNS rebinding.
+3. **Body cap:** 64 KB, else `413`.
+4. **Bearer token** (every route but `/v1/pair`): unknown, revoked or expired is `401`.
+
+Every response carries `Cache-Control: no-store`. An unknown route answers `404` only to a paired device; others get `401`.
 
 ### Rate limits
 
-- **Login:** 5 attempts per minute per client address, doubling the wait after each failure. After 20 failures in an hour the login is locked for every client until the user unlocks it in the panel, and wai notifies the user (`notify`).
-- **Prompts:** at most 30 per minute per signed-in device.
-- **Input caps:** requests are capped at 64 KB, and WebSocket messages at 64 KB in and 4 MB out.
-- **Connections:** at most 4 live connections per device.
-
-### Responses
-
-- **Headers:** `Content-Security-Policy: default-src 'self'` with no inline scripts, `frame-ancestors 'none'`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-store` on the API.
-- **Escaping:** the web app renders agent output as text, never as HTML.
+- **Failed sign-ins:** after 20 refused tokens or pairing codes within an hour, wai notifies the user once (`wai-remoto: 20 failed sign-ins in the last hour`), and at most once an hour. The owner's own phone is never locked out.
+- **Prompts:** at most 30 per minute per device (`429`).
+- **Event streams:** at most 4 open per device (`429`). A stream too slow to keep up is closed; the app reconnects and reads the session again.
 
 ### What it never does
 
-It never reads, stores, forwards or asks for any provider's credentials. If an agent is not signed in, the phone shows the same message wai shows.
+It never reads, stores, forwards or asks for any provider's credentials, and never sends a tool call's output to the phone: transcript items carry a tool's title, kind and status only.
 
 ## Threat model
 
 | Who | Can | Stopped by |
 |---|---|---|
-| A web page open in the user's browser | Send requests to `127.0.0.1` (CSRF, DNS rebinding) | Exact Origin, Host check, `SameSite=Strict`, no state change on `GET` |
-| Another user or process on the same computer | Connect to the loopback port | Password, cookie, rate limits |
-| Someone on the same network (LAN opt-in only) | Reach the login page, sniff traffic | HTTPS only off loopback, password, rate limits, lockout |
-| Someone guessing passwords | Many logins | PBKDF2 cost, per-address backoff, global lockout with a notification |
-| A lost phone or a stolen cookie | Act until the cookie expires | 12 h expiry, logout, "Sign out all devices" |
-| A copy of the data file | Offline guessing | PBKDF2 with salt; rotating the key and password is a click |
+| A web page open in the user's browser | Send requests to `127.0.0.1` (CSRF, DNS rebinding) | Any `Origin` refused, Host check, no cookies: a Bearer token the page does not have |
+| Another user or process on the same computer | Connect to the loopback port | Device token, failed sign-in notification |
+| Someone in the user's tailnet | Reach the tunnel URL | Device token; pairing needs a code shown only in wai's panel |
+| Someone guessing tokens or pairing codes | Many requests | 256-bit tokens, 128-bit single-use codes valid 5 minutes, failed sign-in notification |
+| A lost phone or a stolen token | Act as that device | Revoke, "Sign out all devices", 30-day idle expiry |
+| A copy of `state.json` | Read the devices | It holds SHA-256 hashes only; a hash is not a token |
 
 Not covered:
 - A computer that is already compromised.
-- A malicious extension: in v1 any extension granted `process` runs with the user's powers anyway.
-- The tunnel's own security.
+- A malicious extension: in v1 any extension granted `process` runs with the user's powers anyway, and `listen` is not enforced (like `network`).
+- The tunnel's own security: Tailscale's.
+
+## Transport
+
+HTTP JSON for actions and Server-Sent Events for live updates, standard library only.
+
+| Method and path | Auth | Result |
+|---|---|---|
+| `POST /v1/pair {code, device}` | code | `200 {token}` / `401` |
+| `POST /v1/unpair` | token | `204` |
+| `GET /v1/sessions` | token | `200 [{agent, session, title, state}]` |
+| `GET /v1/sessions/{agent}/{session}?from=&limit=` | token | `200 {items, total}` |
+| `POST /v1/sessions/{agent}/{session}/prompt {text}` | token | `204` / `409` busy / `429` |
+| `POST /v1/sessions/{agent}/{session}/cancel` | token | `204` |
+| `POST /v1/sessions/{agent}/{session}/permissions/{request} {option}` | token | `204` / `409` already answered |
+| `POST /v1/sessions/{agent}/{session}/questions/{request} {answer, values?}` | token | `204` / `409` / `422 {field}` |
+| `GET /v1/events` | token | SSE: one `event:` and `data:` per wai event; `: ping` every 15 s |
+
+wai's errors map to statuses: `No open session …` is `404`, `Request <id> is already answered or unknown` is `409`, `Field <key>: <why>` is `422 {"field": "<key>"}`.
+
+A prompt to a session that is not idle answers `409`, from the states wai-remoto keeps from `event/session_state` and `sessions/list`: wai drops such a prompt silently. A race between that cache and wai remains; the transcript shows the truth.
 
 ## Flows
 
-1. **Install.**
-   - The consent lists `process`, `sessions:read`, `sessions:control` and `listen`, with the usual line that wai cannot restrict files or network access.
-   - Nothing starts listening.
-2. **Set up.**
-   - The panel shows a form: password, confirmation, port.
-   - Saving writes the hash and a new cookie key, then shows the URL and a Start button.
-3. **Start.**
-   - The extension binds the address.
-   - The panel shows `Listening on http://127.0.0.1:<port>` and a Stop button.
-4. **Log in.**
-   - The phone opens the URL and gets the login page.
-   - `POST /login`, with Origin, Host and rate limit checked, sets the cookie.
-5. **Use.**
-   - **List sessions:** `sessions/list`.
-   - **Open one** and follow its stream: needs a new host event, see below.
-   - **Send a prompt:** `sessions/prompt`.
-   - **Answer a permission request:** needs a new host method.
-   - **Cancel a turn:** needs a new host method.
-6. **Sign out.**
-   - Logout from the phone revokes its session id.
-   - "Sign out all devices" in the panel rotates the key.
-7. **Stop.**
-   - The Stop button closes the listener.
-   - Disabling or uninstalling the extension kills the process.
+1. **Install.** The consent lists `process`, `panels`, `sessions:read`, `sessions:content`, `sessions:control`, `notify` and `listen`. Nothing listens.
+2. **Start.** The user sets the port and the tunnel URL and clicks Start; the panel shows `Listening on 127.0.0.1:<port>` and the `tailscale serve --bg <port>` command.
+3. **Pair.** "Pair a device" shows the QR code; the app scans it, sends `POST /v1/pair`, and stores the token.
+4. **Use.** The app lists sessions (`sessions/list`), reads one (`sessions/read`), follows `GET /v1/events`, prompts (`sessions/prompt`), cancels (`sessions/cancel`), answers (`permission/answer`, `question/answer`). The first answer wins, whether given in wai or on the phone.
+5. **Revoke.** Revoke, "Sign out all devices", Unpair or 30 idle days.
+6. **Stop.** Stop closes the listener and every connection; disabling the extension kills the process.
 
-## What wai must add first
+## What wai provides (extension API 1.10)
 
-1. **A `listen` permission.** It must be parsed, shown in the consent ("listen for connections on a network port") and stored like the others. Like `network`, v1 cannot enforce it without a sandbox. An enforceable variant would be for wai to open the socket itself, bound to loopback, and hand it to the extension.
-2. **Session content for extensions.** Today wai sends only `event/session_state` and `event/turn_ended`. The phone needs:
-   - the transcript of a session (`sessions/read`, under `sessions:read`);
-   - its updates as they stream (`event/session_update`, coalesced like the UI's and capped per second).
-3. **Permission requests.**
-   - An `event/permission_requested` with the tool call and its options.
-   - A `permission/answer` method, under `sessions:control`. The first answer wins: whichever of wai and the phone answers first, the other sees it answered.
-4. **Cancel.** A `sessions/cancel` method, under `sessions:control`.
-5. **A private data folder per extension** (`<config>/extension-data/<id>/`, `0700`), so the hash and key do not live in the extension's install folder, which an update replaces.
-
-## Open questions for the owner
-
-- **Tunnel:** which one to recommend (Tailscale, SSH, Cloudflare Tunnel), or none?
-- **LAN mode:** worth having at all, or loopback plus a tunnel only?
-- **Push notifications** to the phone: they need HTTPS and a push service (VAPID). Is that in scope?
-- **Ownership:** who signs off on the security review before any code is written?
+- The `listen` permission, shown in the consent as *Listen for connections on a network port*, not enforced.
+- The `sessions:content` permission: `sessions/read` and the events `session_update`, `permission_requested`, `permission_resolved`, `question_requested`, `question_resolved`. `sessions:read` alone does not carry transcripts.
+- Under `sessions:control`: `sessions/cancel`, `permission/answer`, `question/answer`.
+- A private data folder per extension (`WAI_EXT_DATA`), where `state.json` lives.

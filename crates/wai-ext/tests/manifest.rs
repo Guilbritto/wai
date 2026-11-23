@@ -215,11 +215,28 @@ fn first_party_manifests_validate() {
     );
     assert_eq!((card.location, card.width), (PanelLocation::Sidebar, None));
 
-    // wai-remoto: a skeleton; no process, nothing contributed.
+    // wai-remoto: its own process, a sidebar panel, session content and control, and `listen`.
     let remoto = read("wai-remoto");
-    assert!(remoto.process.is_none());
-    assert_eq!(remoto.permissions, [Permission::SessionsControl]);
-    assert_eq!(remoto.contributes, Contributes::default());
+    assert_eq!(
+        remoto.permissions,
+        [
+            Permission::Process,
+            Permission::Panels,
+            Permission::SessionsRead,
+            Permission::SessionsContent,
+            Permission::SessionsControl,
+            Permission::Notify,
+            Permission::Listen
+        ]
+    );
+    assert_eq!(remoto.process.unwrap().command, "bin/wai-remoto");
+    let [panel] = remoto.contributes.panels.as_slice() else {
+        panic!("one panel: {:?}", remoto.contributes.panels)
+    };
+    assert_eq!(
+        (panel.id.as_str(), panel.title.as_str(), panel.location),
+        ("remoto", "Remoto", PanelLocation::Sidebar)
+    );
 }
 
 #[test]
@@ -306,21 +323,22 @@ fn api_version_is_checked_first() {
     assert!(with_api("\"1.7\"", "").is_ok());
     assert!(with_api("\"1.8\"", "").is_ok());
     assert!(with_api("\"1.9\"", "").is_ok());
-    let newer = with_api("\"1.10\"", "").unwrap_err();
+    assert!(with_api("\"1.10\"", "").is_ok());
+    let newer = with_api("\"1.11\"", "").unwrap_err();
     assert_eq!(
         newer.to_string(),
-        "Go Tools needs a newer wai (extension API 1.10; this wai has 1.9)"
+        "Go Tools needs a newer wai (extension API 1.11; this wai has 1.10)"
     );
     // Even when the newer API's fields would fail the strict parse.
     assert_eq!(
         with_api("\"2.0\"", "\nfuture = true\n")
             .unwrap_err()
             .to_string(),
-        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.9)"
+        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.10)"
     );
-    // Numeric, not lexical: 1.10 is newer than 1.2.
+    // Numeric, not lexical: 1.11 is newer than 1.10 and 1.2.
     assert!(matches!(
-        with_api("\"1.10\"", ""),
+        with_api("\"1.11\"", ""),
         Err(ManifestError::TooOld { .. })
     ));
     for bad in [
@@ -510,4 +528,37 @@ fn events_permission_names_one_extension() {
             format!("events permission {bad:?} must name an extension id")
         );
     }
+}
+
+#[test]
+fn listen_and_sessions_content_parse() {
+    let m = |perms: &str| parse(&with("remote", "bin/remote", perms));
+    let parsed = m("\"process\", \"listen\", \"sessions:content\"").unwrap();
+    assert_eq!(
+        parsed.permissions,
+        [
+            Permission::Process,
+            Permission::Listen,
+            Permission::SessionsContent
+        ]
+    );
+    assert_eq!(Permission::Listen.to_string(), "listen");
+    assert_eq!(Permission::SessionsContent.to_string(), "sessions:content");
+    for bad in [
+        "\"process\", \"listen:8080\"",
+        "\"process\", \"sessions:contents\"",
+    ] {
+        assert!(matches!(m(bad), Err(ManifestError::Unknown(_))), "{bad}");
+    }
+}
+
+#[test]
+fn api_is_1_10() {
+    assert_eq!(API, "1.10");
+    let with_api = |api: &str| parse(&format!("api = \"{api}\"\n{FULL}"));
+    assert!(with_api("1.10").is_ok());
+    assert_eq!(
+        with_api("1.11").unwrap_err().to_string(),
+        "Go Tools needs a newer wai (extension API 1.11; this wai has 1.10)"
+    );
 }

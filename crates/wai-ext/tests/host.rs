@@ -125,7 +125,7 @@ fn initialize_roundtrip() {
             init["params"],
             json!({
                 "protocol": 1,
-                "api": "1.9",
+                "api": "1.10",
                 "wai_version": env!("CARGO_PKG_VERSION"),
                 "ext_id": "fake",
                 "granted": ["process", "notify", "panels"],
@@ -815,5 +815,283 @@ fn ext_event_needs_its_permission() {
         assert_eq!(bodies.len(), 1, "{bodies:?}");
         let body: Value = serde_json::from_str(bodies[0]).unwrap();
         assert_eq!(body, json!({"source": "a", "name": "x", "data": 1}));
+    });
+}
+
+/// One of each content event (HOST-02, HOST-04, HOST-06, QST-01, QST-03), and the
+/// notification and params each one is sent as.
+fn content_events() -> Vec<(HostEvent, &'static str, Value)> {
+    let (agent, session) = (String::from("claude"), String::from("s1"));
+    let options = json!([{"id": "allow", "name": "Allow", "kind": "allow_once"}]);
+    let fields = json!([{"key": "b", "title": "Branch", "description": null, "required": true,
+        "kind": "single", "choices": [{"value": "main", "label": "main", "description": null}]}]);
+    let item = json!({"kind": "agent", "text": "hi"});
+    vec![
+        (
+            HostEvent::SessionUpdate {
+                agent: agent.clone(),
+                session: session.clone(),
+                total: 4,
+                items: vec![(3, item.clone())],
+            },
+            "event/session_update",
+            json!({"agent": "claude", "session": "s1", "total": 4,
+                "items": [{"index": 3, "item": item}]}),
+        ),
+        (
+            HostEvent::PermissionRequested {
+                agent: agent.clone(),
+                session: session.clone(),
+                request: 7,
+                title: "Run cargo test".into(),
+                options: options.clone(),
+            },
+            "event/permission_requested",
+            json!({"agent": "claude", "session": "s1", "request": 7,
+                "title": "Run cargo test", "options": options}),
+        ),
+        (
+            HostEvent::PermissionResolved {
+                agent: agent.clone(),
+                session: session.clone(),
+                request: 7,
+                option: Some("allow".into()),
+            },
+            "event/permission_resolved",
+            json!({"agent": "claude", "session": "s1", "request": 7, "option": "allow"}),
+        ),
+        (
+            HostEvent::QuestionRequested {
+                agent: agent.clone(),
+                session: session.clone(),
+                request: 3,
+                message: "Which branch?".into(),
+                fields: fields.clone(),
+            },
+            "event/question_requested",
+            json!({"agent": "claude", "session": "s1", "request": 3,
+                "message": "Which branch?", "fields": fields}),
+        ),
+        (
+            HostEvent::QuestionResolved {
+                agent,
+                session,
+                request: 3,
+                answer: "decline".into(),
+            },
+            "event/question_resolved",
+            json!({"agent": "claude", "session": "s1", "request": 3, "answer": "decline"}),
+        ),
+    ]
+}
+
+/// HOST-02/04/06, QST-01/03: an extension granted `sessions:content` gets each content event,
+/// with every field.
+#[test]
+fn content_events_reach_content_extension() {
+    let tmp = tempfile::tempdir().unwrap();
+    let granted = vec![
+        Permission::Process,
+        Permission::Notify,
+        Permission::SessionsContent,
+    ];
+    let ext = installed(tmp.path(), &[], granted);
+    run(Duration::from_secs(10), async {
+        let (handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        reported(&rx, "initialize").await;
+        for (event, method, params) in content_events() {
+            handle.notify_event(event);
+            assert_eq!(reported(&rx, method).await, params, "{method}");
+        }
+        // A permission request resolved by the agent (a cancelled turn) has no option.
+        handle.notify_event(HostEvent::PermissionResolved {
+            agent: "claude".into(),
+            session: "s1".into(),
+            request: 8,
+            option: None,
+        });
+        assert_eq!(
+            reported(&rx, "event/permission_resolved").await,
+            json!({"agent": "claude", "session": "s1", "request": 8, "option": null})
+        );
+    });
+}
+
+/// HOST-10: `sessions:read` without `sessions:content` gets none of the five content events.
+#[test]
+fn content_events_skip_read_only_extension() {
+    let tmp = tempfile::tempdir().unwrap();
+    let granted = vec![
+        Permission::Process,
+        Permission::Notify,
+        Permission::SessionsRead,
+    ];
+    let ext = installed(tmp.path(), &[], granted);
+    run(Duration::from_secs(10), async {
+        let (handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        reported(&rx, "initialize").await;
+        for (event, ..) in content_events() {
+            handle.notify_event(event);
+        }
+        // Sent after them, so it arrives after any of them that were sent.
+        handle.notify_event(HostEvent::SessionState {
+            agent: "claude".into(),
+            session: "s1".into(),
+            state: "Working".into(),
+        });
+        let events = until(&rx, |e| title(e) == Some("event/session_state")).await;
+        let titles: Vec<_> = events.iter().filter_map(title).collect();
+        assert_eq!(
+            titles,
+            ["event/session_state"],
+            "content sent without permission"
+        );
+    });
+}
+
+/// The four session methods of API 1.10, with params.
+const CONTENT_AND_CONTROL: [&str; 4] = [
+    r#"sessions/read {"agent": "claude", "session": "s1", "from": 2, "limit": 50}"#,
+    r#"sessions/cancel {"agent": "claude", "session": "s1"}"#,
+    r#"permission/answer {"agent": "claude", "session": "s1", "request": 7, "option": "allow"}"#,
+    r#"question/answer {"agent": "claude", "session": "s1", "request": 3, "answer": "accept", "values": {"b": "main"}}"#,
+];
+
+/// HOST-09: `sessions/read` needs `sessions:content`; `sessions/cancel`, `permission/answer`
+/// and `question/answer` need `sessions:control`. Each one without it answers `-32001` and
+/// never reaches wai, even with the other session permissions granted.
+#[test]
+fn content_and_control_methods_need_permissions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let args: Vec<&str> = (CONTENT_AND_CONTROL.iter())
+        .flat_map(|c| ["--call", *c])
+        .collect();
+    let denied = |permission: &str| json!({"code": -32001, "message": format!("Permission denied: {permission}")});
+    let only_ready_and_reports = |events: &[ExtEvent]| {
+        assert!(
+            (events.iter()).all(|e| matches!(e, ExtEvent::Ready { .. } | ExtEvent::Notify { .. })),
+            "a denied call reached wai: {events:?}"
+        );
+    };
+    run(Duration::from_secs(10), async {
+        // Everything but `sessions:content`.
+        let granted = vec![
+            Permission::Process,
+            Permission::Notify,
+            Permission::SessionsRead,
+            Permission::SessionsControl,
+        ];
+        let ext = installed(&tmp.path().join("a"), &args[..2], granted);
+        let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        let (events, replies) = until_replies(&rx, 1).await;
+        assert_eq!(replies[&1]["error"], denied("sessions:content"));
+        only_ready_and_reports(&events);
+
+        // Everything but `sessions:control`.
+        let granted = vec![
+            Permission::Process,
+            Permission::Notify,
+            Permission::SessionsRead,
+            Permission::SessionsContent,
+        ];
+        let ext = installed(&tmp.path().join("b"), &args[2..], granted);
+        let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        let (events, replies) = until_replies(&rx, 3).await;
+        for id in 1..=3 {
+            assert_eq!(replies[&id]["error"], denied("sessions:control"), "{id}");
+        }
+        only_ready_and_reports(&events);
+    });
+}
+
+/// HOST-01/05/08, QST-02: granted, each method reaches wai with its params, and wai's answer
+/// (a result or an error) reaches the extension.
+#[test]
+fn content_and_control_methods_reach_wai() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut calls = CONTENT_AND_CONTROL.to_vec();
+    // `from`, `limit` and `values` are optional.
+    calls.push(r#"sessions/read {"agent": "claude", "session": "s2"}"#);
+    calls.push(r#"question/answer {"agent": "claude", "session": "s1", "request": 4, "answer": "decline"}"#);
+    let args: Vec<&str> = calls.iter().flat_map(|c| ["--call", *c]).collect();
+    let granted = vec![
+        Permission::Process,
+        Permission::Notify,
+        Permission::SessionsContent,
+        Permission::SessionsControl,
+    ];
+    let ext = installed(tmp.path(), &args, granted);
+    run(Duration::from_secs(10), async {
+        let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        let (mut calls, mut replies) = (Vec::new(), HashMap::new());
+        while calls.len() < 6 || replies.len() < 6 {
+            match rx.recv().await.expect("event channel closed") {
+                ExtEvent::Notify { title, body } if title == "reply" => {
+                    let reply: Value = serde_json::from_str(&body).unwrap();
+                    replies.insert(reply["id"].as_u64().unwrap(), reply);
+                }
+                ExtEvent::ReadSession {
+                    agent,
+                    session,
+                    from,
+                    limit,
+                    reply,
+                } => {
+                    let page = json!({"items": [], "total": 0});
+                    calls.push(json!(["read", agent, session, from, limit]));
+                    reply.send(Ok(page));
+                }
+                ExtEvent::CancelSession {
+                    agent,
+                    session,
+                    reply,
+                } => {
+                    calls.push(json!(["cancel", agent, session]));
+                    reply.send(Ok(Value::Null));
+                }
+                ExtEvent::AnswerPermission {
+                    agent,
+                    session,
+                    request,
+                    option,
+                    reply,
+                } => {
+                    calls.push(json!(["permission", agent, session, request, option]));
+                    reply.send(Err("Request 7 is already answered".into()));
+                }
+                ExtEvent::AnswerQuestion {
+                    agent,
+                    session,
+                    request,
+                    answer,
+                    values,
+                    reply,
+                } => {
+                    calls.push(json!(["question", agent, session, request, answer, values]));
+                    reply.send(Ok(Value::Null));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            calls,
+            [
+                json!(["read", "claude", "s1", 2, 50]),
+                json!(["cancel", "claude", "s1"]),
+                json!(["permission", "claude", "s1", 7, "allow"]),
+                json!(["question", "claude", "s1", 3, "accept", {"b": "main"}]),
+                json!(["read", "claude", "s2", null, null]),
+                json!(["question", "claude", "s1", 4, "decline", null]),
+            ]
+        );
+        assert_eq!(replies[&1]["result"], json!({"items": [], "total": 0}));
+        assert_eq!(replies[&2]["result"], Value::Null);
+        assert_eq!(
+            replies[&3]["error"]["message"],
+            "Request 7 is already answered"
+        );
+        assert_eq!(replies[&4]["result"], Value::Null);
+        assert_eq!(replies[&5]["result"], json!({"items": [], "total": 0}));
+        assert_eq!(replies[&6]["result"], Value::Null);
     });
 }

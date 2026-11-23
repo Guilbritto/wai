@@ -1,7 +1,13 @@
-# A skeleton: not functional yet (see DESIGN.md). It has no process, so installing it runs nothing.
-# Once built it also needs `listen`, a permission wai does not have yet.
 id = "wai-remoto"
 name = "Remoto"
-version = "0.0.0"
-description = "Phone access to your sessions. Design only: not functional yet"
-permissions = ["sessions:control"]
+version = "0.1.0"
+description = "Follow and drive your sessions from your phone, through a Tailscale tunnel"
+api = "1.10"
+permissions = ["process", "panels", "sessions:read", "sessions:content", "sessions:control", "notify", "listen"]
+
+[process]
+command = "bin/wai-remoto"
+
+[[contributes.panels]]
+id = "remoto"
+title = "Remoto"
