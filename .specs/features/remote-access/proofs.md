@@ -1,9 +1,9 @@
 # remote-access proofs
 
-**HEAD**: 97bcf3f
+**HEAD**: 7357bf0
 **Tree**: clean
 **Shell**: C:/Program Files/Git\bin\bash.exe
-**Result**: 79 pass, 0 fail
+**Result**: 80 pass, 0 fail
 
 | Check | Proof | Result |
 | --- | --- | --- |
@@ -36,7 +36,7 @@
 | C27 | `run mobile / ✅ TranscriptStore applies session_update` | pass |
 | C28 | `run mobile / ✅ SessionsScreen shows No open sessions in wai` | pass |
 | C29 | `run mobile / ✅ SessionsScreen shows can't reach wai with Retry` | pass |
-| C30 | `run mobile / ✅ SessionsStore unpairs on 401` | pass |
+| C30 | `run mobile / ✅ App returns to pairing when wai-remoto answers 401` | pass |
 | C31 | `run wai / workspace::tests::remote_permission_requested_event ... ok` | pass |
 | C32 | `run wai / workspace::tests::remote_permission_answer_reaches_agent ... ok` | pass |
 | C33 | `run wai / workspace::tests::remote_permission_resolved_event ... ok` | pass |
@@ -84,6 +84,7 @@
 | C75 | `walk - Extensions → wai-remoto → Disable while started; Test-NetConnection 127.0.0.1 -Port 7717 fails afterwar` | pass (Walked) |
 | C76 | `run remoto / --- PASS: TestPromptToBusySessionIs409` | pass |
 | C77 | `run remoto / --- PASS: TestResponsesAreNoStore` | pass |
+| C78 | `run mobile / ✅ TranscriptStore reads the state again after a reconnect` | pass |
 | Build | `cargo fmt --all --check` | pass |
 | Build | `cargo clippy --workspace --all-targets -- -D warnings` | pass |
 
@@ -92,20 +93,20 @@
 `Run wai` - exit 0
 
 ```
-test workspace::tests::remote_permission_resolved_event ... ok
+test workspace::tests::remote_permission_answer_reaches_agent ... ok
 test workspace::tests::remote_read_unknown_session_errors ... ok
-test workspace::tests::remote_question_answer_invalid_stays_pending ... ok
+test workspace::tests::remote_permission_answer_twice_errors ... ok
 test workspace::tests::remote_read_returns_transcript ... ok
 test workspace::tests::remote_question_answer_reaches_agent ... ok
 test workspace::tests::remote_turn_streams_session_update ... ok
 test extensions_view::tests::consent_dialog_lists_permissions ... ok
 test chat::view::tests::remote_card_events_follow_clicks ... ok
 
-test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 710 filtered out; finished in 0.88s
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 710 filtered out; finished in 1.14s
 
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.19s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.32s
    Compiling wai v0.6.2 (C:\Users\guilh\Project\wai\crates\wai)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.49s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.85s
      Running unittests src\main.rs (target\debug\deps\wai-8c9436bf221ee07c.exe)
 ```
 
@@ -136,23 +137,25 @@ ok  	wai-remoto	(cached)
 ✅ C:/Users/guilh/Project/wai-mobile/test/screens/sessions_screen_test.dart: SessionsScreen lists sessions
 ✅ C:/Users/guilh/Project/wai-mobile/test/screens/sessions_screen_test.dart: SessionsScreen shows No open sessions in wai
 ✅ C:/Users/guilh/Project/wai-mobile/test/screens/unpair_test.dart: Unpair revokes and returns to pairing
-✅ C:/Users/guilh/Project/wai-mobile/test/screens/session_screen_test.dart: SessionScreen sends a prompt
 ✅ C:/Users/guilh/Project/wai-mobile/test/screens/sessions_screen_test.dart: SessionsScreen shows can't reach wai with Retry
+✅ C:/Users/guilh/Project/wai-mobile/test/screens/session_screen_test.dart: SessionScreen sends a prompt
 ✅ C:/Users/guilh/Project/wai-mobile/test/screens/session_screen_test.dart: SessionScreen disables send and shows Cancel while working
-✅ C:/Users/guilh/Project/wai-mobile/test/screens/session_screen_test.dart: SessionScreen Cancel calls cancel
 ✅ C:/Users/guilh/Project/wai-mobile/test/screens/question_form_test.dart: QuestionForm Submit sends values
+✅ C:/Users/guilh/Project/wai-mobile/test/screens/session_screen_test.dart: SessionScreen Cancel calls cancel
 ✅ C:/Users/guilh/Project/wai-mobile/test/screens/session_screen_test.dart: SessionScreen shows one button per permission option
-✅ C:/Users/guilh/Project/wai-mobile/test/screens/session_screen_test.dart: SessionScreen sends the tapped option
 ✅ C:/Users/guilh/Project/wai-mobile/test/screens/question_form_test.dart: QuestionForm Decline and Cancel send decline and cancel
+✅ C:/Users/guilh/Project/wai-mobile/test/screens/session_screen_test.dart: SessionScreen sends the tapped option
 ::endgroup::
 
-🎉 38 tests passed.
+🎉 39 tests passed.
 ```
 
 `Run ext` - exit 0
 
 ```
+test parses_full_manifest ... ok
 test prompt_only_command_needs_no_process ... ok
+test api_version_is_checked_first ... ok
 test panel_icon_and_location ... ok
 test required_plugins_parse ... ok
 test svg_icon_paths ... ok
@@ -162,9 +165,7 @@ test unknown_fields_and_permissions_rejected ... ok
 
 test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
-   Compiling wai-settings v0.6.2 (C:\Users\guilh\Project\wai\crates\wai-settings)
-   Compiling wai-ext v0.6.2 (C:\Users\guilh\Project\wai\crates\wai-ext)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.34s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.52s
      Running tests\host.rs (target\debug\deps\host-0f7c1a156179cff5.exe)
      Running tests\manifest.rs (target\debug\deps\manifest-fdb9ea59e5c09d5a.exe)
 ```
