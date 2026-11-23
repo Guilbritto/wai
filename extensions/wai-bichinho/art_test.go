@@ -108,3 +108,32 @@ func TestEveryFormDraws(t *testing.T) {
 		}
 	}
 }
+
+func TestSolidPartFillsTheInside(t *testing.T) {
+	var g grid
+	pen{&g, 0, 0}.part(rrect(2, 2, 6, 6, 0))
+	if g[2][4] != 2 || g[4][2] != 2 || g[4][4] != 1 || g[3][3] != 1 {
+		t.Errorf("edge/inside: %v %v %v %v", g[2][4], g[4][2], g[4][4], g[3][3])
+	}
+}
+
+func TestDimOverDimIsAHole(t *testing.T) {
+	var g grid
+	p := pen{&g, 0, 0}
+	p.part(rrect(2, 2, 8, 8, 0))
+	p.line(4, 5, 6, 5, 1)
+	p.set(12, 12, 1)
+	if g[5][4] != 0 || g[5][6] != 0 || g[12][12] != 1 {
+		t.Errorf("hole %v %v, dim on empty %v", g[5][4], g[5][6], g[12][12])
+	}
+}
+
+func TestCutClears(t *testing.T) {
+	var g grid
+	p := pen{&g, 0, 0}
+	p.part(rrect(2, 2, 8, 8, 0))
+	p.cut(rrect(4, 4, 5, 5, 0))
+	if g[4][4] != 0 || g[5][5] != 0 || g[6][6] != 1 {
+		t.Errorf("cut: %v %v %v", g[4][4], g[5][5], g[6][6])
+	}
+}

@@ -22,6 +22,7 @@ type drawer interface {
 	pix(pts [][2]float64, v uint8)
 	line(x0, y0, x1, y1 float64, v uint8)
 	glyph(x, y float64, rows []string)
+	cut(m mask)
 	scale() float64 // the JS `p.s`
 }
 
@@ -136,11 +137,21 @@ type pen struct {
 
 func (p pen) scale() float64 { return 1 }
 
-func (p pen) set(x, y float64, v uint8) {
+// put writes a cell as is; cells off the grid are dropped.
+func (p pen) put(x, y float64, v uint8) {
 	xi, yi := int(jsRound(x))+p.ox, int(jsRound(y))+p.oy
 	if xi >= 0 && yi >= 0 && xi < W && yi < H {
 		p.g[yi][xi] = v
 	}
+}
+
+// set is put, except that a dim detail over a dim body becomes a hole, so it still shows.
+func (p pen) set(x, y float64, v uint8) {
+	xi, yi := int(jsRound(x))+p.ox, int(jsRound(y))+p.oy
+	if v == 1 && xi >= 0 && yi >= 0 && xi < W && yi < H && p.g[yi][xi] == 1 {
+		v = 0
+	}
+	p.put(x, y, v)
 }
 
 func edge(m mask) mask {
@@ -149,19 +160,14 @@ func edge(m mask) mask {
 	}
 }
 
-// part hides what is under it; its edge is dark, inner staircase corners are grey.
+// part hides what is under it: its edge is full, its inside dim.
 func (p pen) part(m mask) {
 	e := edge(m)
 	for y := -2.0; y < H; y++ {
 		for x := -2.0; x < W; x++ {
-			if !m(x, y) {
-				continue
+			if m(x, y) {
+				p.put(x, y, iff(e(x, y), 2, 1))
 			}
-			if e(x, y) {
-				p.set(x, y, 2)
-				continue
-			}
-			p.set(x, y, iff((e(x, y-1) || e(x, y+1)) && (e(x-1, y) || e(x+1, y)), 1, 0))
 		}
 	}
 }
@@ -181,11 +187,14 @@ func (p pen) fill(m mask, v uint8) {
 	for y := -2.0; y < H; y++ {
 		for x := -2.0; x < W; x++ {
 			if m(x, y) {
-				p.set(x, y, v)
+				p.put(x, y, v)
 			}
 		}
 	}
 }
+
+// cut makes a hole: mouths, pupils, an open maw.
+func (p pen) cut(m mask) { p.fill(m, 0) }
 
 func (p pen) pix(list pts, v uint8) {
 	for _, pt := range list {
@@ -208,11 +217,11 @@ func (p pen) glyph(x, y float64, rows []string) {
 		for i, c := range []rune(r) {
 			switch c {
 			case '#':
-				p.set(x+float64(i), y+float64(j), 2)
+				p.put(x+float64(i), y+float64(j), 2)
 			case '+':
 				p.set(x+float64(i), y+float64(j), 1)
 			case 'o':
-				p.set(x+float64(i), y+float64(j), 0)
+				p.put(x+float64(i), y+float64(j), 0)
 			}
 		}
 	}
@@ -247,6 +256,7 @@ func (d scaledPen) set(x, y float64, v uint8) {
 func (d scaledPen) part(m mask)          { d.p.part(d.T(m)) }
 func (d scaledPen) ring(m mask, v uint8) { d.p.ring(d.T(m), v) }
 func (d scaledPen) fill(m mask, v uint8) { d.p.fill(d.T(m), v) }
+func (d scaledPen) cut(m mask)           { d.p.cut(d.T(m)) }
 func (d scaledPen) pix(list pts, v uint8) {
 	out := make(pts, len(list))
 	for i, pt := range list {
@@ -269,15 +279,16 @@ func (d scaledPen) glyph(x, y float64, rows []string) {
 
 func sw(p drawer, w float64) int { return int(math.Max(2, jsRound(w*p.scale()))) }
 
+// Eyes are full with a hole for the pupil.
 var EYES = map[string][]string{
-	"idle":  {".#.", "#.#", "#.#", ".#."},
-	"blink": {"...", "...", "###", "..."},
-	"happy": {"...", ".#.", "#.#", "..."},
+	"idle":  {"###", "#o#", "###"},
+	"blink": {"...", "###", "..."},
+	"happy": {".#.", "#.#", "..."},
 }
 var SEYES = map[string][]string{
-	"idle":  {"##", "##"},
+	"idle":  {"##", "#o"},
 	"blink": {"..", "##"},
-	"happy": {".#.", "#.#"},
+	"happy": {".#", "#."},
 }
 
 func look(mood string, f int) string {
