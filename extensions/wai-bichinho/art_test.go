@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -45,29 +46,45 @@ func readGolden(t *testing.T) []goldenBlock {
 	return out
 }
 
-func TestFormsMatchTheMockup(t *testing.T) {
-	blocks := readGolden(t)
+// goldenCases is every form in dex order, in the poses the golden pins, then the egg.
+func goldenCases() []goldenBlock {
+	poses := []struct {
+		mood string
+		f    int
+	}{{"idle", 0}, {"happy", 0}, {"talk", 1}, {"hungry", 1}, {"sleep", 2}}
+	var out []goldenBlock
+	for _, l := range dex {
+		for _, fm := range l.Forms {
+			for _, ps := range poses {
+				out = append(out, goldenBlock{form: fm.ID, mood: ps.mood, f: ps.f})
+			}
+		}
+	}
+	return append(out, goldenBlock{form: "ovo", mood: "idle", f: 0}, goldenBlock{form: "ovo", mood: "idle", f: 1})
+}
+
+func TestFormsMatchTheGolden(t *testing.T) {
+	cases := goldenCases()
 	if *update {
 		var sb strings.Builder
-		for _, b := range blocks {
-			if _, ok := forms[b.form]; !ok {
-				continue
-			}
-			g := sprite(b.form, b.mood, b.f, false, 0)
-			fmt.Fprintf(&sb, "%s %s %d\n%s\n\n", b.form, b.mood, b.f, strings.Join(g.rows(), "\n"))
+		for _, c := range cases {
+			g := sprite(c.form, c.mood, c.f, false, 0)
+			fmt.Fprintf(&sb, "%s %s %d\n%s\n\n", c.form, c.mood, c.f, strings.Join(g.rows(), "\n"))
 		}
 		if err := os.WriteFile("testdata/forms.golden", []byte(sb.String()), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		return
 	}
-	checked := 0
-	for _, b := range blocks {
-		if _, ok := forms[b.form]; !ok {
-			t.Errorf("form %q is in the golden file but not ported", b.form)
-			continue
+	blocks := readGolden(t)
+	if len(blocks) != len(cases) {
+		t.Fatalf("golden has %d blocks, want %d", len(blocks), len(cases))
+	}
+	for i, b := range blocks {
+		c := cases[i]
+		if b.form != c.form || b.mood != c.mood || b.f != c.f {
+			t.Fatalf("block %d is %s %s %d, want %s %s %d", i, b.form, b.mood, b.f, c.form, c.mood, c.f)
 		}
-		checked++
 		g := sprite(b.form, b.mood, b.f, false, 0)
 		got := g.rows()
 		for y := range b.rows {
@@ -77,9 +94,6 @@ func TestFormsMatchTheMockup(t *testing.T) {
 				break
 			}
 		}
-	}
-	if checked == 0 {
-		t.Fatal("no golden block matched a ported form")
 	}
 }
 
@@ -135,5 +149,89 @@ func TestCutClears(t *testing.T) {
 	p.cut(rrect(4, 4, 5, 5, 0))
 	if g[4][4] != 0 || g[5][5] != 0 || g[6][6] != 1 {
 		t.Errorf("cut: %v %v %v", g[4][4], g[5][5], g[6][6])
+	}
+}
+
+var preview = flag.String("preview", "", "write an HTML page of every form to this file")
+
+// svgOf draws rows as crisp cells: '#' in fg, '+' in fg at 40%, like wai's pixels node.
+func svgOf(rows []string, scale int, fg string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `<svg width="%d" height="%d" viewBox="0 0 %d %d" shape-rendering="crispEdges" fill="%s">`, W*scale, H*scale, W, H, fg)
+	for y, row := range rows {
+		for x := 0; x < len(row); {
+			n := 1
+			for x+n < len(row) && row[x+n] == row[x] {
+				n++
+			}
+			switch row[x] {
+			case '#':
+				fmt.Fprintf(&b, `<rect x="%d" y="%d" width="%d" height="1"/>`, x, y, n)
+			case '+':
+				fmt.Fprintf(&b, `<rect x="%d" y="%d" width="%d" height="1" fill-opacity=".4"/>`, x, y, n)
+			}
+			x += n
+		}
+	}
+	return b.String() + "</svg>"
+}
+
+func mirrored(rows []string) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		b := []byte(r)
+		slices.Reverse(b)
+		out[i] = string(b)
+	}
+	return out
+}
+
+// TestPreview writes the owner's review page: a fragment the brainstorming companion wraps.
+func TestPreview(t *testing.T) {
+	if *preview == "" {
+		t.Skip("pass -preview <file> to write the page")
+	}
+	const dark, light = "#dcdce0", "#1e1e22"
+	rows := func(id, mood string, f int) []string { g := sprite(id, mood, f, false, 0); return g.rows() }
+	var b strings.Builder
+	b.WriteString(`<style>
+.dex{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:18px}
+.pet{border-radius:10px;padding:8px;background:#f0f0f2;font-size:12px}
+.pet b{display:block;margin-bottom:4px}
+.d{background:#1e1e22;border-radius:6px;padding:6px;display:flex;gap:6px;align-items:flex-end;flex-wrap:wrap;max-width:320px}
+.l{background:#fff;border-radius:6px;padding:6px;margin-top:4px;display:inline-block;border:1px solid #ddd}
+</style>
+<h2>Bichinhos: todas as formas</h2>
+<p class="subtitle">Cada cartão: parado no tamanho real (2px), espelhado e ampliado; os humores (feliz, falando, com fome, dormindo); e o tema claro.</p>
+`)
+	card := func(title, id string) {
+		fmt.Fprintf(&b, `<div class="pet"><b>%s</b><div class="d">%s%s%s</div><div class="d" style="margin-top:4px">`,
+			title, svgOf(rows(id, "idle", 0), 2, dark), svgOf(mirrored(rows(id, "idle", 0)), 2, dark), svgOf(rows(id, "idle", 0), 5, dark))
+		for _, ps := range []struct {
+			mood string
+			f    int
+		}{{"happy", 0}, {"talk", 1}, {"hungry", 1}, {"sleep", 2}} {
+			b.WriteString(svgOf(rows(id, ps.mood, ps.f), 2, dark))
+		}
+		fmt.Fprintf(&b, `</div><div class="l">%s</div></div>`, svgOf(rows(id, "idle", 0), 2, light))
+	}
+	b.WriteString(`<div class="dex">`)
+	card("Ovo", "ovo")
+	b.WriteString(`</div>`)
+	for r := range rarities {
+		fmt.Fprintf(&b, `<h3>%s</h3><div class="dex">`, rarities[r].name)
+		no := 0
+		for _, l := range dex {
+			for _, fm := range l.Forms {
+				no++
+				if l.Rarity == Rarity(r) {
+					card(fmt.Sprintf("#%03d %s", no, fm.Name), fm.ID)
+				}
+			}
+		}
+		b.WriteString(`</div>`)
+	}
+	if err := os.WriteFile(*preview, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
