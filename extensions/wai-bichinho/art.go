@@ -717,130 +717,155 @@ func init() {
 	// ── Raro ──
 	C["dragaozinho"] = func(p pen, mood string, f int) {
 		fl := float64(f % 2)
-		p.part(poly(pts{{21, 26}, {28, 24}, {31, 19}, {30, 25}, {23, 29}}))
-		for _, s := range []float64{-1, 1} {
-			p.part(poly(pts{{16 + s*5, 19}, {16 + s*12, 14 - fl}, {16 + s*11, 19}, {16 + s*9, 23}}))
-		}
-		p.part(ell(16, 24, 7.5, 6))
-		p.ring(ell(16, 24, 3.5, 3.5), 1)
-		p.part(and(ell(16, 27, 11, 4.5), func(x, y float64) bool { return y >= 27 }))
-		for x := 6; x <= 25; x++ {
-			p.set(float64(x), float64(26+x%2), 0)
-		}
-		p.part(poly(pts{{10, 9}, {8, 2}, {13, 7}}))
-		p.part(poly(pts{{22, 9}, {24, 2}, {19, 7}}))
-		p.part(ell(16, 13, 8, 6.5))
-		p.pix(pts{{14, 16}, {17, 16}}, 1)
-		eyes(p, xs(11, 18), 10, mood, f)
-		mouth(p, 16, 17.5, 2, mood, f)
+		p.part(tube(curve(pt{9, 26}, pt{3, 29.5}, pt{3, 23}, 24), 1.4, .8))
+		p.part(poly(pts{{1, 23.5}, {3, 19}, {5, 23.5}, {3, 22.5}}))
+		p.part(rrect(10, 27, 12, 30, 1))
+		p.part(rrect(16, 27, 18, 30, 1))
+		p.part(ell(14, 25, 6, 4.5))
+		p.part(poly(pts{{11, 22}, {4, 13 - fl}, {7, 16 - fl}, {9, 12 - fl}, {12, 17}, {15, 21}}))
+		p.line(12, 21, 5, 14-fl, 2)
+		p.line(12, 21, 9, 13-fl, 2)
+		p.part(poly(pts{{17, 10.5}, {14.5, 6}, {19, 9}}))
+		p.part(poly(pts{{21, 9.5}, {21.5, 5}, {23.5, 9.5}}))
+		p.part(rrect(22, 14, 29, 19, 2))
+		p.part(ell(19.5, 14.5, 6.5, 6))
+		p.set(27, 15, 0)
+		eyes(p, xs(18), 12, mood, f)
+		mouth(p, 25.5, 18, 3, mood, f)
 	}
 	C["dragao"] = func(p pen, mood string, f int) {
-		fl := float64(f % 2)
-		p.part(tube(curve(pt{9, 24}, pt{1, 28}, pt{2, 19}, mid), 1.6, .9))
-		p.part(poly(pts{{0, 19}, {2, 14}, {4.5, 19}}))
-		p.part(poly(pts{{8, 18}, {3, 6 - fl}, {7, 8 - fl}, {9, 3 - fl}, {12, 8 - fl}, {15, 5 - fl}, {16, 17}}))
-		p.line(11, 16, 9, 6-fl, 1)
-		p.line(13, 16, 14, 8-fl, 1)
-		p.part(ell(9, 26.5, 4, 3.8))
-		p.part(rrect(19, 24, 21, 30, 1))
-		p.part(ell(14, 21, 8, 6.5))
-		for y := 18.0; y <= 25; y += 2 {
-			p.line(18, y, 20, y, 1)
-		}
-		p.part(poly(pts{{18, 17}, {22, 9}, {26, 10}, {23, 20}}))
-		p.part(rrect(26, 8, 32, 12, 2))
-		p.part(poly(pts{{22, 6}, {19, 0}, {25, 4}}))
-		p.part(ell(24, 8.5, 4, 3.5))
-		p.set(31, 9, 0)
-		seye(p, 24, 7, mood, f)
-		if mood != "sleep" && f%4 < 2 {
-			p.pix(pts{{33, 7 - fl}, {33, 5 - fl}}, 1)
-		}
+		t := float64(f % 2)
+		p.part(tube(curve(pt{10, 26}, pt{2, 29}, pt{1.5, 21}, 24), 1.8, 1))
+		p.part(poly(pts{{-1, 22.5}, {1.5, 16}, {4, 22.5}, {1.5, 21}}))
+		p.part(rrect(9, 25, 12, 30, 1))
+		p.part(rrect(18, 25, 21, 30, 1))
+		p.part(ell(14.5, 23, 7.5, 5))
+		p.part(tube(curve(pt{18, 22}, pt{23, 20}, pt{24, 13}, 24), 2.8, 2.2))
+		p.part(poly(pts{{24, 8.5}, {19, 3}, {26, 7}}))
+		p.part(poly(pts{{21, 12}, {23, 8}, {27, 7}, {33, 9.5}, {33, 12.5}, {26, 14}}))
+		p.line(27, 12, 32, 12, 2)
+		p.set(31, 10, 2)
+		p.part(poly(pts{{10, 20}, {1, 5 + t}, {6, 9.5}, {8, 1 + t}, {11.5, 9}, {16, 3 + t}, {17, 19}}))
+		p.line(14, 19, 1, 5+t, 2)
+		p.line(14, 19, 8, 1+t, 2)
+		p.line(14, 19, 16, 3+t, 2)
+		seye(p, 25, 8.5, mood, f)
 	}
 	C["caozinho"] = func(p pen, mood string, f int) {
-		p.part(rrect(11, 26, 13, 30, 1))
-		p.part(rrect(19, 26, 21, 30, 1))
-		p.part(ell(16, 25, 7, 4.5))
+		wag := float64(f % 2)
+		p.part(tube(curve(pt{22, 24}, pt{28, 22}, pt{27 + wag*2, 15}, 24), 1.5, 1.1))
+		p.part(ell(16, 25, 7.5, 5))
+		p.part(rrect(10, 27, 14, 30, 1.5))
+		p.part(rrect(18, 27, 22, 30, 1.5))
+		p.set(12, 29, 1)
+		p.set(20, 29, 1)
+		p.part(ell(16, 14, 8.5, 7))
 		for _, s := range []float64{-1, 1} {
-			p.part(poly(pts{{16 + s*9, 17}, {16 + s*10, 13}, {16 + s*7, 16}}))
-			p.part(ell(16+s*8, 19, 3.2, 2.8))
-			p.pix(pts{{16 + s*9 - 1, 19}, {16 + s*9, 19}}, 2)
+			drop := 0.0
+			if s > 0 {
+				drop = wag
+			}
+			p.fill(tube(curve(pt{16 + s*6, 8}, pt{16 + s*10.5, 10}, pt{16 + s*9.5, 19 + drop}, 24), 2.6, 2), 2)
 		}
-		p.part(poly(pts{{10, 12}, {9, 5}, {14, 9}}))
-		p.part(poly(pts{{22, 12}, {23, 5}, {18, 9}}))
-		p.part(ell(16, 14, 6.5, 5.5))
+		p.part(ell(16, 17.5, 4.5, 3))
+		p.fill(poly(pts{{14, 15.5}, {18, 15.5}, {16, 17.5}}), 2)
+		p.line(16, 17, 16, 18.5, 2)
+		if mood != "sleep" {
+			p.part(rrect(15, 19.5, 17, 22, 1))
+			p.set(16, 20.5, 2)
+		}
 		eyes(p, xs(11, 18), 11, mood, f)
-		p.pix(pts{{15, 15}, {16, 15}}, 2)
-		mouth(p, 16, 17, 2, mood, f)
 	}
 	C["cerbero"] = func(p pen, mood string, f int) {
-		p.part(rrect(9, 24, 12, 30, 1))
-		p.part(rrect(20, 24, 23, 30, 1))
-		p.part(tube(curve(pt{25, 22}, pt{31, 21}, pt{29, 15}, mid), 1.2, .8))
-		p.part(ell(16, 23, 9.5, 5.5))
-		head := func(cx, cy float64, big bool) {
-			rx, ry := 4.5, 4.0
-			if big {
-				rx, ry = 5.5, 4.8
-			}
-			p.part(poly(pts{{cx - rx + 1, cy - 1}, {cx - rx, cy - ry - 4}, {cx - 1, cy - ry + .5}}))
-			p.part(poly(pts{{cx + rx - 1, cy - 1}, {cx + rx, cy - ry - 4}, {cx + 1, cy - ry + .5}}))
-			p.part(ell(cx, cy, rx, ry))
-			seye(p, cx-3, cy-1, mood, f)
-			seye(p, cx+1, cy-1, mood, f)
-			p.pix(pts{{cx - 1, cy + 2}, {cx, cy + 2}}, 2)
+		wag := float64(f % 2)
+		p.part(rrect(9, 27, 12, 30, 1))
+		p.part(rrect(20, 27, 23, 30, 1))
+		p.part(ell(16, 26, 9, 4))
+		// side heads in profile, facing out: snout, nose, a floppy ear
+		side := func(hx, hy, d float64) {
+			p.part(rrect(math.Min(hx, hx+d*5), hy-.5, math.Max(hx, hx+d*5), hy+3, 1.2))
+			p.part(ell(hx, hy, 4, 3.6))
+			p.fill(rrect(math.Min(hx+d*4, hx+d*5.5), hy-1, math.Max(hx+d*4, hx+d*5.5), hy+.5, .5), 2)
+			p.fill(tube(curve(pt{hx - d*.5, hy - 3}, pt{hx - d*3.5, hy - 1}, pt{hx - d*3, hy + 3.5}, 24), 1.4, 1.2), 2)
+			seye(p, hx-1+d*.5, hy-1.5, mood, f)
 		}
-		head(6, float64(14+f%2), false)
-		head(26, float64(14+(f+1)%2), false)
-		head(16, 10, true)
-		mouth(p, 15.5, 13.5, 2, mood, f)
-		p.pix(pts{{10, 19}, {13, 20}, {16, 20}, {19, 20}, {22, 19}}, 1)
+		side(4.5, 20+wag, -1)
+		side(27.5, 21-wag, 1)
+		p.fill(rrect(11, 19, 21, 20, 0), 2)
+		p.pix(pts{{12, 21}, {15, 21}, {18, 21}, {21, 21}}, 2)
+		// the middle head is the Cãozinho's
+		p.part(ell(16, 11, 8, 6.5))
+		for _, s := range []float64{-1, 1} {
+			p.fill(tube(curve(pt{16 + s*5.5, 5}, pt{16 + s*10, 7}, pt{16 + s*9, 15}, 24), 2.4, 1.9), 2)
+		}
+		p.part(ell(16, 14.5, 4.5, 3))
+		p.fill(poly(pts{{14, 12.5}, {18, 12.5}, {16, 14.5}}), 2)
+		p.line(16, 14, 16, 15.5, 2)
+		if mood != "sleep" {
+			p.part(rrect(15, 16.5, 17, 19, 1))
+			p.set(16, 17.5, 2)
+		}
+		eyes(p, xs(11, 18), 8, mood, f)
 	}
 
 	C["cavalinho"] = func(p pen, mood string, f int) {
-		p.part(tube(curve(pt{15, 22}, pt{18, 30}, pt{11, 29}, mid), 1.8, 1.2))
-		p.part(tube(curve(pt{11, 29}, pt{8, 27}, pt{11, 25}, mid), 1.2, 1))
-		p.part(poly(pts{{11, 14}, {6, float64(17 - f%2)}, {11, 21}}))
-		p.part(ell(16, 18, 5, 6.5))
-		for y := 14.0; y <= 22; y += 2 {
-			p.line(18, y, 19, y, 1)
+		fl := float64(f % 2)
+		p.ring(ell(28, 6-fl, 1.3, 1.3), 2)
+		p.ring(ell(30, 2-fl, .9, .9), 2)
+		p.part(tube(curve(pt{14, 21}, pt{20, 29}, pt{14, 29.5}, 24), 2.2, 1.4))
+		p.part(tube(curve(pt{14, 29.5}, pt{10, 28}, pt{13, 25.5}, 24), 1.4, 1))
+		p.part(poly(pts{{11, 13}, {5, 15 - fl}, {6, 19 + fl}, {11, 20}}))
+		p.line(10, 15, 6, 16-fl, 2)
+		p.line(10, 18, 6, 18+fl, 2)
+		p.part(ell(15, 17, 5, 6.5))
+		for y := 13.0; y <= 21; y += 2 {
+			p.line(17, y, 19, y, 1)
 		}
-		p.part(rrect(19, 9, 26, 11, 1))
-		p.part(ell(17, 9, 4, 3.5))
-		p.pix(pts{{15, 5}, {16, 4}, {17, 5}, {18, 4}}, 2)
-		seye(p, 17, 8, mood, f)
-		p.set(28, []float64{11, 9, 7, 5}[f%4], 1)
+		p.part(rrect(20, 8, 28, 10.5, 1))
+		p.part(ell(17.5, 8, 4.2, 3.6))
+		p.line(15, 4, 14, 2, 2)
+		p.line(17.5, 4, 17.5, 1.5, 2)
+		p.line(20, 5, 21, 2.5, 2)
+		seye(p, 18, 7, mood, f)
 	}
 	C["hipocampo"] = func(p pen, mood string, f int) {
-		wave(p, 28, f)
-		p.part(poly(pts{{1, 20}, {0, 12}, {3, 16}, {6, 12}, {5, 20}}))
-		p.part(tube(curve(pt{12, 22}, pt{3, 27}, pt{3, 19}, mid), 2.2, 1.3))
-		for _, c := range (pts{{7, 25}, {10, 24}, {4, 23}}) {
-			p.set(c[0], c[1], 1)
+		fl := float64(f % 2)
+		wave(p, 29, f)
+		p.part(tube(curve(pt{12, 22}, pt{4, 28}, pt{3, 18}, 24), 3, 1.2))
+		p.part(poly(pts{{0, 18}, {2, 11 + fl}, {4, 16}, {7, 12 - fl}, {5, 19}}))
+		for _, q := range (pts{{6, 25}, {9, 26}, {4, 22}}) {
+			p.set(q[0], q[1], 1)
 		}
-		p.part(poly(pts{{19, 8}, {14, 10}, {17, 12}, {13, 15}, {17, 17}}))
-		p.part(rrect(18, 22, 20, 27, 1))
-		p.part(poly(pts{{16, 27}, {23, 26}, {21, 29}}))
-		p.part(ell(15, 21, 7, 5))
-		p.part(poly(pts{{15, 18}, {19, 8}, {24, 9}, {21, 20}}))
-		p.part(rrect(24, 7, 31, 11, 2))
-		p.part(poly(pts{{20, 5}, {21, 0}, {23, 4}}))
-		p.part(ell(23, 7, 4, 3.5))
-		seye(p, 23, 6, mood, f)
+		p.part(tube(curve(pt{20, 23}, pt{22, 26}, pt{21, 29}, 24), 1.3, 1.1))
+		p.part(tube(curve(pt{22, 22}, pt{26, 22 + fl}, pt{27, 25 + fl}, 24), 1.3, 1.1))
+		p.part(ell(16, 20, 7.5, 5))
+		p.part(tube(curve(pt{19, 18}, pt{22, 13}, pt{23, 8}, 24), 3, 2.4))
+		p.part(poly(pts{{22, 4}, {22, 0}, {24.5, 3}}))
+		p.part(poly(pts{{20, 6}, {25, 3}, {32, 7}, {32, 10.5}, {27, 11}, {22, 9.5}}))
+		p.set(30, 8, 0)
+		p.line(27, 10, 31, 10, 2)
+		for _, q := range (pts{{20, 6}, {19, 9}, {18, 12}, {17, 15}}) {
+			p.line(q[0], q[1], q[0]-3, q[1]+1.5, 2)
+		}
+		seye(p, 25, 5, mood, f)
 	}
 
 	C["cubo"] = func(p pen, mood string, f int) {
-		j := float64(f % 2)
-		p.part(poly(pts{{24, 10}, {30, 4 + j}, {30, 23}, {24, 29}}))
-		p.part(poly(pts{{6, 10}, {12, 4 + j}, {30, 4 + j}, {24, 10}}))
-		p.part(rrect(6, 10, 24, 29, 0))
-		p.glyph(17, 20, grey([]string{".###.", "#.#.#", "#####", ".#.#."}))
-		p.line(8, 27, 13, 22, 1)
-		p.line(9, 22, 11, 24, 1)
-		p.ring(ell(27, 15, 1.4, 1.4), 1)
-		p.set(21, 26, 1)
-		eyes(p, xs(10, 17), 13, mood, f)
-		mouth(p, 15, 18.5, 2, mood, f)
+		w := float64(f % 2)
+		p.part(poly(pts{{4, 10}, {10, 4}, {31, 4}, {25, 10}}))
+		p.part(poly(pts{{25, 10}, {31, 4}, {31, 24}, {25, 30}}))
+		p.part(rrect(4, 10, 25, 30, 0))
+		p.part(ell(8, 30.5, 1.5, 1.2+w*.5))
+		p.part(ell(19, 30.5, 1.2, 1+w*.5))
+		p.fill(ell(17, 22.5, 3.5, 3), 2)
+		p.fill(rrect(15, 24, 19, 27, .5), 2)
+		p.cut(rrect(15, 22, 16, 23, 0))
+		p.cut(rrect(18, 22, 19, 23, 0))
+		p.pix(pts{{16, 26}, {18, 26}}, 0)
+		p.line(7, 27, 11, 24, 2)
+		p.pix(pts{{6, 27}, {7, 28}, {11, 23}, {12, 24}}, 2)
+		eyes(p, xs(8, 15), 13, mood, f)
+		mouth(p, 13, 18, 4, mood, f)
 	}
 
 	// ── Épico ──
