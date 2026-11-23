@@ -235,3 +235,17 @@ func TestPreview(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Happy and sleep change the form's own drawing, not only fx's hearts and z's.
+func TestEveryFaceShowsTheMood(t *testing.T) {
+	draw := func(id, mood string) grid { var g grid; forms[id](pen{&g, 2, 0}, mood, 0); return g }
+	for id := range forms {
+		if id == "ovo" {
+			continue
+		}
+		idle := draw(id, "idle")
+		if draw(id, "happy") == idle || draw(id, "sleep") == idle {
+			t.Errorf("%s: happy or sleep looks like idle", id)
+		}
+	}
+}

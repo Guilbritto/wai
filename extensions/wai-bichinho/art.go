@@ -871,115 +871,102 @@ func init() {
 	// ── Épico ──
 	C["fenix"] = func(p pen, mood string, f int) {
 		fl := float64(f % 2)
-		p.line(15, 23, 11, 29, 2)
-		p.line(16, 23, 16, 30, 2)
-		p.line(17, 23, 21, 29, 2)
-		for _, x := range []float64{10, 16, 22} {
-			p.part(ell(x, 29.5, 1.6, 1.3))
+		for i, end := range []pt{{7, 30}, {16, 31}, {25, 30}} {
+			p.part(tube(curve(pt{16, 21}, pt{end[0] + (16-end[0])*.2 + fl*float64(i-1), 26}, end, 24), 1.6, .6))
 		}
 		for _, s := range []float64{-1, 1} {
-			p.part(poly(pts{{16 + s*3, 14}, {16 + s*14, 5 - fl}, {16 + s*12, 9}, {16 + s*15, 11 - fl}, {16 + s*12, 14}, {16 + s*14, 17 - fl}, {16 + s*4, 20}}))
-			p.line(16+s*5, 15, 16+s*11, 9-fl, 1)
-			p.line(16+s*5, 17, 16+s*11, 15-fl, 1)
+			p.part(poly(pts{{16 + s*2, 15}, {16 + s*15, 3 - fl}, {16 + s*12, 9}, {16 + s*16, 10 - fl}, {16 + s*12, 14}, {16 + s*15, 18}, {16 + s*7, 20}, {16 + s*2, 20}}))
+			p.line(16+s*3, 17, 16+s*13, 5-fl, 2)
+			p.line(16+s*4, 18, 16+s*13, 11-fl, 2)
 		}
-		p.part(ell(16, 17, 4.5, 6))
-		wig := [4]float64{0, 1, 0, -1}
-		for _, xi := range [][2]int{{14, 0}, {16, 1}, {18, 2}} {
-			for y := 0; y < 4; y++ {
-				p.set(float64(xi[0])+wig[(y+f+xi[1])%4], float64(y+1), iff(y == 0, 1, 2))
-			}
-		}
-		p.part(ell(16, 8, 4, 3.5))
-		seye(p, 13, 7, mood, f)
-		seye(p, 17, 7, mood, f)
-		p.pix(pts{{15, 9}, {16, 9}, {15, 10}, {16, 10}}, 2)
-		c := [4][2]float64{{6, 22}, {26, 24}, {9, 26}, {24, 27}}[f%4]
-		p.set(c[0], c[1], 1)
+		p.part(ell(16, 18, 4.5, 5.5))
+		p.part(poly(pts{{14, 7}, {13, 1 + fl}, {15.5, 4.5}, {17.5, 0 + fl}, {18.5, 7}}))
+		p.part(ell(16, 9, 3.6, 3.2))
+		p.fill(poly(pts{{15, 11}, {17, 11}, {16, 13.5}}), 2)
+		seye(p, 13.5, 8, mood, f)
+		seye(p, 16.5, 8, mood, f)
 	}
 	C["mecha"] = func(p pen, mood string, f int) {
-		p.part(rrect(8, 27, 15, 30, 1))
-		p.part(rrect(17, 27, 24, 30, 1))
-		p.part(rrect(10, 20, 14, 27, 1))
-		p.part(rrect(18, 20, 22, 27, 1))
-		p.part(rrect(3, 14, 8, 22, 2))
-		p.part(rrect(24, 14, 29, 22, 2))
-		p.part(rrect(2, 21, 8, 25, 2))
-		p.part(rrect(24, 21, 30, 25, 2))
-		p.part(poly(pts{{8, 11}, {24, 11}, {22, 21}, {10, 21}}))
-		p.part(ell(16, 15.5, 2.5, 2.5))
-		p.fill(ell(16, 15.5, 1.2, 1.2), iff(f%2 != 0, 2, 1))
-		p.part(rrect(1, 9, 9, 15, 2))
-		p.part(rrect(23, 9, 31, 15, 2))
-		p.line(19, 2, 21, 0, 2)
-		p.part(rrect(11, 2, 21, 10, 3))
-		p.fill(rrect(12, 5, 20, 7, 0), 1)
-		if mood != "sleep" {
-			x := 12 + float64([12]int{0, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1}[f%12])
-			p.pix(pts{{x, 6}, {x + 1, 6}}, 2)
-		}
-		p.pix(pts{{14, 9}, {16, 9}, {18, 9}}, 1)
+		a := float64(f % 2)
+		p.part(rrect(9, 23, 13, 29, 1))
+		p.part(rrect(19, 23, 23, 29, 1))
+		p.part(rrect(7, 28, 14, 30, 1))
+		p.part(rrect(18, 28, 25, 30, 1))
+		p.part(rrect(4, 4-a, 7, 11, .5))
+		p.part(rrect(25, 4-a, 28, 11, .5))
+		p.cut(rrect(5, 4-a, 6, 5-a, 0))
+		p.cut(rrect(26, 4-a, 27, 5-a, 0))
+		p.part(rrect(3, 16, 7, 25, 1))
+		p.part(rrect(25, 16, 29, 25, 1))
+		p.part(rrect(8, 11, 24, 24, 2))
+		p.line(10, 21, 14, 21, 2)
+		p.line(18, 21, 22, 21, 2)
+		p.fill(ell(16, 16, 2.3, 2.3), 2)
+		p.set(16, 16, 0)
+		p.part(rrect(2, 10, 9, 16, 1.5))
+		p.part(rrect(23, 10, 30, 16, 1.5))
+		p.line(13, 3, 11, 0, 2)
+		p.line(19, 3, 21, 0, 2)
+		p.part(rrect(11, 2, 21, 10, 2))
+		p.ring(rrect(12, 4, 20, 8, 1), 2)
+		eyes(p, xs(13, 16.5), 4.5, mood, f)
 	}
 
 	// ── Lendário ──
 	C["kraken"] = func(p pen, mood string, f int) {
-		arms := [][3]pt{
-			{{10, 17}, {2, 16}, {3, 5}}, {{22, 17}, {30, 16}, {29, 5}},
-			{{11, 19}, {6, 26}, {1, 27}}, {{21, 19}, {26, 26}, {31, 27}},
-			{{13, 20}, {11, 27}, {7, 30}}, {{19, 20}, {21, 27}, {25, 30}},
+		fl := float64(f % 2)
+		arms := []struct{ a, b, c pt }{
+			{pt{9, 16}, pt{0, 20}, pt{2, 28 - fl}},
+			{pt{11, 18}, pt{6, 26}, pt{9, 31}},
+			{pt{14, 19}, pt{12, 27}, pt{15, 31}},
+			{pt{18, 19}, pt{20, 27}, pt{17, 31}},
+			{pt{21, 18}, pt{26, 26}, pt{23, 31}},
+			{pt{23, 16}, pt{32, 20}, pt{30, 28 - fl}},
 		}
-		for i, arm := range arms {
-			a, b, c := arm[0], arm[1], arm[2]
-			d := -1.0
-			if (f+i)%4 < 2 {
-				d = 1
-			}
-			cv := curve(a, pt{b[0] + d, b[1]}, pt{c[0] + d, c[1]}, mid)
-			p.part(tube(cv, 2, 1))
-			for j, q := range cv {
-				if j%5 == 3 {
-					p.set(math.Floor(q[0]), math.Floor(q[1]), 1)
-				}
+		for _, arm := range arms {
+			pp := curve(arm.a, arm.b, arm.c, 24)
+			p.part(tube(pp, 2.2, .8))
+			for i := 6; i < len(pp)-3; i += 5 {
+				p.set(pp[i][0], pp[i][1], 1)
 			}
 		}
-		p.part(ell(16, 10.5, 8.5, 9.5))
-		p.pix(pts{{13, 3}, {19, 4}, {10, 6}, {22, 7}, {16, 2}}, 1)
-		eyes(p, xs(11, 18), 10, mood, f)
-		mouth(p, 16, 16, 2, mood, f)
+		p.part(ell(16, 11, 9.5, 9))
+		p.pix(pts{{10, 5}, {21, 6}, {13, 3}}, 1)
+		eyes(p, xs(10, 19), 10, mood, f)
+		mouth(p, 16, 15, 2, mood, f)
 	}
 	C["jormungandr"] = func(p pen, mood string, f int) {
-		cx, cy := 16.0, 16.5
-		p.ring(ell(cx, cy, 5, 4.5), 1)
-		p.pix(pts{{14, 15}, {15, 15}, {15, 16}, {18, 17}, {18, 18}, {17, 18}, {13, 18}}, 1)
-		p.part(and(ell(cx, cy, 14.5, 13.5), not(ell(cx, cy, 9, 8))))
-		for i := 0; i < 18; i++ {
-			a := float64(float64(float64(i)/18+float64(f)/72) * 2 * math.Pi)
-			p.set(jsRound(cx-.5+float64(math.Cos(a)*11.8)), jsRound(cy-.5+float64(math.Sin(a)*10.8)), 1)
+		ring := and(ell(16, 17, 14.5, 13.5), not(ell(16, 17, 9, 8)))
+		p.part(ring)
+		for i := 0; i < 16; i++ {
+			a := float64(i)*math.Pi/8 + float64(f%2)*math.Pi/16
+			p.set(16+11.7*math.Cos(a), 17+10.7*math.Sin(a), 1)
 		}
-		p.part(poly(pts{{23, 2}, {30, 3.5}, {29, 6}, {23, 7}}))
-		p.part(ell(21, 4.5, 5, 3.8))
-		p.pix(pts{{16, 7}, {17, 8}, {19, 8}, {20, 9}}, 2)
-		eyes(p, xs(19), 2, mood, f)
+		p.part(poly(pts{{17, 3}, {23, 5}, {17, 7}}))
+		p.part(poly(pts{{22, 4.5}, {27, 1}, {33, 3}, {33, 7}, {27, 9}, {22, 7}}))
+		p.fill(poly(pts{{23, 4}, {24.5, 4}, {23.5, 6}}), 2)
+		p.fill(poly(pts{{23, 7}, {24.5, 7}, {23.5, 5.5}}), 2)
+		p.part(poly(pts{{29, 1.5}, {33, -1}, {31, 2}}))
+		seye(p, 28, 3, mood, f)
 	}
 	C["hidra"] = func(p pen, mood string, f int) {
-		p.part(tube(curve(pt{24, 26}, pt{32, 27}, pt{30, 19}, mid), 1.8, .8))
-		h3 := [][3]pt{{{10, 22}, {4, 16}, {6, 9}}, {{16, 21}, {14, 12}, {16, 6}}, {{22, 22}, {28, 16}, {26, 9}}}
-		var heads []pt
-		for i, h := range h3 {
-			a, b, c := h[0], h[1], h[2]
-			d := [4]float64{0, 1, 0, -1}[(f+i)%4]
-			e := pt{c[0] + d, c[1]}
-			p.part(tube(curve(a, pt{b[0] + d, b[1]}, e, mid), 2.2, 1.6))
-			heads = append(heads, e)
+		fl := float64(f % 2)
+		p.part(tube(curve(pt{24, 27}, pt{31, 30}, pt{33, 23}, 24), 1.8, .8))
+		head := func(hx, hy, d float64, sway float64) {
+			p.part(tube(curve(pt{16 + (hx-16)*.3, 24}, pt{hx - d*3 + sway, (hy + 24) / 2}, pt{hx, hy + 1}, 24), 1.8, 1.4))
+			p.part(ell(hx+d*1.5, hy, 3.5, 2.4))
+			p.line(hx+d*5, hy+1, hx+d*7, hy+1, 2)
+			p.pix(pts{{hx + d*8, hy}, {hx + d*8, hy + 2}}, 2)
+			seye(p, hx+d*1.5-.5, hy-1.5, mood, f)
 		}
-		p.part(ell(16, 25.5, 10, 5))
-		p.pix(pts{{9, 23}, {12, 22}, {16, 22}, {20, 22}, {23, 23}, {11, 27}, {16, 28}, {21, 27}}, 1)
-		for _, h := range heads {
-			hx, hy := h[0], h[1]
-			p.part(ell(hx, hy-1, 4.5, 3.6))
-			seye(p, hx-3, hy-2, mood, f)
-			seye(p, hx+1, hy-2, mood, f)
-			p.pix(pts{{hx - 1, hy + 1}, {hx, hy + 1}}, 2)
+		head(5, 9, -1, fl)
+		head(27, 9, 1, -fl)
+		p.part(ell(16, 26, 11, 4.5))
+		for x := 8.0; x <= 24; x += 4 {
+			p.set(x, 26, 1)
+			p.set(x+2, 24.5, 1)
 		}
+		head(16, 4, 1, fl)
 	}
 
 	// ── D&D ──
