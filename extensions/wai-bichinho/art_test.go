@@ -249,3 +249,39 @@ func TestEveryFaceShowsTheMood(t *testing.T) {
 		}
 	}
 }
+
+// Every form fits its box at x 2..35: nothing is cut at the grid's edges, at rest or bobbing a row down.
+func TestFormsStayOnTheGrid(t *testing.T) {
+	draw := func(id, mood string, f, ox, oy int) grid { var g grid; forms[id](pen{&g, ox, oy}, mood, f); return g }
+	used := func(cells ...uint8) bool { return slices.ContainsFunc(cells, func(v uint8) bool { return v != 0 }) }
+	col := func(g grid, x int) []uint8 {
+		out := make([]uint8, H)
+		for y := range g {
+			out[y] = g[y][x]
+		}
+		return out
+	}
+	for id := range forms {
+		for _, mood := range []string{"idle", "talk", "happy", "sleep", "hungry"} {
+			for f := 0; f < 8; f++ {
+				var edges []string
+				if used(col(draw(id, mood, f, 3, 0), 0)...) {
+					edges = append(edges, "left")
+				}
+				if used(col(draw(id, mood, f, 1, 0), W-1)...) {
+					edges = append(edges, "right")
+				}
+				if g := draw(id, mood, f, 2, 1); used(g[0][:]...) {
+					edges = append(edges, "top")
+				}
+				if g := draw(id, mood, f, 2, 0); used(g[H-1][:]...) {
+					edges = append(edges, "bottom")
+				}
+				if edges != nil {
+					t.Errorf("%s %s %d is cut at the %v", id, mood, f, edges)
+					break
+				}
+			}
+		}
+	}
+}
