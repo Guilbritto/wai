@@ -57,32 +57,34 @@ var dex = []Line{
 	ln(Common, fm("bit", "Bit", 1), fm("bot", "Bot", 10)),
 	ln(Common, fm("alevino", "Alevino", 1), fm("abissal", "Peixe-abissal", 10)),
 	ln(Common, fm("bauzinho", "Bauzinho", 1), fm("mimico", "Mímico", 10)),
+	ln(Common, fm("goblin", "Goblin", 1)),
 	ln(Uncommon, fm("grifinho", "Grifinho", 1), fm("grifo", "Grifo", 10)),
 	ln(Uncommon, fm("pedrinha", "Pedrinha", 1), fm("golem", "Golem", 10)),
 	ln(Uncommon, fm("corvinho", "Corvinho", 1), fm("corvo", "Corvo de Odin", 10)),
 	ln(Uncommon, fm("drone", "Drone", 1)),
 	ln(Uncommon, fm("ursinhocoruja", "Ursinho-coruja", 1), fm("ursocoruja", "Urso-coruja", 10)),
-	ln(Uncommon, fm("ferrugem", "Monstro da ferrugem", 1)),
+	ln(Uncommon, fm("kobold", "Kobold", 1)),
 	ln(Rare, fm("dragaozinho", "Dragãozinho", 1), fm("dragao", "Dragão", 10)),
 	ln(Rare, fm("caozinho", "Cãozinho", 1), fm("cerbero", "Cérbero", 10)),
 	ln(Rare, fm("cavalinho", "Cavalo-marinho", 1), fm("hipocampo", "Hipocampo", 10)),
 	ln(Rare, fm("cubo", "Cubo gelatinoso", 1)),
 	ln(Epic, fm("fenix", "Fênix", 1)),
-	ln(Epic, fm("sleipnir", "Sleipnir", 1)),
+	ln(Epic, fm("fada", "Fada", 1)),
 	ln(Epic, fm("mecha", "Mecha", 1)),
-	ln(Epic, fm("verme", "Verme púrpura", 1)),
+	ln(Epic, fm("beholder", "Beholder", 1)),
 	ln(Legendary, fm("kraken", "Kraken", 1)),
 	ln(Legendary, fm("jormungandr", "Jörmungandr", 1)),
 	ln(Legendary, fm("hidra", "Hidra", 1)),
-	ln(Legendary, fm("singularidade", "Singularidade", 1)),
-	ln(Legendary, fm("tarrasque", "Tarrasque", 1)),
+	ln(Legendary, fm("tiamat", "Tiamat", 1)),
 }
 
 // oldSpecies maps the species of 0.3.1 to the line that took their place.
 var oldSpecies = map[string]string{"tatu": "gotinha", "sapo": "larvinha", "jabuti": "alevino",
 	"vagalume": "fagulha", "quati": "grifinho", "tucano": "corvinho", "preguica": "pedrinha",
-	"lobo-guara": "caozinho", "boto": "cavalinho", "mico": "fenix", "curupira": "sleipnir",
-	"boitata": "jormungandr"}
+	"lobo-guara": "caozinho", "boto": "cavalinho", "mico": "fenix", "curupira": "fada",
+	"boitata": "jormungandr",
+	// 0.5.0 replaced these lines.
+	"ferrugem": "kobold", "verme": "beholder", "sleipnir": "fada", "tarrasque": "tiamat", "singularidade": "goblin"}
 
 // lineByID is nil when id is not the first form of a line.
 func lineByID(id string) *Line {

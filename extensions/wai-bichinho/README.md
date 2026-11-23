@@ -15,7 +15,7 @@ Then in wai: Extensions, install from folder, pick this folder, and review the c
 
 - **The egg.** The first one is free: pick **Hatch** in the pet's ⋯ menu. You get another egg every 25 finished turns, up to 3. Hatching a new one moves the current pet to **Your pets**; nothing is ever deleted.
 - **Rarity.** An egg is Common (60%), Uncommon (25%), Rare (10%), Epic (4%) or Legendary (1%), shown by the level badge's colour, and one in 40 is shiny (✦). Rarer pets roll higher stats.
-- **Forms.** 25 lines and 40 forms, drawn in pixels: 6 common, 6 uncommon, 4 rare, 4 epic and 5 legendary lines. The card's **Collection** shows which forms you have hatched or evolved into.
+- **Forms.** 25 lines and 40 forms, drawn in pixels: 7 common, 6 uncommon, 4 rare, 4 epic and 4 legendary lines. The card's **Collection** shows which forms you have hatched or evolved into.
 - **Evolution.** Most lines evolve at Lv 5 and Lv 15 (three forms) or at Lv 10 (two forms); some never evolve. The card says when the next form comes.
 - **Shiny.** One egg in 40 is shiny (✦) at any rarity, with its own colours.
 - **Growing.** Each finished turn in any session gives 10 xp (2 for a cancelled one). Levels come at 25, 100, 225, 400… xp.
@@ -29,6 +29,6 @@ Then in wai: Extensions, install from folder, pick this folder, and review the c
 
 The pet walks in the dock at the foot of the sidebar, so it only shows while the sidebar is open. **Open card** (or the paw in the activity bar) opens its card in the sidebar: stats, care, renaming, the collection and your pets.
 
-Pets from 0.3.x keep working: their old species become the closest line of the new dex (Tatu to Gotinha, Sapo to Larvinha, and so on), and pets stored before the selector had no storage time, so they resume from their last feeding or petting.
+Pets from 0.3.x keep working: their old species become the closest line of the new dex (Tatu to Gotinha, Sapo to Larvinha, and so on), and pets stored before the selector had no storage time, so they resume from their last feeding or petting. Pets of the lines 0.5.0 replaced become their successors: Monstro da ferrugem to Kobold, Verme púrpura to Beholder, Sleipnir to Fada, Tarrasque to Tiamat and Singularidade to Goblin.
 
 State lives in `pet.json` in the extension's data folder (`<config>/extension-data/wai-bichinho/`).

@@ -476,7 +476,7 @@ func TestMouthTalks(t *testing.T) {
 	}
 }
 
-func TestDexMatchesTheMockup(t *testing.T) {
+func TestDexShape(t *testing.T) {
 	if len(dex) != 25 {
 		t.Fatalf("%d lines, want 25", len(dex))
 	}
@@ -499,7 +499,7 @@ func TestDexMatchesTheMockup(t *testing.T) {
 	if forms40 != 40 {
 		t.Errorf("%d forms, want 40", forms40)
 	}
-	for r, want := range []int{6, 6, 4, 4, 5} {
+	for r, want := range []int{7, 6, 4, 4, 4} {
 		if perRarity[Rarity(r)] != want {
 			t.Errorf("%s: %d lines, want %d", rarities[r].name, perRarity[Rarity(r)], want)
 		}
@@ -809,5 +809,29 @@ func TestPetsTable(t *testing.T) {
 	want := h.s.st.Pet.Name + " goes to your pets. You can switch back any time."
 	if hb, _ := json.Marshal(h.s.hatchItem("x")); !strings.Contains(string(hb), want) {
 		t.Errorf("confirm: %s", hb)
+	}
+}
+
+func TestLoadMigratesReplacedLines(t *testing.T) {
+	dir := t.TempDir()
+	body := `{"pet":{"name":"A","species":"verme","xp":5000,"shiny":true},` +
+		`"past":[{"name":"B","species":"ferrugem"},{"name":"C","species":"sleipnir"},{"name":"D","species":"tarrasque"},{"name":"E","species":"singularidade"},{"name":"F","species":"curupira"}],` +
+		`"eggs":0,"seen":{"verme":true,"ferrugem":false,"singularidade":false}}`
+	if err := os.WriteFile(filepath.Join(dir, stateFile), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := start(t, dir).s.st
+	if st.Pet == nil || st.Pet.Species != "beholder" {
+		t.Fatalf("pet: %+v", st.Pet)
+	}
+	var past []string
+	for _, p := range st.Past {
+		past = append(past, p.Species)
+	}
+	if want := []string{"kobold", "fada", "tiamat", "goblin", "fada"}; !reflect.DeepEqual(past, want) {
+		t.Errorf("past: %v, want %v", past, want)
+	}
+	if want := map[string]bool{"beholder": true, "kobold": false, "goblin": false, "fada": false, "tiamat": false}; !reflect.DeepEqual(st.Seen, want) {
+		t.Errorf("seen: %v, want %v", st.Seen, want)
 	}
 }
