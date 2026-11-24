@@ -12,8 +12,8 @@ use wai_ext::panel::clamp;
 use wai_ext::{ExtId, Installed, Manifest};
 
 use super::{
-    Available, DESCRIPTION_CHARS, DetailTab, ExtensionsView, InstallPlugin, NAME_CHARS,
-    PLUGINS_SHOWN, plugin_install,
+    Available, DESCRIPTION_CHARS, DetailTab, ExtensionsView, InstallPlugin, LIMITATION, NAME_CHARS,
+    PLUGINS_SHOWN, permissions_text, plugin_install,
 };
 use crate::appearance::fonts;
 use crate::aurora::{self, DISPLAY_FONT};
@@ -170,12 +170,93 @@ fn status_line(status: &RowStatus, cx: &App) -> Div {
 }
 
 /// Small caps over a group: ABOUT, INSTALLED.
-fn heading(text: &'static str, cx: &App) -> Div {
+fn heading(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
         .text_size(fonts::ui(cx, 11.))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(cx.theme().muted_foreground)
+        .child(text.into())
+}
+
+/// A card of rows, each named `<prefix>: <text>` for tests.
+fn card(prefix: &'static str, lines: Vec<String>, cx: &App) -> Div {
+    let border = aurora::borda(cx);
+    v_flex()
+        .rounded(px(12.))
+        .border_1()
+        .border_color(border)
+        .bg(aurora::card_fill(cx))
+        .text_sm()
+        .children(lines.into_iter().enumerate().map(|(n, line)| {
+            let selector = format!("{prefix}: {line}");
+            div()
+                .px_3()
+                .py_2()
+                .when(n > 0, |el| el.border_t_1().border_color(border))
+                .debug_selector(move || selector)
+                .child(line)
+        }))
+}
+
+fn features_tab(ext: &Installed, cx: &App) -> Div {
+    let kinds = features(&ext.manifest);
+    if kinds.is_empty() {
+        return (div().text_sm().text_color(cx.theme().muted_foreground))
+            .child("This extension adds no panels, commands, agents, MCP servers or themes.");
+    }
+    v_flex()
+        .gap_4()
+        .children(kinds.into_iter().map(|(kind, names)| {
+            (v_flex().gap_2())
+                .child(heading(kind.to_uppercase(), cx))
+                .child(card("ext-feature", names, cx))
+        }))
+}
+
+fn permissions_tab(ext: &Installed, cx: &App) -> Div {
+    let selector = format!("ext-permission: {LIMITATION}");
+    v_flex()
+        .gap_2()
+        .child(heading("IT ASKS TO", cx))
+        .child(card("ext-permission", permissions_text(&ext.granted), cx))
+        .child(
+            div()
+                .text_xs()
+                .text_color(aurora::ambar(cx))
+                .debug_selector(move || selector)
+                .child(LIMITATION),
+        )
+}
+
+/// A label over its value, in the meta column.
+fn meta_row(label: &'static str, value: impl IntoElement, cx: &App) -> Div {
+    (v_flex().gap(px(2.)).min_w_0())
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(label),
+        )
+        .child(value)
+}
+
+fn mono(text: String, cx: &App) -> Div {
+    (div().min_w_0().truncate().text_xs())
+        .font_family(fonts::editor_family(cx))
         .child(text)
+}
+
+fn link(id: &'static str, label: &'static str, url: String, cx: &App) -> Stateful<Div> {
+    (h_flex()
+        .id(id)
+        .gap_1()
+        .items_center()
+        .cursor_pointer()
+        .text_sm())
+    .text_color(aurora::boreal(cx))
+    .child(label)
+    .child(Icon::new(Lucide::ExternalLink).with_size(px(11.)))
+    .on_click(move |_, _, cx| cx.open_url(&url))
 }
 
 fn muted(text: &'static str, cx: &App) -> Div {
@@ -574,7 +655,11 @@ impl ExtensionsView {
             }
         });
         let Some(subject) = subject else {
-            return div().flex_1().into_any_element();
+            return (v_flex().flex_1().items_center().justify_center())
+                .text_color(cx.theme().muted_foreground)
+                .debug_selector(|| "ext-empty-detail".into())
+                .child("Select an extension")
+                .into_any_element();
         };
         let (id, tab) = match subject {
             Subject::Installed(_, ext) => (ext.manifest.id.clone(), self.tab),
@@ -591,13 +676,94 @@ impl ExtensionsView {
             .child(self.hero(&subject, cx))
             .child(self.tabs(&subject, tab, cx))
             .child(
-                v_flex()
-                    .px_6()
-                    .py_4()
-                    .gap_4()
-                    .children((tab == DetailTab::Details).then(|| self.details(&subject, cx))),
+                h_flex()
+                    .items_start()
+                    .gap(px(28.))
+                    .px(px(28.))
+                    .py(px(20.))
+                    .child(v_flex().flex_1().min_w_0().child(match (tab, &subject) {
+                        (DetailTab::Features, Subject::Installed(_, ext)) => {
+                            features_tab(ext, cx).into_any_element()
+                        }
+                        (DetailTab::Permissions, Subject::Installed(_, ext)) => {
+                            permissions_tab(ext, cx).into_any_element()
+                        }
+                        _ => self.details(&subject, cx).into_any_element(),
+                    }))
+                    .child(self.meta(&subject, cx)),
             )
             .into_any_element()
+    }
+
+    /// INSTALLATION or LISTING, then RESOURCES when a repository is known.
+    fn meta(&self, subject: &Subject, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let entries = self.entries();
+        let column = v_flex().w(px(210.)).flex_none().gap_3();
+        let (column, id) = match subject {
+            Subject::Installed(_, ext) => {
+                let m = &ext.manifest;
+                let update = listed_update(ext, entries).map(|l| {
+                    let to = format!(" → {}", clamp(&l.version, NAME_CHARS));
+                    div().text_color(aurora::boreal(cx)).child(to)
+                });
+                let version = (h_flex().text_sm())
+                    .child(clamp(&m.version, NAME_CHARS))
+                    .children(update);
+                let column = column
+                    .child(heading("INSTALLATION", cx))
+                    .child(meta_row(
+                        "Identifier",
+                        mono(clamp(m.id.as_str(), NAME_CHARS), cx),
+                        cx,
+                    ))
+                    .child(meta_row("Version", version, cx))
+                    .child(meta_row(
+                        "Folder",
+                        mono(ext.dir.display().to_string(), cx),
+                        cx,
+                    ));
+                (column, &m.id)
+            }
+            Subject::Listed(entry) => {
+                let l = &entry.listing;
+                let chips = (h_flex().flex_wrap().gap_1()).children(
+                    l.packages
+                        .keys()
+                        .map(|key| aurora::badge(platform_label(key), cx)),
+                );
+                let column = column
+                    .child(heading("LISTING", cx))
+                    .child(meta_row(
+                        "Identifier",
+                        mono(clamp(l.id.as_str(), NAME_CHARS), cx),
+                        cx,
+                    ))
+                    .child(meta_row(
+                        "Version",
+                        div().text_sm().child(clamp(&l.version, NAME_CHARS)),
+                        cx,
+                    ))
+                    .child(meta_row(
+                        "Index",
+                        div().text_sm().child(index_label(entry)),
+                        cx,
+                    ))
+                    .child(heading("PLATFORMS", cx).pt_2())
+                    .child(chips);
+                (column, &l.id)
+            }
+        };
+        let repository = (listing_for(id, entries).and_then(|e| e.listing.repository.clone()))
+            .filter(|url| wai_ext::index::https_url(url));
+        column.children(repository.map(|url| {
+            let releases = releases_url(&url);
+            v_flex()
+                .gap_2()
+                .pt_2()
+                .child(heading("RESOURCES", cx))
+                .child(link("ext-link-repository", "Repository", url, cx))
+                .children(releases.map(|url| link("ext-link-releases", "Releases", url, cx)))
+        }))
     }
 
     fn hero(&self, subject: &Subject, cx: &Context<Self>) -> impl IntoElement + use<> {

@@ -1444,6 +1444,49 @@ pub(crate) mod tests {
         assert!(shows("ext-detail: sample", cx));
     }
 
+    /// Features lists the manifest's contributions; Permissions, what it was granted.
+    #[gpui_kit::test]
+    fn tabs_show_features_and_permissions(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the extension is a real process
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = format!(
+            "{MANIFEST}[[contributes.commands]]\nid = \"go\"\ntitle = \"Go now\"\nprompt = \"go\"\n"
+        );
+        install_all(&config, tmp.path(), &[&manifest]);
+        let (_, _, cx) = shown(&config, cx);
+        assert!(!shows("ext-feature: Go now", cx), "Details first");
+        click("ext-tab-features", cx);
+        assert!(shows("ext-feature: Go now", cx));
+        click("ext-tab-permissions", cx);
+        for line in PERMISSION_LINES {
+            assert!(shows(&format!("ext-permission: {line}"), cx), "{line}");
+        }
+        assert!(shows(&format!("ext-permission: {LIMITATION}"), cx));
+    }
+
+    /// Review Focus 1: uninstalling the selected one shows the first installed.
+    #[gpui_kit::test]
+    fn uninstall_moves_the_selection(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        install_all(&config, tmp.path(), &[PLAIN, OTHER]);
+        let (_, view, cx) = shown(&config, cx);
+        click(("ext-row", 1usize), cx);
+        assert!(shows("ext-detail: other", cx));
+        click(("ext-uninstall", 1usize), cx);
+        assert_eq!(installed(&view, cx).len(), 1);
+        assert!(shows("ext-detail: sample", cx));
+    }
+
+    /// Review Focus 3: nothing installed and nothing listed.
+    #[gpui_kit::test]
+    fn empty_page_has_an_empty_detail(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, _, cx) = shown(&tmp.path().join("config"), cx);
+        assert!(shows("ext-empty-detail", cx));
+    }
+
     /// The typed command names a plugin and nothing else: no spaces, control characters, shell
     /// syntax or option.
     #[test]
