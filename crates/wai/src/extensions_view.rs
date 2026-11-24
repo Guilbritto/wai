@@ -1,6 +1,8 @@
-//! The Extensions view, in the sidebar: the installed extensions with enable/disable and
-//! Uninstall, and installing from a folder or a git URL. Every install goes through the consent
+//! The Extensions page, in the settings modal: a list of the installed and the listed
+//! extensions, and the selected one's page (`page.rs`). Every install goes through the consent
 //! dialog, which lists each permission the extension asks for; nothing installs without it.
+
+mod page;
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -8,13 +10,9 @@ use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::DialogFooter;
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
-};
-use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::*;
 // A manifest's text goes through `clamp`: a hostile one cannot push the permissions out of the
 // consent dialog.
@@ -23,11 +21,9 @@ use wai_ext::panel::clamp;
 use wai_ext::{ExtId, ExtStore, Installed, Permission, RequiredPlugin, Source, Staged};
 use wai_settings::{Change, Settings, write_change};
 
-use crate::appearance::fonts;
 use crate::claude_plugins::{self, INSTALL_TIMEOUT};
-use crate::ext_host::{ExtHost, ExtStatus};
+use crate::ext_host::ExtHost;
 use crate::marketplace::{self, Entry, Listings};
-use crate::{aurora, campo};
 
 /// v1 has no sandbox, and the consent dialog says so in these words.
 pub const LIMITATION: &str = "wai cannot restrict files or network access in this version; only install extensions you trust.";
@@ -111,7 +107,22 @@ pub struct ExtensionsView {
     /// The stage in progress: a copy or a clone, off the main thread. A new one replaces it.
     staging: Option<Task<()>>,
     available: Available,
+    search: Entity<InputState>,
+    /// The extension whose page shows; `current` falls back when it is gone.
+    selected: Option<ExtId>,
+    tab: DetailTab,
+    /// INSTALLED, AVAILABLE.
+    closed: [bool; 2],
     _host_changed: Subscription,
+    _search_changed: Subscription,
+}
+
+/// The tabs of an extension's page; a listing has only Details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DetailTab {
+    Details,
+    Features,
+    Permissions,
 }
 
 impl ExtensionsView {
@@ -123,6 +134,7 @@ impl ExtensionsView {
     ) -> Self {
         let url = cx.new(|cx| InputState::new(window, cx).placeholder("https://… or git@…"));
         let index = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo or https://…"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search extensions"));
         Self {
             config_dir: config_dir.to_path_buf(),
             store: ExtStore::open(config_dir),
@@ -132,7 +144,38 @@ impl ExtensionsView {
             index,
             staging: None,
             available: Available::NotFetched,
+            _search_changed: cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify()),
+            search,
+            selected: None,
+            tab: DetailTab::Details,
+            closed: [false; 2],
         }
+    }
+
+    fn entries(&self) -> &[Entry] {
+        match &self.available {
+            Available::Loaded(listings) => &listings.entries,
+            _ => &[],
+        }
+    }
+
+    /// The extension whose page shows: the selected one while it is installed or listed, else
+    /// the first installed, else the first listing not installed.
+    fn current(&self, installed: &[Installed], entries: &[Entry]) -> Option<ExtId> {
+        let is_installed = |id: &ExtId| installed.iter().any(|i| i.manifest.id == *id);
+        let known = |id: &ExtId| is_installed(id) || page::listing_for(id, entries).is_some();
+        let mut listed = (entries.iter()).filter(|e| !is_installed(&e.listing.id));
+        (self.selected.clone().filter(known))
+            .or_else(|| installed.first().map(|i| i.manifest.id.clone()))
+            .or_else(|| listed.next().map(|e| e.listing.id.clone()))
+    }
+
+    /// Installed extensions an index lists another version of: the nav's dot.
+    pub(crate) fn updates(&self) -> usize {
+        let entries = self.entries();
+        (self.store.list().iter())
+            .filter(|ext| page::listed_update(ext, entries).is_some())
+            .count()
     }
 
     fn sync_host(&self, cx: &mut Context<Self>) {
@@ -435,6 +478,39 @@ impl ExtensionsView {
         });
     }
 
+    fn install_url_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (url, this) = (self.url.clone(), cx.entity().downgrade());
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let empty = url.read(cx).value().trim().is_empty();
+            let body = v_flex().gap_2().child(Input::new(&url)).child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("wai clones it, then shows what it asks for before it installs."),
+            );
+            let this = this.clone();
+            dialog.title("Install from a git URL").child(body).footer(
+                DialogFooter::new()
+                    .child(
+                        Button::new("git-cancel")
+                            .label("Cancel")
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("git-install")
+                            .primary()
+                            .label("Install")
+                            .disabled(empty)
+                            .on_click(move |_, window, cx| {
+                                window.close_dialog(cx);
+                                this.update(cx, |this, cx| this.install_url(window, cx))
+                                    .ok();
+                            }),
+                    ),
+            )
+        });
+    }
+
     /// Saves `input`'s index to the user's settings and reads the indexes again.
     fn add_index(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(url) = index_url(input) else {
@@ -506,196 +582,6 @@ impl ExtensionsView {
         }
         cx.notify();
     }
-
-    fn row(&self, ix: usize, ext: &Installed, cx: &Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let (toggle, remove) = (ext.manifest.id.clone(), ext.manifest.id.clone());
-        let problem = match self.host.read(cx).status(&ext.manifest.id) {
-            Some(ExtStatus::Failed(error)) => Some(format!("Failed: {error}")),
-            Some(ExtStatus::Crashed(tail)) => Some(format!("Crashed: {tail}")),
-            _ => None,
-        };
-        // Never installed silently: typed into the terminal, and the user presses Enter.
-        let plugin_row = |p: usize, label: String, command: Option<String>| {
-            let id = ElementId::Name(format!("ext-plugin:{}:{p}", ext.manifest.id.as_str()).into());
-            let row = h_flex().gap_2().text_xs().child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(format!("Claude Code plugin {label}")),
-            );
-            match command {
-                Some(command) => row.child(
-                    Button::new(id)
-                        .xsmall()
-                        .label("Install in terminal")
-                        .on_click(
-                            cx.listener(move |_, _, _, cx| cx.emit(InstallPlugin(command.clone()))),
-                        ),
-                ),
-                None => row.child(div().text_color(theme.danger).child("Invalid name")),
-            }
-        };
-        let required = (ext.manifest.requires.claude_plugins.iter()).map(|p| {
-            (
-                clamp(&p.name, NAME_CHARS),
-                Some(claude_plugins::terminal_line(p)),
-            )
-        });
-        let suggested = (ext.manifest.contributes.claude_plugins.iter())
-            .map(|name| (clamp(name, NAME_CHARS), plugin_install(name)));
-        let plugins = required
-            .chain(suggested)
-            .filter(|_| ext.enabled)
-            .take(PLUGINS_SHOWN)
-            .enumerate()
-            .map(|(p, (label, command))| plugin_row(p, label, command));
-        v_flex()
-            .gap_1()
-            .py_2()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_center()
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(clamp(&ext.manifest.name, NAME_CHARS)),
-                                    )
-                                    .child(aurora::badge(
-                                        clamp(&ext.manifest.version, NAME_CHARS),
-                                        cx,
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(permissions_text(&ext.granted).join(", ")),
-                            )
-                            .children(problem.map(|text| {
-                                let text = clamp(&text, DESCRIPTION_CHARS);
-                                div().text_xs().text_color(theme.danger).child(text)
-                            }))
-                            .children(plugins),
-                    )
-                    .child(
-                        Switch::new(("ext-enabled", ix))
-                            .label("Enabled")
-                            .checked(ext.enabled)
-                            .on_click(cx.listener(move |this, on: &bool, window, cx| {
-                                this.set_enabled(&toggle, *on, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new(("ext-uninstall", ix))
-                            .ghost()
-                            .small()
-                            .label("Uninstall")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.uninstall(&remove, window, cx)
-                            })),
-                    ),
-            )
-    }
-}
-
-impl ExtensionsView {
-    /// Name, version, description, the user's index it came from, and what installing it does.
-    fn available_row(
-        &self,
-        ix: usize,
-        entry: &Entry,
-        installed: &[Installed],
-        cx: &Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let l = &entry.listing;
-        let have = (installed.iter()).find(|i| i.manifest.id == l.id);
-        let id = ("ext-available", ix);
-        let action = match (l.package(), have) {
-            (None, _) => div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child("Not available for this platform")
-                .into_any_element(),
-            (Some(_), Some(i)) if i.manifest.version == l.version => Button::new(id)
-                .small()
-                .label("Installed")
-                .disabled(true)
-                .into_any_element(),
-            (Some(_), have) => {
-                let label = match have {
-                    Some(_) => format!("Update to {}", clamp(&l.version, NAME_CHARS)),
-                    None => "Install".into(),
-                };
-                let listing = l.clone();
-                Button::new(id)
-                    .small()
-                    .label(label)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.install_listing(&listing, window, cx)
-                    }))
-                    .into_any_element()
-            }
-        };
-        let about = [l.description.as_deref(), entry.from.as_deref()];
-        let about = match about {
-            [Some(d), Some(host)] => format!(
-                "{} · from {}",
-                clamp(d, DESCRIPTION_CHARS),
-                clamp(host, NAME_CHARS)
-            ),
-            [Some(d), None] => clamp(d, DESCRIPTION_CHARS),
-            [None, Some(host)] => format!("from {}", clamp(host, NAME_CHARS)),
-            [None, None] => String::new(),
-        };
-        h_flex()
-            .gap_3()
-            .py_2()
-            .items_center()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(clamp(&l.name, NAME_CHARS)),
-                            )
-                            .child(aurora::badge(clamp(&l.version, NAME_CHARS), cx)),
-                    )
-                    .when(!about.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .text_xs()
-                                .truncate()
-                                .text_color(theme.muted_foreground)
-                                .child(about),
-                        )
-                    }),
-            )
-            .child(action)
-    }
 }
 
 impl Render for ExtensionsView {
@@ -704,111 +590,7 @@ impl Render for ExtensionsView {
         if matches!(self.available, Available::NotFetched) {
             self.refresh(cx);
         }
-        let theme = cx.theme();
-        let installed = self.store.list();
-        let listed = match &self.available {
-            Available::Loaded(listed) => Some(listed),
-            _ => None,
-        };
-        let header = |text: &'static str, count: Option<usize>| {
-            h_flex()
-                .gap_2()
-                .pt_2()
-                .text_size(fonts::ui(cx, 11.))
-                .text_color(theme.muted_foreground)
-                .child(text)
-                .children(count.map(|n| n.to_string()))
-        };
-        let muted = |text: &'static str| {
-            div()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child(text)
-        };
-        v_flex()
-            .id("extensions")
-            .gap_2()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("ext-install-folder")
-                            .small()
-                            .label("Install from folder…")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.pick_folder(window, cx)),
-                            ),
-                    )
-                    .child(div().flex_1().child(campo::field(
-                        Input::new(&self.url).small(),
-                        false,
-                        cx,
-                    )))
-                    .child(
-                        Button::new("ext-install-git")
-                            .small()
-                            .label("Install from git URL…")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.install_url(window, cx)),
-                            ),
-                    ),
-            )
-            .when(self.staging.is_some(), |el| el.child(muted("Preparing…")))
-            .child(header("INSTALLED", Some(installed.len())))
-            .when(installed.is_empty(), |el| {
-                el.child(muted("No extensions installed"))
-            })
-            .children(
-                installed
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, ext)| self.row(ix, ext, cx)),
-            )
-            .child(
-                header("AVAILABLE", listed.map(|l| l.entries.len()))
-                    .items_center()
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("ext-add-index")
-                            .ghost()
-                            .xsmall()
-                            .label("Add index…")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.add_index_dialog(window, cx)
-                                }),
-                            ),
-                    )
-                    .child(
-                        Button::new("ext-refresh")
-                            .ghost()
-                            .xsmall()
-                            .label("Refresh")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.refresh(cx);
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .when(listed.is_none(), |el| {
-                el.child(muted("Loading extensions…"))
-            })
-            .children(listed.into_iter().flat_map(|l| {
-                l.errors.iter().map(|e| {
-                    div()
-                        .text_xs()
-                        .truncate()
-                        .text_color(theme.muted_foreground)
-                        .child(clamp(e, DESCRIPTION_CHARS))
-                })
-            }))
-            .when(listed.is_some_and(|l| l.entries.is_empty()), |el| {
-                el.child(muted("No extensions listed"))
-            })
-            .children(listed.into_iter().flat_map(|l| {
-                (l.entries.iter().enumerate())
-                    .map(|(ix, entry)| self.available_row(ix, entry, &installed, cx))
-            }))
+        self.page(cx)
     }
 }
 
@@ -1317,8 +1099,14 @@ pub(crate) mod tests {
         click("consent-install", cx);
         assert_eq!(installed(&view, cx)[0].manifest.version, "1.2.0");
         assert_eq!(staged(&config), 0, "the download and the stage are gone");
-        click(("ext-available", 0usize), cx);
-        assert!(!consent(cx), "Installed does nothing");
+        assert!(
+            !has(("ext-available", 0usize), cx),
+            "installed: no longer AVAILABLE"
+        );
+        assert!(
+            !has(("ext-update", 0usize), cx),
+            "the same version: no Update"
+        );
 
         let before = notices(cx);
         click(("ext-available", 1usize), cx);
@@ -1333,7 +1121,7 @@ pub(crate) mod tests {
             &entry("sample", "1.3.0", &url, &sha),
         );
         click("ext-refresh", cx);
-        click(("ext-available", 0usize), cx);
+        click(("ext-update", 0usize), cx);
         assert!(consent(cx), "no update dialog");
         cx.update(|window, cx| window.render_frame(cx));
         assert!(cx.debug_bounds("consent: 1.2.0 → 1.3.0").is_some());
@@ -1357,7 +1145,7 @@ pub(crate) mod tests {
                 input.update(cx, |s, cx| s.set_value(text, window, cx));
             });
         };
-        click("ext-add-index", cx);
+        cx.update(|window, cx| view.update(cx, |v, cx| v.add_index_dialog(window, cx)));
         type_in("not a repo", cx);
         click("index-add", cx);
         assert!(
@@ -1512,7 +1300,7 @@ pub(crate) mod tests {
         );
         cx.update(|window, cx| window.render_frame(cx));
         assert!(cx.update(|w, _| w.try_find(("ext-enabled", 0usize)).is_some()));
-        assert!(cx.update(|w, _| w.try_find("ext-install-folder").is_some()));
+        assert!(cx.update(|w, _| w.try_find("ext-more").is_some()));
     }
 
     /// The top bar's Extensions button opens the modal on the Extensions page.
@@ -1523,6 +1311,237 @@ pub(crate) mod tests {
         click("sidebar-extensions", cx);
         let view = workspace.read_with(cx, |w, _| w.settings_view()).unwrap();
         assert_eq!(view.read_with(cx, |v, _| v.section()), Section::Extensions);
+    }
+
+    const PLAIN: &str = "id = \"sample\"\nname = \"Sample\"\nversion = \"1.2.0\"\n\
+        description = \"A sample\"\n";
+    const OTHER: &str = "id = \"other\"\nname = \"Other\"\nversion = \"0.1.0\"\n\
+        description = \"Another one\"\n";
+
+    /// Installs each manifest, in order, with what it asks for granted.
+    fn install_all(config: &Path, tmp: &Path, manifests: &[&str]) {
+        let mut store = ExtStore::open(config);
+        for (n, manifest) in manifests.iter().enumerate() {
+            let src = sample_with(&tmp.join(format!("src{n}")), manifest);
+            let staged = store.stage(&Source::Folder(src)).unwrap();
+            let granted = staged.manifest().permissions.clone();
+            store.commit(staged, granted).unwrap();
+        }
+    }
+
+    /// The settings modal on Extensions, after the indexes are read.
+    fn shown<'a>(
+        config: &Path,
+        cx: &'a mut TestAppContext,
+    ) -> (
+        Entity<Workspace>,
+        Entity<ExtensionsView>,
+        &'a mut VisualTestContext,
+    ) {
+        let (workspace, cx) = workspace(config, cx);
+        let view =
+            cx.update(|window, cx| workspace.update(cx, |w, cx| w.show_extensions(window, cx)));
+        cx.update(|window, cx| window.render_frame(cx));
+        cx.run_until_parked();
+        (workspace, view, cx)
+    }
+
+    fn has(id: impl Into<ElementId>, cx: &mut VisualTestContext) -> bool {
+        let id = id.into();
+        cx.update(|w, cx| {
+            w.render_frame(cx);
+            w.try_find(id).is_some()
+        })
+    }
+
+    fn shows(selector: &str, cx: &mut VisualTestContext) -> bool {
+        cx.update(|w, cx| w.render_frame(cx));
+        cx.debug_bounds(selector.to_string().leak()).is_some()
+    }
+
+    fn search(view: &Entity<ExtensionsView>, text: &str, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            let input = view.read(cx).search.clone();
+            input.update(cx, |s, cx| s.set_value(text, window, cx));
+        });
+    }
+
+    /// The first installed one shows by default; a row click shows another, whose detail
+    /// enables and disables it.
+    #[gpui_kit::test]
+    fn selecting_a_row_shows_its_detail(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        install_all(&config, tmp.path(), &[PLAIN, OTHER]);
+        let (_, view, cx) = shown(&config, cx);
+        assert!(shows("ext-detail: sample", cx), "the first one by default");
+        click(("ext-row", 1usize), cx);
+        assert!(shows("ext-detail: other", cx));
+        assert!(!shows("ext-detail: sample", cx));
+        click(("ext-enabled", 1usize), cx);
+        let list = installed(&view, cx);
+        assert!(list[0].enabled && !list[1].enabled);
+    }
+
+    /// Review Focus 4: the search keeps the matching rows, each with its store index.
+    #[gpui_kit::test]
+    fn search_filters_rows(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        install_all(&config, tmp.path(), &[PLAIN, OTHER]);
+        let (_, view, cx) = shown(&config, cx);
+        assert!(!shows("ext-no-match: installed", cx));
+        search(&view, "oth", cx);
+        assert!(!has(("ext-row", 0usize), cx));
+        assert!(has(("ext-row", 1usize), cx));
+        search(&view, "ANOTHER", cx);
+        assert!(has(("ext-row", 1usize), cx), "matches the description");
+        search(&view, "zzz", cx);
+        assert!(!has(("ext-row", 0usize), cx) && !has(("ext-row", 1usize), cx));
+        assert!(shows("ext-no-match: installed", cx));
+    }
+
+    /// Review Focus 4: a search that empties one section says so under that section only.
+    #[gpui_kit::test]
+    fn no_match_shows_under_each_section(cx: &mut TestAppContext) {
+        use crate::marketplace::tests::{entry, index};
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        install_all(&config, tmp.path(), &[PLAIN]);
+        let (url, sha) = package(tmp.path(), "other", OTHER);
+        let listed = index(
+            tmp.path(),
+            "index.toml",
+            &entry("other", "0.1.0", &url, &sha),
+        );
+        let settings = format!("[extensions]\nindexes = ['{listed}']\n");
+        std::fs::write(config.join("settings.toml"), settings).unwrap();
+        let (_, view, cx) = shown(&config, cx);
+        search(&view, "sample", cx);
+        assert!(!shows("ext-no-match: installed", cx));
+        assert!(shows("ext-no-match: available", cx));
+        search(&view, "other", cx);
+        assert!(shows("ext-no-match: installed", cx));
+        assert!(!shows("ext-no-match: available", cx));
+    }
+
+    #[gpui_kit::test]
+    fn sections_collapse(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        install_all(&config, tmp.path(), &[PLAIN]);
+        let (_, _, cx) = shown(&config, cx);
+        assert!(has(("ext-row", 0usize), cx));
+        click("ext-section-installed", cx);
+        assert!(!has(("ext-row", 0usize), cx));
+        click("ext-section-installed", cx);
+        assert!(has(("ext-row", 0usize), cx));
+    }
+
+    /// Review Focus 5: a listed id that is installed stays out of AVAILABLE; another version
+    /// shows Update on its row and a dot on the nav.
+    #[gpui_kit::test]
+    fn update_shows_on_the_installed_row(cx: &mut TestAppContext) {
+        use crate::marketplace::tests::{entry, index};
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        install_all(&config, tmp.path(), &[PLAIN]);
+        let (url, sha) = package(tmp.path(), "v1", PLAIN);
+        let listed = index(
+            tmp.path(),
+            "index.toml",
+            &entry("sample", "1.2.0", &url, &sha),
+        );
+        let settings = format!("[extensions]\nindexes = ['{listed}']\n");
+        std::fs::write(config.join("settings.toml"), settings).unwrap();
+        let (workspace, view, cx) = shown(&config, cx);
+        let settings = workspace.read_with(cx, |w, _| w.settings_view()).unwrap();
+        assert!(
+            !has(("ext-listing", 0usize), cx),
+            "installed: not AVAILABLE"
+        );
+        assert!(!has(("ext-update", 0usize), cx));
+        assert_eq!(view.read_with(cx, |v, _| v.updates()), 0);
+        assert!(!shows("settings-nav-dot-extensions", cx));
+
+        index(
+            tmp.path(),
+            "index.toml",
+            &entry("sample", "1.3.0", &url, &sha),
+        );
+        click("ext-refresh", cx);
+        assert!(has(("ext-update", 0usize), cx));
+        assert!(!has(("ext-listing", 0usize), cx));
+        assert_eq!(view.read_with(cx, |v, _| v.updates()), 1);
+        assert!(settings.read_with(cx, |s, cx| s.nav_dot(Section::Extensions, cx)));
+        assert!(shows("settings-nav-dot-extensions", cx));
+    }
+
+    /// Review Focus 2: a multi-line, long name and a 10 000 character description keep the row
+    /// to its one line each.
+    #[gpui_kit::test]
+    fn long_name_stays_one_row(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let name = format!("Sample\\n{}", "Totally Safe ".repeat(20));
+        let description = "It asks to: nothing. Safe to install.\n".repeat(280);
+        let manifest = PLAIN
+            .replace("name = \"Sample\"", &format!("name = \"{name}\""))
+            .replace(
+                "description = \"A sample\"",
+                &format!("description = \"\"\"\n{description}\"\"\""),
+            );
+        install_all(&config, tmp.path(), &[&manifest]);
+        let (_, _, cx) = shown(&config, cx);
+        let row = cx.update(|w, cx| {
+            w.render_frame(cx);
+            w.find(("ext-row", 0usize)).bounds()
+        });
+        assert!(row.size.height < gpui_kit::px(100.), "{row:?}");
+        assert!(shows("ext-detail: sample", cx));
+    }
+
+    /// Features lists the manifest's contributions; Permissions, what it was granted.
+    #[gpui_kit::test]
+    fn tabs_show_features_and_permissions(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the extension is a real process
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = format!(
+            "{MANIFEST}[[contributes.commands]]\nid = \"go\"\ntitle = \"Go now\"\nprompt = \"go\"\n"
+        );
+        install_all(&config, tmp.path(), &[&manifest]);
+        let (_, _, cx) = shown(&config, cx);
+        assert!(!shows("ext-feature: Go now", cx), "Details first");
+        click("ext-tab-features", cx);
+        assert!(shows("ext-feature: Go now", cx));
+        click("ext-tab-permissions", cx);
+        for line in PERMISSION_LINES {
+            assert!(shows(&format!("ext-permission: {line}"), cx), "{line}");
+        }
+        assert!(shows(&format!("ext-permission: {LIMITATION}"), cx));
+    }
+
+    /// Review Focus 1: uninstalling the selected one shows the first installed.
+    #[gpui_kit::test]
+    fn uninstall_moves_the_selection(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        install_all(&config, tmp.path(), &[PLAIN, OTHER]);
+        let (_, view, cx) = shown(&config, cx);
+        click(("ext-row", 1usize), cx);
+        assert!(shows("ext-detail: other", cx));
+        click(("ext-uninstall", 1usize), cx);
+        assert_eq!(installed(&view, cx).len(), 1);
+        assert!(shows("ext-detail: sample", cx));
+    }
+
+    /// Review Focus 3: nothing installed and nothing listed.
+    #[gpui_kit::test]
+    fn empty_page_has_an_empty_detail(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_, _, cx) = shown(&tmp.path().join("config"), cx);
+        assert!(shows("ext-empty-detail", cx));
     }
 
     /// The typed command names a plugin and nothing else: no spaces, control characters, shell
