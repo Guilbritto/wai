@@ -2,6 +2,8 @@
 //! Uninstall, and installing from a folder or a git URL. Every install goes through the consent
 //! dialog, which lists each permission the extension asks for; nothing installs without it.
 
+mod page;
+
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
