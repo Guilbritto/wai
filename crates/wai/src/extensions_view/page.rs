@@ -319,7 +319,11 @@ impl ExtensionsView {
             Available::Loaded(listings) => Some(listings),
             _ => None,
         };
-        let no_match = !query.trim().is_empty() && rows.is_empty() && listed.is_empty();
+        let searching = !query.trim().is_empty();
+        let no_match = |section: &'static str| {
+            muted("No extensions match", cx)
+                .debug_selector(move || format!("ext-no-match: {section}"))
+        };
         let this = cx.weak_entity();
         let more = Button::new("ext-more")
             .ghost()
@@ -405,6 +409,9 @@ impl ExtensionsView {
                     .when(installed_open && installed.is_empty(), |el| {
                         el.child(muted("No extensions installed", cx))
                     })
+                    .when(installed_open && searching && !installed.is_empty(), |el| {
+                        el.when(rows.is_empty(), |el| el.child(no_match("installed")))
+                    })
                     .when(installed_open, |el| {
                         el.children(rows.iter().map(|(ix, ext)| {
                             let selected = current == Some(&ext.manifest.id);
@@ -439,16 +446,15 @@ impl ExtensionsView {
                         .when(listings.is_some_and(|l| l.entries.is_empty()), |el| {
                             el.child(muted("No extensions listed", cx))
                         })
+                        .when(listings.is_some_and(|l| !l.entries.is_empty()), |el| {
+                            el.when(searching && listed.is_empty(), |el| {
+                                el.child(no_match("available"))
+                            })
+                        })
                         .children(listed.iter().map(|(ix, entry)| {
                             let selected = current == Some(&entry.listing.id);
                             self.listing_row(*ix, entry, selected, cx)
                         }))
-                    })
-                    .when(no_match, |el| {
-                        el.child(
-                            muted("No extensions match", cx)
-                                .debug_selector(|| "ext-no-match".into()),
-                        )
                     }),
             )
     }

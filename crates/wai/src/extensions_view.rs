@@ -1357,7 +1357,7 @@ pub(crate) mod tests {
         let config = tmp.path().join("config");
         install_all(&config, tmp.path(), &[PLAIN, OTHER]);
         let (_, view, cx) = shown(&config, cx);
-        assert!(!shows("ext-no-match", cx));
+        assert!(!shows("ext-no-match: installed", cx));
         search(&view, "oth", cx);
         assert!(!has(("ext-row", 0usize), cx));
         assert!(has(("ext-row", 1usize), cx));
@@ -1365,7 +1365,31 @@ pub(crate) mod tests {
         assert!(has(("ext-row", 1usize), cx), "matches the description");
         search(&view, "zzz", cx);
         assert!(!has(("ext-row", 0usize), cx) && !has(("ext-row", 1usize), cx));
-        assert!(shows("ext-no-match", cx));
+        assert!(shows("ext-no-match: installed", cx));
+    }
+
+    /// Review Focus 4: a search that empties one section says so under that section only.
+    #[gpui_kit::test]
+    fn no_match_shows_under_each_section(cx: &mut TestAppContext) {
+        use crate::marketplace::tests::{entry, index};
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        install_all(&config, tmp.path(), &[PLAIN]);
+        let (url, sha) = package(tmp.path(), "other", OTHER);
+        let listed = index(
+            tmp.path(),
+            "index.toml",
+            &entry("other", "0.1.0", &url, &sha),
+        );
+        let settings = format!("[extensions]\nindexes = ['{listed}']\n");
+        std::fs::write(config.join("settings.toml"), settings).unwrap();
+        let (_, view, cx) = shown(&config, cx);
+        search(&view, "sample", cx);
+        assert!(!shows("ext-no-match: installed", cx));
+        assert!(shows("ext-no-match: available", cx));
+        search(&view, "other", cx);
+        assert!(shows("ext-no-match: installed", cx));
+        assert!(!shows("ext-no-match: available", cx));
     }
 
     #[gpui_kit::test]
