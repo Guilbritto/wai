@@ -127,6 +127,12 @@ pub enum Node {
         label: Arc<str>,
         checked: Option<bool>,
     },
+    /// An on/off switch (API 1.11): like a checkbox, but every change sends an action.
+    Switch {
+        id: String,
+        label: Option<Arc<str>>,
+        checked: Option<bool>,
+    },
     /// A file or folder path (API 1.6). `editable`: typed or picked; else picked only.
     Path {
         id: String,
@@ -826,6 +832,11 @@ impl Parser {
                 label: line(o, "label")?,
                 checked: flag(o, "checked"),
             },
+            "switch" => Node::Switch {
+                id: id(o)?,
+                label: line(o, "label"),
+                checked: flag(o, "checked"),
+            },
             "log" => Node::Log {
                 text: tail(&strip_ansi(str_field(o, "text")?), LOG_CHARS).into(),
                 follow: flag(o, "follow").unwrap_or(true),
@@ -927,7 +938,8 @@ impl Parser {
             | Node::Input { id, .. }
             | Node::Select { id, .. }
             | Node::Path { id, .. }
-            | Node::Checkbox { id, .. } => self.ids.insert(id.clone()).then_some(node),
+            | Node::Checkbox { id, .. }
+            | Node::Switch { id, .. } => self.ids.insert(id.clone()).then_some(node),
             Node::Pixels { id: Some(id), .. } => self.ids.insert(id.clone()).then_some(node),
             _ => Some(node),
         }
@@ -1420,6 +1432,7 @@ mod tests {
             json!({"type": "select", "id": "s2", "options": ["a", 2]}),
             json!({"type": "checkbox", "id": "c"}),
             json!({"type": "checkbox", "label": "c"}),
+            json!({"type": "switch"}),
             json!({"type": "badge"}),
             json!({"type": "progress"}),
             json!({"type": "progress", "value": "half"}),
@@ -1531,11 +1544,35 @@ mod tests {
     }
 
     #[test]
+    fn switch_parses() {
+        let tree = column(vec![
+            json!({"type": "switch", "id": "auto", "label": "Auto", "checked": true}),
+            json!({"type": "switch", "id": "bare"}),
+        ]);
+        assert_eq!(
+            children(tree),
+            vec![
+                Node::Switch {
+                    id: "auto".into(),
+                    label: Some("Auto".into()),
+                    checked: Some(true),
+                },
+                Node::Switch {
+                    id: "bare".into(),
+                    label: None,
+                    checked: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn repeated_ids_are_unsupported() {
         let tree = column(vec![
             json!({"type": "button", "id": "x", "label": "First"}),
             json!({"type": "input", "id": "x", "placeholder": "Same id"}),
             json!({"type": "checkbox", "id": "x", "label": "Same id"}),
+            json!({"type": "switch", "id": "x", "label": "Same id"}),
             // A broken node does not take its id.
             json!({"type": "select", "id": "y"}),
             json!({"type": "select", "id": "y", "options": []}),
@@ -1553,6 +1590,7 @@ mod tests {
                     confirm: None,
                     icon_only: false,
                 },
+                Node::Unsupported,
                 Node::Unsupported,
                 Node::Unsupported,
                 Node::Unsupported,

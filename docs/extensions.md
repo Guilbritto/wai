@@ -159,7 +159,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 |---|---|---|---|
 | `initialize` | request, id `0` | `{"protocol": 1, "api": "1.11", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
 | `command/run` | request | `{"id": "<command id>"}` | The user ran one of your commands without `prompt` from the palette. wai ignores the answer |
-| `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item, card, table row, button or menu item was clicked (after its confirmation, if it has one). `action_id` is its `id`. `values` has every form field in the panel by id: inputs and paths as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels`. A `bubble` sends one when it is gone: `action_id` is its `id`, and `values` is `{"bubble": "click"}` or `{"bubble": "timeout"}` |
+| `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item, card, table row, button or menu item was clicked, or a `switch` changed (after its confirmation, if it has one). `action_id` is its `id`. `values` has every form field in the panel by id: inputs and paths as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels`. A `bubble` sends one when it is gone: `action_id` is its `id`, and `values` is `{"bubble": "click"}` or `{"bubble": "timeout"}` |
 | `item/action` | request | `{"item": "<item id>"}` | The user clicked one of your bar items. wai ignores the answer. The usual reply is a `panel/open` or a `sessions/open`. Needs `bar` |
 | `event/session_state` | notification | `{"agent", "session", "state"}` | `state` is `idle`, `working`, `needs_you` or `error`. Needs `sessions:read` |
 | `event/turn_ended` | notification | `{"agent", "session", "reason"}` | `reason` is `end_turn`, `cancelled`, `max_tokens`, `refusal`, or the agent's own. Needs `sessions:read` |
@@ -354,6 +354,7 @@ Without `fill`, a list, table or log shows 12 rows (lines) and scrolls the rest.
 | `select` | `id`, `options` (array of strings), `value`?, `segmented`? (bool) | At most 100 options; with no choice, the first. `segmented` (API 1.8) draws the options as a segmented control; choosing one sends `panel/action` with the select's `id` and the choice in `values[id]`. A plain dropdown sends nothing |
 | `path` | `id`, `pick` (`"file"` or `"folder"`), `placeholder`?, `value`?, `editable`? (bool, default true) | A file or folder path, chosen with the system picker or dropped from Finder. Editable, it is also a text field; with `editable: false`, only the picker sets it. It shows your home folder as `~`; its value arrives in `values` as the full path (`""` when empty). API 1.6 |
 | `checkbox` | `id`, `label`, `checked`? (bool) | |
+| `switch` | `id`, `label`?, `checked`? (bool) | API 1.11. An on/off switch, its label to the left. Each change sends `panel/action` with the switch's `id` and the new value in `values[id]`, where it is a boolean like a checkbox's. |
 
 **`tone`** is `neutral` (the default), `info`, `success`, `warning` or `danger`, in the theme's colours.
 

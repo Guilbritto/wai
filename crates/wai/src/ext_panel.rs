@@ -18,6 +18,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, Textar
 use gpui_kit::component::link::Link;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
@@ -172,7 +173,9 @@ impl ExtPanel {
                         (id, value.as_deref().map(Value::from))
                     }
                     Node::Select { id, value, .. } => (id, value.as_deref().map(Value::from)),
-                    Node::Checkbox { id, checked, .. } => (id, checked.map(Value::Bool)),
+                    Node::Checkbox { id, checked, .. } | Node::Switch { id, checked, .. } => {
+                        (id, checked.map(Value::Bool))
+                    }
                     Node::Section { id, open, .. } => (id, open.map(Value::Bool)),
                     Node::Tabs { id, value, .. } => (id, value.as_deref().map(Value::from)),
                     _ => return,
@@ -555,7 +558,9 @@ impl ExtPanel {
                         let chosen = self.chosen(id, options);
                         (id, chosen.map_or(Value::Null, |o| Value::from(&**o)))
                     }
-                    Node::Checkbox { id, .. } => (id, Value::Bool(self.checked(id))),
+                    Node::Checkbox { id, .. } | Node::Switch { id, .. } => {
+                        (id, Value::Bool(self.checked(id)))
+                    }
                     Node::Tabs { id, tabs, .. } => (id, Value::from(&*self.selected(id, tabs).id)),
                     _ => return,
                 };
@@ -1044,6 +1049,28 @@ impl ExtPanel {
                         this.set(field.clone(), Value::Bool(*checked), cx)
                     }));
                 own(checkbox, at)
+            }
+            Node::Switch { id, label, .. } => {
+                let field = id.clone();
+                let mut switch = Switch::new(name("panel-switch", id))
+                    .checked(self.checked(id))
+                    .on_click(cx.listener(move |this, on: &bool, _, cx| {
+                        this.set(field.clone(), Value::Bool(*on), cx);
+                        this.act(field.clone(), cx)
+                    }));
+                if let Some(label) = label {
+                    switch = switch.accessibility_label(SharedString::from(label));
+                }
+                let row = h_flex()
+                    .gap_2()
+                    .items_center()
+                    .children(
+                        label
+                            .as_ref()
+                            .map(|l| div().text_sm().child(SharedString::from(l))),
+                    )
+                    .child(switch);
+                own(row, at)
             }
             Node::Card {
                 id,
@@ -2979,6 +3006,30 @@ mod tests {
         cx.update(|window, cx| window.within("items").click(1usize, cx));
         cx.run_until_parked();
         assert_eq!(sent(&actions), ["c1", "b", "r1", "rb", "m2"]);
+    }
+
+    /// A switch sends each change at once, the new value in `values`; any action carries it.
+    #[gpui_kit::test]
+    fn switch_sends_each_change(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        show(
+            &panel,
+            json!({"type": "column", "children": [
+                {"type": "switch", "id": "auto", "label": "Auto", "checked": true},
+                {"type": "button", "id": "go", "label": "Go"},
+            ]}),
+            cx,
+        );
+        click(name("panel-button:go"), cx);
+        assert_eq!(actions.borrow()[0].1["auto"], true, "the initial value");
+        click(name("panel-switch:auto"), cx);
+        assert_eq!(sent(&actions), ["go", "auto"]);
+        assert_eq!(actions.borrow()[1].1["auto"], false);
+        click(name("panel-switch:auto"), cx);
+        assert_eq!(actions.borrow()[2].1["auto"], true);
     }
 
     /// A row's controls take their own clicks too: a checkbox in a clickable card toggles
