@@ -39,7 +39,10 @@ func (sp *speech) show(l line, now time.Time) {
 }
 
 func (sp *speech) say(l line, now time.Time, asleep bool) {
-	same := func(q line) bool { return q.Text == l.Text && q.URL == l.URL }
+	// A PR's line is said once per PR, whatever text it picked.
+	same := func(q line) bool {
+		return q.URL == l.URL && (q.Text == l.Text || l.URL != "" && q.Kind == l.Kind)
+	}
 	if sp.cur != nil && same(*sp.cur) {
 		return
 	}
@@ -79,7 +82,8 @@ func (sp *speech) insert(l line, first bool) {
 	if len(sp.queue) > maxQueue {
 		low := 0
 		for i, q := range sp.queue {
-			if q.Prio < sp.queue[low].Prio {
+			// A requeued line was said before its peers: on a tie, the newest goes.
+			if q.Prio < sp.queue[low].Prio || first && q.Prio == sp.queue[low].Prio {
 				low = i
 			}
 		}

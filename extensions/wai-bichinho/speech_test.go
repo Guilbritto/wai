@@ -186,3 +186,28 @@ func TestDropKind(t *testing.T) {
 		t.Fatalf("cur = %v queue = %v", sp.cur, sp.queue)
 	}
 }
+
+func TestRequeuedStickySurvivesFullQueue(t *testing.T) {
+	var sp speech
+	pr := line{Kind: "pr_fix", Text: "x", Prio: 2, Sticky: true, URL: "https://github.com/o/r/pull/1"}
+	sp.say(pr, t0, false)
+	sp.next(t0)
+	for _, k := range []string{"a", "b", "c"} {
+		sp.say(n(k, 2), t0, false)
+	}
+	sp.say(line{Kind: "needs_you", Text: "!", Prio: 3, Sticky: true}, t0, false)
+	if sp.cur.Kind != "needs_you" || len(sp.queue) != 3 || sp.queue[0].URL != pr.URL {
+		t.Fatalf("cur = %v queue = %v", sp.cur, sp.queue)
+	}
+}
+
+func TestSamePRDedupesAcrossTexts(t *testing.T) {
+	var sp speech
+	url := "https://github.com/o/r/pull/1"
+	sp.say(line{Kind: "pr_fix", Text: "x", Prio: 2, Sticky: true, URL: url}, t0, false)
+	sp.next(t0)
+	sp.say(line{Kind: "pr_fix", Text: "y", Prio: 2, Sticky: true, URL: url}, t0, false)
+	if len(sp.queue) != 0 {
+		t.Fatalf("queue = %v", sp.queue)
+	}
+}
