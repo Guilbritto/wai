@@ -441,12 +441,13 @@ impl ExtPanel {
                     .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
-                if let Some(url) = &url {
-                    cx.open_url(url);
-                }
                 let now = cx.background_executor().now();
-                if let Some(b) = this.bubbles.get_mut(&click_id) {
-                    b.click(now);
+                // Only the click that closes it opens the url, not one on a leaving bubble.
+                if let Some(b) = this.bubbles.get_mut(&click_id)
+                    && b.click(now)
+                    && let Some(url) = &url
+                {
+                    cx.open_url(url);
                 }
                 this.ensure_ticker(cx);
                 cx.notify();
@@ -2716,6 +2717,28 @@ mod tests {
             *sent.borrow(),
             vec![("say".to_string(), json!({"bubble": "click"}))]
         );
+    }
+
+    #[gpui_kit::test]
+    fn leaving_bubble_does_not_open_its_url(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let sent = actions(&panel, cx);
+        let pr = "https://github.com/o/r/pull/1";
+        show(
+            &panel,
+            json!({"type": "bubble", "id": "say", "text": "Oi", "url": pr}),
+            cx,
+        );
+        // Timed out at 2,660 ms, still leaving until 2,810 ms.
+        cx.executor().advance_clock(ms(2_700));
+        cx.run_until_parked();
+        click(name("panel-bubble:say"), cx);
+        cx.executor().advance_clock(ms(200));
+        cx.run_until_parked();
+        assert_eq!(cx.opened_url(), None);
+        assert_eq!(*sent.borrow(), timeout());
     }
 
     #[gpui_kit::test]
