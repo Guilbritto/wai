@@ -324,21 +324,22 @@ fn api_version_is_checked_first() {
     assert!(with_api("\"1.8\"", "").is_ok());
     assert!(with_api("\"1.9\"", "").is_ok());
     assert!(with_api("\"1.10\"", "").is_ok());
-    let newer = with_api("\"1.11\"", "").unwrap_err();
+    assert!(with_api("\"1.11\"", "").is_ok());
+    let newer = with_api("\"1.12\"", "").unwrap_err();
     assert_eq!(
         newer.to_string(),
-        "Go Tools needs a newer wai (extension API 1.11; this wai has 1.10)"
+        "Go Tools needs a newer wai (extension API 1.12; this wai has 1.11)"
     );
     // Even when the newer API's fields would fail the strict parse.
     assert_eq!(
         with_api("\"2.0\"", "\nfuture = true\n")
             .unwrap_err()
             .to_string(),
-        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.10)"
+        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.11)"
     );
-    // Numeric, not lexical: 1.11 is newer than 1.10 and 1.2.
+    // Numeric, not lexical: 1.12 is newer than 1.11 and 1.2.
     assert!(matches!(
-        with_api("\"1.11\"", ""),
+        with_api("\"1.12\"", ""),
         Err(ManifestError::TooOld { .. })
     ));
     for bad in [
@@ -553,12 +554,12 @@ fn listen_and_sessions_content_parse() {
 }
 
 #[test]
-fn api_is_1_10() {
-    assert_eq!(API, "1.10");
+fn api_is_1_11() {
+    assert_eq!(API, "1.11");
     let with_api = |api: &str| parse(&format!("api = \"{api}\"\n{FULL}"));
-    assert!(with_api("1.10").is_ok());
+    assert!(with_api("1.11").is_ok());
     assert_eq!(
-        with_api("1.11").unwrap_err().to_string(),
-        "Go Tools needs a newer wai (extension API 1.11; this wai has 1.10)"
+        with_api("1.12").unwrap_err().to_string(),
+        "Go Tools needs a newer wai (extension API 1.12; this wai has 1.11)"
     );
 }

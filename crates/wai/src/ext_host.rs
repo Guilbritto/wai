@@ -973,6 +973,36 @@ pub(crate) mod tests {
         assert_eq!(session.read_with(cx, |s, cx| s.draft(cx)), "");
     }
 
+    /// API 1.11 `sessions/open` with `background` takes no pane: the session is in the open list only.
+    #[gpui_kit::test]
+    fn sessions_open_in_background(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = "id = \"opener\"\nname = \"Opener\"\nversion = \"1.0.0\"\n\
+            permissions = [\"process\", \"sessions:control\"]\n\
+            [process]\ncommand = \"bin/run\"\n";
+        let calls = r#"--call 'sessions/open {"agent": "fake", "prompt": "go", "send": true, "background": true}'"#;
+        install(tmp.path(), &config, manifest, calls, "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        let log = log_path(tmp.path(), "opener");
+        let panes = workspace.read_with(cx, |w, _| w.panes.len());
+
+        assert_eq!(
+            reply(&log, 1, cx)["result"],
+            json!({"agent": "fake", "session": "fake-1"})
+        );
+        let session = workspace.read_with(cx, |w, _| w.sessions[0].clone());
+        wait_until(
+            cx,
+            "the answer",
+            |cx| matches!(items(&session, cx).last(), Some(ChatItem::Agent { text }) if text == "Hello from fake agent"),
+        );
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), panes, "no pane added");
+            assert!(w.panes.iter().all(|p| p.session().is_none()), "in no pane");
+        });
+    }
+
     /// Without `sessions:control`, `sessions/open` is denied in wai-ext and opens nothing.
     #[gpui_kit::test]
     fn sessions_open_needs_permission(cx: &mut TestAppContext) {

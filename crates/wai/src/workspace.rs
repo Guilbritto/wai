@@ -1973,6 +1973,7 @@ impl Workspace {
                 agent,
                 prompt,
                 send,
+                background,
                 reply,
             } => {
                 let Some(agent) = agent.or_else(|| self.default_agent()) else {
@@ -1981,7 +1982,14 @@ impl Workspace {
                 if !self.registry.read(cx).knows(&agent) {
                     return reply.send(Err(format!("No agent named {agent}")));
                 }
-                self.start_session(agent, prompt, send, Some((ext, Some(reply))), window, cx);
+                self.start_session(
+                    agent,
+                    prompt,
+                    send,
+                    Some((ext, Some(reply), background)),
+                    window,
+                    cx,
+                );
             }
             ExtEvent::Prompt {
                 agent,
@@ -2182,12 +2190,14 @@ impl Workspace {
         agent: String,
         prompt: Option<String>,
         send: bool,
-        by: Option<(ExtId, Option<Reply>)>,
+        by: Option<(ExtId, Option<Reply>, bool)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.leave_wide(cx);
-        let (ext, reply) = by.map_or((None, None), |(ext, reply)| (Some(ext), reply));
+        let (ext, reply, background) = by.map_or((None, None, false), |(ext, reply, bg)| {
+            (Some(ext), reply, bg)
+        });
         let refuse = |reply: Option<Reply>, why: &str| {
             if let Some(reply) = reply {
                 reply.send(Err(why.into()));
@@ -2195,6 +2205,7 @@ impl Workspace {
         };
         let by_extension = ext.is_some();
         let ix = match &ext {
+            Some(_) if background => None,
             Some(ext) => self.ext_pane(ext),
             None => Some(self.session_pane()),
         };
@@ -5826,6 +5837,43 @@ pub(crate) mod tests {
         assert!(AppState::load(&path).long_context.contains("missing-1"));
     }
 
+    /// API 1.11: a background start takes no pane, not even its extension's last one.
+    #[gpui_kit::test]
+    fn extension_background_open_takes_no_pane(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let ext = wai_ext::ExtId::new("opener").unwrap();
+        let start = |background: bool, cx: &mut VisualTestContext| {
+            let n = workspace.read_with(cx, |w, _| w.sessions.len());
+            let by = Some((ext.clone(), None, background));
+            cx.update(|window, cx| {
+                workspace.update(cx, |w, cx| {
+                    w.start_session("fake".into(), None, false, by, window, cx)
+                })
+            });
+            wait_until(cx, "their session", |cx| {
+                workspace.read_with(cx, |w, _| w.sessions.len() == n + 1)
+            });
+            workspace.read_with(cx, |w, _| w.sessions[n].clone())
+        };
+        let panes = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, _| {
+                w.panes
+                    .iter()
+                    .map(|p| p.session().cloned())
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        let first = start(false, cx);
+        let before = panes(cx);
+        assert!(before.contains(&Some(first)));
+        let second = start(true, cx);
+        let after = panes(cx);
+        assert_eq!(after, before);
+        assert!(!after.contains(&Some(second)));
+    }
+
     /// R57: an extension's sessions reuse the pane of its last one (R61: unless the user is in
     /// it), never a pane showing the user's session; with no pane free they open in the open
     /// list only. None takes the focus.
@@ -5837,7 +5885,7 @@ pub(crate) mod tests {
         let ext = wai_ext::ExtId::new("opener").unwrap();
         let theirs = |prompt: &str, cx: &mut VisualTestContext| {
             let n = workspace.read_with(cx, |w, _| w.sessions.len());
-            let (prompt, by) = (Some(prompt.to_string()), Some((ext.clone(), None)));
+            let (prompt, by) = (Some(prompt.to_string()), Some((ext.clone(), None, false)));
             cx.update(|window, cx| {
                 workspace.update(cx, |w, cx| {
                     w.start_session("fake".into(), prompt, false, by, window, cx)

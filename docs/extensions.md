@@ -4,7 +4,7 @@ An extension is a folder with a `wai-extension.toml` manifest. It can be manifes
 
 Users install an extension from a folder, from a git URL, or from the Extensions page's **Available** list, which downloads a prebuilt package from an index. Anyone can publish one: see [Publishing](#publishing).
 
-This guide describes API version 1.10 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
+This guide describes API version 1.11 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
 - `wai-navegador` is manifest-only;
 - `wai-rotinas` and `wai-bichinho` are written in Go; `wai-bichinho` shows a pet in a dock at the sidebar's foot (API 1.9) and speaks in a `bubble` (API 1.8).
 
@@ -45,7 +45,7 @@ title = "Pull requests"
 | `name` | string | Shown in the extension list and the consent dialog |
 | `version` | string | Free form. wai shows it; it does not compare versions |
 | `description` | string, optional | Shown last in the consent dialog, cut to fit |
-| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.10)`. Set it to `"1.10"` when you use the `listen` or `sessions:content` permission, `sessions/read`, `sessions/cancel`, `permission/answer` or `question/answer`, to `"1.9"` when you use a `sidebar-foot` panel or the `pixels` node, to `"1.8"` when you use a `plain` list, list item `icon`, `tone`, `selected`, `lead`, `note` or `indent`, a `text` `style`, a `column` `framed`, `title`, `badge`, `tone` or `collapsed`, `tabs` `style` or a tab `tone`, `select` `segmented`, `input` `icon`, `submit` or `clear`, `button` `icon_only`, `link` `icon` or `icon_only`, or the `bubble` node, to `"1.7"` when you use `events/emit`, an `events:<id>` permission or a panel's `frame`, to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
+| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.11)`. Set it to `"1.11"` when you use `sessions/open` `background`, `sessions/show`, `tabs` `end` or the `switch` node, to `"1.10"` when you use the `listen` or `sessions:content` permission, `sessions/read`, `sessions/cancel`, `permission/answer` or `question/answer`, to `"1.9"` when you use a `sidebar-foot` panel or the `pixels` node, to `"1.8"` when you use a `plain` list, list item `icon`, `tone`, `selected`, `lead`, `note` or `indent`, a `text` `style`, a `column` `framed`, `title`, `badge`, `tone` or `collapsed`, `tabs` `style` or a tab `tone`, `select` `segmented`, `input` `icon`, `submit` or `clear`, `button` `icon_only`, `link` `icon` or `icon_only`, or the `bubble` node, to `"1.7"` when you use `events/emit`, an `events:<id>` permission or a panel's `frame`, to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
 | `permissions` | array of strings | See [Permissions](#permissions). An unknown permission is refused |
 | `process.command` | string | See [Commands and paths](#commands-and-paths). Needs `process` |
 | `process.args` | array of strings, optional | Arguments, passed as given (no shell) |
@@ -157,7 +157,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 
 | Method | Kind | Params | Notes |
 |---|---|---|---|
-| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.10", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
+| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.11", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
 | `command/run` | request | `{"id": "<command id>"}` | The user ran one of your commands without `prompt` from the palette. wai ignores the answer |
 | `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item, card, table row, button or menu item was clicked (after its confirmation, if it has one). `action_id` is its `id`. `values` has every form field in the panel by id: inputs and paths as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels`. A `bubble` sends one when it is gone: `action_id` is its `id`, and `values` is `{"bubble": "click"}` or `{"bubble": "timeout"}` |
 | `item/action` | request | `{"item": "<item id>"}` | The user clicked one of your bar items. wai ignores the answer. The usual reply is a `panel/open` or a `sessions/open`. Needs `bar` |
@@ -173,14 +173,14 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `event/question_resolved` | notification | `{"agent", "session", "request", "answer"}` | The question closed: `answer` is `accept`, `decline` or `cancel` (also when the agent withdrew it). API 1.10. Needs `sessions:content` |
 
 - Paths are absolute, and on Windows they never carry the `\\?\` prefix.
-- Answer `initialize` before anything else. API 1.1 to 1.10 only add fields and methods; ignore the ones you do not know.
+- Answer `initialize` before anything else. API 1.1 to 1.11 only add fields and methods; ignore the ones you do not know.
 
 ### Extension → host
 
 | Method | Needs | Params | Result |
 |---|---|---|---|
 | `sessions/list` | `sessions:read` | none | `[{"agent", "session", "title" (string or null), "state"}]`, one per open session |
-| `sessions/open` | `sessions:control` | `{"agent"?: string, "prompt"?: string, "send"?: bool}` | `{"agent", "session"}` once the session has started |
+| `sessions/open` | `sessions:control` | `{"agent"?: string, "prompt"?: string, "send"?: bool, "background"?: bool}` | `{"agent", "session"}` once the session has started |
 | `sessions/prompt` | `sessions:control` | `{"agent", "session", "text"}` | `null` at once |
 | `sessions/read` | `sessions:content` | `{"agent", "session", "from"?: int, "limit"?: int}` | `{"items": [item], "total": int}`. API 1.10 |
 | `sessions/cancel` | `sessions:control` | `{"agent", "session"}` | `null`. API 1.10 |
@@ -195,6 +195,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 **`sessions/open`** starts a session with `agent`, or with the user's default agent.
 - **The prompt:** `prompt` is filled in and not sent, unless `send` is `true`.
 - **Pane and focus:** the session never takes the keyboard focus or the focused pane, and never replaces a session the user started. It goes to the pane of your previous session, else an empty pane, else a new pane while there are fewer than four. When there is no room, it opens only in the sidebar's Open list.
+- **Background:** with `background` (API 1.11) the session takes no pane: it opens in the open list only, as when no pane is free.
 - **Limits:**
   - at most **one every 2 seconds** per extension, or `Too many sessions opened; try again later`;
   - `No agent named <agent>` for an unknown agent;

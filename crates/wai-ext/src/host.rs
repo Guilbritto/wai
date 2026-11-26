@@ -68,6 +68,7 @@ pub enum ExtEvent {
         agent: Option<String>,
         prompt: Option<String>,
         send: bool,
+        background: bool,
         reply: Reply,
     },
     Prompt {
@@ -678,6 +679,7 @@ impl Ext {
                     agent: p.agent,
                     prompt: p.prompt,
                     send: p.send,
+                    background: p.background,
                     reply: reply(),
                 })
             }
@@ -818,6 +820,8 @@ struct OpenParams {
     prompt: Option<String>,
     #[serde(default)]
     send: bool,
+    #[serde(default)]
+    background: bool,
 }
 
 #[derive(Deserialize)]
