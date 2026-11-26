@@ -171,6 +171,8 @@ pub enum Node {
         value: Option<String>,
         tabs: Vec<Tab>,
         segmented: bool,
+        /// Drawn at the right end of the bar's row, on every tab.
+        end: Vec<Node>,
     },
     /// A broken row is `None`.
     Table {
@@ -373,8 +375,8 @@ impl Node {
                     child.walk(f);
                 }
             }
-            Node::Tabs { tabs, .. } => {
-                for child in tabs.iter().flat_map(|tab| &tab.children) {
+            Node::Tabs { tabs, end, .. } => {
+                for child in end.iter().chain(tabs.iter().flat_map(|tab| &tab.children)) {
                     child.walk(f);
                 }
             }
@@ -550,13 +552,14 @@ impl Parser {
         Ok(node.unwrap_or(Node::Unsupported))
     }
 
-    /// `children`, if it is an array.
+    /// `key` (`children` or `end`), if it is an array.
     fn children(
         &mut self,
         o: &Map<String, Value>,
+        key: &str,
         depth: usize,
     ) -> Result<Option<Vec<Node>>, TooLarge> {
-        let Some(children) = o.get("children").and_then(Value::as_array) else {
+        let Some(children) = o.get(key).and_then(Value::as_array) else {
             return Ok(None);
         };
         let children = children.iter().map(|child| self.node(child, depth + 1));
@@ -570,7 +573,7 @@ impl Parser {
         depth: usize,
     ) -> Result<Option<Node>, TooLarge> {
         Ok(match kind {
-            "column" => self.children(o, depth)?.map(|children| {
+            "column" => self.children(o, "children", depth)?.map(|children| {
                 let title = line(o, "title");
                 let collapsed = flag(o, "collapsed").unwrap_or(false);
                 Node::Column {
@@ -584,10 +587,12 @@ impl Parser {
                     collapsed,
                 }
             }),
-            "row" => self.children(o, depth)?.map(|children| Node::Row {
-                children,
-                fill: flag(o, "fill").unwrap_or(false),
-            }),
+            "row" => self
+                .children(o, "children", depth)?
+                .map(|children| Node::Row {
+                    children,
+                    fill: flag(o, "fill").unwrap_or(false),
+                }),
             "card" => {
                 let card = |children| Node::Card {
                     id: id(o),
@@ -598,7 +603,9 @@ impl Parser {
                     selected: flag(o, "selected").unwrap_or(false),
                     children,
                 };
-                Some(card(self.children(o, depth)?.unwrap_or_default()))
+                Some(card(
+                    self.children(o, "children", depth)?.unwrap_or_default(),
+                ))
             }
             "section" => {
                 let (Some(id), Some(title)) = (id(o), line(o, "title")) else {
@@ -613,7 +620,7 @@ impl Parser {
                     title,
                     open: flag(o, "open"),
                     badge: line(o, "badge"),
-                    children: self.children(o, depth)?.unwrap_or_default(),
+                    children: self.children(o, "children", depth)?.unwrap_or_default(),
                 })
             }
             "tabs" => self.tabs(o, depth)?,
@@ -657,14 +664,16 @@ impl Parser {
                 title,
                 badge: line(t, "badge"),
                 tone: tone(t).unwrap_or_default(),
-                children: self.children(t, depth)?.unwrap_or_default(),
+                children: self.children(t, "children", depth)?.unwrap_or_default(),
             });
         }
+        let end = self.children(o, "end", depth)?.unwrap_or_default();
         Ok(Some(Node::Tabs {
             id,
             value: str_field(o, "value").map(str::to_owned),
             tabs,
             segmented: str_field(o, "style") == Some("segmented"),
+            end,
         }))
     }
 
@@ -2073,6 +2082,26 @@ mod tests {
     }
 
     #[test]
+    fn tabs_end_parses() {
+        let tabs = |end: Option<Value>| {
+            let mut tree = json!({"type": "tabs", "id": "t", "tabs": [
+                {"id": "a", "title": "A", "children": []}]});
+            if let Some(end) = end {
+                tree["end"] = end;
+            }
+            let Ok(Node::Tabs { end, .. }) = parse(&tree) else {
+                panic!("not tabs")
+            };
+            end
+        };
+        let switch = json!([{"type": "switch", "id": "auto", "label": "Auto"}]);
+        assert!(matches!(&tabs(Some(switch))[..], [Node::Switch { .. }]));
+        for end in [Some(Value::Null), Some(json!("x")), None] {
+            assert!(tabs(end).is_empty());
+        }
+    }
+
+    #[test]
     fn broken_tabs_are_unsupported() {
         let tab = |id: &str| json!({"id": id, "title": id, "children": []});
         let many: Vec<_> = (0..=MAX_TABS).map(|n| tab(&n.to_string())).collect();
@@ -2458,6 +2487,7 @@ mod tests {
                     children: vec![],
                 }],
                 segmented: false,
+                end: vec![],
             },
         ]);
         assert_eq!(parse(&tree), Ok(expected));

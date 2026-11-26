@@ -1245,6 +1245,7 @@ impl ExtPanel {
                 id,
                 tabs,
                 segmented,
+                end,
                 ..
             } => {
                 let current = self.selected(id, tabs).id.clone();
@@ -1296,6 +1297,10 @@ impl ExtPanel {
                     row: false,
                     click: at.click,
                 };
+                let end_at = At { row: true, ..inner };
+                let end: Vec<_> = (end.iter())
+                    .map(|child| self.node(child, end_at, n, window, cx).0)
+                    .collect();
                 let mut fills = false;
                 let mut body = Vec::new();
                 for tab in tabs {
@@ -1312,7 +1317,14 @@ impl ExtPanel {
                 }
                 let element = (v_flex().gap_2())
                     .when(fills, |el| el.flex_1().min_h_0())
-                    .child(own(bar, at))
+                    .child(if end.is_empty() {
+                        own(bar, at).into_any_element()
+                    } else {
+                        (h_flex().justify_between().items_center().gap_2())
+                            .child(own(bar.flex_none(), at))
+                            .child(h_flex().gap_2().children(end))
+                            .into_any_element()
+                    })
                     .child(
                         // Keyed by tab: each tab keeps its own scroll offsets.
                         v_flex()
@@ -1774,7 +1786,10 @@ fn size(node: &Node) -> usize {
         | Node::Row { children, .. }
         | Node::Card { children, .. }
         | Node::Section { children, .. } => children.iter().map(size).sum(),
-        Node::Tabs { tabs, .. } => tabs.iter().flat_map(|t| &t.children).map(size).sum(),
+        Node::Tabs { tabs, end, .. } => {
+            let tabs = tabs.iter().flat_map(|t| &t.children);
+            end.iter().chain(tabs).map(size).sum()
+        }
         _ => 0,
     }
 }
@@ -3232,6 +3247,26 @@ mod tests {
         assert!(shown(name("panel-button:in-help"), cx));
         assert!(!shown(name("panel-button:in-work"), cx));
         assert!(actions.borrow().is_empty());
+    }
+
+    /// `end` sits beside the bar on every tab, and its fields are in the form.
+    #[gpui_kit::test]
+    fn tabs_end_stays_on_every_tab(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        let mut tree = tabs_tree(None);
+        tree["style"] = json!("segmented");
+        tree["end"] = json!([{"type": "switch", "id": "auto", "label": "Auto", "checked": true}]);
+        show(&panel, tree, cx);
+        assert!(shown(name("panel-switch:auto"), cx));
+        click(name("panel-tab:t:help"), cx);
+        frame(cx);
+        assert!(shown(name("panel-switch:auto"), cx));
+        assert!(shown(name("panel-button:in-help"), cx));
+        click(name("panel-button:in-help"), cx);
+        assert_eq!(actions.borrow()[0].1["auto"], true);
     }
 
     #[gpui_kit::test]
