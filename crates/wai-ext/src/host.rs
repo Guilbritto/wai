@@ -68,6 +68,7 @@ pub enum ExtEvent {
         agent: Option<String>,
         prompt: Option<String>,
         send: bool,
+        background: bool,
         reply: Reply,
     },
     Prompt {
@@ -88,6 +89,12 @@ pub enum ExtEvent {
     },
     /// `sessions/cancel`: stop the running turn.
     CancelSession {
+        agent: String,
+        session: String,
+        reply: Reply,
+    },
+    /// `sessions/show`: show an open session in the focused pane.
+    ShowSession {
         agent: String,
         session: String,
         reply: Reply,
@@ -678,6 +685,7 @@ impl Ext {
                     agent: p.agent,
                     prompt: p.prompt,
                     send: p.send,
+                    background: p.background,
                     reply: reply(),
                 })
             }
@@ -705,6 +713,15 @@ impl Ext {
                 need(Permission::SessionsControl)?;
                 let p: SessionParams = params_of(params)?;
                 Call::Deferred(ExtEvent::CancelSession {
+                    agent: p.agent,
+                    session: p.session,
+                    reply: reply(),
+                })
+            }
+            "sessions/show" => {
+                need(Permission::SessionsControl)?;
+                let p: SessionParams = params_of(params)?;
+                Call::Deferred(ExtEvent::ShowSession {
                     agent: p.agent,
                     session: p.session,
                     reply: reply(),
@@ -818,6 +835,8 @@ struct OpenParams {
     prompt: Option<String>,
     #[serde(default)]
     send: bool,
+    #[serde(default)]
+    background: bool,
 }
 
 #[derive(Deserialize)]

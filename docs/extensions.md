@@ -4,7 +4,7 @@ An extension is a folder with a `wai-extension.toml` manifest. It can be manifes
 
 Users install an extension from a folder, from a git URL, or from the Extensions page's **Available** list, which downloads a prebuilt package from an index. Anyone can publish one: see [Publishing](#publishing).
 
-This guide describes API version 1.10 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
+This guide describes API version 1.11 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
 - `wai-navegador` is manifest-only;
 - `wai-rotinas` and `wai-bichinho` are written in Go; `wai-bichinho` shows a pet in a dock at the sidebar's foot (API 1.9) and speaks in a `bubble` (API 1.8).
 
@@ -45,7 +45,7 @@ title = "Pull requests"
 | `name` | string | Shown in the extension list and the consent dialog |
 | `version` | string | Free form. wai shows it; it does not compare versions |
 | `description` | string, optional | Shown last in the consent dialog, cut to fit |
-| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.10)`. Set it to `"1.10"` when you use the `listen` or `sessions:content` permission, `sessions/read`, `sessions/cancel`, `permission/answer` or `question/answer`, to `"1.9"` when you use a `sidebar-foot` panel or the `pixels` node, to `"1.8"` when you use a `plain` list, list item `icon`, `tone`, `selected`, `lead`, `note` or `indent`, a `text` `style`, a `column` `framed`, `title`, `badge`, `tone` or `collapsed`, `tabs` `style` or a tab `tone`, `select` `segmented`, `input` `icon`, `submit` or `clear`, `button` `icon_only`, `link` `icon` or `icon_only`, or the `bubble` node, to `"1.7"` when you use `events/emit`, an `events:<id>` permission or a panel's `frame`, to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
+| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.11)`. Set it to `"1.11"` when you use `sessions/open` `background`, `sessions/show`, `tabs` `end` or the `switch` node, to `"1.10"` when you use the `listen` or `sessions:content` permission, `sessions/read`, `sessions/cancel`, `permission/answer` or `question/answer`, to `"1.9"` when you use a `sidebar-foot` panel or the `pixels` node, to `"1.8"` when you use a `plain` list, list item `icon`, `tone`, `selected`, `lead`, `note` or `indent`, a `text` `style`, a `column` `framed`, `title`, `badge`, `tone` or `collapsed`, `tabs` `style` or a tab `tone`, `select` `segmented`, `input` `icon`, `submit` or `clear`, `button` `icon_only`, `link` `icon` or `icon_only`, or the `bubble` node, to `"1.7"` when you use `events/emit`, an `events:<id>` permission or a panel's `frame`, to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
 | `permissions` | array of strings | See [Permissions](#permissions). An unknown permission is refused |
 | `process.command` | string | See [Commands and paths](#commands-and-paths). Needs `process` |
 | `process.args` | array of strings, optional | Arguments, passed as given (no shell) |
@@ -83,7 +83,7 @@ Calls in both directions are checked against what the user **granted** at instal
 | `process` | Run `[process]`. Also required to contribute `agents` and `mcp_servers`, which run code |
 | `sessions:read` | `sessions/list`. Receive `event/session_state`, `event/turn_ended` and `event/session_focused` |
 | `sessions:content` | `sessions/read`. Receive `event/session_update`, `event/permission_requested`, `event/permission_resolved`, `event/question_requested` and `event/question_resolved`: what the user and the agents write. Shown as *Read your sessions' conversations*. It does not include `sessions:read`. API 1.10 |
-| `sessions:control` | `sessions/open`, `sessions/prompt`, and (API 1.10) `sessions/cancel`, `permission/answer` and `question/answer`. It does not include `sessions:read` |
+| `sessions:control` | `sessions/open`, `sessions/prompt`, and (API 1.10) `sessions/cancel`, `permission/answer` and `question/answer`, and (API 1.11) `sessions/show`. It does not include `sessions:read` |
 | `notify` | `notify`: system notifications |
 | `panels` | Contribute panels, `panel/render`, `panel/open`, and receive `panel/action` |
 | `bar` | Contribute bar items, `item/update`, and receive `item/action`. Shown as *Show items in the top and bottom bars* |
@@ -157,9 +157,9 @@ When an enabled extension with `[process]` and the `process` permission starts (
 
 | Method | Kind | Params | Notes |
 |---|---|---|---|
-| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.10", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
+| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.11", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
 | `command/run` | request | `{"id": "<command id>"}` | The user ran one of your commands without `prompt` from the palette. wai ignores the answer |
-| `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item, card, table row, button or menu item was clicked (after its confirmation, if it has one). `action_id` is its `id`. `values` has every form field in the panel by id: inputs and paths as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels`. A `bubble` sends one when it is gone: `action_id` is its `id`, and `values` is `{"bubble": "click"}` or `{"bubble": "timeout"}` |
+| `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item, card, table row, button or menu item was clicked (a button or menu item with a `confirm` only after the user confirms), or a `switch` changed. `action_id` is its `id`. `values` has every form field in the panel by id: inputs and paths as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels`. A `bubble` sends one when it is gone: `action_id` is its `id`, and `values` is `{"bubble": "click"}` or `{"bubble": "timeout"}` |
 | `item/action` | request | `{"item": "<item id>"}` | The user clicked one of your bar items. wai ignores the answer. The usual reply is a `panel/open` or a `sessions/open`. Needs `bar` |
 | `event/session_state` | notification | `{"agent", "session", "state"}` | `state` is `idle`, `working`, `needs_you` or `error`. Needs `sessions:read` |
 | `event/turn_ended` | notification | `{"agent", "session", "reason"}` | `reason` is `end_turn`, `cancelled`, `max_tokens`, `refusal`, or the agent's own. Needs `sessions:read` |
@@ -173,15 +173,16 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `event/question_resolved` | notification | `{"agent", "session", "request", "answer"}` | The question closed: `answer` is `accept`, `decline` or `cancel` (also when the agent withdrew it). API 1.10. Needs `sessions:content` |
 
 - Paths are absolute, and on Windows they never carry the `\\?\` prefix.
-- Answer `initialize` before anything else. API 1.1 to 1.10 only add fields and methods; ignore the ones you do not know.
+- Answer `initialize` before anything else. API 1.1 to 1.11 only add fields and methods; ignore the ones you do not know.
 
 ### Extension → host
 
 | Method | Needs | Params | Result |
 |---|---|---|---|
 | `sessions/list` | `sessions:read` | none | `[{"agent", "session", "title" (string or null), "state"}]`, one per open session |
-| `sessions/open` | `sessions:control` | `{"agent"?: string, "prompt"?: string, "send"?: bool}` | `{"agent", "session"}` once the session has started |
+| `sessions/open` | `sessions:control` | `{"agent"?: string, "prompt"?: string, "send"?: bool, "background"?: bool}` | `{"agent", "session"}` once the session has started |
 | `sessions/prompt` | `sessions:control` | `{"agent", "session", "text"}` | `null` at once |
+| `sessions/show` | `sessions:control` | `{"agent", "session"}` | `null` once shown. API 1.11 |
 | `sessions/read` | `sessions:content` | `{"agent", "session", "from"?: int, "limit"?: int}` | `{"items": [item], "total": int}`. API 1.10 |
 | `sessions/cancel` | `sessions:control` | `{"agent", "session"}` | `null`. API 1.10 |
 | `permission/answer` | `sessions:control` | `{"agent", "session", "request": int, "option": "<option id>"}` | `null` once the agent has the answer. API 1.10 |
@@ -195,6 +196,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 **`sessions/open`** starts a session with `agent`, or with the user's default agent.
 - **The prompt:** `prompt` is filled in and not sent, unless `send` is `true`.
 - **Pane and focus:** the session never takes the keyboard focus or the focused pane, and never replaces a session the user started. It goes to the pane of your previous session, else an empty pane, else a new pane while there are fewer than four. When there is no room, it opens only in the sidebar's Open list.
+- **Background:** with `background` (API 1.11) the session takes no pane: it opens in the open list only, as when no pane is free.
 - **Limits:**
   - at most **one every 2 seconds** per extension, or `Too many sessions opened; try again later`;
   - `No agent named <agent>` for an unknown agent;
@@ -202,6 +204,8 @@ When an enabled extension with `[process]` and the `process` permission starts (
   - `The session was closed` if the user closed it while it started.
 
 **`sessions/prompt`** sends `text` to the session if it is idle. Otherwise the prompt is dropped (logged), and the result is still `null`.
+
+**`sessions/show`** (API 1.11) does what a click on the session's row in the open list does: it shows the session in the focused pane and focuses it. It counts with `panel/open`: at most one of the two per 2 s. If the session is not open, the error is `No session <agent> <session>`.
 
 **`sessions/read`** returns a page of the session's transcript (see [Transcript items](#transcript-items)): `limit` items from index `from`. Without `from`, the last `limit` items. `limit` defaults to 200 and is at most 500. `total` is the transcript's length, so the page starts at `total` minus the number of items when you left out `from`. A session that is not open is an error, `No open session <agent> <session>`; so is it for `sessions/cancel`, `permission/answer` and `question/answer`.
 
@@ -244,7 +248,7 @@ An item's index can change only for waiting cards: when one is answered it joins
 
 **`panel/open`** shows a panel: a sidebar panel becomes the sidebar's tab, a main panel opens in a pane or its pane is focused (see [Panels](#panels)). A prompt panel is always shown with the focused prompt box: `panel/open` does nothing for it.
 - It never takes the keyboard focus.
-- At most **one every 2 seconds** per extension, or `Too many panel opens; try again later`.
+- At most **one every 2 seconds** per extension, shared with `sessions/show`, or `Too many panel opens; try again later`.
 - A panel id not in your manifest gets `-32602`.
 - Typical use: a palette command without `prompt` → `command/run` → `panel/open`.
 
@@ -303,7 +307,7 @@ A tree is JSON nodes. Every field without `?` is required.
 | `row` | `children` (array of nodes), `fill`? (bool) | Places children side by side; they wrap when there is no room. `fill` (API 1.6): when every node above it is a `column`, the row takes the height left and each child scrolls on its own (a list beside a detail); anywhere else it is a plain row |
 | `card` | `id`?, `title`?, `subtitle`?, `badge`?, `icon`?, `selected`? (bool), `children`? | A bordered card: a header (icon, title, subtitle, badge), then its children. With `id`, the whole card is clickable (also with Enter or Space) and sends `panel/action` with that `id`. Card ids may repeat. `selected` (API 1.6) draws it highlighted, for the item a detail shows |
 | `section` | `id`, `title`, `open`? (bool, default `true`), `badge`?, `children` | A block the user can collapse. `open` is an initial value (see the rules) |
-| `tabs` | `id`, `value`?, `style`?, `tabs` (array of `{"id", "title", "badge"?, "tone"?, "children"}`) | A tab bar; the selected tab's `children` show below it. At most 10 tabs. `value` is the initial tab id (default the first), an initial value (see the rules). The selected tab id is sent in `values` under the node's `id`. API 1.5. `style` (API 1.8) `"segmented"` draws the bar as a rounded box of pills, the selected one violet-tinted with a violet border. A tab's `tone` (API 1.8) is its badge's tone, in both styles |
+| `tabs` | `id`, `value`?, `style`?, `tabs` (array of `{"id", "title", "badge"?, "tone"?, "children"}`) | A tab bar; the selected tab's `children` show below it. At most 10 tabs. `value` is the initial tab id (default the first), an initial value (see the rules). The selected tab id is sent in `values` under the node's `id`. API 1.5. `style` (API 1.8) `"segmented"` draws the bar as a rounded box of pills, the selected one violet-tinted with a violet border. A tab's `tone` (API 1.8) is its badge's tone, in both styles. `end`? (array of nodes, API 1.11) draws them at the right end of the bar's row, on every tab. The bar then takes only its tabs' width. Their fields are in `values` like any other |
 | `divider` | | A horizontal line |
 | `spacer` | | In a row, takes the free space: what follows goes to the end |
 
@@ -350,6 +354,7 @@ Without `fill`, a list, table or log shows 12 rows (lines) and scrolls the rest.
 | `select` | `id`, `options` (array of strings), `value`?, `segmented`? (bool) | At most 100 options; with no choice, the first. `segmented` (API 1.8) draws the options as a segmented control; choosing one sends `panel/action` with the select's `id` and the choice in `values[id]`. A plain dropdown sends nothing |
 | `path` | `id`, `pick` (`"file"` or `"folder"`), `placeholder`?, `value`?, `editable`? (bool, default true) | A file or folder path, chosen with the system picker or dropped from Finder. Editable, it is also a text field; with `editable: false`, only the picker sets it. It shows your home folder as `~`; its value arrives in `values` as the full path (`""` when empty). API 1.6 |
 | `checkbox` | `id`, `label`, `checked`? (bool) | |
+| `switch` | `id`, `label`?, `checked`? (bool) | API 1.11. An on/off switch, its label to the left. Each change sends `panel/action` with the switch's `id` and the new value in `values[id]`, where it is a boolean like a checkbox's. |
 
 **`tone`** is `neutral` (the default), `info`, `success`, `warning` or `danger`, in the theme's colours.
 

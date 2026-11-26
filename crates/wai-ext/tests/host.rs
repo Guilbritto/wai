@@ -125,7 +125,7 @@ fn initialize_roundtrip() {
             init["params"],
             json!({
                 "protocol": 1,
-                "api": "1.10",
+                "api": "1.11",
                 "wai_version": env!("CARGO_PKG_VERSION"),
                 "ext_id": "fake",
                 "granted": ["process", "notify", "panels"],

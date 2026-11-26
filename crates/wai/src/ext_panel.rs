@@ -18,6 +18,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, Textar
 use gpui_kit::component::link::Link;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
@@ -172,7 +173,9 @@ impl ExtPanel {
                         (id, value.as_deref().map(Value::from))
                     }
                     Node::Select { id, value, .. } => (id, value.as_deref().map(Value::from)),
-                    Node::Checkbox { id, checked, .. } => (id, checked.map(Value::Bool)),
+                    Node::Checkbox { id, checked, .. } | Node::Switch { id, checked, .. } => {
+                        (id, checked.map(Value::Bool))
+                    }
                     Node::Section { id, open, .. } => (id, open.map(Value::Bool)),
                     Node::Tabs { id, value, .. } => (id, value.as_deref().map(Value::from)),
                     _ => return,
@@ -555,7 +558,9 @@ impl ExtPanel {
                         let chosen = self.chosen(id, options);
                         (id, chosen.map_or(Value::Null, |o| Value::from(&**o)))
                     }
-                    Node::Checkbox { id, .. } => (id, Value::Bool(self.checked(id))),
+                    Node::Checkbox { id, .. } | Node::Switch { id, .. } => {
+                        (id, Value::Bool(self.checked(id)))
+                    }
                     Node::Tabs { id, tabs, .. } => (id, Value::from(&*self.selected(id, tabs).id)),
                     _ => return,
                 };
@@ -1045,6 +1050,28 @@ impl ExtPanel {
                     }));
                 own(checkbox, at)
             }
+            Node::Switch { id, label, .. } => {
+                let field = id.clone();
+                let mut switch = Switch::new(name("panel-switch", id))
+                    .checked(self.checked(id))
+                    .on_click(cx.listener(move |this, on: &bool, _, cx| {
+                        this.set(field.clone(), Value::Bool(*on), cx);
+                        this.act(field.clone(), cx)
+                    }));
+                if let Some(label) = label {
+                    switch = switch.accessibility_label(SharedString::from(label));
+                }
+                let row = h_flex()
+                    .gap_2()
+                    .items_center()
+                    .children(
+                        label
+                            .as_ref()
+                            .map(|l| div().text_sm().child(SharedString::from(l))),
+                    )
+                    .child(switch);
+                own(row, at)
+            }
             Node::Card {
                 id,
                 title,
@@ -1218,6 +1245,7 @@ impl ExtPanel {
                 id,
                 tabs,
                 segmented,
+                end,
                 ..
             } => {
                 let current = self.selected(id, tabs).id.clone();
@@ -1269,6 +1297,10 @@ impl ExtPanel {
                     row: false,
                     click: at.click,
                 };
+                let end_at = At { row: true, ..inner };
+                let end: Vec<_> = (end.iter())
+                    .map(|child| self.node(child, end_at, n, window, cx).0)
+                    .collect();
                 let mut fills = false;
                 let mut body = Vec::new();
                 for tab in tabs {
@@ -1285,7 +1317,14 @@ impl ExtPanel {
                 }
                 let element = (v_flex().gap_2())
                     .when(fills, |el| el.flex_1().min_h_0())
-                    .child(own(bar, at))
+                    .child(if end.is_empty() {
+                        own(bar, at).into_any_element()
+                    } else {
+                        (h_flex().justify_between().items_center().gap_2())
+                            .child(own(bar.flex_none(), at))
+                            .child(h_flex().gap_2().children(end))
+                            .into_any_element()
+                    })
                     .child(
                         // Keyed by tab: each tab keeps its own scroll offsets.
                         v_flex()
@@ -1747,7 +1786,10 @@ fn size(node: &Node) -> usize {
         | Node::Row { children, .. }
         | Node::Card { children, .. }
         | Node::Section { children, .. } => children.iter().map(size).sum(),
-        Node::Tabs { tabs, .. } => tabs.iter().flat_map(|t| &t.children).map(size).sum(),
+        Node::Tabs { tabs, end, .. } => {
+            let tabs = tabs.iter().flat_map(|t| &t.children);
+            end.iter().chain(tabs).map(size).sum()
+        }
         _ => 0,
     }
 }
@@ -2981,6 +3023,30 @@ mod tests {
         assert_eq!(sent(&actions), ["c1", "b", "r1", "rb", "m2"]);
     }
 
+    /// A switch sends each change at once, the new value in `values`; any action carries it.
+    #[gpui_kit::test]
+    fn switch_sends_each_change(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        show(
+            &panel,
+            json!({"type": "column", "children": [
+                {"type": "switch", "id": "auto", "label": "Auto", "checked": true},
+                {"type": "button", "id": "go", "label": "Go"},
+            ]}),
+            cx,
+        );
+        click(name("panel-button:go"), cx);
+        assert_eq!(actions.borrow()[0].1["auto"], true, "the initial value");
+        click(name("panel-switch:auto"), cx);
+        assert_eq!(sent(&actions), ["go", "auto"]);
+        assert_eq!(actions.borrow()[1].1["auto"], false);
+        click(name("panel-switch:auto"), cx);
+        assert_eq!(actions.borrow()[2].1["auto"], true);
+    }
+
     /// A row's controls take their own clicks too: a checkbox in a clickable card toggles
     /// without sending the card's action.
     #[gpui_kit::test]
@@ -3181,6 +3247,26 @@ mod tests {
         assert!(shown(name("panel-button:in-help"), cx));
         assert!(!shown(name("panel-button:in-work"), cx));
         assert!(actions.borrow().is_empty());
+    }
+
+    /// `end` sits beside the bar on every tab, and its fields are in the form.
+    #[gpui_kit::test]
+    fn tabs_end_stays_on_every_tab(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let actions = actions(&panel, cx);
+        let mut tree = tabs_tree(None);
+        tree["style"] = json!("segmented");
+        tree["end"] = json!([{"type": "switch", "id": "auto", "label": "Auto", "checked": true}]);
+        show(&panel, tree, cx);
+        assert!(shown(name("panel-switch:auto"), cx));
+        click(name("panel-tab:t:help"), cx);
+        frame(cx);
+        assert!(shown(name("panel-switch:auto"), cx));
+        assert!(shown(name("panel-button:in-help"), cx));
+        click(name("panel-button:in-help"), cx);
+        assert_eq!(actions.borrow()[0].1["auto"], true);
     }
 
     #[gpui_kit::test]
