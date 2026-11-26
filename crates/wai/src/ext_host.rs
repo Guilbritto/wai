@@ -31,8 +31,9 @@ use crate::notify;
 
 /// Events applied per wake of an extension's pump: a flooding one cannot hold the UI thread.
 const MAX_BATCH: usize = 256;
-/// At most one notification, one `sessions/open` and one `panel/open` per 2 s per extension: the
-/// excess notifications are dropped, the excess opens refused.
+/// At most one notification, one `sessions/open`, and one `panel/open` or `sessions/show` per 2 s
+/// per extension (`panel/open` and `sessions/show` share that slot): the excess notifications are
+/// dropped, the excess opens refused.
 const CALL_GAP: Duration = Duration::from_secs(2);
 /// At most `EMIT_LIMIT` `events/emit` per `EMIT_WINDOW` per extension; the excess is dropped.
 const EMIT_LIMIT: u32 = 20;
@@ -146,7 +147,7 @@ struct Running {
     notified: Option<Instant>,
     /// When it last opened a session.
     opened: Option<Instant>,
-    /// When it last showed one of its panels (`panel/open`).
+    /// When it last showed one of its panels (`panel/open`) or a session (`sessions/show`).
     shown: Option<Instant>,
     /// The start and count of its current `events/emit` window.
     emitted: Option<(Instant, u32)>,
@@ -423,7 +424,7 @@ impl ExtHost {
         (self.running.get_mut(id)).is_some_and(|r| allow(&mut r.opened, Instant::now()))
     }
 
-    /// Whether extension `id` may show a panel now, at most once per `CALL_GAP`.
+    /// Whether extension `id` may show a panel or session now, at most once per `CALL_GAP`.
     fn may_show(&mut self, id: &ExtId) -> bool {
         (self.running.get_mut(id)).is_some_and(|r| allow(&mut r.shown, Instant::now()))
     }
