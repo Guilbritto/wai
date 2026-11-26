@@ -159,7 +159,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 |---|---|---|---|
 | `initialize` | request, id `0` | `{"protocol": 1, "api": "1.11", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
 | `command/run` | request | `{"id": "<command id>"}` | The user ran one of your commands without `prompt` from the palette. wai ignores the answer |
-| `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item, card, table row, button or menu item was clicked, or a `switch` changed (after its confirmation, if it has one). `action_id` is its `id`. `values` has every form field in the panel by id: inputs and paths as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels`. A `bubble` sends one when it is gone: `action_id` is its `id`, and `values` is `{"bubble": "click"}` or `{"bubble": "timeout"}` |
+| `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item, card, table row, button or menu item was clicked (a button or menu item with a `confirm` only after the user confirms), or a `switch` changed. `action_id` is its `id`. `values` has every form field in the panel by id: inputs and paths as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels`. A `bubble` sends one when it is gone: `action_id` is its `id`, and `values` is `{"bubble": "click"}` or `{"bubble": "timeout"}` |
 | `item/action` | request | `{"item": "<item id>"}` | The user clicked one of your bar items. wai ignores the answer. The usual reply is a `panel/open` or a `sessions/open`. Needs `bar` |
 | `event/session_state` | notification | `{"agent", "session", "state"}` | `state` is `idle`, `working`, `needs_you` or `error`. Needs `sessions:read` |
 | `event/turn_ended` | notification | `{"agent", "session", "reason"}` | `reason` is `end_turn`, `cancelled`, `max_tokens`, `refusal`, or the agent's own. Needs `sessions:read` |
@@ -248,7 +248,7 @@ An item's index can change only for waiting cards: when one is answered it joins
 
 **`panel/open`** shows a panel: a sidebar panel becomes the sidebar's tab, a main panel opens in a pane or its pane is focused (see [Panels](#panels)). A prompt panel is always shown with the focused prompt box: `panel/open` does nothing for it.
 - It never takes the keyboard focus.
-- At most **one every 2 seconds** per extension, or `Too many panel opens; try again later`.
+- At most **one every 2 seconds** per extension, shared with `sessions/show`, or `Too many panel opens; try again later`.
 - A panel id not in your manifest gets `-32602`.
 - Typical use: a palette command without `prompt` → `command/run` → `panel/open`.
 
