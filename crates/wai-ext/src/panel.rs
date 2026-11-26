@@ -94,6 +94,8 @@ pub enum Node {
         text: Arc<str>,
         tone: Tone,
         sticky: bool,
+        /// API 1.10: opened by the click that closes the bubble.
+        url: Option<Arc<str>>,
     },
     Button {
         id: String,
@@ -777,6 +779,10 @@ impl Parser {
                     },
                     tone: tone(o).unwrap_or_default(),
                     sticky: flag(o, "sticky").unwrap_or(false),
+                    url: match o.get("url") {
+                        None => None,
+                        Some(url) => Some(url.as_str().filter(|url| web_url(url))?.into()),
+                    },
                 }
             }
             "button" => {
@@ -1118,7 +1124,8 @@ mod tests {
                 id: "say".into(),
                 text: "Oi".into(),
                 tone: Tone::Success,
-                sticky: true
+                sticky: true,
+                url: None
             })
         );
         let plain = parse(&json!({"type": "bubble", "id": "say", "text": "Oi"}));
@@ -1128,9 +1135,27 @@ mod tests {
                 id: "say".into(),
                 text: "Oi".into(),
                 tone: Tone::Neutral,
-                sticky: false
+                sticky: false,
+                url: None
             })
         );
+    }
+
+    #[test]
+    fn bubble_url_is_checked() {
+        let pr = "https://github.com/o/r/pull/1";
+        let Ok(Node::Bubble { url, .. }) =
+            parse(&json!({"type": "bubble", "id": "b", "text": "Oi", "url": pr}))
+        else {
+            panic!()
+        };
+        assert_eq!(url.as_deref(), Some(pr));
+        for bad in [json!("javascript:alert(1)"), json!("https://"), json!(3)] {
+            assert_eq!(
+                parse(&json!({"type": "bubble", "id": "b", "text": "Oi", "url": bad})),
+                Ok(Node::Unsupported)
+            );
+        }
     }
 
     #[test]

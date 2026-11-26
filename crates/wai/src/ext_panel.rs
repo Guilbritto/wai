@@ -338,7 +338,14 @@ impl ExtPanel {
         }
     }
 
-    fn bubble(&self, id: &str, tone: Tone, sticky: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn bubble(
+        &self,
+        id: &str,
+        tone: Tone,
+        sticky: bool,
+        url: Option<Arc<str>>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(bubble) = self.bubbles.get(id).filter(|b| !b.ended()) else {
             return div().into_any_element();
         };
@@ -428,7 +435,15 @@ impl ExtPanel {
                 this.ensure_ticker(cx);
                 cx.notify();
             }))
+            .when_some(url.clone(), |el, url| {
+                let tip = SharedString::from(&*url);
+                el.cursor_pointer()
+                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(url) = &url {
+                    cx.open_url(url);
+                }
                 let now = cx.background_executor().now();
                 if let Some(b) = this.bubbles.get_mut(&click_id) {
                     b.click(now);
@@ -796,9 +811,13 @@ impl ExtPanel {
             | Node::Spacer
             | Node::Kv(_) => leaf(node, k, cx),
             Node::Bubble {
-                id, tone, sticky, ..
+                id,
+                tone,
+                sticky,
+                url,
+                ..
             } => {
-                let bubble = self.bubble(id, *tone, *sticky, cx);
+                let bubble = self.bubble(id, *tone, *sticky, url.clone(), cx);
                 match self.foot {
                     // Above the foot, out of its height.
                     true => div()
@@ -2669,6 +2688,30 @@ mod tests {
         click(name("panel-bubble:say"), cx);
         cx.executor().advance_clock(ms(200));
         cx.run_until_parked();
+        assert_eq!(
+            *sent.borrow(),
+            vec![("say".to_string(), json!({"bubble": "click"}))]
+        );
+        assert_eq!(cx.opened_url(), None);
+    }
+
+    #[gpui_kit::test]
+    fn bubble_click_opens_its_url(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let pr = "https://github.com/o/r/pull/1";
+        let (panel, cx) = panel_window(cx);
+        let sent = actions(&panel, cx);
+        let bubble =
+            json!({"type": "bubble", "id": "say", "text": "Oi", "sticky": true, "url": pr});
+        show(&panel, bubble, cx);
+        // Shrunk to its "!" by now.
+        cx.executor().advance_clock(ms(7_000));
+        cx.run_until_parked();
+        click(name("panel-bubble:say"), cx);
+        cx.executor().advance_clock(ms(200));
+        cx.run_until_parked();
+        assert_eq!(cx.opened_url().as_deref(), Some(pr));
         assert_eq!(
             *sent.borrow(),
             vec![("say".to_string(), json!({"bubble": "click"}))]
