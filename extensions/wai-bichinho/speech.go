@@ -12,6 +12,7 @@ type line struct {
 	Prio       int
 	Sticky     bool
 	Chatter    bool
+	URL        string // the PR a click opens; "" for none
 }
 
 const (
@@ -38,11 +39,12 @@ func (sp *speech) show(l line, now time.Time) {
 }
 
 func (sp *speech) say(l line, now time.Time, asleep bool) {
-	if sp.cur != nil && sp.cur.Text == l.Text {
+	same := func(q line) bool { return q.Text == l.Text && q.URL == l.URL }
+	if sp.cur != nil && same(*sp.cur) {
 		return
 	}
 	for _, q := range sp.queue {
-		if q.Text == l.Text {
+		if same(q) {
 			return
 		}
 	}
@@ -52,13 +54,22 @@ func (sp *speech) say(l line, now time.Time, asleep bool) {
 		}
 		sp.chatted = now
 	}
-	if l.Prio == 3 && sp.cur != nil && !sp.cur.Sticky && sp.cur.Prio < 3 {
+	if l.Prio == 3 && sp.cur != nil && sp.cur.Prio < 3 {
+		// A sticky line steps aside and comes back after.
+		if sp.cur.Sticky {
+			sp.insert(*sp.cur, true)
+		}
 		sp.show(l, now)
 		return
 	}
+	sp.insert(l, false)
+}
+
+// insert queues l after the higher priorities, and after its own unless first.
+func (sp *speech) insert(l line, first bool) {
 	at := 0
 	for i, q := range sp.queue {
-		if q.Prio >= l.Prio {
+		if q.Prio > l.Prio || q.Prio == l.Prio && !first {
 			at = i + 1
 		}
 	}
@@ -98,13 +109,13 @@ func (sp *speech) unfocus() {
 	}
 }
 
-func (sp *speech) drop(kind string) {
-	if sp.cur != nil && sp.cur.Kind == kind {
+func (sp *speech) drop(match func(line) bool) {
+	if sp.cur != nil && match(*sp.cur) {
 		sp.cur = nil
 	}
 	keep := sp.queue[:0]
 	for _, q := range sp.queue {
-		if q.Kind != kind {
+		if !match(q) {
 			keep = append(keep, q)
 		}
 	}

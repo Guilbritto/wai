@@ -835,3 +835,89 @@ func TestLoadMigratesReplacedLines(t *testing.T) {
 		t.Errorf("seen: %v, want %v", st.Seen, want)
 	}
 }
+
+func pull(i int) string { return fmt.Sprintf("https://github.com/o/r/pull/%d", i) }
+
+// prsEvent is wai-waycarbon's prs.mine with one PR per reason, pull/1 first.
+func prsEvent(reasons ...string) string {
+	var list []string
+	for i, r := range reasons {
+		list = append(list, fmt.Sprintf(`{"url":%q,"reason":%q}`, pull(i+1), r))
+	}
+	return `{"jsonrpc":"2.0","method":"event/ext","params":{"source":"wai-waycarbon","name":"prs.mine","data":{"prs":[` + strings.Join(list, ",") + `]}}}`
+}
+
+// urlOf is the url of the bubble in the last dock render.
+func urlOf(msgs []map[string]any) string {
+	url := ""
+	for _, m := range msgs {
+		p, _ := m["params"].(map[string]any)
+		if m["method"] != "panel/render" || p["panel"] != petPanel {
+			continue
+		}
+		url = ""
+		for _, k := range p["tree"].(map[string]any)["children"].([]any) {
+			if n := k.(map[string]any); n["type"] == "bubble" {
+				url, _ = n["url"].(string)
+			}
+		}
+	}
+	return url
+}
+
+func withHatched(t *testing.T) *harness {
+	h := start(t, t.TempDir())
+	id, _, _ := bubbleOf(h.action("hatch"))
+	h.bubbleDone(id)
+	h.now = h.now.Add(time.Minute)
+	return h
+}
+
+func TestPRBubbleOpensItsPR(t *testing.T) {
+	h := withHatched(t)
+	msgs := h.send(prsEvent("waiting", "ci_failed"))
+	id, text, _ := bubbleOf(msgs)
+	if text != fallback["pr_fix"][0] || !sticky(msgs) || urlOf(msgs) != pull(2) {
+		t.Fatalf("the PR to fix, sticky: %q %v %q", text, sticky(msgs), urlOf(msgs))
+	}
+	h.bubbleDone(id)
+	h.now = h.now.Add(time.Minute)
+	msgs = h.send(prsEvent("approved", "ci_failed"))
+	if _, text, _ := bubbleOf(msgs); text != fallback["pr_approved"][0] || !sticky(msgs) || urlOf(msgs) != pull(1) {
+		t.Fatalf("the approved PR, sticky: %q %v %q", text, sticky(msgs), urlOf(msgs))
+	}
+}
+
+func TestUrgentStepsInFrontOfStickyPR(t *testing.T) {
+	h := withHatched(t)
+	h.send(prsEvent("ci_failed"))
+	msgs := h.send(`{"jsonrpc":"2.0","method":"event/session_state","params":{"agent":"claude","session":"s2","state":"needs_you"}}`)
+	if _, text, _ := bubbleOf(msgs); text != fallback["needs_you"][0] {
+		t.Fatalf("needs_you waits behind a PR: %q", text)
+	}
+	msgs = h.send(`{"jsonrpc":"2.0","method":"event/session_state","params":{"agent":"claude","session":"s2","state":"idle"}}`)
+	if _, text, _ := bubbleOf(msgs); text != fallback["pr_fix"][0] || urlOf(msgs) != pull(1) {
+		t.Fatalf("the PR comes back: %q %q", text, urlOf(msgs))
+	}
+}
+
+func TestPRBubbleLeavesWithItsPR(t *testing.T) {
+	h := withHatched(t)
+	h.send(prsEvent("ci_failed"))
+	if h.s.talk.cur == nil || h.s.talk.cur.URL != pull(1) {
+		t.Fatalf("PR bubble: %v", h.s.talk.cur)
+	}
+	h.send(prsEvent("waiting"))
+	if h.s.talk.cur != nil || len(h.s.talk.queue) > 0 {
+		t.Fatalf("a fixed PR's bubble stays: %v %v", h.s.talk.cur, h.s.talk.queue)
+	}
+	h.now = h.now.Add(time.Minute)
+	h.send(prsEvent("approved"))
+	if h.s.talk.cur == nil || h.s.talk.cur.Kind != "pr_approved" {
+		t.Fatalf("approved bubble: %v", h.s.talk.cur)
+	}
+	h.send(prsEvent())
+	if h.s.talk.cur != nil || len(h.s.talk.queue) > 0 {
+		t.Fatalf("a merged PR's bubble stays: %v %v", h.s.talk.cur, h.s.talk.queue)
+	}
+}

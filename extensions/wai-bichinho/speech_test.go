@@ -45,8 +45,20 @@ func TestUrgentJumpsAndReplaces(t *testing.T) {
 	st.next(t0)
 	st.say(n("b", 2), t0, false)
 	st.say(n("needs_you", 3), t0, false)
-	if st.cur.Kind != "a" || st.queue[0].Kind != "needs_you" {
-		t.Fatalf("cur = %v queue = %v", st.cur, st.queue)
+	if st.cur.Kind != "needs_you" || len(st.queue) != 2 || st.queue[0].Kind != "b" || st.queue[1].Kind != "a" {
+		t.Fatalf("a sticky line steps aside and comes back after its betters: cur = %v queue = %v", st.cur, st.queue)
+	}
+}
+
+func TestSameLineTwoPRs(t *testing.T) {
+	var sp speech
+	pr := func(url string) line { return line{Kind: "pr_fix", Text: "x", Prio: 2, Sticky: true, URL: url} }
+	sp.say(pr("https://github.com/o/r/pull/1"), t0, false)
+	sp.next(t0)
+	sp.say(pr("https://github.com/o/r/pull/2"), t0, false)
+	sp.say(pr("https://github.com/o/r/pull/1"), t0, false)
+	if sp.cur.URL != "https://github.com/o/r/pull/1" || len(sp.queue) != 1 || sp.queue[0].URL != "https://github.com/o/r/pull/2" {
+		t.Fatalf("cur = %v queue = %v", sp.cur, sp.queue)
 	}
 }
 
@@ -169,7 +181,7 @@ func TestDropKind(t *testing.T) {
 	sp.say(n("needs_you", 3), t0, false)
 	sp.say(n("a", 2), t0, false)
 	sp.next(t0)
-	sp.drop("needs_you")
+	sp.drop(func(l line) bool { return l.Kind == "needs_you" })
 	if sp.cur != nil || len(sp.queue) != 1 || sp.queue[0].Kind != "a" {
 		t.Fatalf("cur = %v queue = %v", sp.cur, sp.queue)
 	}

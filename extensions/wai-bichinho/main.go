@@ -216,30 +216,46 @@ func (s *server) countPRs(match func(string) bool) int {
 
 // gotPRs takes wai-waycarbon's prs.mine, the whole state each time, and flashes what changed since
 // the last one; the first only says once that PRs wait for a fix, without a flash or a note, so a
-// restart does not shout about old PRs.
+// restart does not shout about old PRs. A PR's line opens the first PR it is about, and leaves
+// when that PR leaves its state.
 func (s *server) gotPRs(list []struct{ URL, Reason string }) {
 	prs := map[string]string{}
 	first := s.prs == nil
-	fix, approved, waiting := false, false, false
+	fix, approved, waiting := "", "", ""
 	for _, p := range list {
 		prs[p.URL] = p.Reason
-		waiting = waiting || attention(p.Reason)
+		if waiting == "" && attention(p.Reason) {
+			waiting = p.URL
+		}
 		if !first && s.prs[p.URL] != p.Reason {
-			fix = fix || attention(p.Reason)
-			approved = approved || p.Reason == "approved"
+			if fix == "" && attention(p.Reason) {
+				fix = p.URL
+			}
+			if approved == "" && p.Reason == "approved" {
+				approved = p.URL
+			}
 		}
 	}
 	s.prs = prs
+	s.talk.drop(func(l line) bool {
+		switch l.Kind {
+		case "pr_fix":
+			return !attention(prs[l.URL])
+		case "pr_approved":
+			return prs[l.URL] != "approved"
+		}
+		return false
+	})
 	switch {
-	case first && waiting:
-		s.say("pr_fix")
-	case fix:
+	case first && waiting != "":
+		s.sayURL("pr_fix", waiting)
+	case fix != "":
 		s.react("alert")
-		s.say("pr_fix")
+		s.sayURL("pr_fix", fix)
 		s.note("a PR needs a fix")
-	case approved:
+	case approved != "":
 		s.react("happy")
-		s.say("pr_approved")
+		s.sayURL("pr_approved", approved)
 		s.note("a PR got approved")
 	}
 }
@@ -317,6 +333,9 @@ func (s *server) dockTree(now time.Time) node {
 	}
 	if c := s.talk.cur; c != nil {
 		bubble := node{"type": "bubble", "id": c.ID, "text": c.Text, "sticky": c.Sticky}
+		if c.URL != "" {
+			bubble["url"] = c.URL
+		}
 		switch c.Prio {
 		case 3:
 			bubble["tone"] = "warning"
@@ -436,7 +455,7 @@ func (s *server) render() {
 		needs = needs || state == "needs_you"
 	}
 	if !needs {
-		s.talk.drop("needs_you")
+		s.talk.drop(func(l line) bool { return l.Kind == "needs_you" })
 	}
 	s.talk.expire(now)
 	hungry, lonely, asleep := false, false, now.Sub(s.lastEvent) > sleepGap
