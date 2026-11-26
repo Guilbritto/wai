@@ -40,8 +40,8 @@ const EMIT_WINDOW: Duration = Duration::from_secs(1);
 const TOO_MANY_OPENS: &str = "Too many sessions opened; try again later";
 const TOO_MANY_SHOWS: &str = "Too many panel opens; try again later";
 
-/// An extension's `sessions/open`, `sessions/prompt`, `sessions/list` or `panel/open`, for the
-/// workspace to carry out (and answer through the event's `Reply`).
+/// An extension's `sessions/open`, `sessions/prompt`, `sessions/list`, `sessions/show` or
+/// `panel/open`, for the workspace to carry out (and answer through the event's `Reply`).
 pub struct SessionCall(Cell<Option<(ExtId, ExtEvent)>>);
 
 impl SessionCall {
@@ -559,7 +559,9 @@ impl ExtHost {
             ExtEvent::OpenSession { reply, .. } if !self.may_open(id) => {
                 return reply.send(Err(TOO_MANY_OPENS.into()));
             }
-            ExtEvent::OpenPanel { reply, .. } if !self.may_show(id) => {
+            ExtEvent::OpenPanel { reply, .. } | ExtEvent::ShowSession { reply, .. }
+                if !self.may_show(id) =>
+            {
                 return reply.send(Err(TOO_MANY_SHOWS.into()));
             }
             event @ (ExtEvent::OpenSession { .. }
@@ -567,6 +569,7 @@ impl ExtHost {
             | ExtEvent::ListSessions { .. }
             | ExtEvent::ReadSession { .. }
             | ExtEvent::CancelSession { .. }
+            | ExtEvent::ShowSession { .. }
             | ExtEvent::AnswerPermission { .. }
             | ExtEvent::AnswerQuestion { .. }
             | ExtEvent::OpenPanel { .. }) => {
@@ -2396,6 +2399,78 @@ pub(crate) mod tests {
             assert_eq!(w.panes.len(), 2);
             assert!(w.focused_pane < 2);
         });
+    }
+
+    /// API 1.11 `sessions/show` shows an open session in the focused pane, like a click in the
+    /// open list; it shares `panel/open`'s one per 2 s.
+    #[gpui_kit::test]
+    fn sessions_show_shows_and_rate_limits(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = "id = \"shower\"\nname = \"Shower\"\nversion = \"1.0.0\"\n\
+            permissions = [\"process\", \"sessions:control\"]\n[process]\ncommand = \"bin/run\"\n";
+        let show = r#"'sessions/show {"agent": "fake", "session": "fake-1"}'"#;
+        install(
+            tmp.path(),
+            &config,
+            manifest,
+            &format!("--call {show} --call {show}"),
+            "",
+        );
+        let (workspace, cx) = open(cx, fake_settings(""));
+        cx.executor().allow_parking();
+        let session = start_now(&workspace, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.close_pane(0, window, cx)));
+        workspace.read_with(cx, |w, _| {
+            assert!(w.panes.iter().all(|p| p.session().is_none()))
+        });
+        workspace.update(cx, |w, cx| {
+            w.user_dir = config.clone();
+            w.start_extensions(cx);
+        });
+        let log = log_path(tmp.path(), "shower");
+
+        let first = reply(&log, 1, cx);
+        assert!(
+            first["error"].is_null() && first["result"].is_null(),
+            "{first}"
+        );
+        workspace.read_with(cx, |w, _| {
+            let ix = w.panes.iter().position(|p| p.session() == Some(&session));
+            assert_eq!(ix, Some(w.focused_pane));
+        });
+        assert_eq!(
+            reply(&log, 2, cx)["error"]["message"],
+            "Too many panel opens; try again later"
+        );
+    }
+
+    /// `sessions/show` of a session that is not open is an error; without `sessions:control` it
+    /// is denied.
+    #[gpui_kit::test]
+    fn sessions_show_refuses(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = |id: &str, permissions: &str| {
+            format!(
+                "id = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\n\
+                 permissions = [{permissions}]\n[process]\ncommand = \"bin/run\"\n"
+            )
+        };
+        let call = r#"--call 'sessions/show {"agent": "fake", "session": "ghost"}'"#;
+        let lost = manifest("lost", "\"process\", \"sessions:control\"");
+        install(tmp.path(), &config, &lost, call, "");
+        let blind = manifest("blind", "\"process\"");
+        install(tmp.path(), &config, &blind, call, "");
+        let (_workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+
+        let lost = reply(&log_path(tmp.path(), "lost"), 1, cx);
+        assert_eq!(lost["error"]["message"], "No session fake ghost");
+        let blind = reply(&log_path(tmp.path(), "blind"), 1, cx);
+        assert_eq!(
+            blind["error"],
+            json!({"code": -32001, "message": "Permission denied: sessions:control"})
+        );
     }
 
     /// `panel/open` shows a main panel beside the editor without taking its keyboard; a second

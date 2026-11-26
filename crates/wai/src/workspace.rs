@@ -2014,6 +2014,17 @@ impl Workspace {
                 session,
                 reply,
             } => reply.send(self.cancel_session(&agent, &session, cx)),
+            ExtEvent::ShowSession {
+                agent,
+                session,
+                reply,
+            } => match self.session(&agent, &session, cx) {
+                Some(s) => {
+                    self.show(s, false, window, cx);
+                    reply.send(Ok(serde_json::Value::Null));
+                }
+                None => reply.send(Err(format!("No session {agent} {session}"))),
+            },
             ExtEvent::AnswerPermission {
                 agent,
                 session,

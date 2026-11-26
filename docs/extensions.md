@@ -83,7 +83,7 @@ Calls in both directions are checked against what the user **granted** at instal
 | `process` | Run `[process]`. Also required to contribute `agents` and `mcp_servers`, which run code |
 | `sessions:read` | `sessions/list`. Receive `event/session_state`, `event/turn_ended` and `event/session_focused` |
 | `sessions:content` | `sessions/read`. Receive `event/session_update`, `event/permission_requested`, `event/permission_resolved`, `event/question_requested` and `event/question_resolved`: what the user and the agents write. Shown as *Read your sessions' conversations*. It does not include `sessions:read`. API 1.10 |
-| `sessions:control` | `sessions/open`, `sessions/prompt`, and (API 1.10) `sessions/cancel`, `permission/answer` and `question/answer`. It does not include `sessions:read` |
+| `sessions:control` | `sessions/open`, `sessions/prompt`, and (API 1.10) `sessions/cancel`, `permission/answer` and `question/answer`, and (API 1.11) `sessions/show`. It does not include `sessions:read` |
 | `notify` | `notify`: system notifications |
 | `panels` | Contribute panels, `panel/render`, `panel/open`, and receive `panel/action` |
 | `bar` | Contribute bar items, `item/update`, and receive `item/action`. Shown as *Show items in the top and bottom bars* |
@@ -182,6 +182,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `sessions/list` | `sessions:read` | none | `[{"agent", "session", "title" (string or null), "state"}]`, one per open session |
 | `sessions/open` | `sessions:control` | `{"agent"?: string, "prompt"?: string, "send"?: bool, "background"?: bool}` | `{"agent", "session"}` once the session has started |
 | `sessions/prompt` | `sessions:control` | `{"agent", "session", "text"}` | `null` at once |
+| `sessions/show` | `sessions:control` | `{"agent", "session"}` | `null` once shown. API 1.11 |
 | `sessions/read` | `sessions:content` | `{"agent", "session", "from"?: int, "limit"?: int}` | `{"items": [item], "total": int}`. API 1.10 |
 | `sessions/cancel` | `sessions:control` | `{"agent", "session"}` | `null`. API 1.10 |
 | `permission/answer` | `sessions:control` | `{"agent", "session", "request": int, "option": "<option id>"}` | `null` once the agent has the answer. API 1.10 |
@@ -203,6 +204,8 @@ When an enabled extension with `[process]` and the `process` permission starts (
   - `The session was closed` if the user closed it while it started.
 
 **`sessions/prompt`** sends `text` to the session if it is idle. Otherwise the prompt is dropped (logged), and the result is still `null`.
+
+**`sessions/show`** (API 1.11) does what a click on the session's row in the open list does: it shows the session in the focused pane and focuses it. It counts with `panel/open`: at most one of the two per 2 s. If the session is not open, the error is `No session <agent> <session>`.
 
 **`sessions/read`** returns a page of the session's transcript (see [Transcript items](#transcript-items)): `limit` items from index `from`. Without `from`, the last `limit` items. `limit` defaults to 200 and is at most 500. `total` is the transcript's length, so the page starts at `total` minus the number of items when you left out `from`. A session that is not open is an error, `No open session <agent> <session>`; so is it for `sessions/cancel`, `permission/answer` and `question/answer`.
 

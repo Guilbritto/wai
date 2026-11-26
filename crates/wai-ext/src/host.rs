@@ -93,6 +93,12 @@ pub enum ExtEvent {
         session: String,
         reply: Reply,
     },
+    /// `sessions/show`: show an open session in the focused pane.
+    ShowSession {
+        agent: String,
+        session: String,
+        reply: Reply,
+    },
     /// `permission/answer`: answer a pending permission request with one of its options.
     AnswerPermission {
         agent: String,
@@ -707,6 +713,15 @@ impl Ext {
                 need(Permission::SessionsControl)?;
                 let p: SessionParams = params_of(params)?;
                 Call::Deferred(ExtEvent::CancelSession {
+                    agent: p.agent,
+                    session: p.session,
+                    reply: reply(),
+                })
+            }
+            "sessions/show" => {
+                need(Permission::SessionsControl)?;
+                let p: SessionParams = params_of(params)?;
+                Call::Deferred(ExtEvent::ShowSession {
                     agent: p.agent,
                     session: p.session,
                     reply: reply(),
