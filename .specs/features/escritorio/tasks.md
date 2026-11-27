@@ -140,9 +140,9 @@ T19 → T20
 
 **Done when**:
 
-- [ ] `panel_key_notification` (host test via `wai-fake-ext`) sees `{"panel","scene","key","repeat"}` arrive with no `id`
-- [ ] `panel_key_needs_panels` sees nothing sent without the permission
-- [ ] Gate check passes: `cargo test -p wai-ext`
+- [x] `panel_key_notification` (host test via `wai-fake-ext`) sees `{"panel","scene","key","repeat"}` arrive with no `id`
+- [x] `panel_key_needs_panels` sees nothing sent without the permission
+- [x] Gate check passes: `cargo test -p wai-ext`
 
 **Tests**: integration
 **Gate**: full

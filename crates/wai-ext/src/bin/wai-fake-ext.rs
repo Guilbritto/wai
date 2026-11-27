@@ -4,7 +4,8 @@
 //! titled `initialize` whose body is `{params, env_ext_dir, cwd}`. Every later message from wai
 //! is reported the same way (title: the method, body: its params); requests are answered with
 //! `null`. A response from wai (to a call, or an error with a null id) is reported titled `reply`,
-//! with the whole response as the body. Flags:
+//! with the whole response as the body. A `panel/key` is also reported titled `panel/key id`, with
+//! the message's `id` (`null` for a notification). Flags:
 //!
 //! - `--pid-file <path>`: write the process id there at start.
 //! - `--spawn-sleep <path>`: start `sleep 600` (unix) and write its process id there.
@@ -181,6 +182,12 @@ fn main() {
                 report(method, msg["params"].to_string());
                 if let Some(id) = msg.get("id") {
                     send(json!({"jsonrpc": "2.0", "id": id, "result": null}));
+                }
+                if method == "panel/key" {
+                    report(
+                        "panel/key id",
+                        msg.get("id").unwrap_or(&Value::Null).to_string(),
+                    );
                 }
                 if method == "item/action" {
                     let on = values("--on-action");

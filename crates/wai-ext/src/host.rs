@@ -358,6 +358,14 @@ impl ExtHandle {
         }
     }
 
+    /// A key pressed in a scene (API 1.10): a notification, so the extension never answers it.
+    pub fn panel_key(&self, panel: &str, scene: &str, key: &str, repeat: bool) {
+        if self.granted.contains(&Permission::Panels) {
+            let params = json!({"panel": panel, "scene": scene, "key": key, "repeat": repeat});
+            self.send("panel/key", params, false);
+        }
+    }
+
     pub fn item_action(&self, item: &str) {
         if self.granted.contains(&Permission::Bar) {
             self.send("item/action", json!({"item": item}), true);

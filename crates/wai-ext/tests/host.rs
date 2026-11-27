@@ -299,6 +299,44 @@ fn ungranted_call_denied() {
     });
 }
 
+#[test]
+fn panel_key_notification() {
+    let tmp = tempfile::tempdir().unwrap();
+    let granted = vec![Permission::Process, Permission::Notify, Permission::Panels];
+    let ext = installed(tmp.path(), &[], granted);
+    run(Duration::from_secs(10), async {
+        let (handle, rx) = ExtHandle::spawn(&ext, Path::new("/p"));
+        handle.panel_key("office", "map", "up", true);
+        assert_eq!(
+            reported(&rx, "panel/key").await,
+            json!({"panel": "office", "scene": "map", "key": "up", "repeat": true})
+        );
+        assert_eq!(reported(&rx, "panel/key id").await, json!(null));
+    });
+}
+
+#[test]
+fn panel_key_needs_panels() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ext = installed(
+        tmp.path(),
+        &[],
+        vec![Permission::Process, Permission::Notify],
+    );
+    run(Duration::from_secs(10), async {
+        let (handle, rx) = ExtHandle::spawn(&ext, Path::new("/p"));
+        handle.panel_key("office", "map", "up", false);
+        handle.run_command("probe");
+        let events = until(&rx, |e| title(e) == Some("command/run")).await;
+        let seen: Vec<_> = events.iter().filter_map(title).collect();
+        assert_eq!(
+            seen,
+            ["initialize", "command/run"],
+            "sent without permission"
+        );
+    });
+}
+
 /// The fake's reports in its `--log` file, once `done` holds for them.
 fn logged(log: &Path, mut done: impl FnMut(&[Value]) -> bool) -> Vec<Value> {
     let deadline = Instant::now() + Duration::from_secs(10);
