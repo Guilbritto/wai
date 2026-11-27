@@ -98,10 +98,11 @@ impl Workspace {
             Some((m.ext.clone(), m.id.clone(), rest))
         });
         if let Some((ext, id, text)) = to {
-            if !text.is_empty() {
-                (self.ext_host.read(cx)).mention_message(&ext, &id, &text, None, None);
-                draft.update(cx, |d, cx| d.clear(window, cx));
+            if text.is_empty() {
+                return;
             }
+            (self.ext_host.read(cx)).mention_message(&ext, &id, &text, None, None);
+            draft.update(cx, |d, cx| d.clear(window, cx));
             return;
         }
         let d = draft.read(cx);
@@ -1259,5 +1260,13 @@ mod tests {
         );
         draft.read_with(cx, |d, cx| assert_eq!(d.text(cx), ""));
         workspace.read_with(cx, |w, _| assert!(w.sessions.is_empty()));
+
+        cx.simulate_input("@Bolota");
+        cx.simulate_keystrokes("escape enter");
+        draft.read_with(cx, |d, cx| assert_eq!(d.text(cx), "@Bolota"));
+        workspace.read_with(cx, |w, cx| {
+            assert_eq!(w.ext_host.read(cx).mentioned.borrow().len(), 1);
+            assert!(w.sessions.is_empty());
+        });
     }
 }

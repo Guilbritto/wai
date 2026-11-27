@@ -368,27 +368,30 @@ impl ChatSession {
     /// Sends the prompt, its files with it: from an idle session as a prompt; during a turn into
     /// it when the agent steers, else into the queue until it ends.
     pub(super) fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let message = trimmed(&self.input.read(cx).content());
         let live = cx.try_global::<mentions::ExtMentions>();
         let to = live.and_then(|l| {
-            let (m, rest) = mentions::addressed(&trimmed(&self.input.read(cx).content()), &l.0)?;
+            let (m, rest) = mentions::addressed(&message, &l.0)?;
             Some((m.ext.clone(), m.id.clone(), rest))
         });
         if let Some((ext, id, text)) = to {
-            if !text.is_empty() {
-                let typed = self.input.read(cx).value().to_string();
+            if text.is_empty() {
+                // Enter's own newline landed before this ran: the box keeps just the mention.
                 self.input
-                    .update(cx, |input, cx| input.set_value("", window, cx));
-                super::composer::set_typing(cx.entity_id(), self.prompt_typed(cx), cx);
-                let agent = sent(&self.model.items, &[]).len();
-                self.sent_mentions.push((agent, typed.trim().to_string()));
-                cx.emit(ChatEvent::Mention { ext, id, text });
+                    .update(cx, |input, cx| input.set_value(message, window, cx));
+                return;
             }
+            self.input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            super::composer::set_typing(cx.entity_id(), self.prompt_typed(cx), cx);
+            let agent = sent(&self.model.items, &[]).len();
+            self.sent_mentions.push((agent, message.text().to_string()));
+            cx.emit(ChatEvent::Mention { ext, id, text });
             return;
         }
         if self.is_starting() || (!self.model.in_turn && self.model.state != TurnState::Idle) {
             return;
         }
-        let message = trimmed(&self.input.read(cx).content());
         if message.text().is_empty() {
             return;
         }

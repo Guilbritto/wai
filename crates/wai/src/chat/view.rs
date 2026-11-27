@@ -4891,7 +4891,7 @@ mod tests {
 
         cx.simulate_input("@Bolota");
         cx.simulate_keystrokes("escape enter");
-        assert_eq!(typed(&session, cx).trim_end(), "@Bolota");
+        assert_eq!(typed(&session, cx), "@Bolota");
         assert_eq!(mentioned(&workspace, cx).len(), 1);
     }
 
