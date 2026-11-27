@@ -610,7 +610,7 @@ Proof: run go | --- PASS: TestNameRejectsControlChars
 ## Handoff
 
 **Settled mid-build:** 2026-11-26 - OFC-14: token field stays empty on "Change setup", an empty submit keeps the saved token - user: "Token vazio, mantém o salvo"; T15 art: chairs and plants on carpet get carpet-backed variants - user: "Aprovo e corrige o fundo"
-**Dispatched:** batch 1 (Phases 1-2, T1-T7) - sonnet worker - 2026-11-26 - returned (79e0c54..4cd1565); batch 2 (Phases 3-4, T8-T13) - sonnet worker - 2026-11-26 - returned (c534b49..5a6f088); batch 3 (Phases 5-6, T14-T20) - sonnet worker - 2026-11-26
+**Dispatched:** batch 1 (Phases 1-2, T1-T7) - sonnet worker - 2026-11-26 - returned (79e0c54..4cd1565); batch 2 (Phases 3-4, T8-T13) - sonnet worker - 2026-11-26 - returned (c534b49..5a6f088); batch 3 (Phases 5-6, T14-T20) - sonnet worker - 2026-11-26 - returned (4e0132a..2f855fd)
 **Walked:** none
 
 ---
