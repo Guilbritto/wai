@@ -349,8 +349,8 @@ T19 → T20
 
 **Done when**:
 
-- [ ] `TestSetupRejectsBadName`, `TestSetupSavedPrivate`, `TestSetupRefusesPlainRemote` pass
-- [ ] Gate check passes: Quick
+- [x] `TestSetupRejectsBadName`, `TestSetupSavedPrivate`, `TestSetupRefusesPlainRemote` pass
+- [x] Gate check passes: Quick
 
 **Tests**: unit
 **Gate**: quick
@@ -610,7 +610,7 @@ Proof: run go | --- PASS: TestNameRejectsControlChars
 ## Handoff
 
 **Settled mid-build:** none
-**Dispatched:** batch 1 (Phases 1-2, T1-T7) - sonnet worker - 2026-11-26 - returned (79e0c54..4cd1565); batch 2 (Phases 3-4, T8-T13) - sonnet worker - 2026-11-26
+**Dispatched:** batch 1 (Phases 1-2, T1-T7) - sonnet worker - 2026-11-26 - returned (79e0c54..4cd1565); batch 2 (Phases 3-4, T8-T13) - sonnet worker - 2026-11-26 - returned (c534b49..5a6f088); batch 3 (Phases 5-6, T14-T20) - sonnet worker - 2026-11-26
 **Walked:** none
 
 ---

@@ -14,6 +14,9 @@ const (
 	StatusNeedsYou Status = "needs_you"
 )
 
+// Avatars is how many avatar looks there are; an avatar is 0 to Avatars-1.
+const Avatars = 8
+
 // NearbyRadius is the Chebyshev distance that counts as nearby.
 const NearbyRadius = 3
 

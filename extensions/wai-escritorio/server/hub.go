@@ -12,9 +12,8 @@ import (
 )
 
 const (
-	maxPeople   = 50
-	avatarCount = 8
-	outBuffer   = 256
+	maxPeople = 50
+	outBuffer = 256
 )
 
 // Identity is who a connection is. It never holds the token.
@@ -37,7 +36,7 @@ func authenticate(h office.Hello, token string) (Identity, error) {
 	if subtle.ConstantTimeCompare([]byte(h.Token), []byte(token)) != 1 {
 		return Identity{}, errToken
 	}
-	if !office.ValidName(h.Name) || h.Avatar < 0 || h.Avatar >= avatarCount {
+	if !office.ValidName(h.Name) || h.Avatar < 0 || h.Avatar >= office.Avatars {
 		return Identity{}, errHello
 	}
 	return Identity{Name: h.Name, Avatar: h.Avatar}, nil
