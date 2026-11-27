@@ -68,10 +68,35 @@ pub enum ChatEvent {
     },
     /// R87: the header's ×, to take the pane showing this session off the screen.
     Hide,
+    /// A prompt that starts with a mention: the extension takes `text`.
+    Mention {
+        ext: wai_ext::ExtId,
+        id: String,
+        text: String,
+    },
     /// Esc or Stop in a chat whose session has not started: back to the draft.
     StopStart,
     /// The session's `long_context` changed.
     ContextChanged,
+    /// Transcript item `ix` is new or changed. The transcript is `model.items`, then the cards
+    /// in `model.waiting`.
+    ItemsChanged(usize),
+    /// Permission request `id` waits for an answer.
+    PermissionAsked(u64),
+    /// Permission request `id` closed: `option` is the chosen option's id, `None` when the
+    /// agent resolved it (a cancelled turn, say).
+    PermissionAnswered {
+        id: u64,
+        option: Option<String>,
+    },
+    /// Question `id` waits for an answer.
+    QuestionAsked(u64),
+    /// Question `id` closed: `answer` is `accept`, `decline` or `cancel` (also when the agent
+    /// resolved it).
+    QuestionAnswered {
+        id: u64,
+        answer: &'static str,
+    },
 }
 
 /// Brings `map[key]` up to date with `text`: creates it, pushes the new tail, or starts over
@@ -182,6 +207,9 @@ pub struct ChatSession {
     pub(super) menu_closed: bool,
     /// The sent message ↑ put back in the prompt box, by its place among those sent.
     pub(super) recalled: Option<usize>,
+    /// The mention messages sent from this box, as typed, each with how many agent messages
+    /// were sent before it.
+    pub(super) sent_mentions: Vec<(usize, String)>,
     pub(super) registry: WeakEntity<AgentRegistry>,
     /// Per `Agent`/`Thought` row.
     pub(super) texts: HashMap<usize, Markdown>,
@@ -298,6 +326,7 @@ impl ChatSession {
             menu_scroll: ScrollHandle::new(),
             menu_closed: false,
             recalled: None,
+            sent_mentions: Vec::new(),
             registry,
             texts: HashMap::new(),
             sub_texts: HashMap::new(),
@@ -556,10 +585,8 @@ impl ChatSession {
             .find(|v| v.id == option.current)
             .map_or(&option.current, |v| &v.name);
         let label = wai_settings::agent_label(&self.agent);
-        self.model.notice(
-            format!("{label} no longer offers the model {model}; using {current}."),
-            NoticeKind::Info,
-        );
+        let text = format!("{label} no longer offers the model {model}; using {current}.");
+        self.update_model(cx, |m| m.notice(text, NoticeKind::Info));
         self.sync_rows(None, cx);
     }
 
@@ -676,6 +703,7 @@ impl ChatSession {
         let Some(ix) = self.update_model(cx, |m| m.apply(ev)) else {
             return cx.notify(); // header: title, usage, mode
         };
+        cx.emit(ChatEvent::ItemsChanged(ix));
         let located = match ev {
             SessionEvent::ToolCall(_) => true,
             SessionEvent::ToolCallUpdate(p) => p.locations.is_some(),
@@ -713,34 +741,43 @@ impl ChatSession {
     pub fn handle_permission(&mut self, req: PermissionRequest, cx: &mut Context<Self>) {
         let diffs = self.permission_diffs(&req);
         self.card_diffs.insert(req.id, diffs);
+        let id = req.id;
         self.update_model(cx, |m| m.on_permission(req));
+        cx.emit(ChatEvent::PermissionAsked(id));
         cx.notify();
     }
 
     /// Resolutions reach every session of the agent; the model ignores ids it does not hold.
     pub fn handle_permission_resolved(&mut self, id: u64, cx: &mut Context<Self>) {
+        let before = self.waiting_cards();
         self.update_model(cx, |m| m.on_permission_resolved(id));
+        self.report_resolved(before, cx);
         self.card_diffs.remove(&id);
         self.sync_rows(None, cx);
         cx.notify();
     }
 
     pub fn handle_question(&mut self, req: QuestionRequest, cx: &mut Context<Self>) {
+        let id = req.id;
         self.update_model(cx, |m| m.on_question(req));
+        cx.emit(ChatEvent::QuestionAsked(id));
         cx.notify();
     }
 
     /// The agent's form had a field wai cannot show; wai-agent already declined it.
     pub fn handle_question_unsupported(&mut self, cx: &mut Context<Self>) {
-        self.model
-            .notice(UNSUPPORTED_QUESTION.into(), NoticeKind::Info);
+        self.update_model(cx, |m| {
+            m.notice(UNSUPPORTED_QUESTION.into(), NoticeKind::Info)
+        });
         self.sync_rows(None, cx);
         cx.notify();
     }
 
     /// Like permissions, resolutions reach every session of the agent.
     pub fn handle_question_resolved(&mut self, id: u64, cx: &mut Context<Self>) {
+        let before = self.waiting_cards();
         self.update_model(cx, |m| m.on_question_resolved(id));
+        self.report_resolved(before, cx);
         self.questions.remove(&id);
         self.sync_rows(None, cx);
         cx.notify();
@@ -852,7 +889,9 @@ impl ChatSession {
 
     /// The agent process died: every session on it shows the error and a Restart button.
     pub fn handle_agent_exited(&mut self, error: &str, cx: &mut Context<Self>) {
+        let before = self.waiting_cards();
         self.update_model(cx, |m| m.on_exited(Some(error)));
+        self.report_resolved(before, cx);
         self.sync_rows(None, cx);
         self.release_queue(false, cx);
         cx.notify();
@@ -871,6 +910,30 @@ impl ChatSession {
         self.turn.as_ref().map(|(at, ..)| *at)
     }
 
+    /// The waiting cards: whether each is a question, and its id.
+    fn waiting_cards(&self) -> Vec<(bool, u64)> {
+        let cards = self.model.waiting.iter().filter_map(|card| match card {
+            ChatItem::Permission { request, .. } => Some((false, request.id)),
+            ChatItem::Question { request, .. } => Some((true, request.id)),
+            _ => None,
+        });
+        cards.collect()
+    }
+
+    /// Reports the cards of `before` that no longer wait as resolved by the agent.
+    fn report_resolved(&self, before: Vec<(bool, u64)>, cx: &mut Context<Self>) {
+        let now = self.waiting_cards();
+        for (question, id) in before.into_iter().filter(|card| !now.contains(card)) {
+            cx.emit(match question {
+                false => ChatEvent::PermissionAnswered { id, option: None },
+                true => ChatEvent::QuestionAnswered {
+                    id,
+                    answer: "cancel",
+                },
+            });
+        }
+    }
+
     /// Runs `f` on the model and reports state and title changes.
     pub(super) fn update_model<R>(
         &mut self,
@@ -878,7 +941,15 @@ impl ChatSession {
         f: impl FnOnce(&mut ChatModel) -> R,
     ) -> R {
         let (state, title) = (self.model.state.clone(), self.model.title.clone());
+        let rows = (self.model.items.len(), self.model.waiting.len());
         let result = f(&mut self.model);
+        // New rows, and the waiting cards after them, which move as rows join.
+        let (items, waiting) = (self.model.items.len(), self.model.waiting.len());
+        if (items, waiting) != rows {
+            for ix in rows.0.min(items)..items + waiting {
+                cx.emit(ChatEvent::ItemsChanged(ix));
+            }
+        }
         if self.model.state != state {
             self.since = Some(Instant::now());
             cx.emit(ChatEvent::StateChanged);
@@ -1016,23 +1087,31 @@ impl ChatSession {
         diff_views(diffs, locations, &self.cwd)
     }
 
-    pub(super) fn answer(
+    /// Whether the agent took the answer: else it had already resolved the request.
+    pub(crate) fn answer(
         &mut self,
         request: u64,
         choice: &PermissionChoice,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let sent = self
             .handle
             .answer_permission(request, Some(choice.id.clone()));
+        let option = sent.is_ok().then(|| choice.id.clone());
         self.update_model(cx, |m| match sent {
             Ok(()) => m.on_permission_answered(request, &choice.name),
             // Already resolved on the agent's side (cancelled, say).
             Err(_) => m.on_permission_resolved(request),
         });
+        let taken = option.is_some();
+        cx.emit(ChatEvent::PermissionAnswered {
+            id: request,
+            option,
+        });
         self.card_diffs.remove(&request);
         self.sync_rows(None, cx);
         cx.notify();
+        taken
     }
 
     pub(crate) fn set_mode(&mut self, mode: String, cx: &mut Context<Self>) {
@@ -1191,7 +1270,7 @@ mod tests {
     };
     use wai_settings::{AppState, Change, OpenSession, Processing, Settings};
 
-    use super::ChatSession;
+    use super::{ChatEvent, ChatSession};
     use crate::agents::RegistryEvent;
     use crate::chat::input::{Message, insert_files};
     use crate::chat::model::{
@@ -4589,5 +4668,266 @@ mod tests {
         cx.update(|window, cx| session.update(cx, |s, cx| s.set_long_context(true, window, cx)));
         assert!(!session.read_with(cx, |s, _| s.long_context));
         assert!(!is_long(&workspace, &session, cx));
+    }
+
+    /// What a session reported for extensions: its card events as `(event, id, detail)`, and the
+    /// transcript rows it said changed.
+    #[derive(Default)]
+    struct Reported {
+        cards: Vec<(&'static str, u64, Option<String>)>,
+        rows: Vec<usize>,
+    }
+
+    fn reported(
+        session: &Entity<ChatSession>,
+        cx: &mut VisualTestContext,
+    ) -> Rc<RefCell<Reported>> {
+        let seen = Rc::new(RefCell::new(Reported::default()));
+        let log = seen.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(session, move |_, event: &ChatEvent, _| {
+                let mut log = log.borrow_mut();
+                let card = match event {
+                    ChatEvent::ItemsChanged(ix) => return log.rows.push(*ix),
+                    ChatEvent::PermissionAsked(id) => ("permission_asked", *id, None),
+                    ChatEvent::PermissionAnswered { id, option } => {
+                        ("permission_answered", *id, option.clone())
+                    }
+                    ChatEvent::QuestionAsked(id) => ("question_asked", *id, None),
+                    ChatEvent::QuestionAnswered { id, answer } => {
+                        ("question_answered", *id, Some(answer.to_string()))
+                    }
+                    _ => return,
+                };
+                log.cards.push(card);
+            })
+            .detach()
+        });
+        seen
+    }
+
+    /// The index of the first permission or question card among the closed rows.
+    fn closed_card(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> usize {
+        session.read_with(cx, |s, _| {
+            (s.model.items.iter())
+                .position(|i| matches!(i, ChatItem::Permission { .. } | ChatItem::Question { .. }))
+                .expect("a closed card")
+        })
+    }
+
+    /// HOST-04/06, QST-01/03: a card opening and a click closing it are reported with the chosen
+    /// option (or the answer's kind), and the rows they touched with them.
+    #[gpui_kit::test]
+    fn remote_card_events_follow_clicks(cx: &mut TestAppContext, qx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--ask-permission"));
+        let session = start_session(&workspace, cx);
+        let seen = reported(&session, cx);
+        send("edit", cx);
+        wait_until(cx, "the permission card", |cx| {
+            state(&session, cx) == TurnState::NeedsYou
+        });
+        // The waiting card follows the closed rows.
+        let waiting = session.read_with(cx, |s, _| s.model.items.len());
+        assert_eq!(seen.borrow().cards, [("permission_asked", 1, None)]);
+        assert!(
+            seen.borrow().rows.contains(&waiting),
+            "{:?}",
+            seen.borrow().rows
+        );
+        seen.borrow_mut().rows.clear();
+
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.click("perm-allow_once", cx);
+        });
+        wait_until(cx, "the answer", |cx| {
+            state(&session, cx) == TurnState::Idle
+        });
+        assert_eq!(
+            seen.borrow().cards,
+            [
+                ("permission_asked", 1, None),
+                ("permission_answered", 1, Some("allow-once".into())),
+            ]
+        );
+        let (card, last) = (
+            closed_card(&session, cx),
+            session.read_with(cx, |s, _| s.model.items.len() - 1),
+        );
+        let rows = &seen.borrow().rows;
+        assert!(rows.contains(&card), "the closed card's row: {rows:?}");
+        assert!(rows.contains(&last), "the reply's row: {rows:?}");
+
+        qx.executor().allow_parking();
+        let (workspace, cx) = open(qx, fake_settings("--ask-question"));
+        let session = start_session(&workspace, cx);
+        let seen = reported(&session, cx);
+        send("ask", cx);
+        wait_until(cx, "the question card", |cx| {
+            state(&session, cx) == TurnState::NeedsYou
+        });
+        let waiting = session.read_with(cx, |s, _| s.model.items.len());
+        assert_eq!(seen.borrow().cards, [("question_asked", 1, None)]);
+        assert!(seen.borrow().rows.contains(&waiting));
+        seen.borrow_mut().rows.clear();
+
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.within("field-color").click(1usize, cx);
+        });
+        cx.update(|window, cx| window.click("question-submit", cx));
+        wait_until(cx, "the answer", |cx| {
+            state(&session, cx) == TurnState::Idle
+        });
+        assert_eq!(
+            seen.borrow().cards,
+            [
+                ("question_asked", 1, None),
+                ("question_answered", 1, Some("accept".into())),
+            ]
+        );
+        let card = closed_card(&session, cx);
+        assert!(seen.borrow().rows.contains(&card));
+    }
+
+    /// HOST-06: a card the agent resolves itself (the turn was stopped) closes with no option.
+    #[gpui_kit::test]
+    fn remote_agent_resolution_has_no_option(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings("--ask-permission"));
+        let session = start_session(&workspace, cx);
+        let seen = reported(&session, cx);
+        send("edit", cx);
+        wait_until(cx, "the permission card", |cx| {
+            state(&session, cx) == TurnState::NeedsYou
+        });
+        session.read_with(cx, |s, _| s.stop());
+        wait_until(cx, "the cancelled turn", |cx| {
+            state(&session, cx) == TurnState::Idle
+        });
+        assert_eq!(
+            seen.borrow().cards,
+            [
+                ("permission_asked", 1, None),
+                ("permission_answered", 1, None),
+            ]
+        );
+        let card = closed_card(&session, cx);
+        assert!(seen.borrow().rows.contains(&card));
+    }
+
+    /// Extension mentions come before the files in the `@` menu; Enter puts one in as a token.
+    #[gpui_kit::test]
+    fn at_lists_extension_mentions_first(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bolo.txt"), "").unwrap();
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        session.update(cx, |s, _| s.cwd = dir.path().to_path_buf());
+        let bolota = crate::ext_host::ExtMention {
+            ext: wai_ext::ExtId::new("wai-bichinho").unwrap(),
+            id: "pet".into(),
+            name: "Bolota".into(),
+            ext_name: "Bichinho".into(),
+            icon: None,
+        };
+        cx.update(|_, cx| cx.set_global(crate::chat::ExtMentions(vec![bolota])));
+
+        cx.simulate_input("@bo");
+        wait_until(cx, "mentions", |cx| shows(("mention", 1usize), cx));
+        assert!(!shows(("mention", 2usize), cx));
+        cx.simulate_keystrokes("enter");
+        assert_eq!(typed(&session, cx), "@Bolota ");
+        let tokens = session.read_with(cx, |s, cx| s.input.read(cx).tokens().to_vec());
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].range(), 0..7);
+        assert_eq!(tokens[0].token().id(), "wai-mention:wai-bichinho:pet");
+
+        cx.simulate_input("@bo");
+        cx.simulate_keystrokes("down enter");
+        assert_eq!(typed(&session, cx), "@Bolota @bolo.txt ");
+    }
+
+    fn live_bolota(cx: &mut VisualTestContext) {
+        let bolota = crate::ext_host::ExtMention {
+            ext: wai_ext::ExtId::new("wai-bichinho").unwrap(),
+            id: "pet".into(),
+            name: "Bolota".into(),
+            ext_name: "Bichinho".into(),
+            icon: None,
+        };
+        cx.update(|_, cx| cx.set_global(crate::chat::ExtMentions(vec![bolota])));
+    }
+
+    fn mentioned(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(wai_ext::ExtId, String, String)> {
+        workspace.read_with(cx, |w, cx| w.ext_host.read(cx).mentioned.borrow().clone())
+    }
+
+    fn bichinho(id: &str, text: &str) -> (wai_ext::ExtId, String, String) {
+        (
+            wai_ext::ExtId::new("wai-bichinho").unwrap(),
+            id.into(),
+            text.into(),
+        )
+    }
+
+    /// A prompt that starts with a mention goes to its extension, not to the agent.
+    #[gpui_kit::test]
+    fn mention_message_goes_to_the_extension(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        live_bolota(cx);
+
+        send("@Bolota quais PRs?", cx);
+        assert_eq!(typed(&session, cx), "");
+        session.read_with(cx, |s, _| assert!(s.model.items.is_empty()));
+        assert_eq!(mentioned(&workspace, cx), [bichinho("pet", "quais PRs?")]);
+
+        cx.simulate_input("@Bolota");
+        cx.simulate_keystrokes("escape enter");
+        assert_eq!(typed(&session, cx), "@Bolota");
+        assert_eq!(mentioned(&workspace, cx).len(), 1);
+    }
+
+    /// A mention does not wait for the turn: it is not queued or steered.
+    #[gpui_kit::test]
+    fn mention_skips_a_running_turn(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        live_bolota(cx);
+        session.update(cx, |s, _| s.model.in_turn = true);
+
+        send("@Bolota oi", cx);
+        assert_eq!(mentioned(&workspace, cx), [bichinho("pet", "oi")]);
+        session.read_with(cx, |s, _| {
+            assert!(s.queued.is_empty());
+            assert!(s.model.items.is_empty());
+        });
+    }
+
+    /// ↑ walks the mention messages sent here with the agent's, in send order.
+    #[gpui_kit::test]
+    fn recall_brings_back_a_mention_message(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        live_bolota(cx);
+
+        send("first", cx);
+        wait_until(cx, "the reply", |cx| {
+            state(&session, cx) == TurnState::Idle && last_agent_text(&session, cx).is_some()
+        });
+        send("@Bolota oi", cx);
+        cx.simulate_keystrokes("up");
+        assert_eq!(typed(&session, cx), "@Bolota oi");
+        cx.simulate_keystrokes("up");
+        assert_eq!(typed(&session, cx), "first");
     }
 }

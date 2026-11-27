@@ -49,7 +49,7 @@ A wai extension for a virtual office with Gather's mechanics (2D map, avatars, p
 
 ### Scene format
 
-- The scene node carries a palette and character patterns in the JSON; wai paints the map once and tweens sprites (user: "Paleta + padrões no JSON"), over a PNG tileset and an incremental scene protocol. AD-001.
+- The scene node carries a palette and character patterns in the JSON; wai paints the map once and tweens sprites (user: "Paleta + padrões no JSON"), over a PNG tileset and an incremental scene protocol. AD-002.
 
 ### wai integration
 

@@ -1,4 +1,4 @@
-//! A panel's `scene` node (API 1.10): the pure parts. The tile layer's pixels, the view's scroll,
+//! A panel's `scene` node (API 1.14): the pure parts. The tile layer's pixels, the view's scroll,
 //! the sprites' tween and the labels' stacking, all clock- and window-free.
 
 use std::cell::Cell;

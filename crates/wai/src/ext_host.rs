@@ -21,8 +21,8 @@ use gpui_kit::*;
 use wai_agent::McpServer;
 use wai_ext::panel::{ItemState, clamp};
 use wai_ext::{
-    Bar, CommandSpec, ExtEvent, ExtHandle, ExtId, HostEvent, Installed, PanelLocation, PanelSpec,
-    Permission,
+    Bar, CommandSpec, ExtEvent, ExtHandle, ExtId, HostEvent, Installed, Mention, PanelLocation,
+    PanelSpec, Permission,
 };
 use wai_settings::{AgentConfig, Template};
 
@@ -31,8 +31,9 @@ use crate::notify;
 
 /// Events applied per wake of an extension's pump: a flooding one cannot hold the UI thread.
 const MAX_BATCH: usize = 256;
-/// At most one notification, one `sessions/open` and one `panel/open` per 2 s per extension: the
-/// excess notifications are dropped, the excess opens refused.
+/// At most one notification, one `sessions/open`, and one `panel/open` or `sessions/show` per 2 s
+/// per extension (`panel/open` and `sessions/show` share that slot): the excess notifications are
+/// dropped, the excess opens refused.
 const CALL_GAP: Duration = Duration::from_secs(2);
 /// At most `EMIT_LIMIT` `events/emit` per `EMIT_WINDOW` per extension; the excess is dropped.
 const EMIT_LIMIT: u32 = 20;
@@ -40,8 +41,8 @@ const EMIT_WINDOW: Duration = Duration::from_secs(1);
 const TOO_MANY_OPENS: &str = "Too many sessions opened; try again later";
 const TOO_MANY_SHOWS: &str = "Too many panel opens; try again later";
 
-/// An extension's `sessions/open`, `sessions/prompt`, `sessions/list` or `panel/open`, for the
-/// workspace to carry out (and answer through the event's `Reply`).
+/// An extension's `sessions/open`, `sessions/prompt`, `sessions/list`, `sessions/show` or
+/// `panel/open`, for the workspace to carry out (and answer through the event's `Reply`).
 pub struct SessionCall(Cell<Option<(ExtId, ExtEvent)>>);
 
 impl SessionCall {
@@ -74,6 +75,16 @@ pub(crate) fn panel_icon(spec: &PanelSpec, ext_dir: &Path) -> Option<PanelIcon> 
         return ok.then(|| PanelIcon::Svg(path.to_string_lossy().into_owned().into()));
     }
     spec.icon.as_deref().and_then(lucide).map(PanelIcon::Lucide)
+}
+
+/// A name an extension registered for the `@` menu (`mentions/set`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtMention {
+    pub ext: ExtId,
+    pub id: String,
+    pub name: String,
+    pub ext_name: String,
+    pub icon: Option<PanelIcon>,
 }
 
 /// A panel an extension contributes: a sidebar tab, or a pane in the main area.
@@ -147,12 +158,14 @@ struct Running {
     notified: Option<Instant>,
     /// When it last opened a session.
     opened: Option<Instant>,
-    /// When it last showed one of its panels (`panel/open`).
+    /// When it last showed one of its panels (`panel/open`) or a session (`sessions/show`).
     shown: Option<Instant>,
     /// The start and count of its current `events/emit` window.
     emitted: Option<(Instant, u32)>,
     /// What each item last said (`item/update`); empty again for a fresh process.
     items: HashMap<String, ItemState>,
+    /// What it last registered (`mentions/set`); empty again for a fresh process.
+    mentions: Vec<Mention>,
     _pump: Task<()>,
 }
 
@@ -167,6 +180,12 @@ pub struct ExtHost {
     /// The last `event/session_focused`, sent again to an extension that starts. Set while the
     /// workspace renders, so not through an update.
     focused: RefCell<Option<(Option<String>, Option<String>)>>,
+    /// Every broadcast, for tests that run no extension.
+    #[cfg(test)]
+    pub(crate) sent: RefCell<Vec<HostEvent>>,
+    /// Every `mention_message`, for tests that run no extension.
+    #[cfg(test)]
+    pub(crate) mentioned: RefCell<Vec<(ExtId, String, String)>>,
 }
 
 impl ExtHost {
@@ -177,6 +196,10 @@ impl ExtHost {
             panels: Vec::new(),
             enabled: Vec::new(),
             focused: RefCell::new(None),
+            #[cfg(test)]
+            sent: RefCell::default(),
+            #[cfg(test)]
+            mentioned: RefCell::default(),
         }
     }
 
@@ -283,6 +306,40 @@ impl ExtHost {
         items.collect()
     }
 
+    /// The live enabled extensions' mentions, in the list's order.
+    pub fn mentions(&self) -> Vec<ExtMention> {
+        let mentions = self.enabled.iter().flat_map(|i| {
+            let ext = &i.manifest.id;
+            let running = self.running.get(ext).filter(|r| r.status.live());
+            let icon =
+                (i.manifest.contributes.panels.iter()).find_map(|spec| panel_icon(spec, &i.dir));
+            (running.into_iter().flat_map(|r| r.mentions.iter())).map(move |m| ExtMention {
+                ext: ext.clone(),
+                id: m.id.clone(),
+                name: m.name.clone(),
+                ext_name: i.manifest.name.clone(),
+                icon: icon.clone(),
+            })
+        });
+        mentions.collect()
+    }
+
+    /// `mention/message`, to a running extension.
+    pub fn mention_message(
+        &self,
+        ext: &ExtId,
+        id: &str,
+        text: &str,
+        agent: Option<&str>,
+        session: Option<&str>,
+    ) {
+        #[cfg(test)]
+        (self.mentioned.borrow_mut()).push((ext.clone(), id.to_string(), text.to_string()));
+        if let Some(handle) = self.handle(ext) {
+            handle.mention_message(id, text, agent, session);
+        }
+    }
+
     /// `item/action`, to a running extension.
     pub fn item_action(&self, ext: &ExtId, item: &str) {
         if let Some(handle) = self.handle(ext) {
@@ -309,6 +366,8 @@ impl ExtHost {
 
     /// Tells every running extension, as far as each was granted what `event` needs.
     pub fn broadcast(&self, event: HostEvent) {
+        #[cfg(test)]
+        self.sent.borrow_mut().push(event.clone());
         for running in self.running.values() {
             running.handle.notify_event(event.clone());
         }
@@ -417,7 +476,7 @@ impl ExtHost {
         (self.running.get_mut(id)).is_some_and(|r| allow(&mut r.opened, Instant::now()))
     }
 
-    /// Whether extension `id` may show a panel now, at most once per `CALL_GAP`.
+    /// Whether extension `id` may show a panel or session now, at most once per `CALL_GAP`.
     fn may_show(&mut self, id: &ExtId) -> bool {
         (self.running.get_mut(id)).is_some_and(|r| allow(&mut r.shown, Instant::now()))
     }
@@ -500,6 +559,7 @@ impl ExtHost {
             shown: None,
             emitted: None,
             items: HashMap::new(),
+            mentions: Vec::new(),
             _pump: pump,
         };
         self.running.insert(id, running);
@@ -558,16 +618,32 @@ impl ExtHost {
                 }
                 return;
             }
+            ExtEvent::Mentions { names } => {
+                if let Some(running) = self.running.get_mut(id).filter(|r| r.status.live())
+                    && running.mentions != names
+                {
+                    running.mentions = names;
+                    cx.notify();
+                }
+                return;
+            }
             ExtEvent::Notify { title, body } => return self.notify(id, &title, &body),
             ExtEvent::OpenSession { reply, .. } if !self.may_open(id) => {
                 return reply.send(Err(TOO_MANY_OPENS.into()));
             }
-            ExtEvent::OpenPanel { reply, .. } if !self.may_show(id) => {
+            ExtEvent::OpenPanel { reply, .. } | ExtEvent::ShowSession { reply, .. }
+                if !self.may_show(id) =>
+            {
                 return reply.send(Err(TOO_MANY_SHOWS.into()));
             }
             event @ (ExtEvent::OpenSession { .. }
             | ExtEvent::Prompt { .. }
             | ExtEvent::ListSessions { .. }
+            | ExtEvent::ReadSession { .. }
+            | ExtEvent::CancelSession { .. }
+            | ExtEvent::ShowSession { .. }
+            | ExtEvent::AnswerPermission { .. }
+            | ExtEvent::AnswerQuestion { .. }
             | ExtEvent::OpenPanel { .. }) => {
                 return cx.emit(SessionCall(Cell::new(Some((id.clone(), event)))));
             }
@@ -576,6 +652,7 @@ impl ExtHost {
             if !status.live() {
                 self.panels.retain(|p| p.ext != *id);
                 running.items.clear();
+                running.mentions.clear();
             }
             running.status = status;
             cx.notify();
@@ -787,6 +864,32 @@ pub(crate) mod tests {
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.close_settings(window, cx)));
     }
 
+    /// API 1.13 `mentions/set` registers names for the `@` menu, only while the extension runs.
+    #[gpui_kit::test]
+    fn mentions_follow_the_extension(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = "id = \"pets\"\nname = \"Pets\"\nversion = \"1.0.0\"\n\
+            permissions = [\"process\", \"mentions\"]\n[process]\ncommand = \"bin/run\"\n";
+        let calls = r#"--call 'mentions/set {"names":[{"id":"pet","name":"Bolota"}]}'"#;
+        install(tmp.path(), &config, manifest, calls, "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        let mentions = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, cx| w.ext_host.read(cx).mentions())
+        };
+        wait_until(cx, "the mention", |cx| !mentions(cx).is_empty());
+        let got = mentions(cx);
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            (got[0].name.as_str(), got[0].id.as_str()),
+            ("Bolota", "pet")
+        );
+        assert_eq!(got[0].ext_name, "Pets");
+
+        disable_first(&workspace, cx);
+        assert_eq!(mentions(cx), []);
+    }
+
     /// An extension's agent joins the registry as `<ext-id>/<name>`, its command resolved in the
     /// extension's folder and spawned from wai's cwd (R18), and its sessions work like any
     /// agent's. Disabling the extension removes it and shuts it down: its session sees it exit.
@@ -970,6 +1073,36 @@ pub(crate) mod tests {
         let first = items(&session, cx).into_iter().next();
         assert!(matches!(first, Some(ChatItem::User { text }) if text == "go"));
         assert_eq!(session.read_with(cx, |s, cx| s.draft(cx)), "");
+    }
+
+    /// API 1.11 `sessions/open` with `background` takes no pane: the session is in the open list only.
+    #[gpui_kit::test]
+    fn sessions_open_in_background(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = "id = \"opener\"\nname = \"Opener\"\nversion = \"1.0.0\"\n\
+            permissions = [\"process\", \"sessions:control\"]\n\
+            [process]\ncommand = \"bin/run\"\n";
+        let calls = r#"--call 'sessions/open {"agent": "fake", "prompt": "go", "send": true, "background": true}'"#;
+        install(tmp.path(), &config, manifest, calls, "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        let log = log_path(tmp.path(), "opener");
+        let panes = workspace.read_with(cx, |w, _| w.panes.len());
+
+        assert_eq!(
+            reply(&log, 1, cx)["result"],
+            json!({"agent": "fake", "session": "fake-1"})
+        );
+        let session = workspace.read_with(cx, |w, _| w.sessions[0].clone());
+        wait_until(
+            cx,
+            "the answer",
+            |cx| matches!(items(&session, cx).last(), Some(ChatItem::Agent { text }) if text == "Hello from fake agent"),
+        );
+        workspace.read_with(cx, |w, _| {
+            assert_eq!(w.panes.len(), panes, "no pane added");
+            assert!(w.panes.iter().all(|p| p.session().is_none()), "in no pane");
+        });
     }
 
     /// Without `sessions:control`, `sessions/open` is denied in wai-ext and opens nothing.
@@ -2365,6 +2498,78 @@ pub(crate) mod tests {
             assert_eq!(w.panes.len(), 2);
             assert!(w.focused_pane < 2);
         });
+    }
+
+    /// API 1.11 `sessions/show` shows an open session in the focused pane, like a click in the
+    /// open list; it shares `panel/open`'s one per 2 s.
+    #[gpui_kit::test]
+    fn sessions_show_shows_and_rate_limits(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = "id = \"shower\"\nname = \"Shower\"\nversion = \"1.0.0\"\n\
+            permissions = [\"process\", \"sessions:control\"]\n[process]\ncommand = \"bin/run\"\n";
+        let show = r#"'sessions/show {"agent": "fake", "session": "fake-1"}'"#;
+        install(
+            tmp.path(),
+            &config,
+            manifest,
+            &format!("--call {show} --call {show}"),
+            "",
+        );
+        let (workspace, cx) = open(cx, fake_settings(""));
+        cx.executor().allow_parking();
+        let session = start_now(&workspace, cx);
+        cx.update(|window, cx| workspace.update(cx, |w, cx| w.close_pane(0, window, cx)));
+        workspace.read_with(cx, |w, _| {
+            assert!(w.panes.iter().all(|p| p.session().is_none()))
+        });
+        workspace.update(cx, |w, cx| {
+            w.user_dir = config.clone();
+            w.start_extensions(cx);
+        });
+        let log = log_path(tmp.path(), "shower");
+
+        let first = reply(&log, 1, cx);
+        assert!(
+            first["error"].is_null() && first["result"].is_null(),
+            "{first}"
+        );
+        workspace.read_with(cx, |w, _| {
+            let ix = w.panes.iter().position(|p| p.session() == Some(&session));
+            assert_eq!(ix, Some(w.focused_pane));
+        });
+        assert_eq!(
+            reply(&log, 2, cx)["error"]["message"],
+            "Too many panel opens; try again later"
+        );
+    }
+
+    /// `sessions/show` of a session that is not open is an error; without `sessions:control` it
+    /// is denied.
+    #[gpui_kit::test]
+    fn sessions_show_refuses(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = |id: &str, permissions: &str| {
+            format!(
+                "id = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\n\
+                 permissions = [{permissions}]\n[process]\ncommand = \"bin/run\"\n"
+            )
+        };
+        let call = r#"--call 'sessions/show {"agent": "fake", "session": "ghost"}'"#;
+        let lost = manifest("lost", "\"process\", \"sessions:control\"");
+        install(tmp.path(), &config, &lost, call, "");
+        let blind = manifest("blind", "\"process\"");
+        install(tmp.path(), &config, &blind, call, "");
+        let (_workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+
+        let lost = reply(&log_path(tmp.path(), "lost"), 1, cx);
+        assert_eq!(lost["error"]["message"], "No session fake ghost");
+        let blind = reply(&log_path(tmp.path(), "blind"), 1, cx);
+        assert_eq!(
+            blind["error"],
+            json!({"code": -32001, "message": "Permission denied: sessions:control"})
+        );
     }
 
     /// `panel/open` shows a main panel beside the editor without taking its keyboard; a second

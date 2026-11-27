@@ -119,13 +119,13 @@ This is delivery 1 of 4 (see `context.md`, Slicing): a shared map with walking a
 
 **Acceptance Criteria**:
 
-1. WHERE an extension declares API 1.10 or later, the system SHALL draw a scene node: a grid of colour tiles and sprites placed on tiles, each sprite with an optional name label and badge.  <!-- OFC-30 -->
+1. WHERE an extension declares API 1.14 or later, the system SHALL draw a scene node: a grid of colour tiles and sprites placed on tiles, each sprite with an optional name label and badge.  <!-- OFC-30 -->
 2. WHEN an extension renders a scene in which a sprite's tile changed THEN the system SHALL move that sprite to its new tile within 150 ms.  <!-- OFC-31 -->
 3. WHILE a panel with a scene has the keyboard focus, WHEN the user presses a key THEN the system SHALL send the extension the panel id, the scene id and the key's name.  <!-- OFC-32 -->
 4. WHEN the user clicks a scene THEN the system SHALL give that panel the keyboard focus.  <!-- OFC-33 -->
 5. IF a scene is larger than its panel THEN the system SHALL show the part around the tile the extension marks as the view's centre.  <!-- OFC-34 -->
 6. IF a scene node breaks the node rules (missing field, too many tiles or sprites) THEN the system SHALL show "Unsupported element" in its place, as for other nodes.  <!-- OFC-35 -->
-7. The extension guide (`docs/extensions.md`) SHALL document the scene node, the key event, their limits and API 1.10.  <!-- OFC-36 -->
+7. The extension guide (`docs/extensions.md`) SHALL document the scene node, the key event, their limits and API 1.14.  <!-- OFC-36 -->
 
 **Independent Test**: A test extension renders a 10 × 10 scene with one sprite and moves the sprite on each key it receives; the sprite follows the arrow keys while the pane has the focus, and nothing is sent once another pane has it.
 

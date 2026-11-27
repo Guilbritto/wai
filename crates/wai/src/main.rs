@@ -19,6 +19,7 @@ mod ext_bubble;
 mod ext_host;
 mod ext_panel;
 mod ext_scene;
+mod ext_sessions;
 mod extensions_view;
 mod files;
 mod git;

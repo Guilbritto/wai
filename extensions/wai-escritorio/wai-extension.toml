@@ -2,7 +2,7 @@ id = "wai-escritorio"
 name = "Escritório"
 version = "0.1.0"
 description = "A shared office map inside wai: walk your avatar, see who is around and whose agents are working"
-api = "1.10"
+api = "1.14"
 permissions = ["process", "panels", "sessions:read", "network"]
 
 [process]

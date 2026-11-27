@@ -27,7 +27,7 @@ Worktree: `.claude/worktrees/escritorio`, branch `feat/escritorio`, its own `tar
 | Code Layer | Required Test Type | Coverage Expectation | Location Pattern | Run Command |
 | ---------- | ------------------ | -------------------- | ---------------- | ----------- |
 | Panel schema (`wai-ext/src/panel.rs`) | unit | Every scene rule: valid parse, each limit and each bad field → Unsupported; 1:1 to OFC-30, OFC-35 | `#[cfg(test)] mod tests` in `panel.rs` | `cargo test -p wai-ext` |
-| Extension host / manifest (`wai-ext/src/host.rs`, `manifest.rs`) | integration | `panel/key` round trip through the fake extension; API 1.10 accepted, 1.11 refused | `crates/wai-ext/tests/host.rs`, `tests/manifest.rs` | `cargo test -p wai-ext` |
+| Extension host / manifest (`wai-ext/src/host.rs`, `manifest.rs`) | integration | `panel/key` round trip through the fake extension; API 1.14 accepted, 1.15 refused | `crates/wai-ext/tests/host.rs`, `tests/manifest.rs` | `cargo test -p wai-ext` |
 | Scene pure functions (`wai/src/ext_scene.rs`) | unit | All branches of `rasterise`, `viewport`, `tween`, label stacking; 1:1 to OFC-11, 31, 34, 62 | `#[cfg(test)] mod tests` in `ext_scene.rs` | `cargo test -p wai scene` |
 | Scene element, focus, keys (`wai/src/ext_scene.rs`, `ext_panel.rs`, `ext_host.rs`) | integration (GPUI `TestAppContext`) | Draws, click focuses, keys emitted with panel/scene/key, ⌘ keys not sent, Unsupported on bad tree | `ext_panel.rs` tests (`panel_window`/`show` helpers) | `cargo test -p wai scene` |
 | `office` package (Go) | unit | All branches; 1:1 to OFC-02, 06, 07, 28, 40, 50-52, 61, 63 | `extensions/wai-escritorio/office/*_test.go` | `go test ./... -v` |
@@ -112,9 +112,9 @@ T19 → T20
 
 ---
 
-### T2: Bump the extension API to 1.10
+### T2: Bump the extension API to 1.14
 
-**What**: `API = "1.10"`; manifests asking 1.10 load, 1.11 is refused with "this wai has 1.10".
+**What**: `API = "1.14"`; manifests asking 1.14 load, 1.15 is refused with "this wai has 1.14".
 **Where**: `crates/wai-ext/src/manifest.rs`
 **Depends on**: T1
 **Reuses**: `check_api` (`manifest.rs:412-430`), tests `tests/manifest.rs:295-320`, `tests/host.rs:128`
@@ -122,7 +122,7 @@ T19 → T20
 
 **Done when**:
 
-- [x] `api_versions` test covers 1.10 ok and 1.11 too old
+- [x] `api_versions` test covers 1.14 ok and 1.15 too old
 - [x] Gate check passes: `cargo test -p wai-ext`
 
 **Tests**: integration
@@ -206,7 +206,7 @@ T19 → T20
 
 ---
 
-### T7: Document scene, `panel/key` and API 1.10
+### T7: Document scene, `panel/key` and API 1.14
 
 **What**: `docs/extensions.md`: the scene row and its rules, the `panel/key` row, the `api` version list, the version mentions; `panel.rs:13` doc comment.
 **Where**: `docs/extensions.md`
@@ -560,8 +560,8 @@ Proof: run wai | test ext_scene::tests::viewport_centres_first_time ... ok
 **C30** - A scene breaking a rule (missing field, too many tiles or sprites) is Unsupported (OFC-35, AC 6)
 Proof: run ext | test panel::tests::scene_rules_unsupported ... ok
 
-**C31** - `docs/extensions.md` documents the scene node, `panel/key` and API 1.10 (OFC-36, AC 7)
-Proof: `grep -q '| \`scene\`' docs/extensions.md && grep -q '\`panel/key\`' docs/extensions.md && grep -q '"1.10"' docs/extensions.md`
+**C31** - `docs/extensions.md` documents the scene node, `panel/key` and API 1.14 (OFC-36, AC 7)
+Proof: `grep -q '| \`scene\`' docs/extensions.md && grep -q '\`panel/key\`' docs/extensions.md && grep -q '"1.14"' docs/extensions.md`
 
 **C32** - The presence panel lists every connected person by name and marks those within 3 tiles "Nearby" (OFC-40, AC 1)
 Proof: run go | --- PASS: TestPresenceListsNearby
@@ -609,7 +609,7 @@ Proof: run go | --- PASS: TestNameRejectsControlChars
 
 ## Handoff
 
-**Settled mid-build:** 2026-11-26 - OFC-14: token field stays empty on "Change setup", an empty submit keeps the saved token - user: "Token vazio, mantém o salvo"; T15 art: chairs and plants on carpet get carpet-backed variants - user: "Aprovo e corrige o fundo"
+**Settled mid-build:** 2026-11-26 - OFC-14: token field stays empty on "Change setup", an empty submit keeps the saved token - user: "Token vazio, mantém o salvo"; T15 art: chairs and plants on carpet get carpet-backed variants - user: "Aprovo e corrige o fundo"; 2026-11-26 - extension API renumbered 1.10 → 1.14 for scene and `panel/key`: development shipped 1.10 to 1.13 meanwhile, so the next free number is 1.14; decisions renumbered AD-002 (art) and AD-003 (websocket) behind development's AD-001 - agent, forced by the merge, no behaviour change
 **Dispatched:** batch 1 (Phases 1-2, T1-T7) - sonnet worker - 2026-11-26 - returned (79e0c54..4cd1565); batch 2 (Phases 3-4, T8-T13) - sonnet worker - 2026-11-26 - returned (c534b49..5a6f088); batch 3 (Phases 5-6, T14-T20) - sonnet worker - 2026-11-26 - returned (4e0132a..2f855fd); Verifier - sonnet - HEAD b3d7e4f - 2026-11-26 - returned (FAIL, 13 findings); fix worker - sonnet - 2026-11-26 - returned (76d467d..364fbf7)
 **Walked:** 2026-11-26 - not walked in the running app: the owner was away and this Mac has no UI automation (osascript UI scripting off, no cliclick). In its place: the T15 art was rendered to PNG from the real scene and approved by the user; `scene_keys_reach_extension_in_workspace` opens the scene in a main pane of the real workspace, clicks it and presses up, w, space, and the fake extension logs each as `panel/key`; `e2e_test.go` runs two clients against a live server (a move seen within 200 ms, a status within 1 s, a second login replacing the first). To reach each state: `go build -o wai-escritorio-server ./server && ./wai-escritorio-server -config office.json` (README), open the Office tab, fill name, server and token, Enter; click the map, arrows or WASD to walk.
 

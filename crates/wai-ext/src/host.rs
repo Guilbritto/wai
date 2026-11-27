@@ -39,6 +39,12 @@ const INIT_ID: u64 = 0;
 // and extension spawns is deferred past v0.1.0 (R70).
 static SPAWN: Mutex<()> = Mutex::new(());
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Mention {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug)]
 pub enum ExtEvent {
     /// `initialize` answered: after the start and after each restart.
@@ -55,6 +61,10 @@ pub enum ExtEvent {
         item: String,
         state: ItemState,
     },
+    /// `mentions/set`: the extension's whole new list of names.
+    Mentions {
+        names: Vec<Mention>,
+    },
     Notify {
         title: String,
         body: String,
@@ -68,6 +78,7 @@ pub enum ExtEvent {
         agent: Option<String>,
         prompt: Option<String>,
         send: bool,
+        background: bool,
         reply: Reply,
     },
     Prompt {
@@ -76,6 +87,44 @@ pub enum ExtEvent {
         text: String,
     },
     ListSessions {
+        reply: Reply,
+    },
+    /// `sessions/read`: a page of the transcript, `{items, total}`.
+    ReadSession {
+        agent: String,
+        session: String,
+        from: Option<usize>,
+        limit: Option<usize>,
+        reply: Reply,
+    },
+    /// `sessions/cancel`: stop the running turn.
+    CancelSession {
+        agent: String,
+        session: String,
+        reply: Reply,
+    },
+    /// `sessions/show`: show an open session in the focused pane.
+    ShowSession {
+        agent: String,
+        session: String,
+        reply: Reply,
+    },
+    /// `permission/answer`: answer a pending permission request with one of its options.
+    AnswerPermission {
+        agent: String,
+        session: String,
+        request: u64,
+        option: String,
+        reply: Reply,
+    },
+    /// `question/answer`: `answer` is `accept` (with `values` by field key), `decline` or
+    /// `cancel`.
+    AnswerQuestion {
+        agent: String,
+        session: String,
+        request: u64,
+        answer: String,
+        values: Option<serde_json::Map<String, Value>>,
         reply: Reply,
     },
     /// `panel/open`: show the panel, a contributed one.
@@ -122,12 +171,50 @@ pub enum HostEvent {
         name: String,
         data: Value,
     },
+    /// Transcript items that changed, by index; `total` is the transcript's length.
+    SessionUpdate {
+        agent: String,
+        session: String,
+        total: usize,
+        items: Vec<(usize, Value)>,
+    },
+    /// `options`: `[{id, name, kind}]`.
+    PermissionRequested {
+        agent: String,
+        session: String,
+        request: u64,
+        title: String,
+        options: Value,
+    },
+    /// `option` is `None` when the agent resolved it (a cancelled turn).
+    PermissionResolved {
+        agent: String,
+        session: String,
+        request: u64,
+        option: Option<String>,
+    },
+    /// `fields`: `[{key, title, description, required, kind, choices}]`.
+    QuestionRequested {
+        agent: String,
+        session: String,
+        request: u64,
+        message: String,
+        fields: Value,
+    },
+    /// `answer`: `accept`, `decline` or `cancel`.
+    QuestionResolved {
+        agent: String,
+        session: String,
+        request: u64,
+        answer: String,
+    },
 }
 
 impl HostEvent {
     /// The notification and the permission it needs.
     fn message(self) -> (&'static str, Value, Option<Permission>) {
         let read = Some(Permission::SessionsRead);
+        let content = Some(Permission::SessionsContent);
         match self {
             Self::SessionState {
                 agent,
@@ -161,6 +248,65 @@ impl HostEvent {
                 "event/ext",
                 json!({"source": source.as_str(), "name": name, "data": data}),
                 Some(Permission::Events(source)),
+            ),
+            Self::SessionUpdate {
+                agent,
+                session,
+                total,
+                items,
+            } => {
+                let items: Vec<Value> = (items.into_iter())
+                    .map(|(index, item)| json!({"index": index, "item": item}))
+                    .collect();
+                (
+                    "event/session_update",
+                    json!({"agent": agent, "session": session, "total": total, "items": items}),
+                    content,
+                )
+            }
+            Self::PermissionRequested {
+                agent,
+                session,
+                request,
+                title,
+                options,
+            } => (
+                "event/permission_requested",
+                json!({"agent": agent, "session": session, "request": request, "title": title,
+                    "options": options}),
+                content,
+            ),
+            Self::PermissionResolved {
+                agent,
+                session,
+                request,
+                option,
+            } => (
+                "event/permission_resolved",
+                json!({"agent": agent, "session": session, "request": request, "option": option}),
+                content,
+            ),
+            Self::QuestionRequested {
+                agent,
+                session,
+                request,
+                message,
+                fields,
+            } => (
+                "event/question_requested",
+                json!({"agent": agent, "session": session, "request": request,
+                    "message": message, "fields": fields}),
+                content,
+            ),
+            Self::QuestionResolved {
+                agent,
+                session,
+                request,
+                answer,
+            } => (
+                "event/question_resolved",
+                json!({"agent": agent, "session": session, "request": request, "answer": answer}),
+                content,
             ),
         }
     }
@@ -358,11 +504,24 @@ impl ExtHandle {
         }
     }
 
-    /// A key pressed in a scene (API 1.10): a notification, so the extension never answers it.
+    /// A key pressed in a scene (API 1.14): a notification, so the extension never answers it.
     pub fn panel_key(&self, panel: &str, scene: &str, key: &str, repeat: bool) {
         if self.granted.contains(&Permission::Panels) {
             let params = json!({"panel": panel, "scene": scene, "key": key, "repeat": repeat});
             self.send("panel/key", params, false);
+        }
+    }
+
+    pub fn mention_message(
+        &self,
+        id: &str,
+        text: &str,
+        agent: Option<&str>,
+        session: Option<&str>,
+    ) {
+        if self.granted.contains(&Permission::Mentions) {
+            let params = json!({"id": id, "text": text, "agent": agent, "session": session});
+            self.send("mention/message", params, true);
         }
     }
 
@@ -557,6 +716,7 @@ impl Ext {
                     agent: p.agent,
                     prompt: p.prompt,
                     send: p.send,
+                    background: p.background,
                     reply: reply(),
                 })
             }
@@ -569,6 +729,58 @@ impl Ext {
                     text: p.text,
                 })
             }
+            "sessions/read" => {
+                need(Permission::SessionsContent)?;
+                let p: ReadParams = params_of(params)?;
+                Call::Deferred(ExtEvent::ReadSession {
+                    agent: p.agent,
+                    session: p.session,
+                    from: p.from,
+                    limit: p.limit,
+                    reply: reply(),
+                })
+            }
+            "sessions/cancel" => {
+                need(Permission::SessionsControl)?;
+                let p: SessionParams = params_of(params)?;
+                Call::Deferred(ExtEvent::CancelSession {
+                    agent: p.agent,
+                    session: p.session,
+                    reply: reply(),
+                })
+            }
+            "sessions/show" => {
+                need(Permission::SessionsControl)?;
+                let p: SessionParams = params_of(params)?;
+                Call::Deferred(ExtEvent::ShowSession {
+                    agent: p.agent,
+                    session: p.session,
+                    reply: reply(),
+                })
+            }
+            "permission/answer" => {
+                need(Permission::SessionsControl)?;
+                let p: PermissionAnswerParams = params_of(params)?;
+                Call::Deferred(ExtEvent::AnswerPermission {
+                    agent: p.agent,
+                    session: p.session,
+                    request: p.request,
+                    option: p.option,
+                    reply: reply(),
+                })
+            }
+            "question/answer" => {
+                need(Permission::SessionsControl)?;
+                let p: QuestionAnswerParams = params_of(params)?;
+                Call::Deferred(ExtEvent::AnswerQuestion {
+                    agent: p.agent,
+                    session: p.session,
+                    request: p.request,
+                    answer: p.answer,
+                    values: p.values,
+                    reply: reply(),
+                })
+            }
             "notify" => {
                 need(Permission::Notify)?;
                 let p: NotifyParams = params_of(params)?;
@@ -576,6 +788,20 @@ impl Ext {
                     title: p.title,
                     body: p.body,
                 })
+            }
+            "mentions/set" => {
+                need(Permission::Mentions)?;
+                let p: MentionsParams = params_of(params)?;
+                for Mention { name, .. } in &p.names {
+                    if !(1..=32).contains(&name.chars().count())
+                        || name.chars().any(char::is_whitespace)
+                    {
+                        let error =
+                            format!("bad mention name {name:?}: 1 to 32 characters, no blanks");
+                        return Err(RpcError::new(rpc::INVALID_PARAMS, error));
+                    }
+                }
+                Call::Done(ExtEvent::Mentions { names: p.names })
             }
             "events/emit" => {
                 let p: EmitParams = params_of(params)?;
@@ -654,6 +880,8 @@ struct OpenParams {
     prompt: Option<String>,
     #[serde(default)]
     send: bool,
+    #[serde(default)]
+    background: bool,
 }
 
 #[derive(Deserialize)]
@@ -664,10 +892,46 @@ struct PromptParams {
 }
 
 #[derive(Deserialize)]
+struct ReadParams {
+    agent: String,
+    session: String,
+    from: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct SessionParams {
+    agent: String,
+    session: String,
+}
+
+#[derive(Deserialize)]
+struct PermissionAnswerParams {
+    agent: String,
+    session: String,
+    request: u64,
+    option: String,
+}
+
+#[derive(Deserialize)]
+struct QuestionAnswerParams {
+    agent: String,
+    session: String,
+    request: u64,
+    answer: String,
+    values: Option<serde_json::Map<String, Value>>,
+}
+
+#[derive(Deserialize)]
 struct NotifyParams {
     title: String,
     #[serde(default)]
     body: String,
+}
+
+#[derive(Deserialize)]
+struct MentionsParams {
+    names: Vec<Mention>,
 }
 
 #[derive(Deserialize)]

@@ -8,7 +8,7 @@ import (
 var t0 = time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 
 func n(kind string, prio int) line { return line{Kind: kind, Text: kind, Prio: prio} }
-func chat(kind string) line        { return line{Kind: kind, Text: kind, Prio: 1, Chatter: true} }
+func chatter(kind string) line     { return line{Kind: kind, Text: kind, Prio: 1, Chatter: true} }
 
 func TestOneLineAtATimeWithGap(t *testing.T) {
 	var sp speech
@@ -45,8 +45,20 @@ func TestUrgentJumpsAndReplaces(t *testing.T) {
 	st.next(t0)
 	st.say(n("b", 2), t0, false)
 	st.say(n("needs_you", 3), t0, false)
-	if st.cur.Kind != "a" || st.queue[0].Kind != "needs_you" {
-		t.Fatalf("cur = %v queue = %v", st.cur, st.queue)
+	if st.cur.Kind != "needs_you" || len(st.queue) != 2 || st.queue[0].Kind != "b" || st.queue[1].Kind != "a" {
+		t.Fatalf("a sticky line steps aside and comes back after its betters: cur = %v queue = %v", st.cur, st.queue)
+	}
+}
+
+func TestSameLineTwoPRs(t *testing.T) {
+	var sp speech
+	pr := func(url string) line { return line{Kind: "pr_fix", Text: "x", Prio: 2, Sticky: true, URL: url} }
+	sp.say(pr("https://github.com/o/r/pull/1"), t0, false)
+	sp.next(t0)
+	sp.say(pr("https://github.com/o/r/pull/2"), t0, false)
+	sp.say(pr("https://github.com/o/r/pull/1"), t0, false)
+	if sp.cur.URL != "https://github.com/o/r/pull/1" || len(sp.queue) != 1 || sp.queue[0].URL != "https://github.com/o/r/pull/2" {
+		t.Fatalf("cur = %v queue = %v", sp.cur, sp.queue)
 	}
 }
 
@@ -84,17 +96,17 @@ func TestQueueCapDropsLowest(t *testing.T) {
 
 func TestChatterLimitedAndQuietAsleep(t *testing.T) {
 	var sp speech
-	sp.say(chat("a"), t0, false)
-	sp.say(chat("b"), t0.Add(time.Minute), false)
+	sp.say(chatter("a"), t0, false)
+	sp.say(chatter("b"), t0.Add(time.Minute), false)
 	if len(sp.queue) != 1 {
 		t.Fatalf("queue = %v", sp.queue)
 	}
-	sp.say(chat("c"), t0.Add(16*time.Minute), false)
+	sp.say(chatter("c"), t0.Add(16*time.Minute), false)
 	if len(sp.queue) != 2 {
 		t.Fatalf("queue = %v", sp.queue)
 	}
 	var sl speech
-	sl.say(chat("a"), t0, true)
+	sl.say(chatter("a"), t0, true)
 	sl.say(n("b", 2), t0, true)
 	if len(sl.queue) != 1 || sl.queue[0].Kind != "b" {
 		t.Fatalf("queue = %v", sl.queue)
@@ -169,8 +181,33 @@ func TestDropKind(t *testing.T) {
 	sp.say(n("needs_you", 3), t0, false)
 	sp.say(n("a", 2), t0, false)
 	sp.next(t0)
-	sp.drop("needs_you")
+	sp.drop(func(l line) bool { return l.Kind == "needs_you" })
 	if sp.cur != nil || len(sp.queue) != 1 || sp.queue[0].Kind != "a" {
 		t.Fatalf("cur = %v queue = %v", sp.cur, sp.queue)
+	}
+}
+
+func TestRequeuedStickySurvivesFullQueue(t *testing.T) {
+	var sp speech
+	pr := line{Kind: "pr_fix", Text: "x", Prio: 2, Sticky: true, URL: "https://github.com/o/r/pull/1"}
+	sp.say(pr, t0, false)
+	sp.next(t0)
+	for _, k := range []string{"a", "b", "c"} {
+		sp.say(n(k, 2), t0, false)
+	}
+	sp.say(line{Kind: "needs_you", Text: "!", Prio: 3, Sticky: true}, t0, false)
+	if sp.cur.Kind != "needs_you" || len(sp.queue) != 3 || sp.queue[0].URL != pr.URL {
+		t.Fatalf("cur = %v queue = %v", sp.cur, sp.queue)
+	}
+}
+
+func TestSamePRDedupesAcrossTexts(t *testing.T) {
+	var sp speech
+	url := "https://github.com/o/r/pull/1"
+	sp.say(line{Kind: "pr_fix", Text: "x", Prio: 2, Sticky: true, URL: url}, t0, false)
+	sp.next(t0)
+	sp.say(line{Kind: "pr_fix", Text: "y", Prio: 2, Sticky: true, URL: url}, t0, false)
+	if len(sp.queue) != 0 {
+		t.Fatalf("queue = %v", sp.queue)
 	}
 }

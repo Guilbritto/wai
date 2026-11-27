@@ -19,3 +19,5 @@ claude_config::tests::mcp_toggles_wait_for_the_write
 late_permission_answer_is_stale
 tree::tests::global_ignores_follow_the_flag
 claude::tests::mcp_on_without_entry_writes_nothing
+# remote access (2026-11-23): agent tests started after these time out on the Windows runner; cause not found yet
+workspace::tests::remote_

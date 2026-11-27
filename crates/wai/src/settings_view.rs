@@ -729,6 +729,12 @@ impl SettingsView {
         }
     }
 
+    /// A dot beside `section` in the nav: an index lists an update for an installed extension.
+    pub(crate) fn nav_dot(&self, section: Section, cx: &App) -> bool {
+        section == Section::Extensions
+            && (self.data.extensions.as_ref()).is_some_and(|ext| ext.read(cx).updates() > 0)
+    }
+
     #[cfg(test)]
     pub(crate) fn section(&self) -> Section {
         self.section
@@ -1487,6 +1493,13 @@ impl Render for SettingsView {
                             .rounded(px(8.))
                             .cursor_pointer()
                             .child(div().flex_1().min_w_0().child(s.title()))
+                            .children(self.nav_dot(s, cx).then(|| {
+                                div()
+                                    .debug_selector(move || format!("settings-nav-dot-{}", s.key()))
+                                    .size(px(6.))
+                                    .rounded_full()
+                                    .bg(aurora::boreal(cx))
+                            }))
                             .children(s.is_soon().then(|| {
                                 div()
                                     .text_size(fonts::ui(cx, 10.))
@@ -1528,6 +1541,11 @@ impl Render for SettingsView {
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::OpenFile))),
                 )
         });
+        // Extensions fills the area with its own list and page: the banner goes on top of it.
+        let (banner, extensions_banner) = match extensions {
+            true => (None, banner),
+            false => (banner, None),
+        };
         // The page's header stays put; only what is under it scrolls.
         let header = column(
             v_flex()
@@ -1588,8 +1606,7 @@ impl Render for SettingsView {
                         .child(div().text_color(muted).child(soon_text(section)))
                 }))
                 .children(claude_page.then(|| self.claude_page(section, &query, cx)))
-                .children(advanced)
-                .children(extensions.then(|| self.data.extensions.clone()).flatten()),
+                .children(advanced),
         );
         v_flex()
             .size_full()
@@ -1656,8 +1673,14 @@ impl Render for SettingsView {
                             .bg(nav_fill)
                             .children(nav),
                     )
-                    .child(
-                        v_flex().flex_1().min_w_0().child(header).child(
+                    .child(match extensions {
+                        true => v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .children(extensions_banner.map(|b| div().px_4().pb_3().child(b)))
+                            .children(self.data.extensions.clone()),
+                        false => v_flex().flex_1().min_w_0().child(header).child(
                             v_flex()
                                 .id("settings-content")
                                 .flex_1()
@@ -1666,7 +1689,7 @@ impl Render for SettingsView {
                                 .child(body)
                                 .test_support(),
                         ),
-                    ),
+                    }),
             )
     }
 }

@@ -9,7 +9,7 @@
 
 Three parts, built in this order:
 
-1. **wai core (Rust):** a `scene` tree node and a `panel/key` notification, API 1.10. Generic: nothing in it knows about offices.
+1. **wai core (Rust):** a `scene` tree node and a `panel/key` notification, API 1.14. Generic: nothing in it knows about offices.
 2. **`office` server (Go):** one binary holding who is where; the authority on positions.
 3. **`wai-escritorio` extension (Go):** the setup form, the presence panel and the office pane; it talks JSON-RPC to wai and WebSocket to the server.
 
@@ -75,7 +75,7 @@ sequenceDiagram
 | Panel action path | `ext_panel.rs:452-455` → `ext_host.rs:437-441` → `host.rs:354-385` | `panel/key` follows it: `PanelKey` event → `ExtHandle::panel_key` → `Command::Send` notification |
 | Hex colour parser | `appearance/overrides.rs:31-49`, gpui-kit `try_parse_color` | Parse the scene palette |
 | `RenderImage` + `img()` | gpui-fast `assets.rs:43`, `elements/img.rs:46,201` | Paint the static tile layer once into an image |
-| API version | `manifest.rs:96`, tests `wai-ext/tests/manifest.rs:295-320`, `tests/host.rs:128` | Bump to 1.10 |
+| API version | `manifest.rs:96`, tests `wai-ext/tests/manifest.rs:295-320`, `tests/host.rs:128` | Bump to 1.14 |
 | Fake extension | `crates/wai-ext/src/bin/wai-fake-ext.rs`, `tests/host.rs` | `panel/key` round trip test |
 | Go protocol loop | `extensions/wai-bichinho/main.go:30-92, 538-705` | Copy the `message` type, `write`/`call`, `handle` switch and the `serve` select loop; add a channel for server messages |
 | Extension release | `.github/workflows/extensions.yml`, `extension-release.yml` | Ships `wai-escritorio` on `wai-escritorio-v*` tags unchanged (`go build .` at the extension root) |
@@ -97,7 +97,7 @@ sequenceDiagram
 
 - **Purpose**: Parse and validate the `scene` node (OFC-30, OFC-35).
 - **Location**: `crates/wai-ext/src/panel.rs` (`Node::Scene(Scene)`, parse in `leaf()`), tests in its `#[cfg(test)]`.
-- **Interfaces** (JSON, API 1.10):
+- **Interfaces** (JSON, API 1.14):
 
 ```json
 {
@@ -146,7 +146,7 @@ sequenceDiagram
 - **Interfaces**: host → extension **notification** `panel/key` `{"panel": "<panel id>", "scene": "<scene id>", "key": "<gpui key name>", "repeat": bool}`. Key names as GPUI gives them: `up`, `down`, `left`, `right`, letters lowercase, `space`, `enter`, `escape`, … Needs `panels`. No answer.
 - **Reuses**: `send()` → `Command::Send` → bounded outgoing queue (256).
 
-### 4. API 1.10 and docs
+### 4. API 1.14 and docs
 
 - **Location**: `manifest.rs:96`, the tests listed above, `docs/extensions.md` (scene row in Content, `panel/key` row in Host → extension, the `api` field's version list, Rules ids list, version mentions at 7/48/158/169), `panel.rs:13`.
 - Satisfies OFC-36.
@@ -182,7 +182,7 @@ sequenceDiagram
 
 - **Purpose**: Setup, presence panel, office pane, agent status (OFC-01..14, OFC-40..54).
 - **Location**: `extensions/wai-escritorio/` (`main.go`, `setup.go`, `client.go`, `views.go`, `art.go`, `wai-extension.toml`, `README.md`).
-- **Manifest**: `api = "1.10"`, permissions `process`, `panels`, `sessions:read`, `network`; panels `presence` (sidebar, icon `users`, title "Office") and `office` (main, icon `map`, title "Office").
+- **Manifest**: `api = "1.14"`, permissions `process`, `panels`, `sessions:read`, `network`; panels `presence` (sidebar, icon `users`, title "Office") and `office` (main, icon `map`, title "Office").
 - **Interfaces**:
   - `main.go`: bichinho's `serve` loop + a `from <-chan serverMsg` case. Handles `initialize`, `panel/action`, `panel/key`, `event/session_state`, the `sessions/list` answer.
   - `setup.go`: `type Setup {Name, Server, Token, Avatar}`; load/save `setup.json` in `data_dir`, written with mode 0600 (OFC-13); `validate(Setup) string` returns the message to show. Also refuses `ws://` to a non-loopback host: "Use wss:// for a server that is not on this computer" (the token must not cross a network in clear text; mirrors OFC-22 on the client).
@@ -256,7 +256,7 @@ type Setup struct{ Name, Server, Token string; Avatar int }
 | `ext_panel.rs` is very large | `ext_panel.rs` (3,000+ lines) | Hard to change safely | New code goes in `ext_scene.rs`; `ext_panel.rs` gets only the `Scene` arm and the focus handle |
 | Outgoing queue drops when full | `host.rs:34, 845-855` (256, drop + warn) | Held keys could flood | Key repeat is ~30/s and the extension reads continuously; repeats past the 120 ms move pace are ignored by the extension, not queued by wai |
 | Whole tree per render | `host.rs:703-748` (coalesced at 100/s) | 50 people moving → many ~20 KB renders | The tile layer is cached by hash, so a render re-parses JSON but never re-rasterises; incremental updates were weighed and declined (context.md) |
-| First non-stdlib dependency in a Go extension | `extensions/*/go.mod` | Supply chain, release build needs module download | One small, maintained module (`github.com/coder/websocket`, no transitive deps); `go.sum` committed; AD-002 |
+| First non-stdlib dependency in a Go extension | `extensions/*/go.mod` | Supply chain, release build needs module download | One small, maintained module (`github.com/coder/websocket`, no transitive deps); `go.sum` committed; AD-003 |
 | Self-signed certificates | client TLS | A team using a self-signed cert cannot connect | README says: use a real certificate, or listen on loopback behind Caddy/nginx with TLS. A custom CA option is out of scope |
 | Shared team token | `authenticate` | Anyone with the token can pick any name | Accepted for delivery 1 (user chose token); OFC-27 keeps login swappable in one function |
 | Original art quality | `art.go` | The office may look rough | 16 × 16 patterns drawn in code, reviewed with a `WAI_SHOT` screenshot before the art task is done |
@@ -267,9 +267,9 @@ type Setup struct{ Name, Server, Token string; Avatar int }
 
 | Decision | Choice | Rationale |
 | -------- | ------ | --------- |
-| Scene art format | Palette + char patterns in the tree, wai rasterises and caches | User picked "Paleta + padrões no JSON"; matches `pixels` and bichinho's art-in-code; no image decoding of extension files (AD-001) |
+| Scene art format | Palette + char patterns in the tree, wai rasterises and caches | User picked "Paleta + padrões no JSON"; matches `pixels` and bichinho's art-in-code; no image decoding of extension files (AD-002) |
 | Tween in wai, not the extension | wai interpolates 150 ms on tile change | 30 fps re-renders from Go would hit the 100 renders/s cap with several people moving |
-| WebSocket library | `github.com/coder/websocket` | Go's standard library has no WebSocket; spec fixed WebSocket (AD-002) |
+| WebSocket library | `github.com/coder/websocket` | Go's standard library has no WebSocket; spec fixed WebSocket (AD-003) |
 | Server config | JSON file (`encoding/json`) | Standard library; TOML would need a dependency |
 | Server state | One hub goroutine, channels | No locks; ordering is the hub's receive order |
 | Map source | Server sends layout in `welcome`; art stays in the extension | One authority for collision; the server needs no art |

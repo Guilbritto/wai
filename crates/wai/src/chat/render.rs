@@ -839,7 +839,7 @@ impl ChatSession {
                     let id = request.id;
                     let on_choose =
                         Rc::new(cx.listener(move |this, choice: &PermissionChoice, _, cx| {
-                            this.answer(id, choice, cx)
+                            this.answer(id, choice, cx);
                         }));
                     let diffs = self.card_diffs.get(&id).map_or(&[][..], Vec::as_slice);
                     permission::card(request, diffs, on_choose, &on_open, k == 0, cx)

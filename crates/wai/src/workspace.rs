@@ -35,11 +35,13 @@ use crate::app::{
 };
 use crate::appearance::{self, fonts};
 use crate::chat::{
-    ChatEvent, ChatSession, DraftView, PromptSlot, PromptSlots, PromptTyping, TurnState, signed_out,
+    ChatEvent, ChatSession, DraftView, ExtMentions, PromptSlot, PromptSlots, PromptTyping,
+    TurnState, signed_out,
 };
 use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved, TabsChanged, recovery};
-use crate::ext_host::{ExtHost, PanelIcon, SessionCall};
+use crate::ext_host::{ExtHost, ExtMention, PanelIcon, SessionCall};
 use crate::ext_panel::ExtPanel;
+use crate::ext_sessions::{self, Feed};
 use crate::extensions_view::{ExtensionsView, InstallPlugin};
 use crate::files::{FileTree, OpenFile};
 use crate::git;
@@ -254,6 +256,8 @@ pub struct Workspace {
     pub(crate) sidebar_hidden: bool,
     /// What the `PromptSlots` global was last set to.
     prompt_slots: PromptSlots,
+    /// What the `ExtMentions` global was last set to.
+    ext_mentions: Vec<ExtMention>,
     /// The user closed the lone empty pane: the main area is not drawn while that pane is all it
     /// has, and the sidebar takes its width (`main_shown`). Never with `sidebar_hidden`.
     pub(crate) main_closed: bool,
@@ -287,6 +291,8 @@ pub struct Workspace {
     early: HashMap<(String, String), Vec<SessionEvent>>,
     /// The last session each extension opened: its next one takes that one's pane (R57).
     ext_sessions: HashMap<ExtId, EntityId>,
+    /// The sessions' changed transcript items, sent to extensions at most 10 times a second.
+    feed: Feed<EntityId>,
     /// Where the open sessions, the project and the terminal's visibility are kept between runs;
     /// `None` keeps nothing (tests). Unsaved edits are kept beside it, in `recovery/`.
     state_path: Option<PathBuf>,
@@ -427,6 +433,11 @@ impl Workspace {
             }
             this.close_gone_panels(&live, window, cx);
             this.sync_contributions(cx);
+            let mentions = host.read(cx).mentions();
+            if mentions != this.ext_mentions {
+                this.ext_mentions = mentions.clone();
+                cx.set_global(ExtMentions(mentions));
+            }
             cx.notify();
         });
         let calls = cx.subscribe_in(
@@ -479,6 +490,7 @@ impl Workspace {
             agents_collapsed: false,
             sidebar_hidden: false,
             prompt_slots: PromptSlots::default(),
+            ext_mentions: Vec::new(),
             main_closed: false,
             sessions: Vec::new(),
             panes: vec![Pane::Empty(None)],
@@ -509,6 +521,7 @@ impl Workspace {
             starting: HashMap::new(),
             early: HashMap::new(),
             ext_sessions: HashMap::new(),
+            feed: Feed::default(),
             modes_seen: remembered
                 .as_ref()
                 .map(|s| s.modes_seen.clone())
@@ -1255,6 +1268,31 @@ impl Workspace {
         }
     }
 
+    /// HOST-02: item `ix` of `session` changed; extensions hear of it within `FLUSH_GAP`.
+    fn feed_session(&mut self, session: &Entity<ChatSession>, ix: usize, cx: &mut Context<Self>) {
+        let now = std::time::Instant::now();
+        let Some(wait) = self.feed.mark(session.entity_id(), ix, now) else {
+            return;
+        };
+        let session = session.downgrade();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |this, cx| {
+                let id = session.entity_id();
+                let changed = this.feed.flush(&id, std::time::Instant::now());
+                match session.upgrade().filter(|s| this.sessions.contains(s)) {
+                    Some(s) => {
+                        let update = ext_sessions::session_update(s.read(cx), changed);
+                        this.ext_host.read(cx).broadcast(update);
+                    }
+                    None => this.feed.forget(&id),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Cancels a request no open session can show, so the agent's turn goes on. A dead agent's
     /// requests died with it (and `handle` would respawn it).
     fn unrouted(
@@ -1294,6 +1332,12 @@ impl Workspace {
                     this.save_state(cx);
                 }
                 ChatEvent::Bound => return this.claim(session, cx),
+                ChatEvent::Mention { ext, id, text } => {
+                    let s = session.read(cx);
+                    let bound = (!s.id.is_empty()).then_some(s.id.as_str());
+                    let host = this.ext_host.read(cx);
+                    return host.mention_message(ext, id, text, Some(&s.agent), bound);
+                }
                 ChatEvent::ContextChanged => {
                     let s = session.read(cx);
                     if s.long_context {
@@ -1331,6 +1375,16 @@ impl Workspace {
                         session: s.id.clone(),
                         state: state_name(s.status()).into(),
                     });
+                }
+                ChatEvent::ItemsChanged(ix) => return this.feed_session(session, *ix, cx),
+                ChatEvent::PermissionAsked(_)
+                | ChatEvent::PermissionAnswered { .. }
+                | ChatEvent::QuestionAsked(_)
+                | ChatEvent::QuestionAnswered { .. } => {
+                    if let Some(event) = ext_sessions::card_event(event, session.read(cx)) {
+                        this.ext_host.read(cx).broadcast(event);
+                    }
+                    return;
                 }
                 _ => {}
             }
@@ -1934,6 +1988,7 @@ impl Workspace {
                 agent,
                 prompt,
                 send,
+                background,
                 reply,
             } => {
                 let Some(agent) = agent.or_else(|| self.default_agent()) else {
@@ -1942,7 +1997,14 @@ impl Workspace {
                 if !self.registry.read(cx).knows(&agent) {
                     return reply.send(Err(format!("No agent named {agent}")));
                 }
-                self.start_session(agent, prompt, send, Some((ext, Some(reply))), window, cx);
+                self.start_session(
+                    agent,
+                    prompt,
+                    send,
+                    Some((ext, Some(reply), background)),
+                    window,
+                    cx,
+                );
             }
             ExtEvent::Prompt {
                 agent,
@@ -1955,6 +2017,44 @@ impl Workspace {
                     eprintln!("wai: an extension's prompt for {agent} {session} was dropped");
                 }
             }
+            ExtEvent::ReadSession {
+                agent,
+                session,
+                from,
+                limit,
+                reply,
+            } => reply.send(self.read_session(&agent, &session, from, limit, cx)),
+            ExtEvent::CancelSession {
+                agent,
+                session,
+                reply,
+            } => reply.send(self.cancel_session(&agent, &session, cx)),
+            ExtEvent::ShowSession {
+                agent,
+                session,
+                reply,
+            } => match self.session(&agent, &session, cx) {
+                Some(s) => {
+                    self.show(s, false, window, cx);
+                    reply.send(Ok(serde_json::Value::Null));
+                }
+                None => reply.send(Err(format!("No session {agent} {session}"))),
+            },
+            ExtEvent::AnswerPermission {
+                agent,
+                session,
+                request,
+                option,
+                reply,
+            } => reply.send(self.answer_permission(&agent, &session, request, &option, cx)),
+            ExtEvent::AnswerQuestion {
+                agent,
+                session,
+                request,
+                answer,
+                values,
+                reply,
+            } => reply.send(self.answer_question(&agent, &session, request, &answer, values, cx)),
             ExtEvent::OpenPanel { panel, reply } => {
                 let Some(p) = self.ext_host.read(cx).panel_of(&ext, &panel) else {
                     return reply.send(Err(format!("No panel named {panel}")));
@@ -1973,6 +2073,82 @@ impl Workspace {
                 reply.send(Ok(serde_json::Value::Null));
             }
             _ => {}
+        }
+    }
+
+    /// The open session `agent` `session`, else the error an extension gets (HOST-03).
+    fn open_session(
+        &self,
+        agent: &str,
+        session: &str,
+        cx: &App,
+    ) -> Result<Entity<ChatSession>, String> {
+        (self.session(agent, session, cx))
+            .ok_or_else(|| format!("No open session {agent} {session}"))
+    }
+
+    /// `sessions/read`: a page of the session's transcript (HOST-01).
+    fn read_session(
+        &self,
+        agent: &str,
+        session: &str,
+        from: Option<usize>,
+        limit: Option<usize>,
+        cx: &App,
+    ) -> Result<serde_json::Value, String> {
+        let session = self.open_session(agent, session, cx)?;
+        let items = ext_sessions::transcript(&session.read(cx).model);
+        Ok(ext_sessions::page(&items, from, limit))
+    }
+
+    /// `sessions/cancel`: as wai's Stop (HOST-08).
+    fn cancel_session(
+        &self,
+        agent: &str,
+        session: &str,
+        cx: &App,
+    ) -> Result<serde_json::Value, String> {
+        self.open_session(agent, session, cx)?.read(cx).stop();
+        Ok(serde_json::Value::Null)
+    }
+
+    /// `permission/answer`, as a click on the option: the first answer wins (HOST-05, HOST-07).
+    fn answer_permission(
+        &mut self,
+        agent: &str,
+        session: &str,
+        request: u64,
+        option: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, String> {
+        let session = self.open_session(agent, session, cx)?;
+        let pending = ext_sessions::waiting_permission(&session.read(cx).model, request);
+        let pending = pending.ok_or_else(|| not_pending(request))?;
+        let choice = (pending.options.iter()).find(|o| o.id == option).cloned();
+        let choice = choice.ok_or_else(|| format!("No option {option} in request {request}"))?;
+        match session.update(cx, |s, cx| s.answer(request, &choice, cx)) {
+            true => Ok(serde_json::Value::Null),
+            false => Err(not_pending(request)),
+        }
+    }
+
+    /// `question/answer`, as the card's Submit, Decline or Cancel (QST-02, QST-04, QST-05).
+    fn answer_question(
+        &mut self,
+        agent: &str,
+        session: &str,
+        request: u64,
+        answer: &str,
+        values: Option<serde_json::Map<String, serde_json::Value>>,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, String> {
+        let session = self.open_session(agent, session, cx)?;
+        let pending = session.read(cx).model.waiting_question(request);
+        let pending = pending.ok_or_else(|| not_pending(request))?;
+        let (answer, summary) = ext_sessions::question_answer(pending, answer, values)?;
+        match session.update(cx, |s, cx| s.answer_question(request, answer, summary, cx)) {
+            true => Ok(serde_json::Value::Null),
+            false => Err(not_pending(request)),
         }
     }
 
@@ -2040,12 +2216,14 @@ impl Workspace {
         agent: String,
         prompt: Option<String>,
         send: bool,
-        by: Option<(ExtId, Option<Reply>)>,
+        by: Option<(ExtId, Option<Reply>, bool)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.leave_wide(cx);
-        let (ext, reply) = by.map_or((None, None), |(ext, reply)| (Some(ext), reply));
+        let (ext, reply, background) = by.map_or((None, None, false), |(ext, reply, bg)| {
+            (Some(ext), reply, bg)
+        });
         let refuse = |reply: Option<Reply>, why: &str| {
             if let Some(reply) = reply {
                 reply.send(Err(why.into()));
@@ -2053,6 +2231,7 @@ impl Workspace {
         };
         let by_extension = ext.is_some();
         let ix = match &ext {
+            Some(_) if background => None,
             Some(ext) => self.ext_pane(ext),
             None => Some(self.session_pane()),
         };
@@ -3745,6 +3924,11 @@ fn state_name(state: &TurnState) -> &'static str {
     }
 }
 
+/// An extension's answer to a request that no longer waits, or never did (HOST-07, QST-04).
+fn not_pending(request: u64) -> String {
+    format!("Request {request} is already answered or unknown")
+}
+
 /// ACP's names: `end_turn`, `cancelled`, `max_tokens`, `refusal`, or the agent's own.
 fn stop_reason(reason: &StopReason) -> String {
     match reason {
@@ -3773,10 +3957,14 @@ pub(crate) mod tests {
         unapproved,
     };
 
+    use serde_json::{Value, json};
+    use wai_ext::HostEvent;
+
     use super::{Pane, Workspace};
     use crate::agents::{AgentStatus, RegistryEvent};
     use crate::app::{self, ToggleTerminal};
     use crate::chat::{ChatEvent, ChatItem, ChatSession, NoticeKind, TurnState, signed_out};
+    use crate::ext_sessions;
     use crate::notify;
     use crate::sidebar::canonical;
 
@@ -5675,6 +5863,43 @@ pub(crate) mod tests {
         assert!(AppState::load(&path).long_context.contains("missing-1"));
     }
 
+    /// API 1.11: a background start takes no pane, not even its extension's last one.
+    #[gpui_kit::test]
+    fn extension_background_open_takes_no_pane(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let ext = wai_ext::ExtId::new("opener").unwrap();
+        let start = |background: bool, cx: &mut VisualTestContext| {
+            let n = workspace.read_with(cx, |w, _| w.sessions.len());
+            let by = Some((ext.clone(), None, background));
+            cx.update(|window, cx| {
+                workspace.update(cx, |w, cx| {
+                    w.start_session("fake".into(), None, false, by, window, cx)
+                })
+            });
+            wait_until(cx, "their session", |cx| {
+                workspace.read_with(cx, |w, _| w.sessions.len() == n + 1)
+            });
+            workspace.read_with(cx, |w, _| w.sessions[n].clone())
+        };
+        let panes = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, _| {
+                w.panes
+                    .iter()
+                    .map(|p| p.session().cloned())
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        let first = start(false, cx);
+        let before = panes(cx);
+        assert!(before.contains(&Some(first)));
+        let second = start(true, cx);
+        let after = panes(cx);
+        assert_eq!(after, before);
+        assert!(!after.contains(&Some(second)));
+    }
+
     /// R57: an extension's sessions reuse the pane of its last one (R61: unless the user is in
     /// it), never a pane showing the user's session; with no pane free they open in the open
     /// list only. None takes the focus.
@@ -5686,7 +5911,7 @@ pub(crate) mod tests {
         let ext = wai_ext::ExtId::new("opener").unwrap();
         let theirs = |prompt: &str, cx: &mut VisualTestContext| {
             let n = workspace.read_with(cx, |w, _| w.sessions.len());
-            let (prompt, by) = (Some(prompt.to_string()), Some((ext.clone(), None)));
+            let (prompt, by) = (Some(prompt.to_string()), Some((ext.clone(), None, false)));
             cx.update(|window, cx| {
                 workspace.update(cx, |w, cx| {
                     w.start_session("fake".into(), prompt, false, by, window, cx)
@@ -6911,5 +7136,587 @@ pub(crate) mod tests {
         registry.read_with(cx, |r, _| {
             assert_eq!(r.newer_adapter("npx"), Some("1.3.0".into()))
         });
+    }
+
+    /// What the workspace broadcast to extensions, so far.
+    fn sent(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Vec<HostEvent> {
+        workspace.read_with(cx, |w, cx| w.ext_host.read(cx).sent.borrow().clone())
+    }
+
+    /// Starts a session of `flags`' fake agent and sends `prompt`; returns the session and its id.
+    fn prompted<'a>(
+        flags: &str,
+        prompt: &str,
+        cx: &'a mut TestAppContext,
+    ) -> (
+        Entity<Workspace>,
+        Entity<ChatSession>,
+        String,
+        &'a mut VisualTestContext,
+    ) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(flags));
+        let session = start_now(&workspace, cx);
+        assert!(session.update(cx, |s, cx| s.send_text(prompt, cx)));
+        let id = session.read_with(cx, |s, _| s.id.clone());
+        (workspace, session, id, cx)
+    }
+
+    fn turn_state(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> TurnState {
+        session.read_with(cx, |s, _| s.model.state.clone())
+    }
+
+    fn click_now(id: &'static str, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.click(id, cx);
+        });
+    }
+
+    /// HOST-02: a running turn reaches a `sessions:content` extension as `event/session_update`s;
+    /// applied in order, they rebuild the session's transcript.
+    #[gpui_kit::test]
+    fn remote_turn_streams_session_update(cx: &mut TestAppContext) {
+        let words: Vec<String> = (0..10).map(|i| format!("w{i}")).collect();
+        let flags = format!(
+            "--steps 1 --reply '{}' --chunk-delay-ms 15",
+            words.join(" ")
+        );
+        let (workspace, session, id, cx) = prompted(&flags, "hi", cx);
+        let expected = |cx: &mut VisualTestContext| {
+            session.read_with(cx, |s, _| {
+                let items = ext_sessions::transcript(&s.model);
+                items
+                    .into_iter()
+                    .map(ext_sessions::item_json)
+                    .collect::<Vec<_>>()
+            })
+        };
+        let mirrored = |cx: &mut VisualTestContext| {
+            let mut mirror: Vec<Value> = Vec::new();
+            for event in sent(&workspace, cx) {
+                let HostEvent::SessionUpdate {
+                    agent,
+                    session,
+                    total,
+                    items,
+                } = event
+                else {
+                    continue;
+                };
+                assert_eq!((agent.as_str(), session.as_str()), ("fake", id.as_str()));
+                mirror.resize(total, Value::Null);
+                for (ix, item) in items {
+                    mirror[ix] = item;
+                }
+            }
+            mirror
+        };
+        wait_until(cx, "the whole turn mirrored", |cx| {
+            turn_state(&session, cx) == TurnState::Idle && mirrored(cx) == expected(cx)
+        });
+        let mirror = mirrored(cx);
+        assert_eq!(mirror[0], json!({"kind": "user", "text": "hi"}));
+        assert!(mirror.contains(&json!({"kind": "agent", "text": words.join(" ")})));
+        assert!(
+            mirror.contains(&json!({"kind": "tool", "title": "Read README.md",
+            "tool_kind": "read", "status": "completed"}))
+        );
+        let updates = sent(&workspace, cx);
+        let updates = updates
+            .iter()
+            .filter(|e| matches!(e, HostEvent::SessionUpdate { .. }));
+        assert!(updates.count() > 1, "streamed, not sent once at the end");
+    }
+
+    /// HOST-04: `event/permission_requested` carries the session, the request id, the tool call's
+    /// title and the options.
+    #[gpui_kit::test]
+    fn remote_permission_requested_event(cx: &mut TestAppContext) {
+        let (workspace, session, id, cx) = prompted("--ask-permission", "edit", cx);
+        wait_until(cx, "the permission card", |cx| {
+            turn_state(&session, cx) == TurnState::NeedsYou
+        });
+        let asked: Vec<_> = (sent(&workspace, cx).into_iter())
+            .filter_map(|e| match e {
+                HostEvent::PermissionRequested {
+                    agent,
+                    session,
+                    request,
+                    title,
+                    options,
+                } => Some((agent, session, request, title, options)),
+                _ => None,
+            })
+            .collect();
+        let options = json!([
+            {"id": "allow-once", "name": "Yes", "kind": "allow_once"},
+            {"id": "allow-always", "name": "Yes, always", "kind": "allow_always"},
+            {"id": "reject-once", "name": "No", "kind": "reject_once"},
+        ]);
+        assert_eq!(
+            asked,
+            [("fake".into(), id, 1, "Write notes.md".into(), options)]
+        );
+    }
+
+    /// The `event/permission_resolved`s broadcast so far: `(agent, session, request, option)`.
+    fn permissions_resolved(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(String, String, u64, Option<String>)> {
+        (sent(workspace, cx).into_iter())
+            .filter_map(|e| match e {
+                HostEvent::PermissionResolved {
+                    agent,
+                    session,
+                    request,
+                    option,
+                } => Some((agent, session, request, option)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// HOST-06: an answer clicked in wai sends `event/permission_resolved` with the option.
+    #[gpui_kit::test]
+    fn remote_permission_resolved_event(cx: &mut TestAppContext) {
+        let (workspace, session, id, cx) = prompted("--ask-permission", "edit", cx);
+        wait_until(cx, "the permission card", |cx| {
+            turn_state(&session, cx) == TurnState::NeedsYou
+        });
+        assert!(permissions_resolved(&workspace, cx).is_empty());
+        click_now("perm-allow_once", cx);
+        wait_until(cx, "the answer", |cx| {
+            turn_state(&session, cx) == TurnState::Idle
+        });
+        assert_eq!(
+            permissions_resolved(&workspace, cx),
+            [("fake".into(), id, 1, Some("allow-once".into()))]
+        );
+    }
+
+    /// QST-01: `event/question_requested` carries the message and each field's key, title,
+    /// description, required flag, kind and choices.
+    #[gpui_kit::test]
+    fn remote_question_requested_event(cx: &mut TestAppContext) {
+        let (workspace, session, id, cx) = prompted("--ask-question", "ask", cx);
+        wait_until(cx, "the question card", |cx| {
+            turn_state(&session, cx) == TurnState::NeedsYou
+        });
+        let asked: Vec<_> = (sent(&workspace, cx).into_iter())
+            .filter_map(|e| match e {
+                HostEvent::QuestionRequested {
+                    agent,
+                    session,
+                    request,
+                    message,
+                    fields,
+                } => Some((agent, session, request, message, fields)),
+                _ => None,
+            })
+            .collect();
+        let fields = json!([
+            {"key": "color", "title": "Color", "description": null, "required": true,
+                "kind": "single", "choices": [
+                    {"value": "red", "label": "Red", "description": null},
+                    {"value": "blue", "label": "Blue", "description": null},
+                ]},
+            {"key": "note", "title": "Note", "description": null, "required": false,
+                "kind": "text", "choices": []},
+        ]);
+        assert_eq!(
+            asked,
+            [("fake".into(), id, 1, "Pick a color".into(), fields)]
+        );
+    }
+
+    /// The `event/question_resolved`s broadcast so far: `(agent, session, request, answer)`.
+    fn questions_resolved(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(String, String, u64, String)> {
+        (sent(workspace, cx).into_iter())
+            .filter_map(|e| match e {
+                HostEvent::QuestionResolved {
+                    agent,
+                    session,
+                    request,
+                    answer,
+                } => Some((agent, session, request, answer)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// QST-03: a question answered in wai sends `event/question_resolved` with the answer kind.
+    #[gpui_kit::test]
+    fn remote_question_resolved_event(cx: &mut TestAppContext) {
+        let (workspace, session, id, cx) = prompted("--ask-question", "ask", cx);
+        wait_until(cx, "the question card", |cx| {
+            turn_state(&session, cx) == TurnState::NeedsYou
+        });
+        assert!(questions_resolved(&workspace, cx).is_empty());
+        click_now("question-decline", cx);
+        wait_until(cx, "the answer", |cx| {
+            turn_state(&session, cx) == TurnState::Idle
+        });
+        assert_eq!(
+            questions_resolved(&workspace, cx),
+            [("fake".into(), id, 1, "decline".into())]
+        );
+    }
+
+    /// HOST-01: `sessions/read` returns the user's message, the agent's and its tool call (title
+    /// and status, no output), in order.
+    #[gpui_kit::test]
+    fn remote_read_returns_transcript(cx: &mut TestAppContext) {
+        let (workspace, session, id, cx) = prompted("--steps 1", "hi", cx);
+        wait_until(cx, "the answer", |cx| {
+            turn_state(&session, cx) == TurnState::Idle
+                && session.read_with(cx, |s, _| {
+                    matches!(s.model.items.last(), Some(ChatItem::Agent { .. }))
+                })
+        });
+        let read = |from, limit, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, cx| w.read_session("fake", &id, from, limit, cx))
+        };
+        let (user, thought, tool, agent) = (
+            json!({"kind": "user", "text": "hi"}),
+            json!({"kind": "thought", "text": "Looking around"}),
+            json!({"kind": "tool", "title": "Read README.md", "tool_kind": "read",
+                "status": "completed"}),
+            json!({"kind": "agent", "text": "Hello from fake agent"}),
+        );
+        assert_eq!(
+            read(None, None, cx),
+            Ok(json!({"items": [user, thought, tool, agent], "total": 4}))
+        );
+        assert_eq!(
+            read(Some(1), Some(2), cx),
+            Ok(json!({"items": [thought, tool], "total": 4}))
+        );
+        assert!(
+            !read(None, None, cx)
+                .unwrap()
+                .to_string()
+                .contains("step 0 output")
+        );
+    }
+
+    /// HOST-03: a session that is not open is an error naming it.
+    #[gpui_kit::test]
+    fn remote_read_unknown_session_errors(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_now(&workspace, cx);
+        let id = session.read_with(cx, |s, _| s.id.clone());
+        let read = |agent: &str, session: &str, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, cx| w.read_session(agent, session, None, None, cx))
+        };
+        assert!(read("fake", &id, cx).is_ok());
+        assert_eq!(
+            read("fake", "nope", cx),
+            Err("No open session fake nope".into())
+        );
+        assert_eq!(
+            read("other", &id, cx),
+            Err(format!("No open session other {id}"))
+        );
+    }
+
+    /// HOST-08: `sessions/cancel` stops a running turn as wai's Stop does: it ends `cancelled`.
+    #[gpui_kit::test]
+    fn remote_cancel_ends_turn_cancelled(cx: &mut TestAppContext) {
+        let words: Vec<String> = (0..40).map(|i| format!("w{i}")).collect();
+        let flags = format!("--reply '{}' --chunk-delay-ms 50", words.join(" "));
+        let (workspace, session, id, cx) = prompted(&flags, "go", cx);
+        assert_eq!(turn_state(&session, cx), TurnState::Working);
+        let cancel = |session: &str, cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, cx| w.cancel_session("fake", session, cx))
+        };
+        assert_eq!(cancel("nope", cx), Err("No open session fake nope".into()));
+        assert_eq!(cancel(&id, cx), Ok(Value::Null));
+        wait_until(cx, "the cancelled turn", |cx| {
+            turn_state(&session, cx) == TurnState::Idle
+        });
+        let ended: Vec<_> = (sent(&workspace, cx).into_iter())
+            .filter_map(|e| match e {
+                HostEvent::TurnEnded {
+                    agent,
+                    session,
+                    reason,
+                } => Some((agent, session, reason)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ended, [("fake".into(), id, "cancelled".into())]);
+        let last = session.read_with(cx, |s, _| s.model.items.last().cloned());
+        assert!(
+            matches!(&last, Some(ChatItem::Notice { text, .. }) if text == "Cancelled"),
+            "{last:?}"
+        );
+    }
+
+    /// The closed permission or question card's `answered`, once there is one.
+    fn answered(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> Option<String> {
+        session.read_with(cx, |s, _| {
+            s.model.items.iter().rev().find_map(|item| match item {
+                ChatItem::Permission { answered, .. } | ChatItem::Question { answered, .. } => {
+                    answered.clone()
+                }
+                _ => None,
+            })
+        })
+    }
+
+    fn last_agent(session: &Entity<ChatSession>, cx: &mut VisualTestContext) -> Option<String> {
+        session.read_with(cx, |s, _| {
+            s.model.items.iter().rev().find_map(|item| match item {
+                ChatItem::Agent { text } => Some(text.clone()),
+                _ => None,
+            })
+        })
+    }
+
+    /// `permission/answer` on `request` of the fake agent's session `id`.
+    fn answer_permission(
+        workspace: &Entity<Workspace>,
+        id: &str,
+        request: u64,
+        option: &str,
+        cx: &mut VisualTestContext,
+    ) -> Result<Value, String> {
+        workspace.update(cx, |w, cx| {
+            w.answer_permission("fake", id, request, option, cx)
+        })
+    }
+
+    /// `question/answer` on `request` of the fake agent's session `id`.
+    fn answer_question(
+        workspace: &Entity<Workspace>,
+        id: &str,
+        request: u64,
+        answer: &str,
+        values: Option<Value>,
+        cx: &mut VisualTestContext,
+    ) -> Result<Value, String> {
+        let values = values.map(|v| v.as_object().unwrap().clone());
+        workspace.update(cx, |w, cx| {
+            w.answer_question("fake", id, request, answer, values, cx)
+        })
+    }
+
+    /// HOST-05/06: `permission/answer` answers the agent with the option, closes wai's card as
+    /// answered and sends `event/permission_resolved` with it.
+    #[gpui_kit::test]
+    fn remote_permission_answer_reaches_agent(cx: &mut TestAppContext) {
+        let (workspace, session, id, cx) = prompted("--ask-permission", "edit", cx);
+        wait_until(cx, "the permission card", |cx| {
+            turn_state(&session, cx) == TurnState::NeedsYou
+        });
+        assert_eq!(
+            answer_permission(&workspace, &id, 1, "allow", cx),
+            Err("No option allow in request 1".into())
+        );
+        assert_eq!(
+            answer_permission(&workspace, "nope", 1, "allow-always", cx),
+            Err("No open session fake nope".into())
+        );
+        assert_eq!(turn_state(&session, cx), TurnState::NeedsYou, "still waits");
+
+        assert_eq!(
+            answer_permission(&workspace, &id, 1, "allow-always", cx),
+            Ok(Value::Null)
+        );
+        wait_until(cx, "the answer", |cx| {
+            turn_state(&session, cx) == TurnState::Idle
+        });
+        assert_eq!(
+            last_agent(&session, cx).as_deref(),
+            Some("chose:allow-always")
+        );
+        assert_eq!(answered(&session, cx).as_deref(), Some("Yes, always"));
+        assert!(session.read_with(cx, |s, _| s.model.waiting.is_empty()));
+        assert_eq!(
+            permissions_resolved(&workspace, cx),
+            [("fake".into(), id, 1, Some("allow-always".into()))]
+        );
+    }
+
+    /// HOST-07: a request already answered, or never asked, is an error; the agent keeps the
+    /// first answer.
+    #[gpui_kit::test]
+    fn remote_permission_answer_twice_errors(cx: &mut TestAppContext) {
+        let (workspace, session, id, cx) = prompted("--ask-permission", "edit", cx);
+        wait_until(cx, "the permission card", |cx| {
+            turn_state(&session, cx) == TurnState::NeedsYou
+        });
+        let stale = Err("Request 1 is already answered or unknown".to_string());
+        assert_eq!(
+            answer_permission(&workspace, &id, 9, "allow-once", cx),
+            Err("Request 9 is already answered or unknown".into())
+        );
+        click_now("perm-reject_once", cx);
+        assert_eq!(
+            answer_permission(&workspace, &id, 1, "allow-once", cx),
+            stale
+        );
+        wait_until(cx, "the answer", |cx| {
+            turn_state(&session, cx) == TurnState::Idle
+        });
+        assert_eq!(
+            answer_permission(&workspace, &id, 1, "allow-once", cx),
+            stale
+        );
+        assert_eq!(
+            last_agent(&session, cx).as_deref(),
+            Some("chose:reject-once")
+        );
+        assert_eq!(answered(&session, cx).as_deref(), Some("No"));
+        assert_eq!(
+            permissions_resolved(&workspace, cx),
+            [("fake".into(), id, 1, Some("reject-once".into()))]
+        );
+    }
+
+    /// QST-02/03: `question/answer` with `accept` and values, `decline` or `cancel` reaches the
+    /// agent, closes wai's card as answered and sends `event/question_resolved`.
+    #[gpui_kit::test]
+    fn remote_question_answer_reaches_agent(cx: &mut TestAppContext) {
+        let (workspace, session, id, cx) = prompted("--ask-question", "ask", cx);
+        let cases = [
+            ("accept", Some(json!({"color": "blue", "note": "hi"}))),
+            ("decline", None),
+            ("cancel", None),
+        ];
+        let replies = [
+            r#"answered:{"color":"blue","note":"hi"}"#,
+            "answered:declined",
+            "answered:cancelled",
+        ];
+        let closed = ["Answered: Blue, hi", "Declined", "Cancelled"];
+        for (k, (answer, values)) in cases.into_iter().enumerate() {
+            let request = k as u64 + 1;
+            if k > 0 {
+                assert!(session.update(cx, |s, cx| s.send_text("again", cx)));
+            }
+            wait_until(cx, "the question card", |cx| {
+                turn_state(&session, cx) == TurnState::NeedsYou
+            });
+            assert_eq!(
+                answer_question(&workspace, &id, request, answer, values, cx),
+                Ok(Value::Null)
+            );
+            wait_until(cx, "the answer", |cx| {
+                turn_state(&session, cx) == TurnState::Idle
+            });
+            assert_eq!(last_agent(&session, cx).as_deref(), Some(replies[k]));
+            assert_eq!(answered(&session, cx).as_deref(), Some(closed[k]));
+        }
+        assert_eq!(
+            questions_resolved(&workspace, cx),
+            [
+                ("fake".into(), id.clone(), 1, "accept".into()),
+                ("fake".into(), id.clone(), 2, "decline".into()),
+                ("fake".into(), id, 3, "cancel".into()),
+            ]
+        );
+    }
+
+    /// QST-04: a question already answered, or never asked, is an error and changes nothing.
+    #[gpui_kit::test]
+    fn remote_question_answer_twice_errors(cx: &mut TestAppContext) {
+        let (workspace, session, id, cx) = prompted("--ask-question", "ask", cx);
+        wait_until(cx, "the question card", |cx| {
+            turn_state(&session, cx) == TurnState::NeedsYou
+        });
+        let red = Some(json!({"color": "red"}));
+        assert_eq!(
+            answer_question(&workspace, &id, 9, "accept", red.clone(), cx),
+            Err("Request 9 is already answered or unknown".into())
+        );
+        assert_eq!(
+            answer_question(&workspace, &id, 1, "accept", red, cx),
+            Ok(Value::Null)
+        );
+        let stale = Err("Request 1 is already answered or unknown".to_string());
+        let blue = Some(json!({"color": "blue"}));
+        assert_eq!(
+            answer_question(&workspace, &id, 1, "accept", blue, cx),
+            stale
+        );
+        wait_until(cx, "the answer", |cx| {
+            turn_state(&session, cx) == TurnState::Idle
+        });
+        assert_eq!(
+            answer_question(&workspace, &id, 1, "decline", None, cx),
+            stale
+        );
+        assert_eq!(
+            last_agent(&session, cx).as_deref(),
+            Some(r#"answered:{"color":"red"}"#)
+        );
+        assert_eq!(answered(&session, cx).as_deref(), Some("Answered: Red"));
+        assert_eq!(
+            questions_resolved(&workspace, cx),
+            [("fake".into(), id, 1, "accept".into())]
+        );
+    }
+
+    /// QST-05: an `accept` missing a required field, or with a value outside its kind or choices,
+    /// is an error naming the field, and the question still waits.
+    #[gpui_kit::test]
+    fn remote_question_answer_invalid_stays_pending(cx: &mut TestAppContext) {
+        let (workspace, session, id, cx) = prompted("--ask-question", "ask", cx);
+        wait_until(cx, "the question card", |cx| {
+            turn_state(&session, cx) == TurnState::NeedsYou
+        });
+        let cases = [
+            ("accept", None, "Field color: a value is required"),
+            (
+                "accept",
+                Some(json!({"note": "hi"})),
+                "Field color: a value is required",
+            ),
+            (
+                "accept",
+                Some(json!({"color": "green"})),
+                "Field color: not one of its choices",
+            ),
+            (
+                "accept",
+                Some(json!({"color": "red", "note": 5})),
+                "Field note: not text",
+            ),
+            (
+                "maybe",
+                None,
+                "Unknown answer maybe: use accept, decline or cancel",
+            ),
+        ];
+        for (answer, values, error) in cases {
+            assert_eq!(
+                answer_question(&workspace, &id, 1, answer, values, cx),
+                Err(error.into())
+            );
+        }
+        cx.run_until_parked();
+        assert_eq!(turn_state(&session, cx), TurnState::NeedsYou);
+        assert!(session.read_with(cx, |s, _| s.model.waiting_question(1).is_some()));
+        assert!(questions_resolved(&workspace, cx).is_empty());
+        // Still answerable.
+        let blue = Some(json!({"color": "blue"}));
+        assert_eq!(
+            answer_question(&workspace, &id, 1, "accept", blue, cx),
+            Ok(Value::Null)
+        );
+        wait_until(cx, "the answer", |cx| {
+            turn_state(&session, cx) == TurnState::Idle
+        });
+        assert_eq!(
+            last_agent(&session, cx).as_deref(),
+            Some(r#"answered:{"color":"blue"}"#)
+        );
     }
 }

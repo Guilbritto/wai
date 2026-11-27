@@ -18,6 +18,9 @@ var fallback = map[string][]string{
 	"hungry":      {"Tô com fome…"},
 	"lonely":      {"Cadê você?"},
 	"wake":        {"Hm? Acordei."},
+	"chat_done":   {"Terminei, dá uma olhada."},
+	"chat_error":  {"Ih, não consegui. Tenta de novo?"},
+	"chat_busy":   {"Calma, um de cada vez."},
 }
 
 // kinds lists every kind with its priority, stickiness, chatter flag and a one-line meaning for the agent prompt.
@@ -29,8 +32,8 @@ var kinds = []struct {
 }{
 	{"needs_you", 3, true, false, "a session is waiting for the user"},
 	{"error", 3, false, false, "the focused session hit an error"},
-	{"pr_fix", 2, false, false, "a pull request needs a fix"},
-	{"pr_approved", 2, false, false, "a pull request was approved"},
+	{"pr_fix", 2, true, false, "a pull request needs a fix"},
+	{"pr_approved", 2, true, false, "a pull request was approved"},
 	{"level_up", 2, false, false, "the pet leveled up after a turn"},
 	{"evolve", 2, false, false, "the pet just evolved into a new form"},
 	{"egg", 2, false, false, "the pet found a new egg after a turn"},
@@ -42,6 +45,9 @@ var kinds = []struct {
 	{"hungry", 1, false, true, "it got hungry"},
 	{"lonely", 1, false, true, "it feels lonely"},
 	{"wake", 1, false, true, "the first event after it slept"},
+	{"chat_done", 3, true, false, "the pet finished what the user asked; a click shows its session"},
+	{"chat_error", 3, false, false, "the pet's own session failed or was cancelled"},
+	{"chat_busy", 3, false, false, "the user sent the pet more messages than it can hold"},
 }
 
 // pick returns a line for kind, {name} replaced.
@@ -62,11 +68,14 @@ func (s *server) pick(kind string) string {
 }
 
 // say queues kind's line with its priority, stickiness and chatter flag from kinds.
-func (s *server) say(kind string) {
+func (s *server) say(kind string) { s.sayURL(kind, "") }
+
+// sayURL says a line whose bubble opens url when clicked.
+func (s *server) sayURL(kind, url string) {
 	for _, k := range kinds {
 		if k.Kind == kind {
 			if text := s.pick(kind); text != "" {
-				s.talk.say(line{Kind: kind, Text: text, Prio: k.Prio, Sticky: k.Sticky, Chatter: k.Chatter}, s.now(), s.asleep)
+				s.talk.say(line{Kind: kind, Text: text, Prio: k.Prio, Sticky: k.Sticky, Chatter: k.Chatter, URL: url}, s.now(), s.asleep)
 			}
 			return
 		}

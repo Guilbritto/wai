@@ -3,4 +3,5 @@
 *.big.txt
 .superpowers/
 extensions/wai-rotinas/bin/
+extensions/wai-remoto/bin/
 docs/storybook/bin/

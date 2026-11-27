@@ -845,6 +845,15 @@ impl DraftView {
         trimmed(&self.input.read(cx).content())
     }
 
+    /// Empties the box.
+    pub(crate) fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        super::composer::set_typing(cx.entity_id(), self.prompt_typed(cx), cx);
+        cx.emit(DraftEvent::Changed);
+        cx.notify();
+    }
+
     /// Back to editing, with `error` (if any) shown above the prompt and what was typed in the
     /// chat meanwhile (`leftover`) after the draft's own text.
     pub fn fail(
