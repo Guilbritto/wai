@@ -216,8 +216,8 @@ T19 → T20
 
 **Done when**:
 
-- [ ] The C31 grep proof passes
-- [ ] Gate check passes: Build
+- [x] The C31 grep proof passes
+- [x] Gate check passes: Build
 
 **Tests**: none
 **Gate**: build

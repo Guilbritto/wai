@@ -1,4 +1,4 @@
-//! The declarative panel schema (API 1.2): the tree an extension sends in `panel/render` (and, as
+//! The declarative panel schema (API 1.2; `scene` 1.10): the tree an extension sends in `panel/render` (and, as
 //! a display-only `card`, in `item/update`), checked
 //! into typed nodes. The tree is untrusted: parsing never panics and never recurses past
 //! `MAX_DEPTH`. An unknown or broken node becomes `Unsupported`; only a tree beyond the size limits
@@ -10,7 +10,7 @@
 //! - `text` (and `markdown`, `alert`, a multiline input's `value`) keep at most `TEXT_CHARS`
 //!   characters; a `log` keeps its last `LOG_CHARS`. Every other string is one line of at most
 //!   `LINE_CHARS` characters.
-//! - Ids are 1 to `MAX_ID` bytes. Buttons, form fields, sections, tabs, bubbles and pixels share one set of ids: a
+//! - Ids are 1 to `MAX_ID` bytes. Buttons, form fields, sections, tabs, bubbles, pixels and scenes share one set of ids: a
 //!   repeated id makes that node `Unsupported`. List item, card, table row and menu item ids may
 //!   repeat.
 //! - Nodes are the tree's root, each element of a `children` array and each table cell that is
