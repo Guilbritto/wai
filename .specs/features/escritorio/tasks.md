@@ -328,9 +328,9 @@ T19 → T20
 
 **Done when**:
 
-- [ ] `TestServerAcceptsOnConfiguredAddress`, `TestWrongTokenRefusedAndLoggedWithoutToken`, `TestRateLimitDropsPast30`, `TestOversizeMessageCloses`, `TestSilentPeerLeaves`, `TestLogsConnectDisconnectRefusal`, `TestMoveFanOutWithin200ms` pass
-- [ ] `go.sum` committed
-- [ ] Gate check passes: Quick
+- [x] `TestServerAcceptsOnConfiguredAddress`, `TestWrongTokenRefusedAndLoggedWithoutToken`, `TestRateLimitDropsPast30`, `TestOversizeMessageCloses`, `TestSilentPeerLeaves`, `TestLogsConnectDisconnectRefusal`, `TestMoveFanOutWithin200ms` pass
+- [x] `go.sum` committed
+- [x] Gate check passes: Quick
 
 **Tests**: integration
 **Gate**: quick

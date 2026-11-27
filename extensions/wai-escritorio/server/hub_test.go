@@ -58,7 +58,7 @@ func expectClosed(t *testing.T, s *session) {
 }
 
 // expectQuiet fails if s has a message. Call it after the hub has handled
-// everything sent before (see sync).
+// everything sent before (see barrier).
 func expectQuiet(t *testing.T, s *session) {
 	t.Helper()
 	select {
@@ -68,8 +68,8 @@ func expectQuiet(t *testing.T, s *session) {
 	}
 }
 
-// sync returns once the hub has handled every event submitted before it.
-func sync(h *hub) {
+// barrier returns once the hub has handled every event submitted before it.
+func barrier(h *hub) {
 	done := make(chan struct{})
 	h.submit(func() { close(done) })
 	<-done
@@ -131,7 +131,7 @@ func TestRejoinAtLastPosition(t *testing.T) {
 	h.move(s, office.Move{T: office.TMove, X: 2, Y: 1})
 	h.move(s, office.Move{T: office.TMove, X: 2, Y: 2})
 	h.leave(s)
-	sync(h)
+	barrier(h)
 
 	_, w2 := joinAs(t, h, "Ana")
 	if me := w2.People[0]; me.X != 2 || me.Y != 2 {
@@ -187,7 +187,7 @@ func TestIllegalMoveSnapsBack(t *testing.T) {
 			t.Fatalf("other got %+v, want move to %v", mv, want)
 		}
 	}
-	sync(h)
+	barrier(h)
 	expectQuiet(t, b)
 	expectQuiet(t, a)
 }
@@ -222,7 +222,7 @@ func TestSameNameReplacesOlder(t *testing.T) {
 
 	// the replaced session ending later must not remove the new one
 	h.leave(old)
-	sync(h)
+	barrier(h)
 	expectQuiet(t, obs)
 	h.move(fresh, office.Move{T: office.TMove, X: 3, Y: 1})
 	if mv, ok := recv(t, obs).(office.Moved); !ok || mv.X != 3 {
@@ -249,7 +249,7 @@ func TestFiftyFirstRefused(t *testing.T) {
 		t.Fatalf("51st got %+v, want refused full", r)
 	}
 	expectClosed(t, extra)
-	sync(h)
+	barrier(h)
 	expectQuiet(t, first)
 
 	// a same-name login still replaces when the office is full
@@ -280,7 +280,7 @@ func TestStatusFansOut(t *testing.T) {
 		}
 	}
 	h.status(a, office.SetStatus{T: office.TStatus, Status: "typing a secret"})
-	sync(h)
+	barrier(h)
 	expectQuiet(t, b)
 
 	// a later joiner sees the current status in the welcome
