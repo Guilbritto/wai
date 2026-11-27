@@ -460,8 +460,8 @@ T19 → T20
 
 **Done when**:
 
-- [ ] The step mirrors `wai-rotinas`'
-- [ ] Gate check passes: Build
+- [x] The step mirrors `wai-rotinas`'
+- [x] Gate check passes: Build
 
 **Tests**: none
 **Gate**: build
