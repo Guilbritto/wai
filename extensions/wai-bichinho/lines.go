@@ -18,6 +18,9 @@ var fallback = map[string][]string{
 	"hungry":      {"Tô com fome…"},
 	"lonely":      {"Cadê você?"},
 	"wake":        {"Hm? Acordei."},
+	"chat_done":   {"Terminei, dá uma olhada."},
+	"chat_error":  {"Ih, não consegui. Tenta de novo?"},
+	"chat_busy":   {"Calma, um de cada vez."},
 }
 
 // kinds lists every kind with its priority, stickiness, chatter flag and a one-line meaning for the agent prompt.
@@ -42,6 +45,9 @@ var kinds = []struct {
 	{"hungry", 1, false, true, "it got hungry"},
 	{"lonely", 1, false, true, "it feels lonely"},
 	{"wake", 1, false, true, "the first event after it slept"},
+	{"chat_done", 3, true, false, "the pet finished what the user asked; a click shows its session"},
+	{"chat_error", 3, false, false, "the pet's own session failed or was cancelled"},
+	{"chat_busy", 3, false, false, "the user sent the pet more messages than it can hold"},
 }
 
 // pick returns a line for kind, {name} replaced.

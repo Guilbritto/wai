@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,6 +33,7 @@ type message struct {
 	Method string          `json:"method,omitempty"`
 	Params json.RawMessage `json:"params,omitempty"`
 	Result json.RawMessage `json:"result,omitempty"`
+	Error  json.RawMessage `json:"error,omitempty"`
 }
 
 type node = map[string]any
@@ -52,13 +54,16 @@ type server struct {
 		mood  string
 		until time.Time
 	}
-	frame  int
-	walk   walk
-	moved  bool // the pet walked on the last frame
-	ticks  int
-	listID int
-	sent   map[string]string // the last tree sent per panel
-	prs    map[string]string // my open PRs, URL → reason, from wai-waycarbon; nil until its first event
+	frame   int
+	walk    walk
+	moved   bool // the pet walked on the last frame
+	ticks   int
+	reqID   int
+	pending map[int]pendingCall
+	chat    chat
+	mention *string           // the name last sent to mentions/set; nil until the first
+	sent    map[string]string // the last tree sent per panel
+	prs     map[string]string // my open PRs, URL → reason, from wai-waycarbon; nil until its first event
 
 	claude    string // the CLI's path; "" without one
 	run       runner // nil until initialize finds claude
@@ -71,7 +76,7 @@ type server struct {
 }
 
 func newServer(out io.Writer, now func() time.Time, rng *rand.Rand) *server {
-	return &server{out: out, now: now, rng: rng, gen: make(chan pools, 1), st: newState(), walk: walk{x: (stageW - W) / 2, dir: 1, pause: 6}, states: map[string]string{}, sent: map[string]string{}}
+	return &server{out: out, now: now, rng: rng, gen: make(chan pools, 1), st: newState(), walk: walk{x: (stageW - W) / 2, dir: 1, pause: 6}, states: map[string]string{}, pending: map[int]pendingCall{}, sent: map[string]string{}}
 }
 
 func (s *server) write(v any) {
@@ -175,6 +180,9 @@ func (s *server) mood(now time.Time) string {
 		if state == "needs_you" {
 			return "alert"
 		}
+	}
+	if s.chat.busy {
+		return "working"
 	}
 	switch s.states[s.focused] {
 	case "error":
@@ -475,6 +483,7 @@ func (s *server) render() {
 		s.say("wake")
 	}
 	s.talk.next(now)
+	s.syncMention()
 	for _, p := range []struct {
 		id   string
 		tree node
@@ -494,9 +503,9 @@ func (s *server) tick() {
 	s.moved = s.st.Pet != nil && s.mood(s.now()) == "idle" && s.walk.step(s.rng)
 	s.ticks++
 	s.maybeGenerate(s.now())
+	s.retryShow()
 	if s.ticks%listEvery == 0 && len(s.states) > 0 {
-		s.listID++
-		s.write(node{"jsonrpc": "2.0", "id": s.listID, "method": "sessions/list"})
+		s.request("sessions/list", nil, pendingCall{})
 	}
 	s.render()
 }
@@ -580,8 +589,7 @@ func (s *server) handle(m message) {
 			s.hungry, s.lonely = p.Hunger(s.now()) >= 60, p.Affection(s.now()) < 25
 		}
 		s.ready = true
-		s.listID++
-		s.write(node{"jsonrpc": "2.0", "id": s.listID, "method": "sessions/list"})
+		s.request("sessions/list", nil, pendingCall{})
 		s.render()
 	case "panel/action":
 		var p struct {
@@ -591,6 +599,9 @@ func (s *server) handle(m message) {
 		json.Unmarshal(m.Params, &p)
 		s.write(node{"jsonrpc": "2.0", "id": m.ID, "result": nil})
 		if _, ok := p.Values["bubble"]; ok && strings.HasPrefix(p.Action, "say-") {
+			if p.Values["bubble"] == "click" {
+				s.clickShow(p.Action)
+			}
 			s.talk.done(p.Action, s.now())
 			s.render()
 			return
@@ -603,6 +614,9 @@ func (s *server) handle(m message) {
 			Agent, Session, State *string
 		}
 		json.Unmarshal(m.Params, &p)
+		if s.chat.own(p.Agent, p.Session) {
+			return
+		}
 		if k := key(p.Agent, p.Session); k != "" && p.State != nil {
 			prev := s.states[k]
 			s.states[k] = *p.State
@@ -617,8 +631,16 @@ func (s *server) handle(m message) {
 		s.lastEvent = s.now()
 		s.render()
 	case "event/turn_ended":
-		var p struct{ Reason string }
+		var p struct {
+			Agent, Session *string
+			Reason         string
+		}
 		json.Unmarshal(m.Params, &p)
+		if s.chat.own(p.Agent, p.Session) {
+			s.chatTurnEnded(p.Reason)
+			s.render()
+			return
+		}
 		levelUp, evolved, egg := s.st.TurnEnded(p.Reason)
 		if evolved {
 			s.note("evolved into " + formOf(s.st.Pet).Name)
@@ -665,19 +687,43 @@ func (s *server) handle(m message) {
 		}
 		s.gotPRs(p.Data.PRs)
 		s.render()
-	case "":
-		// The answer to our sessions/list: the open sessions' states, closed ones dropped.
-		var list []struct{ Agent, Session, State *string }
-		if json.Unmarshal(m.Result, &list) == nil && m.Result != nil {
-			states := map[string]string{}
-			for _, l := range list {
-				if k := key(l.Agent, l.Session); k != "" && l.State != nil {
-					states[k] = *l.State
-				}
-			}
-			s.states = states
+	case "mention/message":
+		var p struct{ Text string }
+		json.Unmarshal(m.Params, &p)
+		s.write(node{"jsonrpc": "2.0", "id": m.ID, "result": nil})
+		s.chatMessage(p.Text)
+		s.render()
+	case "event/permission_requested", "event/question_requested":
+		var p struct {
+			Agent, Session *string
+			Request, Title string
+			Message        string
+		}
+		json.Unmarshal(m.Params, &p)
+		if s.chat.own(p.Agent, p.Session) {
+			s.chatNeeds(p.Request, cmp.Or(p.Title, p.Message))
 			s.render()
 		}
+	case "event/permission_resolved", "event/question_resolved":
+		var p struct {
+			Agent, Session *string
+			Request        string
+		}
+		json.Unmarshal(m.Params, &p)
+		if s.chat.own(p.Agent, p.Session) {
+			s.chatResolved(p.Request)
+			s.render()
+		}
+	case "":
+		var id int
+		json.Unmarshal(m.ID, &id)
+		call, ok := s.pending[id]
+		if !ok {
+			return
+		}
+		delete(s.pending, id)
+		s.answered(call, m)
+		s.render()
 	default:
 		if m.ID != nil {
 			s.write(node{"jsonrpc": "2.0", "id": m.ID, "error": node{"code": -32601, "message": "Method not found"}})

@@ -8,7 +8,7 @@ import (
 var t0 = time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 
 func n(kind string, prio int) line { return line{Kind: kind, Text: kind, Prio: prio} }
-func chat(kind string) line        { return line{Kind: kind, Text: kind, Prio: 1, Chatter: true} }
+func chatter(kind string) line     { return line{Kind: kind, Text: kind, Prio: 1, Chatter: true} }
 
 func TestOneLineAtATimeWithGap(t *testing.T) {
 	var sp speech
@@ -96,17 +96,17 @@ func TestQueueCapDropsLowest(t *testing.T) {
 
 func TestChatterLimitedAndQuietAsleep(t *testing.T) {
 	var sp speech
-	sp.say(chat("a"), t0, false)
-	sp.say(chat("b"), t0.Add(time.Minute), false)
+	sp.say(chatter("a"), t0, false)
+	sp.say(chatter("b"), t0.Add(time.Minute), false)
 	if len(sp.queue) != 1 {
 		t.Fatalf("queue = %v", sp.queue)
 	}
-	sp.say(chat("c"), t0.Add(16*time.Minute), false)
+	sp.say(chatter("c"), t0.Add(16*time.Minute), false)
 	if len(sp.queue) != 2 {
 		t.Fatalf("queue = %v", sp.queue)
 	}
 	var sl speech
-	sl.say(chat("a"), t0, true)
+	sl.say(chatter("a"), t0, true)
 	sl.say(n("b", 2), t0, true)
 	if len(sl.queue) != 1 || sl.queue[0].Kind != "b" {
 		t.Fatalf("queue = %v", sl.queue)

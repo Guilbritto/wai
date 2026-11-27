@@ -13,6 +13,7 @@ type line struct {
 	Sticky     bool
 	Chatter    bool
 	URL        string // the PR a click opens; "" for none
+	Show       bool   // a click shows the pet's own session
 }
 
 const (
@@ -57,7 +58,7 @@ func (sp *speech) say(l line, now time.Time, asleep bool) {
 		}
 		sp.chatted = now
 	}
-	if l.Prio == 3 && sp.cur != nil && sp.cur.Prio < 3 {
+	if l.Prio == 3 && sp.cur != nil && (sp.cur.Prio < 3 || sp.cur.Kind == "chat_wait") {
 		// A sticky line steps aside and comes back after.
 		if sp.cur.Sticky {
 			sp.insert(*sp.cur, true)
