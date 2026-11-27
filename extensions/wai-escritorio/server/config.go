@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"unicode/utf8"
 
 	"wai-escritorio/office"
 )
@@ -35,7 +36,7 @@ func loadConfig(path string) (Config, office.Map, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return Config{}, office.Map{}, fmt.Errorf("config %s: %w", path, err)
 	}
-	if len(c.Token) < minTokenLen {
+	if utf8.RuneCountInString(c.Token) < minTokenLen {
 		return Config{}, office.Map{}, errors.New("token must be at least 32 characters")
 	}
 	if (c.TLSCert == "") != (c.TLSKey == "") {

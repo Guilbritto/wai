@@ -31,6 +31,11 @@ func TestConfigRejectsShortToken(t *testing.T) {
 	wantErr(t, writeConfig(t, `{"listen":"127.0.0.1:0","token":"short"}`), "token must be at least 32 characters")
 	wantErr(t, writeConfig(t, `{"listen":"127.0.0.1:0","token":"`+goodToken[:31]+`"}`), "token must be at least 32 characters")
 	wantErr(t, writeConfig(t, `{"listen":"127.0.0.1:0"}`), "token must be at least 32 characters")
+	// 16 characters but 32 bytes: characters are counted, not bytes.
+	wantErr(t, writeConfig(t, `{"listen":"127.0.0.1:0","token":"`+strings.Repeat("é", 16)+`"}`), "token must be at least 32 characters")
+	if _, _, err := loadConfig(writeConfig(t, `{"listen":"127.0.0.1:0","token":"`+strings.Repeat("é", 32)+`"}`)); err != nil {
+		t.Fatalf("32 multi-byte characters: %v", err)
+	}
 }
 
 func TestConfigRequiresTLSOffLoopback(t *testing.T) {
@@ -78,4 +83,12 @@ func TestConfigBadMapRefused(t *testing.T) {
 	if err != nil || m.Spawn.X != 1 || m.Spawn.Y != 1 {
 		t.Fatalf("good custom map: %v %+v", err, m.Spawn)
 	}
+}
+
+func TestConfigMapWithoutSpawnRefused(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "nospawn.map"), []byte("###\n#.#\n###\n"), 0o600)
+	p := filepath.Join(dir, "office.json")
+	os.WriteFile(p, []byte(`{"listen":"127.0.0.1:0","token":"`+goodToken+`","map":"nospawn.map"}`), 0o600)
+	wantErr(t, p, "map has no spawn point")
 }

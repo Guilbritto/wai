@@ -597,7 +597,7 @@ Proof: run go | --- PASS: TestStatusReachesOthersWithin1s
 Proof: run go | --- PASS: TestReconnectAfterServerRestart
 
 **C43** - A map with no spawn point stops the server and names the problem (OFC-61)
-Proof: run go | --- PASS: TestMapWithoutSpawnRefused
+Proof: run go | --- PASS: TestConfigMapWithoutSpawnRefused
 
 **C44** - Two sprites on one tile are both drawn and their labels stack apart (OFC-62)
 Proof: run wai | test ext_scene::tests::shared_tile_labels_stack ... ok
