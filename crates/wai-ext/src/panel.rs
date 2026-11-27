@@ -63,6 +63,8 @@ pub const SCENE_MAP_SIDE: usize = 128;
 pub const SCENE_SPRITES: usize = 100;
 pub const SCENE_LABEL: usize = 32;
 pub const SCENE_BADGE: usize = 24;
+/// The most px the drawn map may span on either side (tiles × `cell` × `scale`).
+pub const SCENE_RASTER: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
@@ -1025,8 +1027,10 @@ fn scene(o: &Map<String, Value>) -> Option<Scene> {
     if !(4..=SCENE_PATTERN_SIDE).contains(&cell) {
         return None;
     }
-    let scale = match o.get("scale").and_then(Value::as_u64) {
-        Some(s) => u8::try_from(s).ok().filter(|s| (1..=4).contains(s))?,
+    let scale = match o.get("scale").filter(|v| !v.is_null()) {
+        Some(s) => u8::try_from(s.as_u64()?)
+            .ok()
+            .filter(|s| (1..=4).contains(s))?,
         None => 2,
     };
     let palette = o.get("palette")?.as_object()?;
@@ -1062,6 +1066,9 @@ fn scene(o: &Map<String, Value>) -> Option<Scene> {
     if map.len() > SCENE_MAP_SIDE || width == 0 || width > SCENE_MAP_SIDE {
         return None;
     }
+    if width.max(map.len()) * cell * usize::from(scale) > SCENE_RASTER {
+        return None;
+    }
     map.iter_mut().for_each(|r| r.resize(width, ' '));
     let sprites = o.get("sprites")?.as_array()?;
     if sprites.len() > SCENE_SPRITES {
@@ -1079,17 +1086,26 @@ fn scene(o: &Map<String, Value>) -> Option<Scene> {
                 pattern: str_field(s, "pattern")?.to_owned(),
                 label: sized(s, "label", SCENE_LABEL)?,
                 badge: sized(s, "badge", SCENE_BADGE)?,
-                tone: tone(s).unwrap_or_default(),
+                tone: match s.get("tone").filter(|v| !v.is_null()) {
+                    None => Tone::default(),
+                    Some(_) => tone(s)?,
+                },
             };
             let inside = sprite.x < width && sprite.y < map.len();
             (inside && patterns.contains_key(&sprite.pattern) && seen.insert(sprite.id.clone()))
                 .then_some(sprite)
         })
         .collect::<Option<Vec<_>>>()?;
-    let follow = str_field(o, "follow")
-        .filter(|f| sprites.iter().any(|s| s.id == *f))
-        .map(str::to_owned);
-    let margin = (o.get("margin").and_then(Value::as_u64)).map_or(3, |m| m.min(16) as u8);
+    let follow = match o.get("follow").filter(|v| !v.is_null()) {
+        Some(f) => Some(f.as_str()?),
+        None => None,
+    }
+    .filter(|f| sprites.iter().any(|s| s.id == *f))
+    .map(str::to_owned);
+    let margin = match o.get("margin").filter(|v| !v.is_null()) {
+        Some(m) => m.as_u64()?.min(16) as u8,
+        None => 3,
+    };
     Some(Scene {
         id: scene_id,
         cell,
@@ -1107,9 +1123,10 @@ fn scene(o: &Map<String, Value>) -> Option<Scene> {
 
 /// An optional line of at most `max` characters; `None` when it is there and longer.
 fn sized(o: &Map<String, Value>, key: &str, max: usize) -> Option<Option<Arc<str>>> {
-    match str_field(o, key) {
-        Some(s) if s.chars().count() > max => None,
-        s => Some(s.map(Arc::from)),
+    match o.get(key) {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(s)) if s.chars().count() <= max => Some(Some(Arc::from(s.as_str()))),
+        _ => None,
     }
 }
 
@@ -1377,6 +1394,137 @@ mod tests {
         }) else {
             panic!()
         };
+    }
+
+    #[test]
+    fn scene_limits_at_and_over() {
+        let keys = |n: u32| -> Value {
+            let p = (0..n).map(|i| {
+                (
+                    char::from_u32(0x100 + i).unwrap().to_string(),
+                    json!("#000"),
+                )
+            });
+            Value::Object(p.collect())
+        };
+        let sprites = |n: usize| -> Value {
+            let s =
+                (0..n).map(|i| json!({"id": format!("s{i}"), "x": 0, "y": 0, "pattern": "ana"}));
+            Value::Array(s.collect())
+        };
+        let sq = |n: usize| json!(vec!["a".repeat(n); n]);
+        let pats = |n: usize| -> Value {
+            let mut p = Map::new();
+            for i in 0..n {
+                p.insert(format!("p{i}"), json!(["a"]));
+            }
+            p.insert("floor".into(), json!(vec!["abab"; 4]));
+            p.insert("ana".into(), json!(["a"]));
+            Value::Object(p)
+        };
+        let pairs: Vec<(&str, Box<dyn Fn(&mut Value, bool)>)> = vec![
+            (
+                "palette 64/65",
+                Box::new(|v, over| v["palette"] = keys(64 + u32::from(over))),
+            ),
+            (
+                "sprites 100/101",
+                Box::new(|v, over| v["sprites"] = sprites(100 + usize::from(over))),
+            ),
+            (
+                "pattern 32/33",
+                Box::new(|v, over| v["patterns"]["big"] = sq(32 + usize::from(over))),
+            ),
+            (
+                "patterns 64/65",
+                Box::new(|v, over| v["patterns"] = pats(62 + usize::from(over))),
+            ),
+            (
+                "rows 128/129",
+                Box::new(|v, over| {
+                    v["sprites"] = json!([]);
+                    v["map"] = json!(vec!["."; 128 + usize::from(over)]);
+                }),
+            ),
+            (
+                "columns 128/129",
+                Box::new(|v, over| {
+                    v["scale"] = json!(1);
+                    v["sprites"] = json!([]);
+                    v["map"] = json!([".".repeat(128 + usize::from(over))]);
+                }),
+            ),
+            (
+                "label 32/33",
+                Box::new(|v, over| {
+                    v["sprites"][0]["label"] = json!("x".repeat(32 + usize::from(over)))
+                }),
+            ),
+            (
+                "badge 24/25",
+                Box::new(|v, over| {
+                    v["sprites"][0]["badge"] = json!("x".repeat(24 + usize::from(over)))
+                }),
+            ),
+            // 4096 px is 64 tiles of 16 px at scale 4.
+            (
+                "raster columns",
+                Box::new(|v, over| {
+                    v["cell"] = json!(16);
+                    v["scale"] = json!(4);
+                    v["patterns"]["floor"] = sq(16);
+                    v["map"] = json!(["...".repeat(21) + if over { "..." } else { "." }]);
+                    v["sprites"] = json!([]);
+                }),
+            ),
+            (
+                "raster rows",
+                Box::new(|v, over| {
+                    v["cell"] = json!(16);
+                    v["scale"] = json!(4);
+                    v["patterns"]["floor"] = sq(16);
+                    v["map"] = json!(vec!["."; 64 + usize::from(over)]);
+                    v["sprites"] = json!([]);
+                }),
+            ),
+        ];
+        for (name, edit) in &pairs {
+            let mut at = scene_json();
+            edit(&mut at, false);
+            assert!(
+                matches!(parse(&at), Ok(Node::Scene(_))),
+                "{name} at the limit"
+            );
+            let mut over = scene_json();
+            edit(&mut over, true);
+            assert_eq!(parse(&over), Ok(Node::Unsupported), "{name} over the limit");
+        }
+    }
+
+    #[test]
+    fn scene_missing_and_mistyped_fields() {
+        for key in ["cell", "map", "sprites", "palette", "patterns", "legend"] {
+            let mut v = scene_json();
+            v.as_object_mut().unwrap().remove(key);
+            assert_eq!(parse(&v), Ok(Node::Unsupported), "missing {key}");
+        }
+        let edits: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+            (
+                "label 42",
+                Box::new(|v| v["sprites"][0]["label"] = json!(42)),
+            ),
+            (
+                "badge 42",
+                Box::new(|v| v["sprites"][0]["badge"] = json!(true)),
+            ),
+            ("tone 1", Box::new(|v| v["sprites"][0]["tone"] = json!(1))),
+            ("scale big", Box::new(|v| v["scale"] = json!("big"))),
+            ("margin big", Box::new(|v| v["margin"] = json!("big"))),
+            ("follow 1", Box::new(|v| v["follow"] = json!(1))),
+        ];
+        for (name, edit) in edits {
+            assert_eq!(scene_with(|v| edit(v)), Ok(Node::Unsupported), "{name}");
+        }
     }
 
     #[test]
