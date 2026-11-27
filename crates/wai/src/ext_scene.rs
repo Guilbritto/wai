@@ -14,7 +14,9 @@ use gpui_kit::*;
 use image::{Frame, Rgba, RgbaImage};
 use wai_ext::panel::{Pattern, Scene};
 
-use crate::ext_panel::{ExtPanel, tone_color};
+use crate::appearance::fonts;
+use crate::ext_panel::{ExtPanel, PanelKey, tone_color};
+use gpui_kit::prelude::FluentBuilder as _;
 
 /// A sprite that changed tile takes this long to arrive.
 pub(crate) const TWEEN: Duration = Duration::from_millis(150);
@@ -190,12 +192,11 @@ impl SceneState {
             self.sprites.clear();
         }
         for sprite in &scene.sprites {
-            if !self.sprites.contains_key(&sprite.pattern) {
-                if let Some(image) = rasterise_pattern(scene, &sprite.pattern) {
-                    let (w, h) = image.dimensions();
-                    let image = (render_image(image), w as f32, h as f32);
-                    self.sprites.insert(sprite.pattern.clone(), image);
-                }
+            let cached = self.sprites.contains_key(&sprite.pattern);
+            if let (false, Some(image)) = (cached, rasterise_pattern(scene, &sprite.pattern)) {
+                let (w, h) = image.dimensions();
+                let image = (render_image(image), w as f32, h as f32);
+                self.sprites.insert(sprite.pattern.clone(), image);
             }
         }
         let motions = &mut self.motions;
@@ -252,7 +253,9 @@ fn element_id(kind: &str, id: &str) -> ElementId {
 pub(crate) fn draw(
     scene: &Scene,
     state: &SceneState,
+    focus: &FocusHandle,
     now: Instant,
+    window: &Window,
     cx: &mut Context<ExtPanel>,
 ) -> AnyElement {
     let tile = (scene.cell * usize::from(scene.scale)) as f32;
@@ -311,11 +314,8 @@ pub(crate) fn draw(
     });
 
     let tiles_of = |s: &wai_ext::panel::Sprite| {
-        let at = state
-            .motions
-            .get(&s.id)
-            .map_or(Tile { x: 0, y: 0 }, |m| m.to);
-        at
+        let home = Tile { x: 0, y: 0 };
+        state.motions.get(&s.id).map_or(home, |m| m.to)
     };
     let stack = label_rows(&scene.sprites.iter().map(tiles_of).collect::<Vec<_>>());
     let sprites = scene.sprites.iter().zip(stack).map(|(sprite, row)| {
@@ -336,6 +336,7 @@ pub(crate) fn draw(
         });
         let theme = cx.theme();
         let (background, foreground) = (theme.background.opacity(0.8), theme.foreground);
+        let label_size = fonts::ui(cx, 10.);
         let tag = |text: &str, id: &str, color: Hsla| {
             div()
                 .id(element_id(id, &sprite.id))
@@ -344,7 +345,7 @@ pub(crate) fn draw(
                 .px_1()
                 .rounded(px(3.))
                 .bg(background)
-                .text_size(px(10.))
+                .text_size(label_size)
                 .line_height(px(LINE))
                 .text_color(color)
                 .whitespace_nowrap()
@@ -385,6 +386,28 @@ pub(crate) fn draw(
             div()
                 .id(element_id("panel-scene", &scene.id))
                 .test_support()
+                .key_context("ExtScene")
+                .track_focus(focus)
+                .on_mouse_down(MouseButton::Left, {
+                    let focus = focus.clone();
+                    move |_, window, cx| focus.focus(window, cx)
+                })
+                .on_key_down({
+                    let id = scene.id.clone();
+                    cx.listener(move |_, event: &KeyDownEvent, _, cx| {
+                        // Shortcuts stay with the keybindings.
+                        let mods = event.keystroke.modifiers;
+                        if mods.platform || mods.control {
+                            return;
+                        }
+                        cx.emit(PanelKey {
+                            scene: id.clone(),
+                            key: event.keystroke.key.clone(),
+                            repeat: event.is_held,
+                        });
+                        cx.stop_propagation();
+                    })
+                })
                 .relative()
                 .w_full()
                 .max_w(px(map_w))
@@ -396,12 +419,15 @@ pub(crate) fn draw(
                 .children(bodies.into_iter().flatten())
                 .children(tags.into_iter().flatten()),
         )
-        .child(
-            h_flex()
-                .text_xs()
-                .text_color(hint)
-                .child("Click the map to walk"),
-        )
+        .when(!focus.is_focused(window), |el| {
+            el.child(
+                h_flex()
+                    .debug_selector(|| "scene-hint".into())
+                    .text_xs()
+                    .text_color(hint)
+                    .child("Click the map to walk"),
+            )
+        })
         .into_any_element()
 }
 

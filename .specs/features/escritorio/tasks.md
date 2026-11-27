@@ -198,8 +198,8 @@ T19 → T20
 
 **Done when**:
 
-- [ ] `scene_click_takes_focus`, `scene_keys_reach_extension` (arrows and WASD with panel, scene, key), `scene_cmd_keys_not_sent` pass
-- [ ] Gate check passes: Full, then the Build gate (Phase 2 touches `crates/`)
+- [x] `scene_click_takes_focus`, `scene_keys_reach_extension` (arrows and WASD with panel, scene, key), `scene_cmd_keys_not_sent` pass
+- [x] Gate check passes: Full, then the Build gate (Phase 2 touches `crates/`)
 
 **Tests**: integration
 **Gate**: build

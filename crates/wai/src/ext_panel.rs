@@ -58,6 +58,13 @@ pub struct PanelAction {
     pub values: Value,
 }
 
+/// A key pressed in a scene that has the keyboard focus (API 1.10); `key` is gpui's name for it.
+pub struct PanelKey {
+    pub scene: String,
+    pub key: String,
+    pub repeat: bool,
+}
+
 /// An input's state: one line, or a text area of `rows` lines.
 #[derive(Clone)]
 pub(crate) enum Field {
@@ -137,6 +144,8 @@ pub struct ExtPanel {
     bubbles: HashMap<String, Bubble>,
     /// Each scene's cached layer and sprite motion, by id.
     scenes: HashMap<String, SceneState>,
+    /// Taken by a scene on click; made with the first scene.
+    pub(crate) focus: Option<FocusHandle>,
     /// Redraws and advances the bubbles while one animates.
     ticker: Option<Task<()>>,
     /// Redraws the bubbles when the prompt box starts or stops having text.
@@ -146,6 +155,7 @@ pub struct ExtPanel {
 }
 
 impl EventEmitter<PanelAction> for ExtPanel {}
+impl EventEmitter<PanelKey> for ExtPanel {}
 
 impl ExtPanel {
     pub fn new(ext_name: SharedString) -> Self {
@@ -159,6 +169,7 @@ impl ExtPanel {
             logs: HashMap::new(),
             bubbles: HashMap::new(),
             scenes: HashMap::new(),
+            focus: None,
             ticker: None,
             typing: None,
             foot: false,
@@ -1442,7 +1453,8 @@ impl ExtPanel {
             Node::Scene(scene) => {
                 let state = self.scenes.get(&scene.id).cloned().unwrap_or_default();
                 let now = cx.background_executor().now();
-                own(ext_scene::draw(scene, &state, now, cx), at)
+                let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
+                own(ext_scene::draw(scene, &state, &focus, now, window, cx), at)
             }
             Node::Unsupported => unsupported(cx),
         };
@@ -3115,6 +3127,74 @@ mod tests {
         tree["palette"]["a"] = json!("#0f0");
         show(&panel, tree, cx);
         assert!(!std::sync::Arc::ptr_eq(&first, &layer(&panel, cx)));
+    }
+
+    fn keys(
+        panel: &Entity<ExtPanel>,
+        cx: &mut VisualTestContext,
+    ) -> Rc<RefCell<Vec<(String, String, bool)>>> {
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let log = sent.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(panel, move |_, k: &super::PanelKey, _| {
+                log.borrow_mut()
+                    .push((k.scene.clone(), k.key.clone(), k.repeat))
+            })
+            .detach()
+        });
+        sent
+    }
+
+    fn focused(panel: &Entity<ExtPanel>, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| {
+            let focus = panel.read(cx).focus.clone();
+            focus.is_some_and(|f| f.is_focused(window))
+        })
+    }
+
+    #[gpui_kit::test]
+    fn scene_click_takes_focus(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        show(&panel, scene_tree(json!([])), cx);
+        assert!(!focused(&panel, cx));
+        assert!(cx.debug_bounds("scene-hint").is_some());
+        click(name("panel-scene:office"), cx);
+        assert!(focused(&panel, cx));
+        cx.update(|window, cx| window.render_frame(cx));
+        assert!(cx.debug_bounds("scene-hint").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn scene_keys_reach_extension(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let keys = keys(&panel, cx);
+        show(&panel, scene_tree(json!([])), cx);
+        click(name("panel-scene:office"), cx);
+        cx.simulate_keystrokes("up down left right w a s d space");
+        let got: Vec<_> = keys.borrow().iter().map(|k| k.1.clone()).collect();
+        assert_eq!(
+            got,
+            ["up", "down", "left", "right", "w", "a", "s", "d", "space"]
+        );
+        assert!(keys.borrow().iter().all(|k| k.0 == "office" && !k.2));
+    }
+
+    #[gpui_kit::test]
+    fn scene_cmd_keys_not_sent(cx: &mut TestAppContext) {
+        use crate::extensions_view::tests::click;
+
+        let (panel, cx) = panel_window(cx);
+        let keys = keys(&panel, cx);
+        show(&panel, scene_tree(json!([])), cx);
+        click(name("panel-scene:office"), cx);
+        cx.simulate_keystrokes("cmd-s ctrl-a cmd-up");
+        assert!(keys.borrow().is_empty(), "{:?}", keys.borrow());
+        cx.simulate_keystrokes("s");
+        assert_eq!(keys.borrow().len(), 1);
     }
 
     #[gpui_kit::test]

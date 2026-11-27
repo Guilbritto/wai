@@ -1307,7 +1307,8 @@ mod tests {
     #[test]
     fn scene_rules_unsupported() {
         let sq = |n: usize| vec!["a".repeat(n); n];
-        let cases: Vec<(&str, Box<dyn FnOnce(&mut Value)>)> = vec![
+        type Edit = Box<dyn FnOnce(&mut Value)>;
+        let cases: Vec<(&str, Edit)> = vec![
             (
                 "missing id",
                 Box::new(|v| drop(v.as_object_mut().unwrap().remove("id"))),

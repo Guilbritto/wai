@@ -26,7 +26,7 @@ use wai_ext::{
 };
 use wai_settings::{AgentConfig, Template};
 
-use crate::ext_panel::{ExtPanel, PanelAction, lucide};
+use crate::ext_panel::{ExtPanel, PanelAction, PanelKey, lucide};
 use crate::notify;
 
 /// Events applied per wake of an extension's pump: a flooding one cannot hold the UI thread.
@@ -96,6 +96,7 @@ pub struct Panel {
     pub view: Entity<ExtPanel>,
     /// Its clicks, sent to the extension as `panel/action`.
     _actions: Subscription,
+    _keys: Subscription,
 }
 
 impl Panel {
@@ -434,6 +435,14 @@ impl ExtHost {
             panel
         });
         let (to, panel) = (ext.clone(), spec.id.clone());
+        let keys = cx.subscribe(&view, {
+            let (to, panel) = (to.clone(), panel.clone());
+            move |this, _, key: &PanelKey, _| {
+                if let Some(handle) = this.handle(&to) {
+                    handle.panel_key(&panel, &key.scene, &key.key, key.repeat);
+                }
+            }
+        });
         let actions = cx.subscribe(&view, move |this, _, action: &PanelAction, _| {
             if let Some(handle) = this.handle(&to) {
                 handle.panel_action(&panel, &action.action, action.values.clone());
@@ -451,6 +460,7 @@ impl ExtHost {
             frame: spec.frame.unwrap_or(true),
             view,
             _actions: actions,
+            _keys: keys,
         }
     }
 
