@@ -3694,6 +3694,42 @@ mod tests {
         );
     }
 
+    /// In the workspace, a scene in a main pane takes the keyboard when clicked and its keys
+    /// reach the extension: no workspace binding swallows them first.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn scene_keys_reach_extension_in_workspace(cx: &mut TestAppContext) {
+        use crate::ext_host::tests::{bodies, log_path, logged};
+        use crate::extensions_view::tests::click;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let log = log_path(tmp.path(), "cards");
+        let render = json!({"panel": "main", "tree": scene_tree(json!([]))});
+        let flags = format!(
+            "--log '{}' --notification 'panel/render {render}'",
+            log.display()
+        );
+        let (workspace, cx) = start_sample(tmp.path(), &flags, cx);
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        let panel = host.read_with(cx, |h, _| h.panels().first().map(|p| p.view.clone()));
+        let panel = panel.expect("a tab for the panel");
+        crate::workspace::tests::wait_until(cx, "the scene", |cx| {
+            panel.read_with(cx, |p, _| p.tree.is_some())
+        });
+        click(("tab-panel", 0usize), cx);
+        click(name("panel-scene:office"), cx);
+        assert!(focused(&panel, cx));
+        cx.simulate_keystrokes("up w space");
+        let lines = logged(&log, "the keys", cx, |l| bodies(l, "panel/key").len() >= 3);
+        let keys: Vec<_> = (bodies(&lines, "panel/key").iter())
+            .map(|k| (k["panel"].clone(), k["scene"].clone(), k["key"].clone()))
+            .collect();
+        assert_eq!(
+            keys,
+            ["up", "w", "space"].map(|k| (json!("main"), json!("office"), json!(k)))
+        );
+    }
+
     /// Types `text` into the panel's `query` input.
     #[cfg(unix)]
     fn type_query(panel: &Entity<ExtPanel>, text: &str, cx: &mut VisualTestContext) {
