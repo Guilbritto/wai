@@ -404,8 +404,8 @@ T19 → T20
 
 **Done when**:
 
-- [ ] `TestTokenRefusedStops`, `TestUnreachableRetries`, `TestReplacedStopsRetrying`, `TestReconnectAfterServerRestart` pass
-- [ ] Gate check passes: Quick
+- [x] `TestTokenRefusedStops`, `TestUnreachableRetries`, `TestReplacedStopsRetrying`, `TestReconnectAfterServerRestart` pass
+- [x] Gate check passes: Quick
 
 **Tests**: integration
 **Gate**: quick
