@@ -203,6 +203,9 @@ fn first_party_manifests_validate() {
             Permission::Process,
             Permission::Panels,
             Permission::SessionsRead,
+            Permission::SessionsContent,
+            Permission::SessionsControl,
+            Permission::Mentions,
             Permission::Events(ExtId::new("wai-waycarbon").unwrap())
         ]
     );
