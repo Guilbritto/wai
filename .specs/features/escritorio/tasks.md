@@ -272,8 +272,8 @@ T19 → T20
 
 **Done when**:
 
-- [ ] Compiles; `go vet` clean
-- [ ] Gate check passes: Quick
+- [x] Compiles; `go vet` clean
+- [x] Gate check passes: Quick
 
 **Tests**: none
 **Gate**: quick
