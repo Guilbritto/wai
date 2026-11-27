@@ -67,7 +67,7 @@ func ValidName(s string) bool {
 		return false
 	}
 	for _, r := range s {
-		if unicode.IsControl(r) {
+		if r != ' ' && !unicode.IsPrint(r) {
 			return false
 		}
 	}

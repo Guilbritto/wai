@@ -92,7 +92,7 @@ func TestValidName(t *testing.T) {
 }
 
 func TestNameRejectsControlChars(t *testing.T) {
-	for _, s := range []string{"Ana\n", "A\tna", "\x00", "Ana\r\nBob", "a\x1bb", "a\u0085b", "a\x7fb"} {
+	for _, s := range []string{"Ana\n", "A\tna", "\x00", "Ana\r\nBob", "a\x1bb", "a\u0085b", "a\x7fb", "a\u2028b", "a\u200bb", "a\u202eb"} {
 		if ValidName(s) {
 			t.Errorf("%q should be invalid", s)
 		}
