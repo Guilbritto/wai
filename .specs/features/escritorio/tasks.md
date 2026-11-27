@@ -310,8 +310,8 @@ T19 → T20
 
 **Done when**:
 
-- [ ] `TestAuthenticate`, `TestRejoinAtLastPosition`, `TestIllegalMoveSnapsBack`, `TestSameNameReplacesOlder`, `TestFiftyFirstRefused`, `TestStatusFansOut` pass
-- [ ] Gate check passes: Quick
+- [x] `TestAuthenticate`, `TestRejoinAtLastPosition`, `TestIllegalMoveSnapsBack`, `TestSameNameReplacesOlder`, `TestFiftyFirstRefused`, `TestStatusFansOut` pass
+- [x] Gate check passes: Quick
 
 **Tests**: integration
 **Gate**: quick
