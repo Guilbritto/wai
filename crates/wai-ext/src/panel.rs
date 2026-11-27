@@ -1422,7 +1422,8 @@ mod tests {
             p.insert("ana".into(), json!(["a"]));
             Value::Object(p)
         };
-        let pairs: Vec<(&str, Box<dyn Fn(&mut Value, bool)>)> = vec![
+        type Pair<'a> = (&'static str, Box<dyn Fn(&mut Value, bool) + 'a>);
+        let pairs: Vec<Pair> = vec![
             (
                 "palette 64/65",
                 Box::new(|v, over| v["palette"] = keys(64 + u32::from(over))),
@@ -1508,7 +1509,8 @@ mod tests {
             v.as_object_mut().unwrap().remove(key);
             assert_eq!(parse(&v), Ok(Node::Unsupported), "missing {key}");
         }
-        let edits: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+        type Mistyped = (&'static str, Box<dyn Fn(&mut Value)>);
+        let edits: Vec<Mistyped> = vec![
             (
                 "label 42",
                 Box::new(|v| v["sprites"][0]["label"] = json!(42)),
