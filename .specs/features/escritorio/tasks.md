@@ -610,8 +610,8 @@ Proof: run go | --- PASS: TestNameRejectsControlChars
 ## Handoff
 
 **Settled mid-build:** 2026-11-26 - OFC-14: token field stays empty on "Change setup", an empty submit keeps the saved token - user: "Token vazio, mantém o salvo"; T15 art: chairs and plants on carpet get carpet-backed variants - user: "Aprovo e corrige o fundo"
-**Dispatched:** batch 1 (Phases 1-2, T1-T7) - sonnet worker - 2026-11-26 - returned (79e0c54..4cd1565); batch 2 (Phases 3-4, T8-T13) - sonnet worker - 2026-11-26 - returned (c534b49..5a6f088); batch 3 (Phases 5-6, T14-T20) - sonnet worker - 2026-11-26 - returned (4e0132a..2f855fd)
-**Walked:** none
+**Dispatched:** batch 1 (Phases 1-2, T1-T7) - sonnet worker - 2026-11-26 - returned (79e0c54..4cd1565); batch 2 (Phases 3-4, T8-T13) - sonnet worker - 2026-11-26 - returned (c534b49..5a6f088); batch 3 (Phases 5-6, T14-T20) - sonnet worker - 2026-11-26 - returned (4e0132a..2f855fd); Verifier - sonnet - HEAD b3d7e4f - 2026-11-26 - returned (FAIL, 13 findings); fix worker - sonnet - 2026-11-26 - returned (76d467d..364fbf7)
+**Walked:** 2026-11-26 - not walked in the running app: the owner was away and this Mac has no UI automation (osascript UI scripting off, no cliclick). In its place: the T15 art was rendered to PNG from the real scene and approved by the user; `scene_keys_reach_extension_in_workspace` opens the scene in a main pane of the real workspace, clicks it and presses up, w, space, and the fake extension logs each as `panel/key`; `e2e_test.go` runs two clients against a live server (a move seen within 200 ms, a status within 1 s, a second login replacing the first). To reach each state: `go build -o wai-escritorio-server ./server && ./wai-escritorio-server -config office.json` (README), open the Office tab, fill name, server and token, Enter; click the map, arrows or WASD to walk.
 
 ---
 

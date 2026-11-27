@@ -181,51 +181,51 @@ This is delivery 1 of 4 (see `context.md`, Slicing): a shared map with walking a
 
 | Requirement ID | Story | Phase | Status |
 | -------------- | ----- | ----- | ------ |
-| OFC-01 | P1: Enter the office and walk | Design | Pending |
-| OFC-02 | P1: Enter the office and walk | Design | Pending |
-| OFC-03 | P1: Enter the office and walk | Design | Pending |
-| OFC-04 | P1: Enter the office and walk | Design | Pending |
-| OFC-05 | P1: Enter the office and walk | Design | Pending |
-| OFC-06 | P1: Enter the office and walk | Design | Pending |
-| OFC-07 | P1: Enter the office and walk | Design | Pending |
-| OFC-08 | P1: Enter the office and walk | Design | Pending |
-| OFC-09 | P1: Enter the office and walk | Design | Pending |
-| OFC-10 | P1: Enter the office and walk | Design | Pending |
-| OFC-11 | P1: Enter the office and walk | Design | Pending |
-| OFC-12 | P1: Enter the office and walk | Design | Pending |
-| OFC-13 | P1: Enter the office and walk | Design | Pending |
-| OFC-14 | P1: Enter the office and walk | Design | Pending |
-| OFC-20 | P1: Run the office server | Design | Pending |
-| OFC-21 | P1: Run the office server | Design | Pending |
-| OFC-22 | P1: Run the office server | Design | Pending |
-| OFC-23 | P1: Run the office server | Design | Pending |
-| OFC-24 | P1: Run the office server | Design | Pending |
-| OFC-25 | P1: Run the office server | Design | Pending |
-| OFC-26 | P1: Run the office server | Design | Pending |
-| OFC-27 | P1: Run the office server | Design | Pending |
-| OFC-28 | P1: Run the office server | Design | Pending |
-| OFC-29 | P1: Run the office server | Design | Pending |
-| OFC-30 | P1: Scene and keyboard in the extension API | Design | Pending |
-| OFC-31 | P1: Scene and keyboard in the extension API | Design | Pending |
-| OFC-32 | P1: Scene and keyboard in the extension API | Design | Pending |
-| OFC-33 | P1: Scene and keyboard in the extension API | Design | Pending |
-| OFC-34 | P1: Scene and keyboard in the extension API | Design | Pending |
-| OFC-35 | P1: Scene and keyboard in the extension API | Design | Pending |
-| OFC-36 | P1: Scene and keyboard in the extension API | Design | Pending |
-| OFC-40 | P2: Presence panel | Design | Pending |
-| OFC-41 | P2: Presence panel | Design | Pending |
-| OFC-42 | P2: Presence panel | Design | Pending |
-| OFC-43 | P2: Presence panel | Design | Pending |
-| OFC-44 | P2: Presence panel | Design | Pending |
-| OFC-50 | P2: Agent status on the avatar | Design | Pending |
-| OFC-51 | P2: Agent status on the avatar | Design | Pending |
-| OFC-52 | P2: Agent status on the avatar | Design | Pending |
-| OFC-53 | P2: Agent status on the avatar | Design | Pending |
-| OFC-54 | P2: Agent status on the avatar | Design | Pending |
-| OFC-60 | Edge cases | Design | Pending |
-| OFC-61 | Edge cases | Design | Pending |
-| OFC-62 | Edge cases | Design | Pending |
-| OFC-63 | Edge cases | Design | Pending |
+| OFC-01 | P1: Enter the office and walk | Design | Verified |
+| OFC-02 | P1: Enter the office and walk | Design | Verified |
+| OFC-03 | P1: Enter the office and walk | Design | Verified |
+| OFC-04 | P1: Enter the office and walk | Design | Verified |
+| OFC-05 | P1: Enter the office and walk | Design | Verified |
+| OFC-06 | P1: Enter the office and walk | Design | Verified |
+| OFC-07 | P1: Enter the office and walk | Design | Verified |
+| OFC-08 | P1: Enter the office and walk | Design | Verified |
+| OFC-09 | P1: Enter the office and walk | Design | Verified |
+| OFC-10 | P1: Enter the office and walk | Design | Verified |
+| OFC-11 | P1: Enter the office and walk | Design | Verified |
+| OFC-12 | P1: Enter the office and walk | Design | Verified |
+| OFC-13 | P1: Enter the office and walk | Design | Verified |
+| OFC-14 | P1: Enter the office and walk | Design | Verified |
+| OFC-20 | P1: Run the office server | Design | Verified |
+| OFC-21 | P1: Run the office server | Design | Verified |
+| OFC-22 | P1: Run the office server | Design | Verified |
+| OFC-23 | P1: Run the office server | Design | Verified |
+| OFC-24 | P1: Run the office server | Design | Verified |
+| OFC-25 | P1: Run the office server | Design | Verified |
+| OFC-26 | P1: Run the office server | Design | Verified |
+| OFC-27 | P1: Run the office server | Design | Verified |
+| OFC-28 | P1: Run the office server | Design | Verified |
+| OFC-29 | P1: Run the office server | Design | Verified |
+| OFC-30 | P1: Scene and keyboard in the extension API | Design | Verified |
+| OFC-31 | P1: Scene and keyboard in the extension API | Design | Verified |
+| OFC-32 | P1: Scene and keyboard in the extension API | Design | Verified |
+| OFC-33 | P1: Scene and keyboard in the extension API | Design | Verified |
+| OFC-34 | P1: Scene and keyboard in the extension API | Design | Verified |
+| OFC-35 | P1: Scene and keyboard in the extension API | Design | Verified |
+| OFC-36 | P1: Scene and keyboard in the extension API | Design | Verified |
+| OFC-40 | P2: Presence panel | Design | Verified |
+| OFC-41 | P2: Presence panel | Design | Verified |
+| OFC-42 | P2: Presence panel | Design | Verified |
+| OFC-43 | P2: Presence panel | Design | Verified |
+| OFC-44 | P2: Presence panel | Design | Verified |
+| OFC-50 | P2: Agent status on the avatar | Design | Verified |
+| OFC-51 | P2: Agent status on the avatar | Design | Verified |
+| OFC-52 | P2: Agent status on the avatar | Design | Verified |
+| OFC-53 | P2: Agent status on the avatar | Design | Verified |
+| OFC-54 | P2: Agent status on the avatar | Design | Verified |
+| OFC-60 | Edge cases | Design | Verified |
+| OFC-61 | Edge cases | Design | Verified |
+| OFC-62 | Edge cases | Design | Verified |
+| OFC-63 | Edge cases | Design | Verified |
 
 **Coverage:** 45 total, 0 mapped to tasks, 45 unmapped ⚠️ (Tasks not written yet)
 
