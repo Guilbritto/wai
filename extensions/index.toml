@@ -116,3 +116,34 @@ repository = "https://github.com/Guilbritto/wai"
 [extensions.packages.any]
 url = "https://github.com/Guilbritto/wai/releases/download/wai-navegador-v0.1.0/wai-navegador-0.1.0-any.tar.gz"
 sha256 = "654b6560ff8c307387cd268806630c6f224d681214b0e1d83e78d0e88072116c"
+
+[[extensions]]
+id = "wai-escritorio"
+name = "Escritório"
+version = "0.1.0"
+description = "A shared office map inside wai: walk your avatar, see who is around and whose agents are working"
+repository = "https://github.com/Guilbritto/wai"
+
+[extensions.packages.darwin-arm64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-escritorio-v0.1.0/wai-escritorio-0.1.0-darwin-arm64.tar.gz"
+sha256 = "5d0320b691d0c30ccebe123563b761680ee40f7472d95fde28f3d0ff7d9c52eb"
+
+[extensions.packages.darwin-x64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-escritorio-v0.1.0/wai-escritorio-0.1.0-darwin-x64.tar.gz"
+sha256 = "4e01ec819dd37038fe61c360db0ac1657f1c81a06eceb9eca5dfa423db4120bc"
+
+[extensions.packages.linux-arm64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-escritorio-v0.1.0/wai-escritorio-0.1.0-linux-arm64.tar.gz"
+sha256 = "afc21f2d2a5263f173a1ba4bab4f9040fd7234af9ccc557a87dbbf5eced55e71"
+
+[extensions.packages.linux-x64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-escritorio-v0.1.0/wai-escritorio-0.1.0-linux-x64.tar.gz"
+sha256 = "443d55568b6df07c3b4d84f4c0cfc4722479d42d659e9d134b3bbfe035f71392"
+
+[extensions.packages.windows-arm64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-escritorio-v0.1.0/wai-escritorio-0.1.0-windows-arm64.tar.gz"
+sha256 = "bb00d8f34bb89f5a0507e960330240e07ae8c34e7133c409a09fd193f3649ce2"
+
+[extensions.packages.windows-x64]
+url = "https://github.com/Guilbritto/wai/releases/download/wai-escritorio-v0.1.0/wai-escritorio-0.1.0-windows-x64.tar.gz"
+sha256 = "d82aa0c91a51b1a01a2016f8308d04d7225d031edef397010d0aed9f69d26f11"
