@@ -254,8 +254,8 @@ T19 → T20
 
 **Done when**:
 
-- [ ] `TestStepKeys`, `TestAdjacent`, `TestNearbyChebyshev`, `TestDeriveFocused`, `TestDeriveNeedsYouWins`, `TestDeriveNone`, `TestValidName`, `TestNameRejectsControlChars` pass
-- [ ] Gate check passes: Quick
+- [x] `TestStepKeys`, `TestAdjacent`, `TestNearbyChebyshev`, `TestDeriveFocused`, `TestDeriveNeedsYouWins`, `TestDeriveNone`, `TestValidName`, `TestNameRejectsControlChars` pass
+- [x] Gate check passes: Quick
 
 **Tests**: unit
 **Gate**: quick
