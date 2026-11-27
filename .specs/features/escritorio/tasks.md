@@ -386,8 +386,8 @@ T19 → T20
 
 **Done when**:
 
-- [ ] `TestNoSetupShowsForm`, `TestOfficeTreeShowsEveryone`, `TestPresenceListsNearby`, `TestPresenceShowsSetupForm`, `TestPresenceOfflineReasons`, `TestPresenceAlone`, `TestStatusBadges` pass
-- [ ] Gate check passes: Quick
+- [x] `TestNoSetupShowsForm`, `TestOfficeTreeShowsEveryone`, `TestPresenceListsNearby`, `TestPresenceShowsSetupForm`, `TestPresenceOfflineReasons`, `TestPresenceAlone`, `TestStatusBadges` pass
+- [x] Gate check passes: Quick
 
 **Tests**: unit
 **Gate**: quick
