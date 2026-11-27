@@ -34,6 +34,7 @@ use crate::appearance::fonts;
 use crate::campo;
 use crate::chat::PromptTyping;
 use crate::ext_bubble::{self, Bubble, Ended};
+use crate::ext_scene::{self, SceneState};
 use crate::path_field::{self, PathField};
 
 /// A list row with a subtitle: two lines.
@@ -134,6 +135,8 @@ pub struct ExtPanel {
     logs: HashMap<usize, (UniformListScrollHandle, usize)>,
     /// Each speech bubble's timeline, by id.
     bubbles: HashMap<String, Bubble>,
+    /// Each scene's cached layer and sprite motion, by id.
+    scenes: HashMap<String, SceneState>,
     /// Redraws and advances the bubbles while one animates.
     ticker: Option<Task<()>>,
     /// Redraws the bubbles when the prompt box starts or stops having text.
@@ -155,6 +158,7 @@ impl ExtPanel {
             pending: HashMap::new(),
             logs: HashMap::new(),
             bubbles: HashMap::new(),
+            scenes: HashMap::new(),
             ticker: None,
             typing: None,
             foot: false,
@@ -216,6 +220,17 @@ impl ExtPanel {
                 }
             });
             self.bubbles.retain(|id, _| ids.contains(id.as_str()));
+            let mut scenes = HashSet::new();
+            tree.walk(&mut |node| {
+                if let Node::Scene(scene) = node {
+                    scenes.insert(scene.id.as_str());
+                    self.scenes
+                        .entry(scene.id.clone())
+                        .or_default()
+                        .update(scene, now);
+                }
+            });
+            self.scenes.retain(|id, _| scenes.contains(id.as_str()));
         }
         if !self.bubbles.is_empty() && self.typing.is_none() {
             self.typing = Some(cx.observe_global::<PromptTyping>(|this, cx| {
@@ -236,7 +251,7 @@ impl ExtPanel {
     /// itself once nothing animates.
     fn ensure_ticker(&mut self, cx: &mut Context<Self>) {
         let now = cx.background_executor().now();
-        if self.ticker.is_some() || !self.bubbles.values().any(|b| b.animating(now)) {
+        if self.ticker.is_some() || !self.animating(now) {
             return;
         }
         self.ticker = Some(cx.spawn(async move |this, cx| {
@@ -261,7 +276,7 @@ impl ExtPanel {
                             values: json!({"bubble": how}),
                         });
                     }
-                    let more = this.bubbles.values().any(|b| b.animating(now));
+                    let more = this.animating(now);
                     if !more {
                         this.ticker = None;
                     }
@@ -273,6 +288,11 @@ impl ExtPanel {
                 }
             }
         }));
+    }
+
+    fn animating(&self, now: std::time::Instant) -> bool {
+        self.bubbles.values().any(|b| b.animating(now))
+            || self.scenes.values().any(|s| s.animating(now))
     }
 
     /// A grid of cells at `scale` px each: one quad per horizontal run of equal cells. With an
@@ -1419,7 +1439,12 @@ impl ExtPanel {
                 self.pixels(id.as_deref(), rows.clone(), *width, *scale, k, cx),
                 at,
             ),
-            Node::Scene(_) | Node::Unsupported => unsupported(cx),
+            Node::Scene(scene) => {
+                let state = self.scenes.get(&scene.id).cloned().unwrap_or_default();
+                let now = cx.background_executor().now();
+                own(ext_scene::draw(scene, &state, now, cx), at)
+            }
+            Node::Unsupported => unsupported(cx),
         };
         (element, false)
     }
@@ -3029,6 +3054,77 @@ mod tests {
         assert!(shown(("panel-pixels", 3usize), cx));
         click(("panel-pixels", 3usize), cx);
         assert!(sent(&actions).is_empty());
+    }
+
+    fn scene_tree(sprites: Value) -> Value {
+        json!({"type": "scene", "id": "office", "cell": 4, "scale": 2,
+            "palette": {"a": "#f00", "b": "#00f"},
+            "patterns": {"floor": ["aaaa", "a  a", "a  a", "bbbb"], "dot": ["ab", "ba"]},
+            "legend": {".": "floor"},
+            "map": ["...", "...", "...", "..."],
+            "sprites": sprites, "follow": "u1"})
+    }
+
+    fn rel(id: &str, cx: &mut VisualTestContext) -> (f32, f32, f32, f32) {
+        let b = cx.update(|w, _| w.find(name(id)).bounds());
+        let c = cx.update(|w, _| w.find(name("panel-scene:office")).bounds());
+        let f = |p: gpui_kit::Pixels| f32::from(p);
+        (
+            f(b.origin.x - c.origin.x),
+            f(b.origin.y - c.origin.y),
+            f(b.size.width),
+            f(b.size.height),
+        )
+    }
+
+    #[gpui_kit::test]
+    fn scene_draws_tiles_and_sprites(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        show(
+            &panel,
+            scene_tree(json!([
+                {"id": "u1", "x": 1, "y": 3, "pattern": "dot", "label": "Ana", "badge": "Focused"},
+                {"id": "u2", "x": 2, "y": 0, "pattern": "dot"},
+            ])),
+            cx,
+        );
+        // 3 x 4 tiles of 4 px, doubled.
+        assert_eq!(rel("scene-layer:office", cx), (0., 0., 24., 32.));
+        // A 2 x 2 sprite, doubled, sits bottom-centred on its tile.
+        assert_eq!(rel("scene-sprite:u1", cx), (8. + 2., 24. + 4., 4., 4.));
+        assert_eq!(rel("scene-sprite:u2", cx), (16. + 2., 4., 4., 4.));
+        assert!(shown(name("scene-label:u1"), cx));
+        assert!(shown(name("scene-badge:u1"), cx));
+        assert!(!shown(name("scene-label:u2"), cx));
+    }
+
+    #[gpui_kit::test]
+    fn scene_layer_cached_across_renders(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        let layer = |panel: &Entity<ExtPanel>, cx: &mut VisualTestContext| {
+            panel.read_with(cx, |p, _| p.scenes["office"].layer.clone().unwrap())
+        };
+        let at = |x: u32| json!([{"id": "u1", "x": x, "y": 0, "pattern": "dot"}]);
+        show(&panel, scene_tree(at(0)), cx);
+        let first = layer(&panel, cx);
+        // A sprite moved, nothing the tiles are made of: the same layer.
+        show(&panel, scene_tree(at(1)), cx);
+        assert!(std::sync::Arc::ptr_eq(&first, &layer(&panel, cx)));
+        // A different palette: a new one.
+        let mut tree = scene_tree(at(1));
+        tree["palette"]["a"] = json!("#0f0");
+        show(&panel, tree, cx);
+        assert!(!std::sync::Arc::ptr_eq(&first, &layer(&panel, cx)));
+    }
+
+    #[gpui_kit::test]
+    fn scene_bad_tree_unsupported(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        let mut tree = scene_tree(json!([]));
+        tree.as_object_mut().unwrap().remove("id");
+        show(&panel, tree, cx);
+        assert!(cx.debug_bounds("panel-unsupported").is_some());
+        assert!(!shown(name("panel-scene:office"), cx));
     }
 
     /// An icon link in a clickable card takes its own click: the card's action is not sent.

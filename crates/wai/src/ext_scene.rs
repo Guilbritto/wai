@@ -1,11 +1,20 @@
 //! A panel's `scene` node (API 1.10): the pure parts. The tile layer's pixels, the view's scroll,
 //! the sprites' tween and the labels' stacking, all clock- and window-free.
-#![allow(dead_code)]
 
-use std::time::Duration;
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use image::{Rgba, RgbaImage};
+use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::{h_flex, v_flex};
+use gpui_kit::*;
+use image::{Frame, Rgba, RgbaImage};
 use wai_ext::panel::{Pattern, Scene};
+
+use crate::ext_panel::{ExtPanel, tone_color};
 
 /// A sprite that changed tile takes this long to arrive.
 pub(crate) const TWEEN: Duration = Duration::from_millis(150);
@@ -114,10 +123,295 @@ pub(crate) fn label_rows(tiles: &[Tile]) -> Vec<usize> {
         .collect()
 }
 
+/// A map taller than this scrolls instead of growing the panel.
+const MAX_HEIGHT: f32 = 560.;
+/// One line of a sprite's label or badge.
+const LINE: f32 = 14.;
+
+/// The frame gpui draws: BGRA, premultiplied.
+fn render_image(image: RgbaImage) -> Arc<RenderImage> {
+    let mut image = image;
+    for px in image.pixels_mut() {
+        let [r, g, b, a] = px.0;
+        let m = |c: u8| (u16::from(c) * u16::from(a) / 255) as u8;
+        px.0 = [m(b), m(g), m(r), a];
+    }
+    Arc::new(RenderImage::new(vec![Frame::new(image)]))
+}
+
+/// A sprite on its way to a tile.
+#[derive(Clone, Copy)]
+struct Motion {
+    from: Tile,
+    to: Tile,
+    since: Instant,
+}
+
+impl Motion {
+    fn near(&self) -> bool {
+        (self.to.x - self.from.x).abs() <= 1 && (self.to.y - self.from.y).abs() <= 1
+    }
+
+    fn animating(&self, now: Instant) -> bool {
+        self.near() && now.saturating_duration_since(self.since) < TWEEN
+    }
+}
+
+/// What a panel keeps of a scene between renders.
+#[derive(Clone, Default)]
+pub(crate) struct SceneState {
+    /// The hash of what the tile layer and the sprite images are made of.
+    hash: u64,
+    pub(crate) layer: Option<Arc<RenderImage>>,
+    /// Each sprite pattern's image, by name, with its size in px.
+    sprites: HashMap<String, (Arc<RenderImage>, f32, f32)>,
+    motions: HashMap<String, Motion>,
+    /// The scene's drawn size in px, as last painted.
+    view: Rc<Cell<(f32, f32)>>,
+    /// The top-left tile shown, once the view is measured.
+    offset: Rc<Cell<Option<Tile>>>,
+}
+
+fn layer_hash(scene: &Scene) -> u64 {
+    let mut h = DefaultHasher::new();
+    (scene.cell, scene.scale, &scene.palette, &scene.patterns).hash(&mut h);
+    (&scene.legend, &scene.map).hash(&mut h);
+    h.finish()
+}
+
+impl SceneState {
+    /// Takes in a new render of the scene: re-rasterises only when the tiles' makings changed,
+    /// and starts a tween for each sprite that changed tile.
+    pub(crate) fn update(&mut self, scene: &Scene, now: Instant) {
+        let hash = layer_hash(scene);
+        if self.layer.is_none() || hash != self.hash {
+            self.hash = hash;
+            self.layer = Some(render_image(rasterise(scene)));
+            self.sprites.clear();
+        }
+        for sprite in &scene.sprites {
+            if !self.sprites.contains_key(&sprite.pattern) {
+                if let Some(image) = rasterise_pattern(scene, &sprite.pattern) {
+                    let (w, h) = image.dimensions();
+                    let image = (render_image(image), w as f32, h as f32);
+                    self.sprites.insert(sprite.pattern.clone(), image);
+                }
+            }
+        }
+        let motions = &mut self.motions;
+        motions.retain(|id, _| scene.sprites.iter().any(|s| s.id == *id));
+        for sprite in &scene.sprites {
+            let to = Tile {
+                x: sprite.x as i32,
+                y: sprite.y as i32,
+            };
+            match motions.get(&sprite.id) {
+                Some(m) if m.to == to => {}
+                Some(m) => {
+                    let from = m.to;
+                    motions.insert(
+                        sprite.id.clone(),
+                        Motion {
+                            from,
+                            to,
+                            since: now,
+                        },
+                    );
+                }
+                None => {
+                    let since = now.checked_sub(TWEEN).unwrap_or(now);
+                    motions.insert(
+                        sprite.id.clone(),
+                        Motion {
+                            from: to,
+                            to,
+                            since,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    pub(crate) fn animating(&self, now: Instant) -> bool {
+        self.motions.values().any(|m| m.animating(now))
+    }
+
+    fn spot(&self, id: &str, now: Instant) -> Option<Spot> {
+        let m = self.motions.get(id)?;
+        Some(tween(m.from, m.to, now.saturating_duration_since(m.since)))
+    }
+}
+
+fn element_id(kind: &str, id: &str) -> ElementId {
+    ElementId::Name(format!("{kind}:{id}").into())
+}
+
+/// The scene: the cached tile layer, then the sprites with their labels and badges, scrolled to
+/// keep the followed sprite in view.
+pub(crate) fn draw(
+    scene: &Scene,
+    state: &SceneState,
+    now: Instant,
+    cx: &mut Context<ExtPanel>,
+) -> AnyElement {
+    let tile = (scene.cell * usize::from(scene.scale)) as f32;
+    let (cols, rows) = (scene.width as i32, scene.map.len() as i32);
+    let (map_w, map_h) = (cols as f32 * tile, rows as f32 * tile);
+    let (view_w, view_h) = state.view.get();
+    let measured = view_w > 0. && view_h > 0.;
+    let view = match measured {
+        true => (
+            ((view_w / tile) as i32).max(1),
+            ((view_h / tile) as i32).max(1),
+        ),
+        false => (cols, rows),
+    };
+    let follow = scene
+        .follow
+        .as_ref()
+        .and_then(|f| state.motions.get(f))
+        .map(|m| m.to);
+    let offset = match follow {
+        Some(follow) => {
+            let prev = state.offset.get();
+            viewport(view, (cols, rows), follow, i32::from(scene.margin), prev)
+        }
+        None => Tile { x: 0, y: 0 },
+    };
+    if measured {
+        state.offset.set(Some(offset));
+    }
+    let (ox, oy) = (offset.x as f32 * tile, offset.y as f32 * tile);
+
+    // The panel learns its drawn size here, and draws again when it changed.
+    let (measure, entity) = (state.view.clone(), cx.entity_id());
+    let probe = canvas(
+        |bounds, _, _| bounds.size,
+        move |_, size, _, cx| {
+            let size = (f32::from(size.width), f32::from(size.height));
+            if measure.get() != size {
+                measure.set(size);
+                cx.notify(entity);
+            }
+        },
+    )
+    .absolute()
+    .size_full();
+
+    let tiles = state.layer.clone().map(|layer| {
+        img(layer)
+            .id(element_id("scene-layer", &scene.id))
+            .test_support()
+            .absolute()
+            .left(px(-ox))
+            .top(px(-oy))
+            .w(px(map_w))
+            .h(px(map_h))
+    });
+
+    let tiles_of = |s: &wai_ext::panel::Sprite| {
+        let at = state
+            .motions
+            .get(&s.id)
+            .map_or(Tile { x: 0, y: 0 }, |m| m.to);
+        at
+    };
+    let stack = label_rows(&scene.sprites.iter().map(tiles_of).collect::<Vec<_>>());
+    let sprites = scene.sprites.iter().zip(stack).map(|(sprite, row)| {
+        let spot = state.spot(&sprite.id, now).unwrap_or(Spot {
+            x: sprite.x as f32,
+            y: sprite.y as f32,
+        });
+        let (left, top) = (spot.x * tile - ox, spot.y * tile - oy);
+        let body = state.sprites.get(&sprite.pattern).map(|(image, w, h)| {
+            img(image.clone())
+                .id(element_id("scene-sprite", &sprite.id))
+                .test_support()
+                .absolute()
+                .left(px(left + (tile - w) / 2.))
+                .top(px(top + tile - h))
+                .w(px(*w))
+                .h(px(*h))
+        });
+        let theme = cx.theme();
+        let (background, foreground) = (theme.background.opacity(0.8), theme.foreground);
+        let tag = |text: &str, id: &str, color: Hsla| {
+            div()
+                .id(element_id(id, &sprite.id))
+                .test_support()
+                .h(px(LINE))
+                .px_1()
+                .rounded(px(3.))
+                .bg(background)
+                .text_size(px(10.))
+                .line_height(px(LINE))
+                .text_color(color)
+                .whitespace_nowrap()
+                .child(text.to_string())
+        };
+        let lines = usize::from(sprite.label.is_some()) + usize::from(sprite.badge.is_some());
+        let tags = (lines > 0).then(|| {
+            let slot = 2. * LINE;
+            v_flex()
+                .absolute()
+                .left(px(left))
+                .top(px(top - slot * (row + 1) as f32))
+                .w(px(tile))
+                .h(px(slot))
+                .items_center()
+                .justify_end()
+                .children(
+                    sprite
+                        .badge
+                        .as_ref()
+                        .map(|b| tag(b, "scene-badge", tone_color(sprite.tone, cx))),
+                )
+                .children(
+                    sprite
+                        .label
+                        .as_ref()
+                        .map(|l| tag(l, "scene-label", foreground)),
+                )
+        });
+        (body, tags)
+    });
+    let (bodies, tags): (Vec<_>, Vec<_>) = sprites.unzip();
+
+    let hint = cx.theme().muted_foreground;
+    v_flex()
+        .gap_1()
+        .child(
+            div()
+                .id(element_id("panel-scene", &scene.id))
+                .test_support()
+                .relative()
+                .w_full()
+                .max_w(px(map_w))
+                .h(px(map_h.min(MAX_HEIGHT)))
+                .flex_none()
+                .overflow_hidden()
+                .child(probe)
+                .children(tiles)
+                .children(bodies.into_iter().flatten())
+                .children(tags.into_iter().flatten()),
+        )
+        .child(
+            h_flex()
+                .text_xs()
+                .text_color(hint)
+                .child("Click the map to walk"),
+        )
+        .into_any_element()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Spot, Tile, label_rows, rasterise, rasterise_pattern, tween, viewport};
+    use image::RgbaImage;
     use serde_json::json;
+    use std::time::Duration;
+    use wai_ext::panel::Scene;
     use wai_ext::panel::{Node, parse};
 
     fn scene(extra: serde_json::Value) -> Box<Scene> {

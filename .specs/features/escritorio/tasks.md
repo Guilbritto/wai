@@ -179,9 +179,9 @@ T19 → T20
 
 **Done when**:
 
-- [ ] `scene_draws_tiles_and_sprites` and `scene_layer_cached_across_renders` pass; `scene_bad_tree_unsupported` shows "Unsupported element"
-- [ ] A `WAI_SHOT_TREE` screenshot of a sample scene shows correct colours (red is red)
-- [ ] Gate check passes: Full
+- [x] `scene_draws_tiles_and_sprites` and `scene_layer_cached_across_renders` pass; `scene_bad_tree_unsupported` shows "Unsupported element"
+- [x] A `WAI_SHOT_TREE` screenshot of a sample scene shows correct colours (red is red)
+- [x] Gate check passes: Full
 
 **Tests**: integration
 **Gate**: full
