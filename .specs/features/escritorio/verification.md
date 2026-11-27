@@ -58,7 +58,7 @@
 
 | Finding | Evidence | Fix | Closed |
 | --- | --- | --- | --- |
-| Name check accepts Unicode newlines and invisible characters | probe: `ValidName("a b")`, `"​"`, `"a‮b"` all true; `office/rules.go:70` uses `unicode.IsControl` only (OFC-63 says outside printable Unicode, newlines) | reject with `!unicode.IsPrint(r)` (allow ASCII space), add U+2028/200B/202E cases to `TestNameRejectsControlChars` | 76d467d - C45 |
+| Name check accepts Unicode newlines and invisible characters | probe: `ValidName("a\u2028b")`, `"\u200B"`, `"a\u202Eb"` all true; `office/rules.go:70` uses `unicode.IsControl` only (OFC-63 says outside printable Unicode, newlines) | reject with `!unicode.IsPrint(r)` (allow ASCII space), add U+2028/200B/202E cases to `TestNameRejectsControlChars` | 76d467d - C45 |
 | Server token length counts bytes, not characters | probe: `{"token":"éé…"}` (16 chars, 32 bytes) loads with no error; `server/config.go:38` `len(c.Token)` vs OFC-21 "32 characters"; C16 tests ASCII only | use `utf8.RuneCountInString`, or `len` and reword the message to bytes; add a multi-byte case | f611460 - C16 |
 | A name with a trailing or leading newline is accepted by the form | probe: save with `"Ana\n"` stores `Ana`; `main.go:229` `TrimSpace` runs before `validate`; C2 calls `validate` directly | either state trimming in the spec or validate the untrimmed name; test through `onAction("save")` | 737613c - C2 |
 | C4 never asserts "Cannot reach <address>" | `client_test.go:185` checks only the retry gap; `main.go:189-193` mapping untested | in an extension test, point a saved setup at a closed port and `waitTree` for "Cannot reach "+server | 737613c - C4 |

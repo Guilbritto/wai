@@ -3,7 +3,7 @@
   "promote_threshold": 2,
   "window_days": 45,
   "quarantine_threshold": 2,
-  "next_id": 5,
+  "next_id": 17,
   "lessons": [
     {
       "id": "L-001",
@@ -76,6 +76,222 @@
       ],
       "created": "2026-11-21T15:17:58Z",
       "last_seen": "2026-11-21T15:17:58Z"
+    },
+    {
+      "id": "L-005",
+      "key": "ac_gap::validate display names with unicode isprint not unicode iscontrol so line separators and invisible or bidi characters are refused",
+      "text": "Validate display names with unicode.IsPrint, not unicode.IsControl, so line separators and invisible or bidi characters are refused",
+      "signal": "ac_gap",
+      "scope": "go-extensions",
+      "status": "candidate",
+      "features": [
+        "escritorio"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "office/rules.go:70 (OFC-63) (go-extensions)"
+      ],
+      "created": "2026-11-27T02:08:33Z",
+      "last_seen": "2026-11-27T02:08:33Z"
+    },
+    {
+      "id": "L-006",
+      "key": "ac_gap::count length limits in characters not bytes and test a multi byte value",
+      "text": "Count length limits in characters, not bytes, and test a multi-byte value",
+      "signal": "ac_gap",
+      "scope": "go-extensions",
+      "status": "candidate",
+      "features": [
+        "escritorio"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "server/config.go:38 (C16) (go-extensions)"
+      ],
+      "created": "2026-11-27T02:08:33Z",
+      "last_seen": "2026-11-27T02:08:33Z"
+    },
+    {
+      "id": "L-007",
+      "key": "ac_gap::validate user input before normalising it or state the normalisation in the spec and test through the real form action",
+      "text": "Validate user input before normalising it, or state the normalisation in the spec, and test through the real form action",
+      "signal": "ac_gap",
+      "scope": "go-extensions",
+      "status": "candidate",
+      "features": [
+        "escritorio"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "main.go:229 (C2) (go-extensions)"
+      ],
+      "created": "2026-11-27T02:08:33Z",
+      "last_seen": "2026-11-27T02:08:33Z"
+    },
+    {
+      "id": "L-008",
+      "key": "weak_test::assert the exact user facing message a criterion names driven through the real loop not a hand built view",
+      "text": "Assert the exact user-facing message a criterion names, driven through the real loop, not a hand-built view",
+      "signal": "weak_test",
+      "scope": "",
+      "status": "candidate",
+      "features": [
+        "escritorio"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "client_test.go:185 (C4, C35)"
+      ],
+      "created": "2026-11-27T02:08:33Z",
+      "last_seen": "2026-11-27T02:08:33Z"
+    },
+    {
+      "id": "L-009",
+      "key": "weak_test::prove a focus gated input rule with the negative case before focus and through the host wiring to the wire params",
+      "text": "Prove a focus-gated input rule with the negative case before focus and through the host wiring to the wire params",
+      "signal": "weak_test",
+      "scope": "panels",
+      "status": "candidate",
+      "features": [
+        "escritorio"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "ext_panel.rs:3170 (C27) (panels)"
+      ],
+      "created": "2026-11-27T02:08:33Z",
+      "last_seen": "2026-11-27T02:08:33Z"
+    },
+    {
+      "id": "L-010",
+      "key": "weak_test::prove every bounded field with an at limit and an over limit pair and every required field missing",
+      "text": "Prove every bounded field with an at-limit and an over-limit pair, and every required field missing",
+      "signal": "weak_test",
+      "scope": "panels",
+      "status": "candidate",
+      "features": [
+        "escritorio"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "panel.rs:1308 (C30, C25) (panels)"
+      ],
+      "created": "2026-11-27T02:08:33Z",
+      "last_seen": "2026-11-27T02:08:33Z"
+    },
+    {
+      "id": "L-011",
+      "key": "ac_gap::cap the product of size parameters that decides an allocation not each parameter alone",
+      "text": "Cap the product of size parameters that decides an allocation, not each parameter alone",
+      "signal": "ac_gap",
+      "scope": "panels",
+      "status": "candidate",
+      "features": [
+        "escritorio"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "ext_scene.rs:59 raster (panels)"
+      ],
+      "created": "2026-11-27T02:08:33Z",
+      "last_seen": "2026-11-27T02:08:33Z"
+    },
+    {
+      "id": "L-012",
+      "key": "weak_test::time every state transition a latency criterion covers not one of them",
+      "text": "Time every state transition a latency criterion covers, not one of them",
+      "signal": "weak_test",
+      "scope": "",
+      "status": "candidate",
+      "features": [
+        "escritorio"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "e2e_test.go:85 (C41)"
+      ],
+      "created": "2026-11-27T02:08:33Z",
+      "last_seen": "2026-11-27T02:08:33Z"
+    },
+    {
+      "id": "L-013",
+      "key": "weak_test::point each check s proof at a test in the layer the test matrix names for it",
+      "text": "Point each check's proof at a test in the layer the test matrix names for it",
+      "signal": "weak_test",
+      "scope": "",
+      "status": "candidate",
+      "features": [
+        "escritorio"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "office/map_test.go:61 (C43)"
+      ],
+      "created": "2026-11-27T02:08:33Z",
+      "last_seen": "2026-11-27T02:08:33Z"
+    },
+    {
+      "id": "L-014",
+      "key": "weak_test::prove a drawing rule on the rendered elements not on the helper that computes their positions",
+      "text": "Prove a drawing rule on the rendered elements, not on the helper that computes their positions",
+      "signal": "weak_test",
+      "scope": "panels",
+      "status": "candidate",
+      "features": [
+        "escritorio"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "ext_scene.rs shared_tile_labels_stack (C44) (panels)"
+      ],
+      "created": "2026-11-27T02:08:33Z",
+      "last_seen": "2026-11-27T02:08:33Z"
+    },
+    {
+      "id": "L-015",
+      "key": "ac_gap::re validate persisted settings on load with the same rules as the form before acting on them",
+      "text": "Re-validate persisted settings on load with the same rules as the form before acting on them",
+      "signal": "ac_gap",
+      "scope": "go-extensions",
+      "status": "candidate",
+      "features": [
+        "escritorio"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "main.go:268-277 saved setup (go-extensions)"
+      ],
+      "created": "2026-11-27T02:08:33Z",
+      "last_seen": "2026-11-27T02:08:33Z"
+    },
+    {
+      "id": "L-016",
+      "key": "ac_gap::reject an optional field present with the wrong type when the docs promise it and treat null as absent",
+      "text": "Reject an optional field present with the wrong type when the docs promise it, and treat null as absent",
+      "signal": "ac_gap",
+      "scope": "panels",
+      "status": "candidate",
+      "features": [
+        "escritorio"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "panel.rs scene optional fields (panels)"
+      ],
+      "created": "2026-11-27T02:08:33Z",
+      "last_seen": "2026-11-27T02:08:33Z"
     }
   ]
 }
