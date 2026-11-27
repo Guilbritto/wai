@@ -13,6 +13,7 @@ const (
 	maxWaiting = 5
 	maxBubble  = 140
 	showGap    = 2 * time.Second
+	maxRead    = 500 // sessions/read gives the last maxRead items at most
 )
 
 // chat is the pet's own background session, where the user's @ messages are answered.
@@ -23,9 +24,11 @@ type chat struct {
 	from           int    // the session's item count before the turn in flight
 	request        string // the permission or question its session waits on
 	showAt         time.Time
+	since          int // the id of the call that opened the session
 }
 
 type pendingCall struct {
+	id           int
 	method, text string
 	retry        bool
 }
@@ -37,7 +40,7 @@ func (c *chat) own(agent, session *string) bool {
 // request writes a call whose answer handle routes by id through pending.
 func (s *server) request(method string, params any, p pendingCall) {
 	s.reqID++
-	p.method = method
+	p.id, p.method = s.reqID, method
 	s.pending[s.reqID] = p
 	m := node{"jsonrpc": "2.0", "id": s.reqID, "method": method}
 	if params != nil {
@@ -132,7 +135,7 @@ func (s *server) chatTurnEnded(reason string) {
 	switch {
 	case !c.busy:
 	case reason == "end_turn" || reason == "max_tokens":
-		s.request("sessions/read", node{"agent": c.agent, "session": c.session, "from": c.from}, pendingCall{})
+		s.request("sessions/read", node{"agent": c.agent, "session": c.session, "limit": maxRead}, pendingCall{})
 	default:
 		s.chatFailed()
 	}
@@ -149,19 +152,26 @@ func (s *server) answered(call pendingCall, m message) {
 			return
 		}
 		states := map[string]string{}
+		alive := false
 		for _, l := range list {
-			if k := key(l.Agent, l.Session); k != "" && l.State != nil && !c.own(l.Agent, l.Session) {
+			if c.own(l.Agent, l.Session) {
+				alive = true
+			} else if k := key(l.Agent, l.Session); k != "" && l.State != nil {
 				states[k] = *l.State
 			}
 		}
 		s.states = states
+		// A list asked before the session opened cannot know it.
+		if c.busy && c.session != "" && !alive && call.id > c.since {
+			s.chatGone()
+		}
 	case "sessions/open":
 		var r struct{ Agent, Session string }
-		if failed || json.Unmarshal(m.Result, &r) != nil {
+		if failed || json.Unmarshal(m.Result, &r) != nil || r.Session == "" {
 			s.chatFailed()
 			return
 		}
-		c.agent, c.session, c.from = r.Agent, r.Session, 0
+		c.agent, c.session, c.from, c.since = r.Agent, r.Session, 0, call.id
 	case "sessions/prompt":
 		if failed {
 			s.chatFailed()
@@ -193,14 +203,15 @@ func (s *server) chatRead(call pendingCall, m message, failed bool) {
 	case failed:
 		s.chatFailed()
 	default:
-		s.chatAnswer(r.Items)
+		s.chatAnswer(r.Items, r.Total-len(r.Items))
 	}
 }
 
-func (s *server) chatAnswer(items []struct{ Kind, Text string }) {
+// chatAnswer says the last agent text of this turn; items is the end of the transcript and first its first index.
+func (s *server) chatAnswer(items []struct{ Kind, Text string }, first int) {
 	s.talk.drop(func(l line) bool { return l.Kind == "chat_wait" })
 	now := s.now()
-	for i := len(items) - 1; i >= 0; i-- {
+	for i := len(items) - 1; i >= 0 && first+i >= s.chat.from; i-- {
 		if items[i].Kind == "agent" && items[i].Text != "" {
 			text, cut := firstLine(items[i].Text)
 			s.talk.say(line{Kind: "chat_answer", Text: text, Prio: 3, Sticky: true, Show: cut}, now, s.asleep)
@@ -216,6 +227,13 @@ func (s *server) chatFailed() {
 	s.talk.drop(func(l line) bool { return l.Kind == "chat_wait" })
 	s.say("chat_error")
 	s.chatNext()
+}
+
+// chatGone ends the turn of a session that was closed: the next message opens a new one.
+func (s *server) chatGone() {
+	s.chat.agent, s.chat.session, s.chat.request = "", "", ""
+	s.talk.drop(func(l line) bool { return l.Kind == "chat_needs" })
+	s.chatFailed()
 }
 
 func (s *server) chatNext() {

@@ -108,7 +108,7 @@ func TestAnswerBecomesTheBubble(t *testing.T) {
 	h := opened(t)
 	xp := h.s.st.Pet.XP
 	read := find(h.ended("s1", "end_turn"), "sessions/read")
-	if p := paramsOf(read); p["from"] != 0.0 || p["agent"] != "claude" || p["session"] != "s1" {
+	if p := paramsOf(read); p["from"] != nil || p["limit"] != 500.0 || p["agent"] != "claude" || p["session"] != "s1" {
 		t.Fatalf("read: %v", p)
 	}
 	msgs := h.reply(read, `{"items":[{"kind":"user","text":"oi"},{"kind":"agent","text":"Tudo certo.\n\nDetalhes"}],"total":2}`)
@@ -173,9 +173,8 @@ func TestBusyQueuesUpToFive(t *testing.T) {
 	if p := paramsOf(prompt); prompt == nil || p["text"] != "m0" {
 		t.Fatalf("prompt: %v", prompt)
 	}
-	read = find(h.ended("s1", "end_turn"), "sessions/read")
-	if p := paramsOf(read); p["from"] != 4.0 {
-		t.Errorf("answer read: %v", p)
+	if h.s.chat.from != 4 {
+		t.Errorf("noted total: %d", h.s.chat.from)
 	}
 }
 
@@ -259,5 +258,46 @@ func TestShowRetriesOnce(t *testing.T) {
 	h.s.tick()
 	if find(h.send(`{"jsonrpc":"2.0","method":"event/file_saved","params":{}}`), "sessions/show") != nil {
 		t.Error("a third try")
+	}
+}
+
+func TestVanishedSessionEndsLikeAFailedTurn(t *testing.T) {
+	h := opened(t)
+	h.mention("segunda")
+	h.s.request("sessions/list", nil, pendingCall{})
+	list := find(h.send(`{"jsonrpc":"2.0","method":"event/file_saved","params":{}}`), "sessions/list")
+	msgs := h.reply(list, `[{"agent":"claude","session":"s2","state":"idle"}]`)
+	if _, text, _ := bubbleOf(msgs); text != fallback["chat_error"][0] {
+		t.Errorf("bubble %q", text)
+	}
+	open := find(msgs, "sessions/open")
+	if prompt, _ := paramsOf(open)["prompt"].(string); open == nil || !strings.HasSuffix(prompt, "segunda") {
+		t.Errorf("the queue moves on with a new session: %v", msgs)
+	}
+}
+
+func TestOpenWithoutSessionIsAnError(t *testing.T) {
+	h := petted(t)
+	open := find(h.mention("oi"), "sessions/open")
+	msgs := h.reply(open, `{"agent":"claude","session":""}`)
+	if _, text, _ := bubbleOf(msgs); text != fallback["chat_error"][0] || h.s.chat.busy {
+		t.Errorf("bubble %q busy %v", text, h.s.chat.busy)
+	}
+}
+
+func TestAnswerAfterALongTurn(t *testing.T) {
+	h := opened(t)
+	read := find(h.ended("s1", "end_turn"), "sessions/read")
+	items := `[{"kind":"agent","text":"Resposta."},{"kind":"tool","text":"x"},{"kind":"tool","text":"y"}]`
+	_, text, _ := bubbleOf(h.reply(read, `{"items":`+items+`,"total":450}`))
+	if text != "Resposta." {
+		t.Errorf("bubble %q", text)
+	}
+
+	h = opened(t)
+	h.s.chat.from = 448
+	read = find(h.ended("s1", "end_turn"), "sessions/read")
+	if _, text, _ := bubbleOf(h.reply(read, `{"items":`+items+`,"total":450}`)); text != fallback["chat_done"][0] {
+		t.Errorf("an answer from before the turn: %q", text)
 	}
 }
