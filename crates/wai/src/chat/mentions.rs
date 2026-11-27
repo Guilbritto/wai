@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::input::{
-    Enter, Escape, IndentInline, InlineTokenSpan, MoveDown, MoveUp, TextareaState,
+    Enter, Escape, IndentInline, InlineToken, InlineTokenSpan, MoveDown, MoveUp, TextareaState,
 };
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -17,13 +17,35 @@ use wai_project::Entry;
 
 use super::input::{file_token, slashed};
 use crate::appearance::fonts;
-use crate::ext_host::ExtMention;
+use crate::ext_host::{ExtMention, PanelIcon};
 
 /// The names the extensions registered for the `@` menu. The workspace sets it when they change.
 #[derive(Clone, Default, PartialEq)]
 pub struct ExtMentions(pub Vec<ExtMention>);
 
 impl Global for ExtMentions {}
+
+/// What a mention token's id starts with, then the extension and the mention.
+pub(crate) const MENTION_TOKEN: &str = "wai-mention:";
+
+/// The token for `m`: `@name`, shown as its name.
+pub(crate) fn mention_token(m: &ExtMention) -> InlineToken {
+    InlineToken::new(
+        format!("{MENTION_TOKEN}{}:{}", m.ext.as_str(), m.id),
+        format!("@{}", m.name),
+    )
+    .with_label(m.name.clone())
+}
+
+pub(crate) fn is_mention_token(token: &InlineToken) -> bool {
+    token.id().starts_with(MENTION_TOKEN)
+}
+
+/// A row of the menu: an extension's name, or a file.
+enum Row {
+    Mention(ExtMention),
+    File(Entry),
+}
 
 /// A row's height: the list shows 8 rows and scrolls past them.
 const ROW: f32 = 28.;
@@ -67,6 +89,16 @@ fn matching(files: &[Entry], folder: &Path, query: &str) -> Vec<Entry> {
     tiers.into_iter().flatten().take(ROWS).cloned().collect()
 }
 
+/// The mentions for `query`, ignoring case: names that start with it, then names that contain it.
+fn matching_mentions(mentions: &[ExtMention], query: &str) -> Vec<ExtMention> {
+    let query = query.to_lowercase();
+    let lower = |m: &ExtMention| m.name.to_lowercase();
+    let (first, rest): (Vec<_>, Vec<_>) = (mentions.iter())
+        .filter(|m| lower(m).contains(&query))
+        .partition(|m| lower(m).starts_with(&query));
+    first.into_iter().chain(rest).cloned().collect()
+}
+
 /// `entry`'s path from `folder`, `/` between its parts.
 fn relative(entry: &Entry, folder: &Path) -> String {
     slashed(entry.path.strip_prefix(folder).unwrap_or(&entry.path))
@@ -80,7 +112,7 @@ pub(crate) struct Mentions {
     files: Option<(PathBuf, Arc<Vec<Entry>>)>,
     /// The `@query` being typed: its range in the text; `None`: no menu.
     range: Option<Range<usize>>,
-    rows: Vec<Entry>,
+    rows: Vec<Row>,
     ix: usize,
     /// Esc closed the menu: it opens again when the text changes.
     closed: bool,
@@ -125,10 +157,20 @@ impl Mentions {
         let text = input.value();
         let found = query(&text, input.cursor(), input.tokens());
         self.range = found.as_ref().map(|(range, _)| range.clone());
-        self.rows = match (found, &self.files) {
-            (Some((_, query)), Some((_, files))) => matching(files, &self.folder, query),
-            _ => Vec::new(),
-        };
+        self.rows = Vec::new();
+        if let Some((_, query)) = found {
+            let mentions = cx.try_global::<ExtMentions>().map_or(&[][..], |m| &m.0[..]);
+            self.rows.extend(
+                matching_mentions(mentions, query)
+                    .into_iter()
+                    .map(Row::Mention),
+            );
+            if let Some((_, files)) = &self.files {
+                let files = matching(files, &self.folder, query);
+                self.rows.extend(files.into_iter().map(Row::File));
+            }
+            self.rows.truncate(ROWS);
+        }
         cx.notify();
     }
 
@@ -174,13 +216,19 @@ impl Mentions {
             return;
         }
         let ix = ix.unwrap_or(self.ix).min(self.rows.len() - 1);
-        let (Some(range), Some(entry)) = (self.range.clone(), self.rows.get(ix)) else {
+        let (Some(range), Some(row)) = (self.range.clone(), self.rows.get(ix)) else {
             return;
         };
-        let path = entry.path.clone();
+        let (mention, path) = match row {
+            Row::Mention(m) => (Some(m.clone()), PathBuf::new()),
+            Row::File(entry) => (None, entry.path.clone()),
+        };
         let folder = self.folder.clone();
         self.input.update(cx, |input, cx| {
-            let token = file_token(&path, &folder, input.tokens());
+            let token = match &mention {
+                Some(m) => mention_token(m),
+                None => file_token(&path, &folder, input.tokens()),
+            };
             if input
                 .replace_range_with_token(range, token, window, cx)
                 .is_ok()
@@ -240,15 +288,42 @@ impl Render for Mentions {
         }
         let theme = cx.theme();
         let selected = self.ix.min(self.rows.len() - 1);
-        let rows = self.rows.iter().enumerate().map(|(ix, entry)| {
-            let icon = match entry.is_dir {
-                true => Lucide::Folder,
-                false => Lucide::File,
+        let rows = self.rows.iter().enumerate().map(|(ix, row)| {
+            let (icon, name, detail) = match row {
+                Row::Mention(m) => {
+                    let icon = match &m.icon {
+                        Some(PanelIcon::Svg(path)) => svg()
+                            .external_path(path.clone())
+                            .size(px(12.))
+                            .text_color(theme.muted_foreground)
+                            .into_any_element(),
+                        Some(PanelIcon::Lucide(icon)) => Icon::new(*icon)
+                            .with_size(px(12.))
+                            .text_color(theme.muted_foreground)
+                            .into_any_element(),
+                        None => Icon::new(Lucide::AtSign)
+                            .with_size(px(12.))
+                            .text_color(theme.muted_foreground)
+                            .into_any_element(),
+                    };
+                    (icon, m.name.clone(), m.ext_name.clone())
+                }
+                Row::File(entry) => {
+                    let icon = match entry.is_dir {
+                        true => Lucide::Folder,
+                        false => Lucide::File,
+                    };
+                    let parent = Path::new(&relative(entry, &self.folder))
+                        .parent()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let icon = Icon::new(icon)
+                        .with_size(px(12.))
+                        .text_color(theme.muted_foreground)
+                        .into_any_element();
+                    (icon, entry.name.clone(), parent)
+                }
             };
-            let parent = Path::new(&relative(entry, &self.folder))
-                .parent()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
             h_flex()
                 .id(("mention", ix))
                 .flex_none()
@@ -259,19 +334,15 @@ impl Render for Mentions {
                 .when(ix == selected, |el| {
                     el.bg(theme.accent).text_color(theme.accent_foreground)
                 })
-                .child(
-                    Icon::new(icon)
-                        .with_size(px(12.))
-                        .text_color(theme.muted_foreground),
-                )
-                .child(div().flex_none().child(entry.name.clone()))
+                .child(icon)
+                .child(div().flex_none().child(name))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .truncate()
                         .text_color(theme.muted_foreground)
-                        .child(parent),
+                        .child(detail),
                 )
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.complete(Some(ix), window, cx)),
@@ -311,7 +382,8 @@ mod tests {
     use gpui_kit::component::input::{InlineToken, InputContent};
     use wai_project::Entry;
 
-    use super::{matching, query};
+    use super::{matching, matching_mentions, query};
+    use crate::ext_host::ExtMention;
 
     #[test]
     fn query_is_the_at_word_at_the_caret() {
@@ -358,5 +430,28 @@ mod tests {
         assert_eq!(names("src/"), ["main.rs"]);
         assert_eq!(names("").len(), 5);
         assert!(names("zzz").is_empty());
+    }
+
+    #[test]
+    fn mentions_match_like_file_names() {
+        let mention = |ext: &str, name: &str| ExtMention {
+            ext: wai_ext::ExtId::new(ext).unwrap(),
+            id: "pet".into(),
+            name: name.into(),
+            ext_name: ext.into(),
+            icon: None,
+        };
+        let all = [mention("one", "Bolota"), mention("two", "Bob")];
+        let names = |all: &[ExtMention], q| -> Vec<String> {
+            matching_mentions(all, q)
+                .into_iter()
+                .map(|m| m.name)
+                .collect()
+        };
+        assert_eq!(names(&all, "bo"), ["Bolota", "Bob"]);
+        assert_eq!(names(&all, "LOT"), ["Bolota"]);
+        assert!(names(&all, "x").is_empty());
+        let twins = [mention("one", "Bolota"), mention("two", "Bolota")];
+        assert_eq!(matching_mentions(&twins, "bolota").len(), 2);
     }
 }

@@ -4806,4 +4806,37 @@ mod tests {
         let card = closed_card(&session, cx);
         assert!(seen.borrow().rows.contains(&card));
     }
+
+    /// Extension mentions come before the files in the `@` menu; Enter puts one in as a token.
+    #[gpui_kit::test]
+    fn at_lists_extension_mentions_first(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bolo.txt"), "").unwrap();
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        session.update(cx, |s, _| s.cwd = dir.path().to_path_buf());
+        let bolota = crate::ext_host::ExtMention {
+            ext: wai_ext::ExtId::new("wai-bichinho").unwrap(),
+            id: "pet".into(),
+            name: "Bolota".into(),
+            ext_name: "Bichinho".into(),
+            icon: None,
+        };
+        cx.update(|_, cx| cx.set_global(crate::chat::ExtMentions(vec![bolota])));
+
+        cx.simulate_input("@bo");
+        wait_until(cx, "mentions", |cx| shows(("mention", 1usize), cx));
+        assert!(!shows(("mention", 2usize), cx));
+        cx.simulate_keystrokes("enter");
+        assert_eq!(typed(&session, cx), "@Bolota ");
+        let tokens = session.read_with(cx, |s, cx| s.input.read(cx).tokens().to_vec());
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].range(), 0..7);
+        assert_eq!(tokens[0].token().id(), "wai-mention:wai-bichinho:pet");
+
+        cx.simulate_input("@bo");
+        cx.simulate_keystrokes("down enter");
+        assert_eq!(typed(&session, cx), "@Bolota @bolo.txt ");
+    }
 }
