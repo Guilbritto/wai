@@ -21,7 +21,7 @@
 //!   otherwise what the user did stays. `fill` makes a list, table or log take the panel's
 //!   remaining height.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
@@ -55,6 +55,14 @@ pub const MAX_WIDTH: f64 = 2_000.;
 /// The most a `pixels` node keeps, in cells.
 pub const PIXEL_ROWS: usize = 64;
 pub const PIXEL_COLS: usize = 256;
+/// A scene's limits (API 1.10).
+pub const SCENE_PALETTE: usize = 64;
+pub const SCENE_PATTERNS: usize = 64;
+pub const SCENE_PATTERN_SIDE: usize = 32;
+pub const SCENE_MAP_SIDE: usize = 128;
+pub const SCENE_SPRITES: usize = 100;
+pub const SCENE_LABEL: usize = 32;
+pub const SCENE_BADGE: usize = 24;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
@@ -212,8 +220,45 @@ pub enum Node {
         width: usize,
         scale: u8,
     },
+    /// A grid of coloured tiles with sprites on it (API 1.10).
+    Scene(Box<Scene>),
     /// An unknown type, or a known one that is broken.
     Unsupported,
+}
+
+/// A scene's pattern: `rows` of palette keys, a space being transparent; every row is `width`
+/// long.
+#[derive(Debug, Clone, PartialEq, Hash)]
+pub struct Pattern {
+    pub width: usize,
+    pub rows: Vec<Vec<char>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sprite {
+    pub id: String,
+    pub x: usize,
+    pub y: usize,
+    pub pattern: String,
+    pub label: Option<Arc<str>>,
+    pub badge: Option<Arc<str>>,
+    pub tone: Tone,
+}
+
+/// The map is `rows` of characters, padded to `width`; `legend` names each character's pattern.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Scene {
+    pub id: String,
+    pub cell: usize,
+    pub scale: u8,
+    pub palette: BTreeMap<char, [u8; 3]>,
+    pub patterns: BTreeMap<String, Pattern>,
+    pub legend: BTreeMap<char, String>,
+    pub map: Vec<Vec<char>>,
+    pub width: usize,
+    pub sprites: Vec<Sprite>,
+    pub follow: Option<String>,
+    pub margin: u8,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -918,6 +963,7 @@ impl Parser {
                         .map_or(2, |s| s.clamp(1., 8.) as u8),
                 }
             }
+            "scene" => Node::Scene(Box::new(scene(o)?)),
             _ => return None,
         };
         // Only a node that is otherwise whole takes its id.
@@ -929,8 +975,141 @@ impl Parser {
             | Node::Path { id, .. }
             | Node::Checkbox { id, .. } => self.ids.insert(id.clone()).then_some(node),
             Node::Pixels { id: Some(id), .. } => self.ids.insert(id.clone()).then_some(node),
+            Node::Scene(scene) => self.ids.insert(scene.id.clone()).then_some(node),
             _ => Some(node),
         }
+    }
+}
+
+/// `#rgb` or `#rrggbb`.
+fn hex(s: &str) -> Option<[u8; 3]> {
+    let h = s.strip_prefix('#')?;
+    if !h.is_ascii() || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let n = |i: usize, len: usize| u8::from_str_radix(&h[i..i + len], 16).ok();
+    match h.len() {
+        3 => Some([n(0, 1)? * 17, n(1, 1)? * 17, n(2, 1)? * 17]),
+        6 => Some([n(0, 2)?, n(2, 2)?, n(4, 2)?]),
+        _ => None,
+    }
+}
+
+/// One character, the key of a palette or legend entry.
+fn key(k: &str) -> Option<char> {
+    let mut chars = k.chars();
+    chars.next().filter(|_| chars.next().is_none())
+}
+
+/// Rows of at most `SCENE_PATTERN_SIDE` characters, padded to the longest.
+fn pattern(value: &Value) -> Option<Pattern> {
+    let rows = value.as_array()?;
+    if rows.is_empty() || rows.len() > SCENE_PATTERN_SIDE {
+        return None;
+    }
+    let mut rows = rows
+        .iter()
+        .map(|r| Some(r.as_str()?.chars().collect::<Vec<_>>()))
+        .collect::<Option<Vec<_>>>()?;
+    let width = rows.iter().map(Vec::len).max()?;
+    if width == 0 || width > SCENE_PATTERN_SIDE {
+        return None;
+    }
+    rows.iter_mut().for_each(|r| r.resize(width, ' '));
+    Some(Pattern { width, rows })
+}
+
+fn scene(o: &Map<String, Value>) -> Option<Scene> {
+    let scene_id = id(o)?;
+    let cell = o.get("cell")?.as_u64()? as usize;
+    if !(4..=SCENE_PATTERN_SIDE).contains(&cell) {
+        return None;
+    }
+    let scale = match o.get("scale").and_then(Value::as_u64) {
+        Some(s) => u8::try_from(s).ok().filter(|s| (1..=4).contains(s))?,
+        None => 2,
+    };
+    let palette = o.get("palette")?.as_object()?;
+    if palette.len() > SCENE_PALETTE {
+        return None;
+    }
+    let palette = (palette.iter())
+        .map(|(k, v)| Some((key(k)?, hex(v.as_str()?)?)))
+        .collect::<Option<BTreeMap<_, _>>>()?;
+    let patterns = o.get("patterns")?.as_object()?;
+    if patterns.len() > SCENE_PATTERNS {
+        return None;
+    }
+    let patterns = (patterns.iter())
+        .map(|(k, v)| Some((k.clone(), pattern(v)?)))
+        .collect::<Option<BTreeMap<_, _>>>()?;
+    let legend = (o.get("legend")?.as_object()?.iter())
+        .map(|(k, v)| Some((key(k)?, v.as_str()?.to_owned())))
+        .collect::<Option<BTreeMap<_, _>>>()?;
+    // A tile is exactly `cell` by `cell`.
+    let tile = |p: &String| {
+        patterns
+            .get(p)
+            .is_some_and(|p| p.width == cell && p.rows.len() == cell)
+    };
+    if !legend.values().all(tile) {
+        return None;
+    }
+    let mut map = (o.get("map")?.as_array()?.iter())
+        .map(|r| Some(r.as_str()?.chars().collect::<Vec<_>>()))
+        .collect::<Option<Vec<_>>>()?;
+    let width = map.iter().map(Vec::len).max()?;
+    if map.len() > SCENE_MAP_SIDE || width == 0 || width > SCENE_MAP_SIDE {
+        return None;
+    }
+    map.iter_mut().for_each(|r| r.resize(width, ' '));
+    let sprites = o.get("sprites")?.as_array()?;
+    if sprites.len() > SCENE_SPRITES {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    let sprites = sprites
+        .iter()
+        .map(|s| {
+            let s = s.as_object()?;
+            let sprite = Sprite {
+                id: id(s)?,
+                x: s.get("x")?.as_u64()? as usize,
+                y: s.get("y")?.as_u64()? as usize,
+                pattern: str_field(s, "pattern")?.to_owned(),
+                label: sized(s, "label", SCENE_LABEL)?,
+                badge: sized(s, "badge", SCENE_BADGE)?,
+                tone: tone(s).unwrap_or_default(),
+            };
+            let inside = sprite.x < width && sprite.y < map.len();
+            (inside && patterns.contains_key(&sprite.pattern) && seen.insert(sprite.id.clone()))
+                .then_some(sprite)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let follow = str_field(o, "follow")
+        .filter(|f| sprites.iter().any(|s| s.id == *f))
+        .map(str::to_owned);
+    let margin = (o.get("margin").and_then(Value::as_u64)).map_or(3, |m| m.min(16) as u8);
+    Some(Scene {
+        id: scene_id,
+        cell,
+        scale,
+        palette,
+        patterns,
+        legend,
+        map,
+        width,
+        sprites,
+        follow,
+        margin,
+    })
+}
+
+/// An optional line of at most `max` characters; `None` when it is there and longer.
+fn sized(o: &Map<String, Value>, key: &str, max: usize) -> Option<Option<Arc<str>>> {
+    match str_field(o, key) {
+        Some(s) if s.chars().count() > max => None,
+        s => Some(s.map(Arc::from)),
     }
 }
 
@@ -1061,6 +1240,147 @@ mod tests {
             panic!()
         };
         assert_eq!(children[1], Node::Unsupported);
+    }
+
+    fn scene_json() -> Value {
+        let tile = vec!["ab".repeat(2); 4];
+        json!({
+            "type": "scene", "id": "office", "cell": 4, "scale": 3,
+            "palette": {"a": "#f00", "b": "#00ff80"},
+            "patterns": {"floor": tile, "ana": ["  a", "bbb"]},
+            "legend": {".": "floor"},
+            "map": ["...", ".."],
+            "sprites": [
+                {"id": "u1", "x": 2, "y": 1, "pattern": "ana", "label": "Ana", "badge": "Focused", "tone": "info"},
+                {"id": "u2", "x": 0, "y": 0, "pattern": "ana"},
+            ],
+            "follow": "u1", "margin": 5,
+        })
+    }
+
+    fn scene_with(edit: impl FnOnce(&mut Value)) -> Result<Node, TooLarge> {
+        let mut v = scene_json();
+        edit(&mut v);
+        parse(&v)
+    }
+
+    #[test]
+    fn scene_parse() {
+        let Ok(Node::Scene(s)) = parse(&scene_json()) else {
+            panic!()
+        };
+        assert_eq!(
+            (s.id.as_str(), s.cell, s.scale, s.margin),
+            ("office", 4, 3, 5)
+        );
+        assert_eq!(s.palette[&'a'], [255, 0, 0]);
+        assert_eq!(s.palette[&'b'], [0, 255, 128]);
+        assert_eq!((s.width, s.map.len()), (3, 2));
+        assert_eq!(s.map[1], vec!['.', '.', ' ']);
+        assert_eq!(s.patterns["ana"].rows[0], vec![' ', ' ', 'a']);
+        assert_eq!(s.legend[&'.'], "floor");
+        assert_eq!(s.follow.as_deref(), Some("u1"));
+        assert_eq!(s.sprites.len(), 2);
+        let ana = &s.sprites[0];
+        assert_eq!((ana.x, ana.y, ana.tone), (2, 1, Tone::Info));
+        assert_eq!(ana.label.as_deref(), Some("Ana"));
+        assert_eq!(ana.badge.as_deref(), Some("Focused"));
+        // Defaults.
+        let Ok(Node::Scene(s)) = scene_with(|v| {
+            let o = v.as_object_mut().unwrap();
+            o.remove("scale");
+            o.remove("margin");
+            o.remove("follow");
+        }) else {
+            panic!()
+        };
+        assert_eq!((s.scale, s.margin, s.follow), (2, 3, None));
+        // A scene shares the panel's id set.
+        let Ok(Node::Column { children, .. }) = parse(&json!({"type": "column", "children": [
+            {"type": "button", "id": "office", "label": "x"}, scene_json()]}))
+        else {
+            panic!()
+        };
+        assert_eq!(children[1], Node::Unsupported);
+    }
+
+    #[test]
+    fn scene_rules_unsupported() {
+        let sq = |n: usize| vec!["a".repeat(n); n];
+        let cases: Vec<(&str, Box<dyn FnOnce(&mut Value)>)> = vec![
+            (
+                "missing id",
+                Box::new(|v| drop(v.as_object_mut().unwrap().remove("id"))),
+            ),
+            ("cell 3", Box::new(|v| v["cell"] = json!(3))),
+            ("cell 33", Box::new(|v| v["cell"] = json!(33))),
+            ("scale 5", Box::new(|v| v["scale"] = json!(5))),
+            ("bad hex", Box::new(|v| v["palette"]["a"] = json!("red"))),
+            (
+                "65 palette keys",
+                Box::new(|v| {
+                    let p = (0..65).map(|i| {
+                        (
+                            char::from_u32(0x100 + i).unwrap().to_string(),
+                            json!("#000"),
+                        )
+                    });
+                    v["palette"] = Value::Object(p.collect());
+                }),
+            ),
+            (
+                "33x33 pattern",
+                Box::new(move |v| v["patterns"]["big"] = json!(sq(33))),
+            ),
+            (
+                "tile not cell x cell",
+                Box::new(|v| v["patterns"]["floor"] = json!(vec!["aaaa"; 3])),
+            ),
+            ("129 rows", Box::new(|v| v["map"] = json!(vec!["."; 129]))),
+            (
+                "101 sprites",
+                Box::new(|v| {
+                    let s = (0..101)
+                        .map(|i| json!({"id": format!("s{i}"), "x": 0, "y": 0, "pattern": "ana"}));
+                    v["sprites"] = Value::Array(s.collect());
+                }),
+            ),
+            (
+                "sprite outside map",
+                Box::new(|v| v["sprites"][0]["x"] = json!(3)),
+            ),
+            (
+                "unknown pattern",
+                Box::new(|v| v["sprites"][0]["pattern"] = json!("nope")),
+            ),
+            (
+                "unknown legend pattern",
+                Box::new(|v| v["legend"]["."] = json!("nope")),
+            ),
+            (
+                "repeated sprite id",
+                Box::new(|v| v["sprites"][1]["id"] = json!("u1")),
+            ),
+            (
+                "label 33 chars",
+                Box::new(|v| v["sprites"][0]["label"] = json!("é".repeat(33))),
+            ),
+        ];
+        for (name, edit) in cases {
+            assert_eq!(scene_with(edit), Ok(Node::Unsupported), "{name}");
+        }
+        // The limits themselves are fine.
+        let Ok(Node::Scene(_)) = scene_with(|v| {
+            v["sprites"][0]["label"] = json!("é".repeat(32));
+            v["map"] = json!(vec!["...".repeat(42); 128]);
+        }) else {
+            panic!()
+        };
+    }
+
+    #[test]
+    fn scene_not_in_card() {
+        assert_eq!(card(&scene_json()), Some(Node::Unsupported));
     }
 
     fn col(children: Vec<Node>) -> Node {

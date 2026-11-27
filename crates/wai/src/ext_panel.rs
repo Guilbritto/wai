@@ -1419,7 +1419,7 @@ impl ExtPanel {
                 self.pixels(id.as_deref(), rows.clone(), *width, *scale, k, cx),
                 at,
             ),
-            Node::Unsupported => unsupported(cx),
+            Node::Scene(_) | Node::Unsupported => unsupported(cx),
         };
         (element, false)
     }

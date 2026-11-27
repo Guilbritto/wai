@@ -103,9 +103,9 @@ T19 → T20
 
 **Done when**:
 
-- [ ] `scene_parse` and `scene_rules_unsupported` (one case per rule: missing id, cell 3/33, scale 5, bad hex, 65 palette keys, 33×33 pattern, tile pattern not cell×cell, 129 rows, 101 sprites, sprite outside map, unknown pattern, repeated sprite id, label 33 chars) pass
-- [ ] `scene_not_in_card` passes
-- [ ] Gate check passes: `cargo test -p wai-ext`
+- [x] `scene_parse` and `scene_rules_unsupported` (one case per rule: missing id, cell 3/33, scale 5, bad hex, 65 palette keys, 33×33 pattern, tile pattern not cell×cell, 129 rows, 101 sprites, sprite outside map, unknown pattern, repeated sprite id, label 33 chars) pass
+- [x] `scene_not_in_card` passes
+- [x] Gate check passes: `cargo test -p wai-ext`
 
 **Tests**: unit
 **Gate**: full
