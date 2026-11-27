@@ -367,9 +367,9 @@ T19 → T20
 
 **Done when**:
 
-- [ ] `TestArtValid` (every pattern 16 × 16, only palette keys or space, every map legend character has a pattern, 8 avatars) passes
-- [ ] A `WAI_SHOT_TREE` screenshot of the default map is shown to the user before the commit
-- [ ] Gate check passes: Quick
+- [x] `TestArtValid` (every pattern 16 × 16, only palette keys or space, every map legend character has a pattern, 8 avatars) passes
+- [x] A `WAI_SHOT_TREE` screenshot of the default map is shown to the user before the commit
+- [x] Gate check passes: Quick
 
 **Tests**: unit
 **Gate**: quick
@@ -509,7 +509,7 @@ Proof: run go | --- PASS: TestSecondLoginReplacesFirst
 **C13** - `setup.json` holds name, server, avatar and token and has mode 0600 (OFC-13, AC 13)
 Proof: run go | --- PASS: TestSetupSavedPrivate
 
-**C14** - "Change setup" disconnects and shows the form filled with the saved values (OFC-14, AC 14)
+**C14** - "Change setup" disconnects and shows the form with the saved name, server and avatar and an empty token field; an empty token keeps the saved one (OFC-14, AC 14)
 Proof: run go | --- PASS: TestChangeSetupDisconnectsAndPrefills
 
 **C15** - A server started from a valid config accepts an office connection on its listen address (OFC-20, AC 1)
@@ -609,7 +609,7 @@ Proof: run go | --- PASS: TestNameRejectsControlChars
 
 ## Handoff
 
-**Settled mid-build:** none
+**Settled mid-build:** 2026-11-26 - OFC-14: token field stays empty on "Change setup", an empty submit keeps the saved token - user: "Token vazio, mantém o salvo"; T15 art: chairs and plants on carpet get carpet-backed variants - user: "Aprovo e corrige o fundo"
 **Dispatched:** batch 1 (Phases 1-2, T1-T7) - sonnet worker - 2026-11-26 - returned (79e0c54..4cd1565); batch 2 (Phases 3-4, T8-T13) - sonnet worker - 2026-11-26 - returned (c534b49..5a6f088); batch 3 (Phases 5-6, T14-T20) - sonnet worker - 2026-11-26
 **Walked:** none
 

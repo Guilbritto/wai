@@ -82,7 +82,7 @@ This is delivery 1 of 4 (see `context.md`, Slicing): a shared map with walking a
 11. WHEN the user's avatar comes within 3 tiles of the visible area's edge THEN the office pane SHALL scroll the map to keep the avatar in view.  <!-- OFC-11 -->
 12. WHEN the same name connects a second time THEN the server SHALL keep the new connection and close the older one, whose extension SHALL show "Signed in elsewhere" and SHALL NOT retry.  <!-- OFC-12 -->
 13. The extension SHALL save name, server address, avatar and token in its data folder, with the file readable only by the user (mode 0600).  <!-- OFC-13 -->
-14. WHEN the user chooses "Change setup" THEN the extension SHALL disconnect and show the setup form filled with the saved values.  <!-- OFC-14 -->
+14. WHEN the user chooses "Change setup" THEN the extension SHALL disconnect and show the setup form filled with the saved name, server and avatar, with the token field empty; a submit with an empty token SHALL keep the saved token.  <!-- OFC-14 -->
 
 **Independent Test**: With a server on localhost and two wai processes set up with different names, moving one avatar with the arrow keys moves it on the other's map; quitting one removes its avatar from the other within 10 s.
 

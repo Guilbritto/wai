@@ -27,7 +27,7 @@ func TestDefaultMapParses(t *testing.T) {
 }
 
 func TestBlocked(t *testing.T) {
-	m, err := ParseMap("#####\n#.D.#\n#PTS#\n#,C.#\n#####")
+	m, err := ParseMap("#####\n#.D.#\n#PTS#\n#,C.#\n#pc,#\n#####")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,9 @@ func TestBlocked(t *testing.T) {
 		{"outside left", Point{-1, 1}, true},
 		{"outside right", Point{5, 1}, true},
 		{"outside top", Point{1, -1}, true},
-		{"outside bottom", Point{1, 5}, true},
+		{"plant on carpet", Point{1, 4}, true},
+		{"chair on carpet", Point{2, 4}, false},
+		{"outside bottom", Point{1, 6}, true},
 	}
 	for _, c := range cases {
 		if got := m.Blocked(c.p); got != c.want {

@@ -31,12 +31,12 @@ func DefaultMap() Map {
 }
 
 const (
-	walkable = ".,CS"
-	blocking = "#DPT"
+	walkable = ".,CcS"
+	blocking = "#DPpT"
 )
 
 // ParseMap reads rows of tiles: # wall, . floor, , carpet, D desk, C chair,
-// P plant, T table, S spawn. The first S is the spawn point.
+// P plant, T table, S spawn; c and p are a chair and a plant on carpet. The first S is the spawn point.
 func ParseMap(text string) (Map, error) {
 	text = strings.TrimRight(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	m := Map{Rows: strings.Split(text, "\n")}
