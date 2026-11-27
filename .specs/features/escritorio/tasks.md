@@ -600,7 +600,7 @@ Proof: run go | --- PASS: TestReconnectAfterServerRestart
 Proof: run go | --- PASS: TestConfigMapWithoutSpawnRefused
 
 **C44** - Two sprites on one tile are both drawn and their labels stack apart (OFC-62)
-Proof: run wai | test ext_scene::tests::shared_tile_labels_stack ... ok
+Proof: run wai | test ext_panel::tests::scene_shared_tile_draws_both ... ok
 
 **C45** - A name with a control character is refused with the OFC-02 message (OFC-63)
 Proof: run go | --- PASS: TestNameRejectsControlChars

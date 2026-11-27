@@ -3089,13 +3089,33 @@ mod tests {
         )
     }
 
+    /// The (label, badge, tone) the panel's scene holds for sprite `id`: gpui-kit cannot read
+    /// drawn text, and the draw test above shows those elements exist.
+    fn sprite_text(
+        panel: &Entity<ExtPanel>,
+        id: &str,
+        cx: &mut VisualTestContext,
+    ) -> (Option<String>, Option<String>, wai_ext::panel::Tone) {
+        let tree = panel.read_with(cx, |p, _| p.tree.clone());
+        let mut found = None;
+        tree.unwrap().unwrap().walk(&mut |node| {
+            if let Node::Scene(scene) = node {
+                for s in scene.sprites.iter().filter(|s| s.id == id) {
+                    let own = |t: &Option<std::sync::Arc<str>>| t.as_deref().map(str::to_owned);
+                    found = Some((own(&s.label), own(&s.badge), s.tone));
+                }
+            }
+        });
+        found.unwrap()
+    }
+
     #[gpui_kit::test]
     fn scene_draws_tiles_and_sprites(cx: &mut TestAppContext) {
         let (panel, cx) = panel_window(cx);
         show(
             &panel,
             scene_tree(json!([
-                {"id": "u1", "x": 1, "y": 3, "pattern": "dot", "label": "Ana", "badge": "Focused"},
+                {"id": "u1", "x": 1, "y": 3, "pattern": "dot", "label": "Ana", "badge": "Focused", "tone": "info"},
                 {"id": "u2", "x": 2, "y": 0, "pattern": "dot"},
             ])),
             cx,
@@ -3105,9 +3125,16 @@ mod tests {
         // A 2 x 2 sprite, doubled, sits bottom-centred on its tile.
         assert_eq!(rel("scene-sprite:u1", cx), (8. + 2., 24. + 4., 4., 4.));
         assert_eq!(rel("scene-sprite:u2", cx), (16. + 2., 4., 4., 4.));
-        assert!(shown(name("scene-label:u1"), cx));
-        assert!(shown(name("scene-badge:u1"), cx));
+        assert_eq!(
+            sprite_text(&panel, "u1", cx),
+            (
+                Some("Ana".into()),
+                Some("Focused".into()),
+                wai_ext::panel::Tone::Info
+            )
+        );
         assert!(!shown(name("scene-label:u2"), cx));
+        assert!(!shown(name("scene-badge:u2"), cx));
     }
 
     #[gpui_kit::test]
@@ -3173,6 +3200,9 @@ mod tests {
         let (panel, cx) = panel_window(cx);
         let keys = keys(&panel, cx);
         show(&panel, scene_tree(json!([])), cx);
+        // Before the click the scene has no keyboard: nothing is sent.
+        cx.simulate_keystrokes("up w space");
+        assert!(keys.borrow().is_empty(), "{:?}", keys.borrow());
         click(name("panel-scene:office"), cx);
         cx.simulate_keystrokes("up down left right w a s d space");
         let got: Vec<_> = keys.borrow().iter().map(|k| k.1.clone()).collect();
@@ -3181,6 +3211,25 @@ mod tests {
             ["up", "down", "left", "right", "w", "a", "s", "d", "space"]
         );
         assert!(keys.borrow().iter().all(|k| k.0 == "office" && !k.2));
+    }
+
+    #[gpui_kit::test]
+    fn scene_shared_tile_draws_both(cx: &mut TestAppContext) {
+        let (panel, cx) = panel_window(cx);
+        show(
+            &panel,
+            scene_tree(json!([
+                {"id": "u1", "x": 1, "y": 3, "pattern": "dot", "label": "Ana"},
+                {"id": "u2", "x": 1, "y": 3, "pattern": "dot", "label": "Bia"},
+            ])),
+            cx,
+        );
+        assert!(shown(name("scene-sprite:u1"), cx));
+        assert!(shown(name("scene-sprite:u2"), cx));
+        assert_eq!(sprite_text(&panel, "u1", cx).0.as_deref(), Some("Ana"));
+        assert_eq!(sprite_text(&panel, "u2", cx).0.as_deref(), Some("Bia"));
+        let (a, b) = (rel("scene-label:u1", cx), rel("scene-label:u2", cx));
+        assert_ne!(a.1, b.1, "the labels stack apart: {a:?} {b:?}");
     }
 
     #[gpui_kit::test]
@@ -3611,6 +3660,38 @@ mod tests {
             values.is_some()
         });
         values.unwrap()
+    }
+
+    /// A key from a panel's scene reaches the extension as `panel/key` with the panel's id.
+    #[cfg(unix)]
+    #[gpui_kit::test]
+    fn scene_key_reaches_extension_as_panel_key(cx: &mut TestAppContext) {
+        use crate::ext_host::tests::{bodies, log_path, logged};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let log = log_path(tmp.path(), "cards");
+        let flags = format!("--panel --log '{}'", log.display());
+        let (workspace, cx) = start_sample(tmp.path(), &flags, cx);
+        let host = workspace.read_with(cx, |w, _| w.ext_host.clone());
+        let panel = host.read_with(cx, |h, _| h.panels().first().map(|p| p.view.clone()));
+        let panel = panel.expect("a tab for the panel");
+        crate::workspace::tests::wait_until(cx, "the first tree", |cx| {
+            panel.read_with(cx, |p, _| p.tree.is_some())
+        });
+        panel.update(cx, |_, cx| {
+            cx.emit(super::PanelKey {
+                scene: "office".into(),
+                key: "up".into(),
+                repeat: true,
+            })
+        });
+        let lines = logged(&log, "panel/key", cx, |l| {
+            !bodies(l, "panel/key").is_empty()
+        });
+        assert_eq!(
+            bodies(&lines, "panel/key"),
+            [json!({"panel": "main", "scene": "office", "key": "up", "repeat": true})]
+        );
     }
 
     /// Types `text` into the panel's `query` input.
