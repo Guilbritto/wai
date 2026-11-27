@@ -292,8 +292,8 @@ T19 → T20
 
 **Done when**:
 
-- [ ] `TestConfigRejectsShortToken`, `TestConfigRequiresTLSOffLoopback`, `TestConfigAllowsPlainLoopback`, `TestConfigBadMapRefused` pass
-- [ ] Gate check passes: Quick
+- [x] `TestConfigRejectsShortToken`, `TestConfigRequiresTLSOffLoopback`, `TestConfigAllowsPlainLoopback`, `TestConfigBadMapRefused` pass
+- [x] Gate check passes: Quick
 
 **Tests**: unit
 **Gate**: quick
