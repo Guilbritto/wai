@@ -161,8 +161,8 @@ T19 → T20
 
 **Done when**:
 
-- [ ] `rasterise_paints_palette_and_transparency`, `viewport_keeps_margin`, `viewport_centres_first_time`, `tween_takes_150ms`, `tween_skips_jumps`, `shared_tile_labels_stack` pass
-- [ ] Gate check passes: `cargo test -p wai scene`
+- [x] `rasterise_paints_palette_and_transparency`, `viewport_keeps_margin`, `viewport_centres_first_time`, `tween_takes_150ms`, `tween_skips_jumps`, `shared_tile_labels_stack` pass
+- [x] Gate check passes: `cargo test -p wai scene`
 
 **Tests**: unit
 **Gate**: full
