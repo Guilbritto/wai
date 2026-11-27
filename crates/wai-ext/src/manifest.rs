@@ -93,7 +93,7 @@ pub struct McpServerSpec {
 
 /// The extension API this wai speaks: `initialize` sends it, and a manifest's `api` may not be
 /// newer.
-pub const API: &str = "1.12";
+pub const API: &str = "1.13";
 
 pub const MAX_ITEMS: usize = 3;
 
@@ -223,6 +223,7 @@ pub enum Permission {
     SessionsRead,
     SessionsControl,
     SessionsContent,
+    Mentions,
     Notify,
     Panels,
     Bar,
@@ -239,6 +240,7 @@ impl std::fmt::Display for Permission {
             Self::SessionsRead => f.write_str("sessions:read"),
             Self::SessionsControl => f.write_str("sessions:control"),
             Self::SessionsContent => f.write_str("sessions:content"),
+            Self::Mentions => f.write_str("mentions"),
             Self::Notify => f.write_str("notify"),
             Self::Panels => f.write_str("panels"),
             Self::Bar => f.write_str("bar"),
@@ -343,6 +345,7 @@ pub(crate) fn parse_permission(s: &str) -> Result<Permission, ManifestError> {
         "sessions:read" => Permission::SessionsRead,
         "sessions:control" => Permission::SessionsControl,
         "sessions:content" => Permission::SessionsContent,
+        "mentions" => Permission::Mentions,
         "notify" => Permission::Notify,
         "panels" => Permission::Panels,
         "bar" => Permission::Bar,

@@ -326,17 +326,18 @@ fn api_version_is_checked_first() {
     assert!(with_api("\"1.10\"", "").is_ok());
     assert!(with_api("\"1.11\"", "").is_ok());
     assert!(with_api("\"1.12\"", "").is_ok());
-    let newer = with_api("\"1.13\"", "").unwrap_err();
+    assert!(with_api("\"1.13\"", "").is_ok());
+    let newer = with_api("\"1.14\"", "").unwrap_err();
     assert_eq!(
         newer.to_string(),
-        "Go Tools needs a newer wai (extension API 1.13; this wai has 1.12)"
+        "Go Tools needs a newer wai (extension API 1.14; this wai has 1.13)"
     );
     // Even when the newer API's fields would fail the strict parse.
     assert_eq!(
         with_api("\"2.0\"", "\nfuture = true\n")
             .unwrap_err()
             .to_string(),
-        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.12)"
+        "Go Tools needs a newer wai (extension API 2.0; this wai has 1.13)"
     );
     // Numeric, not lexical: 1.20 is newer than 1.12, and 1.9 older.
     assert!(matches!(
@@ -556,12 +557,27 @@ fn listen_and_sessions_content_parse() {
 }
 
 #[test]
-fn api_is_1_12() {
-    assert_eq!(API, "1.12");
-    let with_api = |api: &str| parse(&format!("api = \"{api}\"\n{FULL}"));
-    assert!(with_api("1.12").is_ok());
+fn mentions_permission_parses() {
+    let m = |perms: &str| parse(&with("remote", "bin/remote", perms));
+    let parsed = m("\"process\", \"mentions\"").unwrap();
     assert_eq!(
-        with_api("1.13").unwrap_err().to_string(),
-        "Go Tools needs a newer wai (extension API 1.13; this wai has 1.12)"
+        parsed.permissions,
+        [Permission::Process, Permission::Mentions]
+    );
+    assert_eq!(Permission::Mentions.to_string(), "mentions");
+    assert!(matches!(
+        m("\"process\", \"mention\""),
+        Err(ManifestError::Unknown(_))
+    ));
+}
+
+#[test]
+fn api_is_1_13() {
+    assert_eq!(API, "1.13");
+    let with_api = |api: &str| parse(&format!("api = \"{api}\"\n{FULL}"));
+    assert!(with_api("1.13").is_ok());
+    assert_eq!(
+        with_api("1.14").unwrap_err().to_string(),
+        "Go Tools needs a newer wai (extension API 1.14; this wai has 1.13)"
     );
 }

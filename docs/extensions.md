@@ -4,7 +4,7 @@ An extension is a folder with a `wai-extension.toml` manifest. It can be manifes
 
 Users install an extension from a folder, from a git URL, or from the Extensions page's **Available** list, which downloads a prebuilt package from an index. Anyone can publish one: see [Publishing](#publishing).
 
-This guide describes API version 1.12 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
+This guide describes API version 1.13 (protocol 1), as implemented by the latest wai release. The [first-party extensions](../extensions) are working references:
 - `wai-navegador` is manifest-only;
 - `wai-rotinas` and `wai-bichinho` are written in Go; `wai-bichinho` shows a pet in a dock at the sidebar's foot (API 1.9) and speaks in a `bubble` (API 1.8) that opens the PR it talks about (API 1.12).
 
@@ -45,7 +45,7 @@ title = "Pull requests"
 | `name` | string | Shown in the extension list and the consent dialog |
 | `version` | string | Free form. wai shows it; it does not compare versions |
 | `description` | string, optional | Shown last in the consent dialog, cut to fit |
-| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.12)`. Set it to `"1.12"` when you use a `bubble` `url`, to `"1.11"` when you use `sessions/open` `background`, `sessions/show`, `tabs` `end` or the `switch` node, to `"1.10"` when you use the `listen` or `sessions:content` permission, `sessions/read`, `sessions/cancel`, `permission/answer` or `question/answer`, to `"1.9"` when you use a `sidebar-foot` panel or the `pixels` node, to `"1.8"` when you use a `plain` list, list item `icon`, `tone`, `selected`, `lead`, `note` or `indent`, a `text` `style`, a `column` `framed`, `title`, `badge`, `tone` or `collapsed`, `tabs` `style` or a tab `tone`, `select` `segmented`, `input` `icon`, `submit` or `clear`, `button` `icon_only`, `link` `icon` or `icon_only`, or the `bubble` node, to `"1.7"` when you use `events/emit`, an `events:<id>` permission or a panel's `frame`, to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
+| `api` | string, optional | The oldest extension API the extension needs, `major.minor` (`"1.4"`). Absent means 1.0. A wai with an older API refuses the extension: `<name> needs a newer wai (extension API <api>; this wai has 1.13)`. Set it to `"1.13"` when you use the `mentions` permission, to `"1.12"` when you use a `bubble` `url`, to `"1.11"` when you use `sessions/open` `background`, `sessions/show`, `tabs` `end` or the `switch` node, to `"1.10"` when you use the `listen` or `sessions:content` permission, `sessions/read`, `sessions/cancel`, `permission/answer` or `question/answer`, to `"1.9"` when you use a `sidebar-foot` panel or the `pixels` node, to `"1.8"` when you use a `plain` list, list item `icon`, `tone`, `selected`, `lead`, `note` or `indent`, a `text` `style`, a `column` `framed`, `title`, `badge`, `tone` or `collapsed`, `tabs` `style` or a tab `tone`, `select` `segmented`, `input` `icon`, `submit` or `clear`, `button` `icon_only`, `link` `icon` or `icon_only`, or the `bubble` node, to `"1.7"` when you use `events/emit`, an `events:<id>` permission or a panel's `frame`, to `"1.6"` when you use a `prompt` or `prompt-side` panel, `event/session_focused`, the `path` node, `wide`, `row.fill`, `column.width` or `card.selected`, to `"1.5"` when you use `tabs`, to `"1.4"` when you use `card`, and to `"1.3"` or later when you use `items` or the `bar` permission, so an older wai refuses the extension with that message instead of an unknown-field error. Anything not `major.minor` is an invalid manifest. wai 0.8 and older do not know the field and refuse the manifest |
 | `permissions` | array of strings | See [Permissions](#permissions). An unknown permission is refused |
 | `process.command` | string | See [Commands and paths](#commands-and-paths). Needs `process` |
 | `process.args` | array of strings, optional | Arguments, passed as given (no shell) |
@@ -84,6 +84,7 @@ Calls in both directions are checked against what the user **granted** at instal
 | `sessions:read` | `sessions/list`. Receive `event/session_state`, `event/turn_ended` and `event/session_focused` |
 | `sessions:content` | `sessions/read`. Receive `event/session_update`, `event/permission_requested`, `event/permission_resolved`, `event/question_requested` and `event/question_resolved`: what the user and the agents write. Shown as *Read your sessions' conversations*. It does not include `sessions:read`. API 1.10 |
 | `sessions:control` | `sessions/open`, `sessions/prompt`, and (API 1.10) `sessions/cancel`, `permission/answer` and `question/answer`, and (API 1.11) `sessions/show`. It does not include `sessions:read` |
+| `mentions` | `mentions/set`, and receive `mention/message`. Shown as *Be mentioned with @ in the prompt box*. API 1.13 |
 | `notify` | `notify`: system notifications |
 | `panels` | Contribute panels, `panel/render`, `panel/open`, and receive `panel/action` |
 | `bar` | Contribute bar items, `item/update`, and receive `item/action`. Shown as *Show items in the top and bottom bars* |
@@ -157,7 +158,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 
 | Method | Kind | Params | Notes |
 |---|---|---|---|
-| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.12", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
+| `initialize` | request, id `0` | `{"protocol": 1, "api": "1.13", "wai_version": "1.2.3", "ext_id", "granted": [permissions], "project": "<folder>", "ext_dir": "<folder>", "data_dir": "<folder>"}` | Answer within **10 s** with any result (`{}` is fine), or the extension is marked `Failed`. An error answer also fails it (`initialize failed: <message>`) |
 | `command/run` | request | `{"id": "<command id>"}` | The user ran one of your commands without `prompt` from the palette. wai ignores the answer |
 | `panel/action` | request | `{"panel": "<panel id>", "action_id": "<id>", "values": {…}}` | A list item, card, table row, button or menu item was clicked (a button or menu item with a `confirm` only after the user confirms), or a `switch` changed. `action_id` is its `id`. `values` has every form field in the panel by id: inputs and paths as strings, selects as the chosen option (or `null`), checkboxes as booleans. Needs `panels`. A `bubble` sends one when it is gone: `action_id` is its `id`, and `values` is `{"bubble": "click"}` or `{"bubble": "timeout"}` |
 | `item/action` | request | `{"item": "<item id>"}` | The user clicked one of your bar items. wai ignores the answer. The usual reply is a `panel/open` or a `sessions/open`. Needs `bar` |
@@ -171,9 +172,10 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `event/permission_resolved` | notification | `{"agent", "session", "request", "option"}` | The request closed: `option` is the chosen option's `id`, whether the user chose it in wai or an extension did, or `null` when the agent withdrew it (a cancelled turn, say). API 1.10. Needs `sessions:content` |
 | `event/question_requested` | notification | `{"agent", "session", "request", "message", "fields": [{"key", "title", "description", "required", "kind", "choices": [{"value", "label", "description"}]}]}` | An agent asks the user to fill a form. `kind` is `single`, `multi`, `text`, `boolean` or `number`; `choices` is empty but for `single` and `multi`; `description` may be `null`. API 1.10. Needs `sessions:content` |
 | `event/question_resolved` | notification | `{"agent", "session", "request", "answer"}` | The question closed: `answer` is `accept`, `decline` or `cancel` (also when the agent withdrew it). API 1.10. Needs `sessions:content` |
+| `mention/message` | request | `{"id", "text", "agent", "session"}` | The user sent a prompt starting with your mention; `text` is the rest, trimmed, never empty; `agent`/`session` are the prompt box's session, `null` on a new-session draft; wai ignores the answer. Needs `mentions`. API 1.13 |
 
 - Paths are absolute, and on Windows they never carry the `\\?\` prefix.
-- Answer `initialize` before anything else. API 1.1 to 1.12 only add fields and methods; ignore the ones you do not know.
+- Answer `initialize` before anything else. API 1.1 to 1.13 only add fields and methods; ignore the ones you do not know.
 
 ### Extension → host
 
@@ -188,6 +190,7 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `permission/answer` | `sessions:control` | `{"agent", "session", "request": int, "option": "<option id>"}` | `null` once the agent has the answer. API 1.10 |
 | `question/answer` | `sessions:control` | `{"agent", "session", "request": int, "answer": "accept"\|"decline"\|"cancel", "values"?: {…}}` | `null` once the agent has the answer. API 1.10 |
 | `notify` | `notify` | `{"title", "body"?}` | `null` |
+| `mentions/set` | `mentions` | `{"names": [{"id", "name"}]}` | `null`. Replaces your mentions; `[]` removes them. A `name` is 1 to 32 characters without blanks; a bad one is an error naming it. API 1.13 |
 | `events/emit` | none | `{"name", "data"?}` | `null` |
 | `panel/render` | `panels` | `{"panel": "<panel id>", "tree": {…}}` | `null` |
 | `panel/open` | `panels` | `{"panel": "<panel id>"}` | `null` once shown |
@@ -237,6 +240,8 @@ When an enabled extension with `[process]` and the `process` permission starts (
 | `edits` | `files`: the paths a finished turn edited |
 
 An item's index can change only for waiting cards: when one is answered it joins the conversation, and the cards still waiting move after it. `event/session_update` sends every index that changed, so applying its items by index keeps a copy of the transcript in step.
+
+**`mentions/set`** makes your names appear in the prompt box's `@` menu, above the files, matched by their start and then anywhere in them, ignoring case. When a chat prompt box's message starts with a mention (picked, or typed in full as `@<name>`), wai does not send it to the agent: it sends `mention/message` to the extension with the `id` you set, and the box clears. Only a session's prompt box and the new-session draft route mentions, and they do it in any state, even during a turn. An empty `text` is not sent. A mention of an extension that stopped drops out of the menu.
 
 **`notify`:**
 - It shows a system notification. The title is cut to 100 characters and the body to 300, each on one line.

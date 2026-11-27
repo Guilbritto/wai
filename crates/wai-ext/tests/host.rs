@@ -125,7 +125,7 @@ fn initialize_roundtrip() {
             init["params"],
             json!({
                 "protocol": 1,
-                "api": "1.12",
+                "api": "1.13",
                 "wai_version": env!("CARGO_PKG_VERSION"),
                 "ext_id": "fake",
                 "granted": ["process", "notify", "panels"],
@@ -1093,5 +1093,127 @@ fn content_and_control_methods_reach_wai() {
         assert_eq!(replies[&4]["result"], Value::Null);
         assert_eq!(replies[&5]["result"], json!({"items": [], "total": 0}));
         assert_eq!(replies[&6]["result"], Value::Null);
+    });
+}
+
+/// `mentions/set` replaces the extension's mentions; a name is 1 to 32 characters, no blanks.
+#[test]
+fn mentions_set_reaches_the_host() {
+    let tmp = tempfile::tempdir().unwrap();
+    let args = [
+        "--call",
+        r#"mentions/set {"names":[{"id":"pet","name":"Bolota"}]}"#,
+    ];
+    let granted = vec![
+        Permission::Process,
+        Permission::Notify,
+        Permission::Mentions,
+    ];
+    let ext = installed(tmp.path(), &args, granted);
+    run(Duration::from_secs(10), async {
+        let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        let events = until(&rx, |e| matches!(e, ExtEvent::Mentions { .. })).await;
+        let Some(ExtEvent::Mentions { names }) = events.into_iter().last() else {
+            unreachable!()
+        };
+        let pet = Mention {
+            id: "pet".into(),
+            name: "Bolota".into(),
+        };
+        assert_eq!(names, vec![pet]);
+        assert_eq!(reported(&rx, "reply").await["result"], Value::Null);
+    });
+
+    let ext = installed(
+        tmp.path(),
+        &args,
+        vec![Permission::Process, Permission::Notify],
+    );
+    run(Duration::from_secs(10), async {
+        let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        assert!(reported(&rx, "reply").await["error"].is_object());
+    });
+}
+
+#[test]
+fn mentions_set_refuses_bad_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let long = "a".repeat(33);
+    let calls: Vec<String> = ["Bolota Jr", long.as_str(), ""]
+        .iter()
+        .map(|n| format!(r#"mentions/set {{"names":[{{"id":"pet","name":"{n}"}}]}}"#))
+        .chain([r#"mentions/set {"names":[]}"#.to_string()])
+        .collect();
+    let args: Vec<&str> = calls.iter().flat_map(|c| ["--call", c.as_str()]).collect();
+    let granted = vec![
+        Permission::Process,
+        Permission::Notify,
+        Permission::Mentions,
+    ];
+    let ext = installed(tmp.path(), &args, granted);
+    run(Duration::from_secs(10), async {
+        let (_handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        let events = until(&rx, |e| matches!(e, ExtEvent::Mentions { .. })).await;
+        let Some(ExtEvent::Mentions { names }) = events.iter().last() else {
+            unreachable!()
+        };
+        assert!(names.is_empty());
+        let mut replies = Vec::new();
+        for e in &events {
+            if let ExtEvent::Notify { title, body } = e
+                && title == "reply"
+            {
+                replies.push(serde_json::from_str::<Value>(body).unwrap());
+            }
+        }
+        while replies.len() < 3 {
+            replies.push(reported(&rx, "reply").await);
+        }
+        replies.sort_by_key(|r| r["id"].as_u64());
+        for (reply, name) in replies.iter().zip(["Bolota Jr", long.as_str(), ""]) {
+            let message = reply["error"]["message"].as_str().unwrap();
+            assert!(message.contains(&format!("{name:?}")), "{message}");
+        }
+    });
+}
+
+/// `mention/message` is sent only to an extension granted `mentions`.
+#[test]
+fn mention_message_needs_the_permission() {
+    let tmp = tempfile::tempdir().unwrap();
+    let granted = vec![
+        Permission::Process,
+        Permission::Notify,
+        Permission::Mentions,
+    ];
+    let ext = installed(tmp.path(), &[], granted);
+    run(Duration::from_secs(10), async {
+        let (handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        reported(&rx, "initialize").await;
+        handle.mention_message("pet", "oi", Some("claude"), Some("s1"));
+        assert_eq!(
+            reported(&rx, "mention/message").await,
+            json!({"id": "pet", "text": "oi", "agent": "claude", "session": "s1"})
+        );
+        handle.mention_message("pet", "oi", None, None);
+        assert_eq!(
+            reported(&rx, "mention/message").await,
+            json!({"id": "pet", "text": "oi", "agent": null, "session": null})
+        );
+    });
+
+    let ext = installed(
+        tmp.path(),
+        &[],
+        vec![Permission::Process, Permission::Notify],
+    );
+    run(Duration::from_secs(10), async {
+        let (handle, rx) = ExtHandle::spawn(&ext, tmp.path());
+        reported(&rx, "initialize").await;
+        handle.mention_message("pet", "oi", None, None);
+        handle.run_command("x");
+        let events = until(&rx, |e| title(e) == Some("command/run")).await;
+        let sent: Vec<_> = events.iter().filter_map(title).collect();
+        assert_eq!(sent, ["command/run"], "sent without permission");
     });
 }

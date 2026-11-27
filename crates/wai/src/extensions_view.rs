@@ -35,6 +35,7 @@ pub fn permission_text(permission: &Permission) -> String {
         Permission::SessionsRead => "See your sessions and their progress".into(),
         Permission::SessionsControl => "Start sessions and send prompts".into(),
         Permission::SessionsContent => "Read your sessions' conversations".into(),
+        Permission::Mentions => "Be mentioned with @ in the prompt box".into(),
         Permission::Notify => "Show notifications".into(),
         Permission::Panels => "Show panels in the sidebar".into(),
         Permission::Bar => "Show items in the top and bottom bars".into(),

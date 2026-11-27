@@ -39,6 +39,12 @@ const INIT_ID: u64 = 0;
 // and extension spawns is deferred past v0.1.0 (R70).
 static SPAWN: Mutex<()> = Mutex::new(());
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Mention {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug)]
 pub enum ExtEvent {
     /// `initialize` answered: after the start and after each restart.
@@ -54,6 +60,10 @@ pub enum ExtEvent {
     Item {
         item: String,
         state: ItemState,
+    },
+    /// `mentions/set`: the extension's whole new list of names.
+    Mentions {
+        names: Vec<Mention>,
     },
     Notify {
         title: String,
@@ -494,6 +504,19 @@ impl ExtHandle {
         }
     }
 
+    pub fn mention_message(
+        &self,
+        id: &str,
+        text: &str,
+        agent: Option<&str>,
+        session: Option<&str>,
+    ) {
+        if self.granted.contains(&Permission::Mentions) {
+            let params = json!({"id": id, "text": text, "agent": agent, "session": session});
+            self.send("mention/message", params, true);
+        }
+    }
+
     pub fn item_action(&self, item: &str) {
         if self.granted.contains(&Permission::Bar) {
             self.send("item/action", json!({"item": item}), true);
@@ -758,6 +781,20 @@ impl Ext {
                     body: p.body,
                 })
             }
+            "mentions/set" => {
+                need(Permission::Mentions)?;
+                let p: MentionsParams = params_of(params)?;
+                for Mention { name, .. } in &p.names {
+                    if !(1..=32).contains(&name.chars().count())
+                        || name.chars().any(char::is_whitespace)
+                    {
+                        let error =
+                            format!("bad mention name {name:?}: 1 to 32 characters, no blanks");
+                        return Err(RpcError::new(rpc::INVALID_PARAMS, error));
+                    }
+                }
+                Call::Done(ExtEvent::Mentions { names: p.names })
+            }
             "events/emit" => {
                 let p: EmitParams = params_of(params)?;
                 if !valid_event_name(&p.name) {
@@ -882,6 +919,11 @@ struct NotifyParams {
     title: String,
     #[serde(default)]
     body: String,
+}
+
+#[derive(Deserialize)]
+struct MentionsParams {
+    names: Vec<Mention>,
 }
 
 #[derive(Deserialize)]

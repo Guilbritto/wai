@@ -556,6 +556,7 @@ impl ExtHost {
                 }
                 return;
             }
+            ExtEvent::Mentions { .. } => return,
             ExtEvent::Notify { title, body } => return self.notify(id, &title, &body),
             ExtEvent::OpenSession { reply, .. } if !self.may_open(id) => {
                 return reply.send(Err(TOO_MANY_OPENS.into()));
