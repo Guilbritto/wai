@@ -226,7 +226,7 @@ func (s *ext) onAction(id string, values map[string]any) {
 		s.v.Editing, s.v.FormErr, s.v.Reason = true, "", ""
 		s.v.Form = prefill(s.v.Setup)
 	case "save":
-		form := Setup{Name: strings.TrimSpace(str(values["name"])), Server: strings.TrimSpace(str(values["server"])), Token: strings.TrimSpace(str(values["token"]))}
+		form := Setup{Name: strings.Trim(str(values["name"]), " "), Server: strings.TrimSpace(str(values["server"])), Token: strings.TrimSpace(str(values["token"]))}
 		for i, n := range avatarNames {
 			if n == str(values["avatar"]) {
 				form.Avatar = i
@@ -274,7 +274,11 @@ func (s *ext) handle(m message) {
 		s.listID++
 		s.write(node{"jsonrpc": "2.0", "id": s.listID, "method": "sessions/list"})
 		if st != nil {
-			s.connect()
+			if msg := validate(*st); msg != "" {
+				s.v.Editing, s.v.Form, s.v.FormErr = true, prefill(st), msg
+			} else {
+				s.connect()
+			}
 		}
 		s.render()
 	case "panel/action":

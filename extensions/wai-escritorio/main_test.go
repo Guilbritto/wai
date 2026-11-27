@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -535,5 +536,55 @@ func TestStatusFromSessionsListAtStart(t *testing.T) {
 	h.barrier()
 	if got := f.frame(t); got != `{"t":"status","status":"focused"}` {
 		t.Fatalf("frame %s", got)
+	}
+}
+
+func TestUnreachableShowsAddress(t *testing.T) {
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr := "ws://" + ln.Addr().String()
+	ln.Close()
+	dir := t.TempDir()
+	saveSetup(dir, Setup{Name: "Ana", Server: addr, Token: testToken})
+	h := newHarness(t, dir)
+	h.initialize()
+	for _, p := range []string{"presence", "office"} {
+		h.waitTree(p, "Cannot reach "+addr)
+	}
+}
+
+func TestOfflineReasonsThroughLoop(t *testing.T) {
+	for _, c := range []struct{ refuse, want string }{{office.ReasonFull, "The office is full"}, {office.ReasonReplaced, "Signed in elsewhere"}} {
+		f := newFakeOffice(t, office.Point{})
+		f.refuse = c.refuse
+		dir := t.TempDir()
+		saveSetup(dir, Setup{Name: "Ana", Server: f.url(), Token: testToken})
+		h := newHarness(t, dir)
+		h.initialize()
+		for _, p := range []string{"presence", "office"} {
+			h.waitTree(p, c.want)
+			h.waitTree(p, `"Offline"`)
+		}
+	}
+	// A refused token goes back to the form (OFC-03).
+	f := newFakeOffice(t, office.Point{})
+	f.refuse = office.ReasonToken
+	dir := t.TempDir()
+	saveSetup(dir, Setup{Name: "Ana", Server: f.url(), Token: testToken})
+	h := newHarness(t, dir)
+	h.initialize()
+	h.waitTree("presence", reasonToken)
+}
+
+func TestSavedSetupRevalidatedBeforeDial(t *testing.T) {
+	f := newFakeOffice(t, office.Point{})
+	dir := t.TempDir()
+	saveSetup(dir, Setup{Name: "Ana", Server: "ws://office.example.com:7420", Token: testToken})
+	h := newHarness(t, dir)
+	h.initialize()
+	h.waitTree("presence", "Use wss:// for a server that is not on this computer")
+	h.waitTree("presence", `"id":"token"`)
+	time.Sleep(300 * time.Millisecond)
+	if f.conns.Load() != 0 {
+		t.Error("dialled with an invalid saved setup")
 	}
 }

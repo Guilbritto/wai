@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"wai-escritorio/office"
 )
 
 func goodSetup() Setup {
@@ -25,6 +26,25 @@ func TestSetupRejectsBadName(t *testing.T) {
 		if got := validate(s); got != "" {
 			t.Errorf("name %q: got %q", name, got)
 		}
+	}
+}
+
+// A name with a newline anywhere is refused through the real form action, even at the edges.
+func TestSetupFormRejectsNewlineName(t *testing.T) {
+	f := newFakeOffice(t, office.Point{})
+	for _, name := range []string{"Ana\n", "\nAna", "A\nna"} {
+		dir := t.TempDir()
+		h := newHarness(t, dir)
+		h.initialize()
+		h.action("save", map[string]any{"name": name, "server": f.url(), "token": testToken, "avatar": "Red"})
+		h.barrier()
+		h.waitTree("presence", "Name must be 1 to 32 characters")
+		if st, _ := loadSetup(dir); st != nil {
+			t.Errorf("%q: setup saved: %+v", name, st)
+		}
+	}
+	if f.conns.Load() != 0 {
+		t.Error("dialled with a bad name")
 	}
 }
 
