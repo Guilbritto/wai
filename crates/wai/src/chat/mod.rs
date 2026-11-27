@@ -16,6 +16,7 @@ pub use composer::{PromptSlot, PromptSlots, PromptTyping};
 pub(crate) use context::context_meta;
 pub use draft::{DraftData, DraftEvent, DraftView};
 pub use mentions::ExtMentions;
+pub(crate) use mentions::addressed;
 pub use model::{ChatItem, ChatModel, NoticeKind, TurnState, signed_out};
 #[cfg(test)]
 pub use model::{EditedFile, ToolItem};

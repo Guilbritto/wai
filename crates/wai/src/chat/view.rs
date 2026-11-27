@@ -68,6 +68,12 @@ pub enum ChatEvent {
     },
     /// R87: the header's ×, to take the pane showing this session off the screen.
     Hide,
+    /// A prompt that starts with a mention: the extension takes `text`.
+    Mention {
+        ext: wai_ext::ExtId,
+        id: String,
+        text: String,
+    },
     /// Esc or Stop in a chat whose session has not started: back to the draft.
     StopStart,
     /// The session's `long_context` changed.
@@ -201,6 +207,9 @@ pub struct ChatSession {
     pub(super) menu_closed: bool,
     /// The sent message ↑ put back in the prompt box, by its place among those sent.
     pub(super) recalled: Option<usize>,
+    /// The mention messages sent from this box, as typed, each with how many agent messages
+    /// were sent before it.
+    pub(super) sent_mentions: Vec<(usize, String)>,
     pub(super) registry: WeakEntity<AgentRegistry>,
     /// Per `Agent`/`Thought` row.
     pub(super) texts: HashMap<usize, Markdown>,
@@ -317,6 +326,7 @@ impl ChatSession {
             menu_scroll: ScrollHandle::new(),
             menu_closed: false,
             recalled: None,
+            sent_mentions: Vec::new(),
             registry,
             texts: HashMap::new(),
             sub_texts: HashMap::new(),
@@ -4838,5 +4848,86 @@ mod tests {
         cx.simulate_input("@bo");
         cx.simulate_keystrokes("down enter");
         assert_eq!(typed(&session, cx), "@Bolota @bolo.txt ");
+    }
+
+    fn live_bolota(cx: &mut VisualTestContext) {
+        let bolota = crate::ext_host::ExtMention {
+            ext: wai_ext::ExtId::new("wai-bichinho").unwrap(),
+            id: "pet".into(),
+            name: "Bolota".into(),
+            ext_name: "Bichinho".into(),
+            icon: None,
+        };
+        cx.update(|_, cx| cx.set_global(crate::chat::ExtMentions(vec![bolota])));
+    }
+
+    fn mentioned(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(wai_ext::ExtId, String, String)> {
+        workspace.read_with(cx, |w, cx| w.ext_host.read(cx).mentioned.borrow().clone())
+    }
+
+    fn bichinho(id: &str, text: &str) -> (wai_ext::ExtId, String, String) {
+        (
+            wai_ext::ExtId::new("wai-bichinho").unwrap(),
+            id.into(),
+            text.into(),
+        )
+    }
+
+    /// A prompt that starts with a mention goes to its extension, not to the agent.
+    #[gpui_kit::test]
+    fn mention_message_goes_to_the_extension(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        live_bolota(cx);
+
+        send("@Bolota quais PRs?", cx);
+        assert_eq!(typed(&session, cx), "");
+        session.read_with(cx, |s, _| assert!(s.model.items.is_empty()));
+        assert_eq!(mentioned(&workspace, cx), [bichinho("pet", "quais PRs?")]);
+
+        cx.simulate_input("@Bolota");
+        cx.simulate_keystrokes("escape enter");
+        assert_eq!(typed(&session, cx).trim_end(), "@Bolota");
+        assert_eq!(mentioned(&workspace, cx).len(), 1);
+    }
+
+    /// A mention does not wait for the turn: it is not queued or steered.
+    #[gpui_kit::test]
+    fn mention_skips_a_running_turn(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        live_bolota(cx);
+        session.update(cx, |s, _| s.model.in_turn = true);
+
+        send("@Bolota oi", cx);
+        assert_eq!(mentioned(&workspace, cx), [bichinho("pet", "oi")]);
+        session.read_with(cx, |s, _| {
+            assert!(s.queued.is_empty());
+            assert!(s.model.items.is_empty());
+        });
+    }
+
+    /// ↑ walks the mention messages sent here with the agent's, in send order.
+    #[gpui_kit::test]
+    fn recall_brings_back_a_mention_message(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let session = start_session(&workspace, cx);
+        live_bolota(cx);
+
+        send("first", cx);
+        wait_until(cx, "the reply", |cx| {
+            state(&session, cx) == TurnState::Idle && last_agent_text(&session, cx).is_some()
+        });
+        send("@Bolota oi", cx);
+        cx.simulate_keystrokes("up");
+        assert_eq!(typed(&session, cx), "@Bolota oi");
+        cx.simulate_keystrokes("up");
+        assert_eq!(typed(&session, cx), "first");
     }
 }

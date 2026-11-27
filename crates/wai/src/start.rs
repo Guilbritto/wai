@@ -6,6 +6,7 @@ use wai_agent::{AgentError, ConfigCategory, SessionStarted};
 use wai_settings::{agent_label, shown};
 
 use crate::agents::AgentStatus;
+use crate::chat::addressed;
 use crate::chat::{ChatEvent, ChatSession, DraftData, DraftEvent, DraftView, signed_out};
 use crate::git::{self, Repo};
 use crate::sidebar::canonical;
@@ -90,6 +91,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let d = draft.read(cx);
+        let live = cx.try_global::<crate::chat::ExtMentions>();
+        let to = live.and_then(|l| {
+            let (m, rest) = addressed(&d.message(cx), &l.0)?;
+            Some((m.ext.clone(), m.id.clone(), rest))
+        });
+        if let Some((ext, id, text)) = to {
+            if !text.is_empty() {
+                (self.ext_host.read(cx)).mention_message(&ext, &id, &text, None, None);
+                draft.update(cx, |d, cx| d.clear(window, cx));
+            }
+            return;
+        }
         let d = draft.read(cx);
         if !d.can_send(cx) {
             return;
@@ -1214,5 +1228,36 @@ mod tests {
             assert_eq!(d.worktree_blocked(), Some(SUBMODULE_HINT));
             assert!(!d.worktree);
         });
+    }
+
+    #[gpui_kit::test]
+    fn draft_mention_goes_to_the_extension_without_a_session(cx: &mut TestAppContext) {
+        cx.executor().allow_parking(); // the fake agent is a real process
+        let (workspace, cx) = open(cx, fake_settings(""));
+        let draft = new_draft(&workspace, cx);
+        let bolota = crate::ext_host::ExtMention {
+            ext: wai_ext::ExtId::new("wai-bichinho").unwrap(),
+            id: "pet".into(),
+            name: "Bolota".into(),
+            ext_name: "Bichinho".into(),
+            icon: None,
+        };
+        cx.update(|_, cx| cx.set_global(crate::chat::ExtMentions(vec![bolota])));
+
+        cx.simulate_input("@Bolota oi");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let mentioned =
+            workspace.read_with(cx, |w, cx| w.ext_host.read(cx).mentioned.borrow().clone());
+        assert_eq!(
+            mentioned,
+            [(
+                wai_ext::ExtId::new("wai-bichinho").unwrap(),
+                "pet".to_string(),
+                "oi".to_string()
+            )]
+        );
+        draft.read_with(cx, |d, cx| assert_eq!(d.text(cx), ""));
+        workspace.read_with(cx, |w, _| assert!(w.sessions.is_empty()));
     }
 }

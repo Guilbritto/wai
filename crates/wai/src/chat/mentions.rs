@@ -15,7 +15,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use wai_project::Entry;
 
-use super::input::{file_token, slashed};
+use super::input::{Message, file_token, slashed};
 use crate::appearance::fonts;
 use crate::ext_host::{ExtMention, PanelIcon};
 
@@ -39,6 +39,29 @@ pub(crate) fn mention_token(m: &ExtMention) -> InlineToken {
 
 pub(crate) fn is_mention_token(token: &InlineToken) -> bool {
     token.id().starts_with(MENTION_TOKEN)
+}
+
+/// The live mention `message` (trimmed) starts with, and the rest of it, trimmed: a mention token
+/// at its start, else its first word as `@name`, ignoring case.
+pub(crate) fn addressed<'a>(
+    message: &Message,
+    live: &'a [ExtMention],
+) -> Option<(&'a ExtMention, String)> {
+    let text = message.text();
+    let token = message.tokens().first().filter(|s| s.range().start == 0);
+    let by_token = token.and_then(|span| {
+        let m = live
+            .iter()
+            .find(|m| mention_token(m).id() == span.token().id())?;
+        Some((m, span.range().end))
+    });
+    let (mention, end) = by_token.or_else(|| {
+        let word = text.split_whitespace().next()?;
+        let name = word.strip_prefix('@')?.to_lowercase();
+        let m = live.iter().find(|m| m.name.to_lowercase() == name)?;
+        Some((m, word.len()))
+    })?;
+    Some((mention, text[end..].trim().to_string()))
 }
 
 /// A row of the menu: an extension's name, or a file.
@@ -382,7 +405,7 @@ mod tests {
     use gpui_kit::component::input::{InlineToken, InputContent};
     use wai_project::Entry;
 
-    use super::{matching, matching_mentions, query};
+    use super::{addressed, matching, matching_mentions, mention_token, query};
     use crate::ext_host::ExtMention;
 
     #[test]
@@ -453,5 +476,39 @@ mod tests {
         assert!(names(&all, "x").is_empty());
         let twins = [mention("one", "Bolota"), mention("two", "Bolota")];
         assert_eq!(matching_mentions(&twins, "bolota").len(), 2);
+    }
+
+    #[test]
+    fn addressed_by_token_or_first_word() {
+        let bolota = ExtMention {
+            ext: wai_ext::ExtId::new("wai-bichinho").unwrap(),
+            id: "pet".into(),
+            name: "Bolota".into(),
+            ext_name: "Bichinho".into(),
+            icon: None,
+        };
+        let live = [bolota.clone()];
+        let to = |text: &str, live: &[ExtMention]| {
+            let message = InputContent::new(text.to_string());
+            addressed(&message, live).map(|(m, rest)| (m.name.clone(), rest))
+        };
+        let said = |rest: &str| Some(("Bolota".to_string(), rest.to_string()));
+        assert_eq!(to("@Bolota oi", &live), said("oi"));
+        assert_eq!(to("@bolota   quais PRs?", &live), said("quais PRs?"));
+        assert_eq!(to("@Bolota", &live), said(""));
+        assert_eq!(to("oi @Bolota", &live), None);
+        assert_eq!(to("@Bolotas oi", &live), None);
+        assert_eq!(to("@Bolota", &[]), None);
+
+        let message = InputContent::new("@Bolota veja @src/a.rs")
+            .with_token(0..7, mention_token(&bolota))
+            .unwrap()
+            .with_token(13..22, InlineToken::new("/p/src/a.rs", "@src/a.rs"))
+            .unwrap();
+        let (m, rest) = addressed(&message, &live).unwrap();
+        assert_eq!(
+            (m.name.as_str(), rest.as_str()),
+            ("Bolota", "veja @src/a.rs")
+        );
     }
 }

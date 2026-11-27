@@ -1332,6 +1332,12 @@ impl Workspace {
                     this.save_state(cx);
                 }
                 ChatEvent::Bound => return this.claim(session, cx),
+                ChatEvent::Mention { ext, id, text } => {
+                    let s = session.read(cx);
+                    let bound = (!s.id.is_empty()).then_some(s.id.as_str());
+                    let host = this.ext_host.read(cx);
+                    return host.mention_message(ext, id, text, Some(&s.agent), bound);
+                }
                 ChatEvent::ContextChanged => {
                     let s = session.read(cx);
                     if s.long_context {
