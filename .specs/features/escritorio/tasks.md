@@ -122,8 +122,8 @@ T19 → T20
 
 **Done when**:
 
-- [ ] `api_versions` test covers 1.10 ok and 1.11 too old
-- [ ] Gate check passes: `cargo test -p wai-ext`
+- [x] `api_versions` test covers 1.10 ok and 1.11 too old
+- [x] Gate check passes: `cargo test -p wai-ext`
 
 **Tests**: integration
 **Gate**: full
