@@ -422,8 +422,8 @@ T19 → T20
 
 **Done when**:
 
-- [ ] `TestNoSetupNoDial`, `TestTokenRefusedShowsForm`, `TestKeyMovesOneTile`, `TestBlockedTileStays`, `TestHeldKeyPace`, `TestChangeSetupDisconnectsAndPrefills`, `TestEnterOfficeOpensPane`, `TestStatusCarriesNoSessionData` pass
-- [ ] Gate check passes: Quick
+- [x] `TestNoSetupNoDial`, `TestTokenRefusedShowsForm`, `TestKeyMovesOneTile`, `TestBlockedTileStays`, `TestHeldKeyPace`, `TestChangeSetupDisconnectsAndPrefills`, `TestEnterOfficeOpensPane`, `TestStatusCarriesNoSessionData` pass
+- [x] Gate check passes: Quick
 
 **Tests**: integration
 **Gate**: quick

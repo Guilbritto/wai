@@ -1,0 +1,21 @@
+id = "wai-escritorio"
+name = "Escritório"
+version = "0.1.0"
+description = "A shared office map inside wai: walk your avatar, see who is around and whose agents are working"
+api = "1.10"
+permissions = ["process", "panels", "sessions:read", "network"]
+
+[process]
+command = "bin/wai-escritorio"
+
+[[contributes.panels]]
+id = "presence"
+title = "Office"
+icon = "users"
+location = "sidebar"
+
+[[contributes.panels]]
+id = "office"
+title = "Office"
+icon = "map"
+location = "main"
