@@ -21,8 +21,8 @@ use gpui_kit::*;
 use wai_agent::McpServer;
 use wai_ext::panel::{ItemState, clamp};
 use wai_ext::{
-    Bar, CommandSpec, ExtEvent, ExtHandle, ExtId, HostEvent, Installed, PanelLocation, PanelSpec,
-    Permission,
+    Bar, CommandSpec, ExtEvent, ExtHandle, ExtId, HostEvent, Installed, Mention, PanelLocation,
+    PanelSpec, Permission,
 };
 use wai_settings::{AgentConfig, Template};
 
@@ -75,6 +75,16 @@ pub(crate) fn panel_icon(spec: &PanelSpec, ext_dir: &Path) -> Option<PanelIcon> 
         return ok.then(|| PanelIcon::Svg(path.to_string_lossy().into_owned().into()));
     }
     spec.icon.as_deref().and_then(lucide).map(PanelIcon::Lucide)
+}
+
+/// A name an extension registered for the `@` menu (`mentions/set`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtMention {
+    pub ext: ExtId,
+    pub id: String,
+    pub name: String,
+    pub ext_name: String,
+    pub icon: Option<PanelIcon>,
 }
 
 /// A panel an extension contributes: a sidebar tab, or a pane in the main area.
@@ -153,6 +163,8 @@ struct Running {
     emitted: Option<(Instant, u32)>,
     /// What each item last said (`item/update`); empty again for a fresh process.
     items: HashMap<String, ItemState>,
+    /// What it last registered (`mentions/set`); empty again for a fresh process.
+    mentions: Vec<Mention>,
     _pump: Task<()>,
 }
 
@@ -170,6 +182,9 @@ pub struct ExtHost {
     /// Every broadcast, for tests that run no extension.
     #[cfg(test)]
     pub(crate) sent: RefCell<Vec<HostEvent>>,
+    /// Every `mention_message`, for tests that run no extension.
+    #[cfg(test)]
+    pub(crate) mentioned: RefCell<Vec<(ExtId, String, String)>>,
 }
 
 impl ExtHost {
@@ -182,6 +197,8 @@ impl ExtHost {
             focused: RefCell::new(None),
             #[cfg(test)]
             sent: RefCell::default(),
+            #[cfg(test)]
+            mentioned: RefCell::default(),
         }
     }
 
@@ -286,6 +303,40 @@ impl ExtHost {
             })
         });
         items.collect()
+    }
+
+    /// The live enabled extensions' mentions, in the list's order.
+    pub fn mentions(&self) -> Vec<ExtMention> {
+        let mentions = self.enabled.iter().flat_map(|i| {
+            let ext = &i.manifest.id;
+            let running = self.running.get(ext).filter(|r| r.status.live());
+            let icon =
+                (i.manifest.contributes.panels.iter()).find_map(|spec| panel_icon(spec, &i.dir));
+            (running.into_iter().flat_map(|r| r.mentions.iter())).map(move |m| ExtMention {
+                ext: ext.clone(),
+                id: m.id.clone(),
+                name: m.name.clone(),
+                ext_name: i.manifest.name.clone(),
+                icon: icon.clone(),
+            })
+        });
+        mentions.collect()
+    }
+
+    /// `mention/message`, to a running extension.
+    pub fn mention_message(
+        &self,
+        ext: &ExtId,
+        id: &str,
+        text: &str,
+        agent: Option<&str>,
+        session: Option<&str>,
+    ) {
+        #[cfg(test)]
+        (self.mentioned.borrow_mut()).push((ext.clone(), id.to_string(), text.to_string()));
+        if let Some(handle) = self.handle(ext) {
+            handle.mention_message(id, text, agent, session);
+        }
     }
 
     /// `item/action`, to a running extension.
@@ -498,6 +549,7 @@ impl ExtHost {
             shown: None,
             emitted: None,
             items: HashMap::new(),
+            mentions: Vec::new(),
             _pump: pump,
         };
         self.running.insert(id, running);
@@ -556,7 +608,15 @@ impl ExtHost {
                 }
                 return;
             }
-            ExtEvent::Mentions { .. } => return,
+            ExtEvent::Mentions { names } => {
+                if let Some(running) = self.running.get_mut(id).filter(|r| r.status.live())
+                    && running.mentions != names
+                {
+                    running.mentions = names;
+                    cx.notify();
+                }
+                return;
+            }
             ExtEvent::Notify { title, body } => return self.notify(id, &title, &body),
             ExtEvent::OpenSession { reply, .. } if !self.may_open(id) => {
                 return reply.send(Err(TOO_MANY_OPENS.into()));
@@ -582,6 +642,7 @@ impl ExtHost {
             if !status.live() {
                 self.panels.retain(|p| p.ext != *id);
                 running.items.clear();
+                running.mentions.clear();
             }
             running.status = status;
             cx.notify();
@@ -791,6 +852,32 @@ pub(crate) mod tests {
         });
         crate::extensions_view::tests::click(("ext-enabled", 0usize), cx);
         cx.update(|window, cx| workspace.update(cx, |w, cx| w.close_settings(window, cx)));
+    }
+
+    /// API 1.13 `mentions/set` registers names for the `@` menu, only while the extension runs.
+    #[gpui_kit::test]
+    fn mentions_follow_the_extension(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        let manifest = "id = \"pets\"\nname = \"Pets\"\nversion = \"1.0.0\"\n\
+            permissions = [\"process\", \"mentions\"]\n[process]\ncommand = \"bin/run\"\n";
+        let calls = r#"--call 'mentions/set {"names":[{"id":"pet","name":"Bolota"}]}'"#;
+        install(tmp.path(), &config, manifest, calls, "");
+        let (workspace, cx) = workspace_at(&config, fake_settings(""), cx);
+        let mentions = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |w, cx| w.ext_host.read(cx).mentions())
+        };
+        wait_until(cx, "the mention", |cx| !mentions(cx).is_empty());
+        let got = mentions(cx);
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            (got[0].name.as_str(), got[0].id.as_str()),
+            ("Bolota", "pet")
+        );
+        assert_eq!(got[0].ext_name, "Pets");
+
+        disable_first(&workspace, cx);
+        assert_eq!(mentions(cx), []);
     }
 
     /// An extension's agent joins the registry as `<ext-id>/<name>`, its command resolved in the

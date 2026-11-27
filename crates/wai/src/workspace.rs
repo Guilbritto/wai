@@ -35,10 +35,11 @@ use crate::app::{
 };
 use crate::appearance::{self, fonts};
 use crate::chat::{
-    ChatEvent, ChatSession, DraftView, PromptSlot, PromptSlots, PromptTyping, TurnState, signed_out,
+    ChatEvent, ChatSession, DraftView, ExtMentions, PromptSlot, PromptSlots, PromptTyping,
+    TurnState, signed_out,
 };
 use crate::editor::{self, EditorPane, Emptied, FileEditor, Saved, TabsChanged, recovery};
-use crate::ext_host::{ExtHost, PanelIcon, SessionCall};
+use crate::ext_host::{ExtHost, ExtMention, PanelIcon, SessionCall};
 use crate::ext_panel::ExtPanel;
 use crate::ext_sessions::{self, Feed};
 use crate::extensions_view::{ExtensionsView, InstallPlugin};
@@ -255,6 +256,8 @@ pub struct Workspace {
     pub(crate) sidebar_hidden: bool,
     /// What the `PromptSlots` global was last set to.
     prompt_slots: PromptSlots,
+    /// What the `ExtMentions` global was last set to.
+    ext_mentions: Vec<ExtMention>,
     /// The user closed the lone empty pane: the main area is not drawn while that pane is all it
     /// has, and the sidebar takes its width (`main_shown`). Never with `sidebar_hidden`.
     pub(crate) main_closed: bool,
@@ -430,6 +433,11 @@ impl Workspace {
             }
             this.close_gone_panels(&live, window, cx);
             this.sync_contributions(cx);
+            let mentions = host.read(cx).mentions();
+            if mentions != this.ext_mentions {
+                this.ext_mentions = mentions.clone();
+                cx.set_global(ExtMentions(mentions));
+            }
             cx.notify();
         });
         let calls = cx.subscribe_in(
@@ -482,6 +490,7 @@ impl Workspace {
             agents_collapsed: false,
             sidebar_hidden: false,
             prompt_slots: PromptSlots::default(),
+            ext_mentions: Vec::new(),
             main_closed: false,
             sessions: Vec::new(),
             panes: vec![Pane::Empty(None)],

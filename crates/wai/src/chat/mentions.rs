@@ -17,6 +17,13 @@ use wai_project::Entry;
 
 use super::input::{file_token, slashed};
 use crate::appearance::fonts;
+use crate::ext_host::ExtMention;
+
+/// The names the extensions registered for the `@` menu. The workspace sets it when they change.
+#[derive(Clone, Default, PartialEq)]
+pub struct ExtMentions(pub Vec<ExtMention>);
+
+impl Global for ExtMentions {}
 
 /// A row's height: the list shows 8 rows and scrolls past them.
 const ROW: f32 = 28.;
