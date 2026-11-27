@@ -442,8 +442,8 @@ T19 → T20
 
 **Done when**:
 
-- [ ] `TestMoveReachesOtherWithin200ms`, `TestStatusReachesOthersWithin1s`, `TestSecondLoginReplacesFirst` pass
-- [ ] Gate check passes: Quick
+- [x] `TestMoveReachesOtherWithin200ms`, `TestStatusReachesOthersWithin1s`, `TestSecondLoginReplacesFirst` pass
+- [x] Gate check passes: Quick
 
 **Tests**: integration
 **Gate**: quick
