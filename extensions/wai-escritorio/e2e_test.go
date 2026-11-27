@@ -87,13 +87,22 @@ func TestStatusReachesOthersWithin1s(t *testing.T) {
 	a := e2eClient(t, srv, "Ana")
 	b := e2eClient(t, srv, "Bia")
 	b.waitSprite(t, "Ana", 3*time.Second, func(int, int) bool { return true })
-	a.send("event/session_state", map[string]any{"agent": "x", "session": "s1", "state": "needs_you"})
-	start := time.Now()
-	for !strings.Contains(b.tree("office"), "Needs you") {
-		if time.Since(start) > time.Second {
-			t.Fatalf("Bia never saw Needs you within 1 s: %s", b.tree("office"))
+	for _, step := range []struct{ state, shown string }{{"working", "Focused"}, {"needs_you", "Needs you"}, {"idle", ""}} {
+		a.send("event/session_state", map[string]any{"agent": "x", "session": "s1", "state": step.state})
+		start := time.Now()
+		for {
+			tr := b.tree("office")
+			if step.shown != "" && strings.Contains(tr, step.shown) {
+				break
+			}
+			if step.shown == "" && !strings.Contains(tr, "Needs you") && !strings.Contains(tr, "Focused") {
+				break
+			}
+			if time.Since(start) > time.Second {
+				t.Fatalf("Bia never saw %q within 1 s: %s", step.shown, tr)
+			}
+			time.Sleep(5 * time.Millisecond)
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 
